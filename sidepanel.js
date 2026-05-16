@@ -13,6 +13,7 @@ import {
   formatShortcut,
   mergeShortcuts,
   normalizeShortcut,
+  shortcutActionFromEvent,
   shouldIgnoreShortcutInEditable,
   shortcutFromEvent,
   shortcutMatchesEvent,
@@ -24,6 +25,10 @@ import {
   SECRET_STORAGE_KEY,
   STORAGE_KEY,
 } from './src/shared/state.js';
+import {
+  selectionForContextMenu,
+  tabSelectionFromClick,
+} from './src/shared/tab-selection.js';
 import {
   buildSpaceSnapshot,
   isUngroupedSnapshotGroup,
@@ -43,10 +48,14 @@ import {
   buildSpaceView,
   compactTabForAI,
   decorateTabs,
+  domainFromUrl,
+  isPageShortcutCapableUrl,
   planTidyGroups,
   planTidyTabNames,
+  preferredFocusableTab,
   sanitizeTidyGroups,
   searchTabs,
+  titleForDomain,
 } from './src/shared/tab-utils.js';
 
 const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
@@ -61,12 +70,16 @@ let spaceView = [];
 let activeView = 'space';
 let dragState = null;
 let activeAIRequestId = '';
+let activePanelAction = '';
 let panelPort = null;
+let selectedTabIds = new Set();
+let selectionAnchorTabId = null;
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
+  collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   spaceSearch: document.querySelector('#spaceSearch'),
   searchInput: document.querySelector('#searchInput'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
@@ -120,8 +133,29 @@ function connectPanelPort() {
   if (!extensionRuntime || !chrome.runtime.connect) return;
   panelPort = chrome.runtime.connect({ name: 'sidepanel' });
   panelPort.onMessage.addListener((message) => {
-    if (message?.type === 'panel:close') window.close();
+    if (message?.type === 'panel:close') {
+      notifyPanelVisibility(false);
+      window.close();
+    }
+    if (message?.type === 'shortcut:action') {
+      void runTask(() => runShortcutAction(message.action));
+    }
   });
+  notifyPanelVisibility(true);
+  document.addEventListener('visibilitychange', () => {
+    notifyPanelVisibility(document.visibilityState !== 'hidden');
+  });
+  window.addEventListener('focus', () => notifyPanelVisibility(true));
+  window.addEventListener('pageshow', () => notifyPanelVisibility(true));
+  window.addEventListener('pagehide', () => notifyPanelVisibility(false));
+}
+
+function notifyPanelVisibility(visible) {
+  try {
+    panelPort?.postMessage({ type: 'panel:visibility', visible });
+  } catch {
+    // The port is intentionally best-effort; Chrome can keep side panels alive while hidden.
+  }
 }
 
 async function loadState() {
@@ -157,6 +191,7 @@ function bindEvents() {
   els.searchInput.addEventListener('input', render);
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
   els.autoGroupButton.addEventListener('click', () => runTask(autoGroupTabs));
+  els.collapseGroupsButton.addEventListener('click', () => runTask(toggleSpaceGroups));
   els.askAIButton.addEventListener('click', () => runTask(askCustomPrompt));
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
@@ -199,19 +234,13 @@ function handleDocumentKeydown(event) {
 
   if (isEditableTarget(event.target) && shouldIgnoreShortcutInEditable(event)) return;
 
-  const action = shortcutActionFromEvent(event, shortcuts);
+  const action = shortcutActionFromEvent(event, shortcuts, {
+    exclude: ['togglePanel', 'askSubmit', 'askAbort'],
+  });
   if (!action) return;
   event.preventDefault();
   event.stopPropagation();
   void runTask(() => runShortcutAction(action));
-}
-
-function shortcutActionFromEvent(event, shortcuts) {
-  for (const action of SHORTCUT_ACTIONS) {
-    if (['togglePanel', 'askSubmit', 'askAbort'].includes(action.id)) continue;
-    if (shortcutMatchesEvent(shortcuts[action.id], event)) return action.id;
-  }
-  return '';
 }
 
 function captureShortcutInput(event, input) {
@@ -272,6 +301,7 @@ async function activateAdjacentSpace(direction) {
   if (index < 0 || state.spaces.length < 2) return;
   const nextIndex = (index + direction + state.spaces.length) % state.spaces.length;
   await activateSpace(state.spaces[nextIndex].id);
+  focusPanelForShortcuts();
 }
 
 function togglePanel() {
@@ -313,30 +343,43 @@ function render() {
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
   });
+  syncSelectedTabsToVisibleSpace();
 
   const isAskView = activeView === 'ask';
+  const groupsCollapsed = !isAskView && isSpaceGroupsCollapsed();
   if (isAskView) ensureCurrentAskSession();
   els.activeSpaceName.textContent = isAskView ? 'Ask Page' : activeSpace.name;
-  els.syncStatus.textContent = isAskView
+  els.syncStatus.textContent = activePanelAction
+    ? panelActionStatus(activePanelAction)
+    : isAskView
     ? activePageStatus()
     : extensionRuntime
       ? `${tabCount(spaceView)} tabs in ${activeSpace.name}`
       : `${tabCount(spaceView)} preview tabs in ${activeSpace.name}`;
-  els.spaceSearch.hidden = isAskView;
+  els.spaceSearch.hidden = isAskView || groupsCollapsed;
   els.groupsList.hidden = isAskView;
   els.askPageView.hidden = !isAskView;
   els.tidyNamesButton.hidden = isAskView;
   els.autoGroupButton.hidden = isAskView;
+  els.collapseGroupsButton.hidden = isAskView;
+  els.collapseGroupsButton.textContent = groupsCollapsed ? '⌄' : '⌃';
+  els.collapseGroupsButton.title = groupsCollapsed ? 'Expand groups' : 'Collapse groups';
+  els.collapseGroupsButton.setAttribute('aria-label', els.collapseGroupsButton.title);
+  els.collapseGroupsButton.classList.toggle('active', groupsCollapsed);
+  els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
   if (isAskView) renderAskMessages();
   renderSpaces();
   updateAIRequestUI();
+  updatePanelActionUI();
 }
 
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
-  const tabGroups = spaceView.filter((group) => group.key !== 'ungrouped');
+  const tabGroups = isSpaceGroupsCollapsed()
+    ? []
+    : spaceView.filter((group) => group.key !== 'ungrouped');
 
   if (tabGroups.length === 0 && !ungrouped) {
     const empty = document.createElement('div');
@@ -417,11 +460,17 @@ function createUngroupedSection(group) {
 
 function createTabRow(tab, groupKey) {
   const row = document.createElement('div');
-  row.className = `tab-row${tab.active ? ' active' : ''}`;
+  const selected = selectedTabIds.has(tab.id);
+  row.className = [
+    'tab-row',
+    tab.active ? 'active' : '',
+    selected ? 'selected' : '',
+  ].filter(Boolean).join(' ');
   row.tabIndex = 0;
   row.draggable = true;
   row.dataset.tabId = String(tab.id);
   row.dataset.groupKey = groupKey;
+  row.setAttribute('aria-selected', selected ? 'true' : 'false');
 
   const favicon = document.createElement('span');
   favicon.className = 'favicon';
@@ -448,7 +497,7 @@ function createTabRow(tab, groupKey) {
   );
 
   row.append(favicon, label, actions);
-  row.addEventListener('click', () => runTask(() => focusTab(tab)));
+  row.addEventListener('click', (event) => handleTabClick(event, tab));
   row.addEventListener('contextmenu', (event) => showTabContextMenu(event, tab));
   row.addEventListener('dragstart', (event) => startTabDrag(event, tab, groupKey));
   row.addEventListener('dragover', (event) => acceptTabDrop(event));
@@ -621,6 +670,18 @@ async function clearUngroupedTabs(group) {
   setStatus(`Cleared ${closable.length} temporary tabs.`);
 }
 
+function handleTabClick(event, tab) {
+  const additive = event.metaKey || event.ctrlKey;
+  const range = event.shiftKey;
+  updateTabSelection(tab.id, { additive, range });
+  if (additive || range) {
+    event.preventDefault();
+    render();
+    return;
+  }
+  runTask(() => focusTab(tab));
+}
+
 async function focusTab(tab) {
   await send('tabs:focus', { tabId: tab.id });
   await refreshTabs();
@@ -670,6 +731,42 @@ async function renameGroup(group) {
   await refreshTabs();
 }
 
+async function groupSelectedTabs(tabIds) {
+  const ids = tabIds.map(Number).filter(Number.isFinite);
+  if (ids.length < 2) {
+    setStatus('Select at least two tabs to group.');
+    return;
+  }
+
+  await loadTabs({ adopt: true });
+  const selectedTabs = ids
+    .map((id) => tabs.find((tab) => tab.id === id))
+    .filter((tab) => tab && tabBelongsToSpace(tab, state.activeSpaceId) && !tab.pinned);
+
+  if (selectedTabs.length < 2) {
+    setStatus('Select at least two tabs in this Space to group.');
+    return;
+  }
+
+  const result = await send('tabs:group', {
+    title: selectedGroupTitle(selectedTabs),
+    color: nextGroupColor(),
+    tabIds: selectedTabs.map((tab) => tab.id),
+  });
+  if (result.groupId) {
+    state.groupSpaces[result.groupId] = state.activeSpaceId;
+    addGroupOrderKey(state.activeSpaceId, `group:${result.groupId}`);
+  }
+  for (const tab of selectedTabs) {
+    delete state.tabSpaces[tab.id];
+  }
+  selectedTabIds = new Set(selectedTabs.map((tab) => tab.id));
+  selectionAnchorTabId = selectedTabs.at(-1)?.id ?? null;
+  await saveState();
+  await refreshTabs();
+  setStatus(`Grouped ${selectedTabs.length} selected tabs.`);
+}
+
 async function closeTab(tab) {
   delete state.tabSpaces[tab.id];
   delete state.renamedTabs[tab.id];
@@ -717,9 +814,10 @@ async function switchSpace(spaceId) {
   await ensureSpaceHasOpenTab(spaceId, { active: false });
 
   state.activeSpaceId = spaceId;
-  await focusFirstTabInSpace(spaceId);
+  await focusFirstTabInSpace(spaceId, { force: true });
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
   await closeTabsOutsideActiveSpace();
+  await focusFirstTabInSpace(spaceId, { force: true });
   await saveState();
   await refreshTabs();
 }
@@ -744,7 +842,7 @@ async function closeTabsOutsideActiveSpace() {
 
   const activeSpaceTabs = tabs.filter((tab) => tabBelongsToSpace(tab, state.activeSpaceId));
   if (activeSpaceTabs.length && !activeSpaceTabs.some((tab) => tab.active)) {
-    await send('tabs:focus', { tabId: activeSpaceTabs[0].id });
+    await send('tabs:focus', { tabId: preferredFocusableTab(activeSpaceTabs).id });
   }
 
   await saveState();
@@ -772,6 +870,7 @@ async function restoreSpaceSnapshot(spaceId) {
   if (!snapshot || snapshotTabCount(snapshot) === 0) return;
 
   let firstTabId = null;
+  let preferredTabId = null;
   for (const group of snapshot.groups || []) {
     const createdTabIds = [];
     for (const tab of group.tabs || []) {
@@ -779,6 +878,7 @@ async function restoreSpaceSnapshot(spaceId) {
       const tabId = created.tab?.id;
       if (!tabId) continue;
       if (!firstTabId) firstTabId = tabId;
+      if (!preferredTabId && isPageShortcutCapableUrl(tab.url)) preferredTabId = tabId;
       createdTabIds.push(tabId);
     }
 
@@ -800,7 +900,8 @@ async function restoreSpaceSnapshot(spaceId) {
     }
   }
 
-  if (firstTabId) await send('tabs:focus', { tabId: firstTabId });
+  const focusTabId = preferredTabId || firstTabId;
+  if (focusTabId) await send('tabs:focus', { tabId: focusTabId });
 }
 
 async function ensureSpaceHasOpenTab(spaceId, options = {}) {
@@ -812,10 +913,10 @@ async function ensureSpaceHasOpenTab(spaceId, options = {}) {
   await loadTabs({ adopt: false });
 }
 
-async function focusFirstTabInSpace(spaceId) {
+async function focusFirstTabInSpace(spaceId, options = {}) {
   await loadTabs({ adopt: false });
-  const target = tabs.find((tab) => tabBelongsToSpace(tab, spaceId));
-  if (target && !target.active) await send('tabs:focus', { tabId: target.id });
+  const target = preferredFocusableTab(tabs.filter((tab) => tabBelongsToSpace(tab, spaceId)));
+  if (target && (options.force || !target.active)) await send('tabs:focus', { tabId: target.id });
 }
 
 async function toggleGroup(group) {
@@ -942,10 +1043,16 @@ async function tidyTabNames() {
     return;
   }
 
-  Object.assign(state.renamedTabs, planTidyTabNames(visibleTabs));
-  await saveState();
-  await refreshTabs();
-  setStatus(`Renamed ${visibleTabs.length} tabs in the panel only.`);
+  beginPanelAction('tidyNames');
+  try {
+    const tabsWithContext = await addTidyContext(visibleTabs);
+    Object.assign(state.renamedTabs, planTidyTabNames(tabsWithContext));
+    await saveState();
+    await refreshTabs();
+    setStatus(`Renamed ${visibleTabs.length} tabs in the panel only.`);
+  } finally {
+    endPanelAction();
+  }
 }
 
 async function autoGroupTabs() {
@@ -959,30 +1066,105 @@ async function autoGroupTabs() {
     return;
   }
 
+  beginPanelAction('autoGroup');
   let plannedGroups = [];
-  if (state.ai.apiKey) {
-    try {
-      await ensureAIHostPermission();
-      const response = await send('ai:chat', {
-        settings: state.ai,
-        messages: createPrompt('tidy-tabs', { tabs: candidates.map(compactTabForAI) }),
-      });
-      plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
-    } catch (error) {
-      setStatus(`${formatAIError(error)} Using local grouping instead.`);
+  try {
+    if (state.ai.apiKey) {
+      try {
+        await ensureAIHostPermission();
+        const response = await send('ai:chat', {
+          settings: state.ai,
+          messages: createPrompt('tidy-tabs', { tabs: candidates.map(compactTabForAI) }),
+        });
+        plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
+      } catch (error) {
+        setStatus(`${formatAIError(error)} Using local grouping instead.`);
+      }
     }
-  }
 
-  if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
-  for (const group of plannedGroups) {
-    const result = await send('tabs:group', group);
-    if (result.groupId) state.groupSpaces[result.groupId] = state.activeSpaceId;
-    for (const tabId of group.tabIds) delete state.tabSpaces[tabId];
-  }
+    if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
+    for (const group of plannedGroups) {
+      const result = await send('tabs:group', group);
+      if (result.groupId) state.groupSpaces[result.groupId] = state.activeSpaceId;
+      for (const tabId of group.tabIds) delete state.tabSpaces[tabId];
+    }
 
+    await saveState();
+    await refreshTabs();
+    setStatus(`Created ${plannedGroups.length} tab groups in ${currentSpace().name}.`);
+  } finally {
+    endPanelAction();
+  }
+}
+
+async function addTidyContext(visibleTabs) {
+  return Promise.all(visibleTabs.map(async (tab) => {
+    if (!/^https?:/.test(tab.url || '')) return tab;
+    const outline = await send('page:outline', { tabId: tab.id }).catch(() => null);
+    return {
+      ...tab,
+      title: outline?.title || tab.title,
+      outlineHeadings: outline?.headings || [],
+    };
+  }));
+}
+
+async function toggleSpaceGroups() {
+  const next = !isSpaceGroupsCollapsed();
+  state.collapsedSpaceGroups[state.activeSpaceId] = next;
   await saveState();
-  await refreshTabs();
-  setStatus(`Created ${plannedGroups.length} tab groups in ${currentSpace().name}.`);
+  render();
+  focusPanelForShortcuts();
+}
+
+function isSpaceGroupsCollapsed() {
+  return Boolean(state.collapsedSpaceGroups?.[state.activeSpaceId]);
+}
+
+function beginPanelAction(action) {
+  activePanelAction = action;
+  setStatus(panelActionStatus(action));
+  updatePanelActionUI();
+}
+
+function endPanelAction() {
+  activePanelAction = '';
+  updatePanelActionUI();
+}
+
+function panelActionStatus(action) {
+  if (action === 'tidyNames') return 'Tidying tab names...';
+  if (action === 'autoGroup') return 'Auto grouping tabs...';
+  return 'Working...';
+}
+
+function updatePanelActionUI() {
+  const tidyBusy = activePanelAction === 'tidyNames';
+  const groupBusy = activePanelAction === 'autoGroup';
+  const busy = Boolean(activePanelAction);
+
+  els.tidyNamesButton.disabled = busy;
+  els.autoGroupButton.disabled = busy;
+  els.collapseGroupsButton.disabled = busy;
+  els.tidyNamesButton.textContent = tidyBusy ? '…' : '🧹';
+  els.autoGroupButton.textContent = groupBusy ? '…' : '🗂';
+  els.tidyNamesButton.classList.toggle('busy', tidyBusy);
+  els.autoGroupButton.classList.toggle('busy', groupBusy);
+}
+
+function focusPanelForShortcuts() {
+  const target = activeView === 'ask' ? els.askPagePrompt : els.groupsList;
+  if (!target || target.hidden) return;
+  if (target === els.groupsList) target.tabIndex = -1;
+  if (extensionRuntime) {
+    chrome.runtime.sendMessage({ type: 'panel:focus' }).catch(() => null);
+  }
+  for (const delay of [0, 80, 240, 600, 1200, 1800]) {
+    setTimeout(() => {
+      window.focus();
+      target.focus({ preventScroll: true });
+    }, delay);
+  }
 }
 
 function openAskPage() {
@@ -1085,14 +1267,31 @@ async function testAI() {
 function showTabContextMenu(event, tab) {
   event.preventDefault();
   event.stopPropagation();
-  showContextMenu(event, [
+  const contextTabIds = selectionForContextMenu({
+    selectedTabIds: [...selectedTabIds],
+    clickedTabId: tab.id,
+  });
+  selectedTabIds = new Set(contextTabIds);
+  selectionAnchorTabId = tab.id;
+  render();
+
+  const items = [];
+  if (contextTabIds.length > 1) {
+    items.push(
+      menuAction(`Group ${contextTabIds.length} selected tabs`, () => groupSelectedTabs(contextTabIds)),
+      menuSeparator(),
+    );
+  }
+  items.push(
     menuAction('Rename', () => renameTab(tab)),
     menuSeparator(),
     menuLabel('Move to'),
     ...state.spaces
       .filter((space) => space.id !== state.activeSpaceId)
       .map((space) => menuAction(space.name, () => moveTabToSpace(tab, space.id))),
-  ]);
+  );
+
+  showContextMenu(event, items);
 }
 
 function showGroupContextMenu(event, group) {
@@ -1483,6 +1682,31 @@ function buildSpaceViewForSpace(spaceId) {
   });
 }
 
+function currentOrderedTabIds() {
+  return spaceView.flatMap((group) => group.tabs.map((tab) => tab.id));
+}
+
+function updateTabSelection(tabId, options = {}) {
+  const next = tabSelectionFromClick({
+    orderedTabIds: currentOrderedTabIds(),
+    selectedTabIds: [...selectedTabIds],
+    anchorTabId: selectionAnchorTabId,
+    clickedTabId: tabId,
+    additive: Boolean(options.additive),
+    range: Boolean(options.range),
+  });
+  selectedTabIds = new Set(next.selectedTabIds);
+  selectionAnchorTabId = next.anchorTabId;
+}
+
+function syncSelectedTabsToVisibleSpace() {
+  const visibleIds = new Set(currentOrderedTabIds());
+  selectedTabIds = new Set([...selectedTabIds].filter((id) => visibleIds.has(id)));
+  if (!visibleIds.has(selectionAnchorTabId)) {
+    selectionAnchorTabId = [...selectedTabIds].at(-1) ?? null;
+  }
+}
+
 function tabBelongsToSpace(tab, spaceId) {
   return entityBelongsToSpace(tab, state, spaceId);
 }
@@ -1520,6 +1744,15 @@ function lastTabIndexForGroup(group) {
   if (!group?.tabs?.length) return tabs.length;
   const indexes = group.tabs.map((tab) => Number(tab.index)).filter(Number.isFinite);
   return indexes.length ? Math.max(...indexes) : tabs.length;
+}
+
+function selectedGroupTitle(selectedTabs) {
+  const domains = selectedTabs.map((tab) => tab.domain || domainFromUrl(tab.url));
+  const uniqueDomains = [...new Set(domains.filter(Boolean))];
+  if (uniqueDomains.length === 1) {
+    return titleForDomain(uniqueDomains[0], selectedTabs[0]?.title || selectedTabs[0]?.displayTitle || '');
+  }
+  return 'Selected Tabs';
 }
 
 function activePageStatus() {
@@ -1605,6 +1838,11 @@ function uniqueSpaceId(name) {
 function nextSpaceColor() {
   const colors = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
   return colors[state.spaces.length % colors.length];
+}
+
+function nextGroupColor() {
+  const colors = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
+  return colors[groups.length % colors.length];
 }
 
 function escapeHtml(value) {

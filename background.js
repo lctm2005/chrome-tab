@@ -2,7 +2,7 @@ import { buildChatCompletionRequest, extractAssistantText, getZaiFallbackBaseUrl
 import { serializeGroup, serializeTab } from './src/shared/state.js';
 
 const activeAIRequests = new Map();
-const sidePanelPorts = new Set();
+const sidePanelPorts = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   if (chrome.sidePanel?.setPanelBehavior) {
@@ -19,7 +19,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidepanel') return;
-  sidePanelPorts.add(port);
+  sidePanelPorts.set(port, { visible: true });
+  port.onMessage.addListener((message) => {
+    if (message?.type === 'panel:visibility') {
+      const record = sidePanelPorts.get(port);
+      if (record) record.visible = message.visible !== false;
+    }
+  });
   port.onDisconnect.addListener(() => sidePanelPorts.delete(port));
 });
 
@@ -27,6 +33,10 @@ async function handleMessage(message, sender = {}) {
   switch (message?.type) {
     case 'panel:toggle':
       return togglePanel(sender);
+    case 'panel:focus':
+      return focusPanel(sender);
+    case 'shortcut:action':
+      return forwardShortcutAction(message.action, sender);
     case 'tabs:list':
       return listTabs();
     case 'tabs:create':
@@ -47,6 +57,8 @@ async function handleMessage(message, sender = {}) {
       return updateGroup(message.groupId, message.update);
     case 'groups:move':
       return moveGroup(message.groupId, message.index);
+    case 'page:outline':
+      return extractTabOutline(message.tabId);
     case 'page:extract':
       return extractActivePage();
     case 'ai:chat':
@@ -59,8 +71,9 @@ async function handleMessage(message, sender = {}) {
 }
 
 async function togglePanel(sender = {}) {
-  if (sidePanelPorts.size > 0) {
-    for (const port of [...sidePanelPorts]) {
+  const visiblePorts = getVisibleSidePanelPorts();
+  if (visiblePorts.length > 0) {
+    for (const port of visiblePorts) {
       try {
         port.postMessage({ type: 'panel:close' });
       } catch {
@@ -70,12 +83,57 @@ async function togglePanel(sender = {}) {
     return { closed: true };
   }
 
-  const windowId = sender.tab?.windowId;
-  if (chrome.sidePanel?.open && Number.isFinite(windowId)) {
-    await chrome.sidePanel.open({ windowId });
+  const windowId = await sidePanelWindowId(sender);
+  if (await openSidePanel(windowId)) {
     return { opened: true };
   }
   throw new Error('Cannot open the side panel from this page.');
+}
+
+async function focusPanel(sender = {}) {
+  const windowId = await sidePanelWindowId(sender);
+  return { focused: await openSidePanel(windowId) };
+}
+
+async function forwardShortcutAction(action, sender = {}) {
+  if (!action) throw new Error('Missing shortcut action.');
+  const visiblePorts = getVisibleSidePanelPorts();
+  if (visiblePorts.length === 0) {
+    const windowId = await sidePanelWindowId(sender);
+    if (await openSidePanel(windowId)) {
+      return { opened: true, forwarded: false };
+    }
+    return { forwarded: false };
+  }
+
+  for (const port of visiblePorts) {
+    try {
+      port.postMessage({ type: 'shortcut:action', action });
+    } catch {
+      sidePanelPorts.delete(port);
+    }
+  }
+  return { forwarded: true };
+}
+
+function getVisibleSidePanelPorts() {
+  return [...sidePanelPorts.entries()]
+    .filter(([, record]) => record.visible)
+    .map(([port]) => port);
+}
+
+async function sidePanelWindowId(sender = {}) {
+  if (Number.isFinite(sender.tab?.windowId)) return sender.tab.windowId;
+  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (Number.isFinite(activeTab?.windowId)) return activeTab.windowId;
+  const focusedWindow = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
+  return focusedWindow?.id;
+}
+
+async function openSidePanel(windowId) {
+  if (!chrome.sidePanel?.open || !Number.isFinite(windowId)) return false;
+  await chrome.sidePanel.open({ windowId });
+  return true;
 }
 
 async function listTabs() {
@@ -172,6 +230,27 @@ async function extractActivePage() {
   });
 
   return { page: result?.result || { title: tab.title, url: tab.url, text: '' } };
+}
+
+async function extractTabOutline(tabId) {
+  const tab = await chrome.tabs.get(Number(tabId));
+  const fallback = {
+    title: tab?.title || '',
+    url: tab?.url || '',
+    headings: [],
+  };
+  if (!tab?.id || !/^https?:/.test(tab.url || '')) return fallback;
+
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'page:outline' });
+    return {
+      title: response?.title || fallback.title,
+      url: response?.url || fallback.url,
+      headings: Array.isArray(response?.headings) ? response.headings.slice(0, 10) : [],
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 async function runChatCompletion(settings, messages, requestId = '') {

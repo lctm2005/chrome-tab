@@ -5,8 +5,10 @@ import {
   buildSpaceView,
   decorateTabs,
   domainFromUrl,
+  isPageShortcutCapableUrl,
   planTidyGroups,
   planTidyTabNames,
+  preferredFocusableTab,
   sanitizeTidyGroups,
   spaceGroupPlan,
   searchTabs,
@@ -61,6 +63,19 @@ test('searches tabs by title, URL, and domain', () => {
 
   assert.equal(results.length, 1);
   assert.equal(results[0].title, 'GLM docs');
+});
+
+test('prefers web pages when choosing a tab to keep shortcuts usable', () => {
+  const tabs = [
+    { id: 1, url: 'about:blank' },
+    { id: 2, url: 'chrome://extensions' },
+    { id: 3, url: 'https://example.com/page' },
+  ];
+
+  assert.equal(isPageShortcutCapableUrl('https://example.com'), true);
+  assert.equal(isPageShortcutCapableUrl('chrome://newtab'), false);
+  assert.equal(preferredFocusableTab(tabs).id, 3);
+  assert.equal(preferredFocusableTab(tabs.slice(0, 2)).id, 1);
 });
 
 test('plans a Chrome tab group for the active space', () => {
@@ -158,7 +173,7 @@ test('plans readable panel-only tab names without creating tab groups', () => {
     { id: 2, title: 'Chrome Extensions: sidePanel API', url: 'https://developer.chrome.com/docs/extensions/reference/api/sidePanel' },
   ]);
 
-  assert.equal(names[1], 'GitHub - pull/123');
+  assert.equal(names[1], 'GitHub - openai/codex PR #123');
   assert.equal(names[2], 'Chrome Extensions - sidePanel API');
 });
 
@@ -174,4 +189,24 @@ test('tidies common AI and search pages into visibly shorter panel names', () =>
   assert.equal(names[2], 'Claude - Code overview');
   assert.equal(names[3], 'Monica - Account');
   assert.equal(names[4], 'Baidu News');
+});
+
+test('keeps GitHub repository context when tidying panel names', () => {
+  const names = planTidyTabNames([
+    {
+      id: 1,
+      title: 'GitHub - AgriciDaniel/claude-code-router',
+      url: 'https://github.com/AgriciDaniel/claude-code-router',
+      outlineHeadings: ['AgriciDaniel/claude-code-router', 'README'],
+    },
+    {
+      id: 2,
+      title: 'Fix request routing by alice · Pull Request #42 · AgriciDaniel/claude-code-router',
+      url: 'https://github.com/AgriciDaniel/claude-code-router/pull/42',
+      outlineHeadings: ['Fix request routing'],
+    },
+  ]);
+
+  assert.equal(names[1], 'GitHub - AgriciDaniel/claude-code-router');
+  assert.equal(names[2], 'GitHub - AgriciDaniel/claude-code-router PR #42 Fix request routing');
 });

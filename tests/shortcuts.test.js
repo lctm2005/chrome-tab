@@ -7,6 +7,7 @@ import {
   formatShortcut,
   mergeShortcuts,
   normalizeShortcut,
+  shortcutActionFromEvent,
   shortcutFromEvent,
   shortcutMatchesEvent,
   shouldIgnoreShortcutInEditable,
@@ -37,6 +38,14 @@ test('creates shortcuts from keyboard events and matches configured actions', ()
   assert.equal(shortcutFromEvent(event), 'Meta+Enter');
   assert.equal(shortcutMatchesEvent('Meta+Enter', event), true);
   assert.equal(shortcutMatchesEvent('Control+Enter', event), false);
+});
+
+test('finds configured shortcut actions and supports exclusions', () => {
+  const shortcuts = mergeShortcuts();
+  const event = keyEvent({ key: 'ArrowRight', code: 'ArrowRight', ctrlKey: true, altKey: true });
+
+  assert.equal(shortcutActionFromEvent(event, shortcuts), 'nextSpace');
+  assert.equal(shortcutActionFromEvent(event, shortcuts, { exclude: ['nextSpace'] }), '');
 });
 
 test('uses physical key codes for modified letter shortcuts on macOS', () => {

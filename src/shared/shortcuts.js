@@ -96,6 +96,15 @@ export function shortcutMatchesEvent(shortcut, event) {
   return normalizeShortcut(shortcut) === shortcutFromEvent(event);
 }
 
+export function shortcutActionFromEvent(event, shortcuts, options = {}) {
+  const excluded = new Set(options.exclude || []);
+  for (const action of SHORTCUT_ACTIONS) {
+    if (excluded.has(action.id)) continue;
+    if (shortcutMatchesEvent(shortcuts?.[action.id], event)) return action.id;
+  }
+  return '';
+}
+
 export function shouldIgnoreShortcutInEditable(event) {
   return !event.ctrlKey && !event.altKey && !event.metaKey;
 }

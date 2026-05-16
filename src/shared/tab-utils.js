@@ -31,6 +31,19 @@ export function searchTabs(tabs, query) {
   });
 }
 
+export function isPageShortcutCapableUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+export function preferredFocusableTab(tabs = []) {
+  return tabs.find((tab) => isPageShortcutCapableUrl(tab.url)) || tabs[0] || null;
+}
+
 export function planTidyGroups(tabs) {
   const buckets = new Map();
   for (const tab of tabs) {
@@ -153,11 +166,15 @@ export function tidyPanelName(tab) {
   const title = String(tab.title || '').replace(/\s+/g, ' ').trim();
   const path = safePath(tab.url);
   if (domain.includes('github.com')) {
+    const repo = githubRepositoryName(path, tab.outlineHeadings);
+    const heading = bestContentHeading(tab.outlineHeadings, [repo, 'GitHub']);
     const pr = path.match(/\/pull\/(\d+)/);
     const issue = path.match(/\/issues\/(\d+)/);
-    if (pr) return `GitHub - pull/${pr[1]}`;
-    if (issue) return `GitHub - issue/${issue[1]}`;
-    return 'GitHub';
+    if (pr) return githubContextName(repo, `PR #${pr[1]}`, heading);
+    if (issue) return githubContextName(repo, `issue #${issue[1]}`, heading);
+    if (repo) return compactText(`GitHub - ${repo}`, 72);
+    const clean = stripKnownSuffixes(title, ['GitHub']);
+    return compactName('GitHub', clean || heading);
   }
   if (domain.includes('developers.openai.com')) {
     if (path.includes('/codex/use-cases/frontend-designs')) return 'OpenAI - Codex frontend designs';
@@ -237,6 +254,60 @@ function safePath(value) {
   } catch {
     return '';
   }
+}
+
+function githubRepositoryName(path, headings = []) {
+  const parts = String(path || '').split('/').filter(Boolean);
+  if (parts.length >= 2 && !isGithubNonRepoRoute(parts[0])) return `${parts[0]}/${parts[1]}`;
+  const headingRepo = (headings || [])
+    .map((heading) => String(heading || '').trim())
+    .find((heading) => /^[^/\s]+\/[^/\s]+$/.test(heading));
+  return headingRepo || '';
+}
+
+function isGithubNonRepoRoute(route) {
+  return new Set([
+    'about',
+    'codespaces',
+    'collections',
+    'dashboard',
+    'enterprise',
+    'explore',
+    'features',
+    'issues',
+    'login',
+    'marketplace',
+    'new',
+    'notifications',
+    'organizations',
+    'pricing',
+    'pulls',
+    'search',
+    'settings',
+    'sponsors',
+    'topics',
+  ]).has(String(route || '').toLowerCase());
+}
+
+function bestContentHeading(headings = [], excluded = []) {
+  const blocked = new Set(
+    excluded
+      .filter(Boolean)
+      .flatMap((value) => [String(value).trim().toLowerCase(), String(value).split('/').pop()?.trim().toLowerCase()])
+  );
+  return (headings || [])
+    .map((heading) => String(heading || '').replace(/\s+/g, ' ').trim())
+    .find((heading) => (
+      heading.length >= 3 &&
+      !blocked.has(heading.toLowerCase()) &&
+      !/^(navigation menu|readme|code|issues|pull requests|actions|projects|security|insights)$/i.test(heading)
+    )) || '';
+}
+
+function githubContextName(repo, kind, heading) {
+  const suffix = [kind, heading].filter(Boolean).join(' ');
+  const subject = [repo, suffix].filter(Boolean).join(' ');
+  return compactText(subject ? `GitHub - ${subject}` : `GitHub - ${kind}`, 72);
 }
 
 function readablePathTail(path) {

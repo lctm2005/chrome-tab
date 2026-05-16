@@ -123,6 +123,16 @@ h1 {
   color: white;
 }
 
+.icon-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.icon-button.busy {
+  border-color: rgba(47, 99, 255, 0.28);
+  background: rgba(47, 99, 255, 0.12);
+}
+
 .searchbar input,
 textarea,
 .settings input,
@@ -180,6 +190,10 @@ menu button:first-child,
   gap: 8px;
   overflow: auto;
   padding-bottom: 2px;
+}
+
+.space-view.groups-collapsed {
+  gap: 0;
 }
 
 .group-card {
@@ -344,6 +358,11 @@ menu button:first-child,
 .tab-row:hover,
 .tab-row.active {
   background: rgba(255, 255, 255, 0.78);
+}
+
+.tab-row.selected {
+  background: rgba(54, 100, 255, 0.11);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .tab-row.active {
