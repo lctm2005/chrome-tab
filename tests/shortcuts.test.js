@@ -9,6 +9,7 @@ import {
   normalizeShortcut,
   shortcutFromEvent,
   shortcutMatchesEvent,
+  shouldIgnoreShortcutInEditable,
 } from '../src/shared/shortcuts.js';
 
 function keyEvent(overrides) {
@@ -59,4 +60,11 @@ test('detects duplicate shortcut assignments in settings', () => {
 test('formats shortcuts for display without platform symbols', () => {
   assert.equal(formatShortcut('Meta+Enter'), 'Cmd+Enter');
   assert.equal(formatShortcut('Control+Alt+ArrowLeft'), 'Ctrl+Alt+Left');
+});
+
+test('only ignores plain text shortcuts while editing text', () => {
+  assert.equal(shouldIgnoreShortcutInEditable(keyEvent({ key: '/' })), true);
+  assert.equal(shouldIgnoreShortcutInEditable(keyEvent({ key: 'a', altKey: true })), false);
+  assert.equal(shouldIgnoreShortcutInEditable(keyEvent({ key: 't', ctrlKey: true, altKey: true })), false);
+  assert.equal(shouldIgnoreShortcutInEditable(keyEvent({ key: 'Enter', metaKey: true })), false);
 });

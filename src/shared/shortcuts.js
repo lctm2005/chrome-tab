@@ -96,6 +96,10 @@ export function shortcutMatchesEvent(shortcut, event) {
   return normalizeShortcut(shortcut) === shortcutFromEvent(event);
 }
 
+export function shouldIgnoreShortcutInEditable(event) {
+  return !event.ctrlKey && !event.altKey && !event.metaKey;
+}
+
 export function findShortcutConflict(shortcuts, actionId, candidate) {
   const normalized = normalizeShortcut(candidate);
   if (!normalized) return '';

@@ -13,6 +13,7 @@ import {
   formatShortcut,
   mergeShortcuts,
   normalizeShortcut,
+  shouldIgnoreShortcutInEditable,
   shortcutFromEvent,
   shortcutMatchesEvent,
   SHORTCUT_ACTIONS,
@@ -196,7 +197,7 @@ function handleDocumentKeydown(event) {
     return;
   }
 
-  if (isEditableTarget(event.target)) return;
+  if (isEditableTarget(event.target) && shouldIgnoreShortcutInEditable(event)) return;
 
   const action = shortcutActionFromEvent(event, shortcuts);
   if (!action) return;
