@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 
 test('declares the Chrome MV3 side panel extension surface', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
@@ -13,6 +12,10 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Command+S');
   assert.equal(manifest.commands._execute_action.description, 'Toggle Space Tabs');
+  assert.deepEqual(manifest.content_scripts[0].matches, ['http://*/*', 'https://*/*']);
+  assert.deepEqual(manifest.content_scripts[0].js, ['content-script.js']);
+  assert.equal(manifest.content_scripts[0].run_at, 'document_start');
+  await access(new URL('../content-script.js', import.meta.url));
   for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'activeTab']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }

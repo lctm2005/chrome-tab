@@ -60,6 +60,7 @@ let spaceView = [];
 let activeView = 'space';
 let dragState = null;
 let activeAIRequestId = '';
+let panelPort = null;
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -102,6 +103,7 @@ init();
 
 async function init() {
   try {
+    connectPanelPort();
     await loadState();
     bindEvents();
     renderSettings();
@@ -111,6 +113,14 @@ async function init() {
     els.syncStatus.textContent = 'Failed to initialize';
     if (activeView === 'ask') addAskMessage('assistant', formatAIError(error));
   }
+}
+
+function connectPanelPort() {
+  if (!extensionRuntime || !chrome.runtime.connect) return;
+  panelPort = chrome.runtime.connect({ name: 'sidepanel' });
+  panelPort.onMessage.addListener((message) => {
+    if (message?.type === 'panel:close') window.close();
+  });
 }
 
 async function loadState() {

@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check background.js && node --check sidepanel.js && node --check src/shared/ai.js && node --check src/shared/ask-session.js && node --check src/shared/markdown.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/state.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js"
+    "check": "node --check background.js && node --check content-script.js && node --check sidepanel.js && node --check src/shared/ai.js && node --check src/shared/ask-session.js && node --check src/shared/markdown.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/state.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js"
   }
 }

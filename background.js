@@ -2,6 +2,7 @@ import { buildChatCompletionRequest, extractAssistantText, getZaiFallbackBaseUrl
 import { serializeGroup, serializeTab } from './src/shared/state.js';
 
 const activeAIRequests = new Map();
+const sidePanelPorts = new Set();
 
 chrome.runtime.onInstalled.addListener(async () => {
   if (chrome.sidePanel?.setPanelBehavior) {
@@ -16,8 +17,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-async function handleMessage(message) {
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidepanel') return;
+  sidePanelPorts.add(port);
+  port.onDisconnect.addListener(() => sidePanelPorts.delete(port));
+});
+
+async function handleMessage(message, sender = {}) {
   switch (message?.type) {
+    case 'panel:toggle':
+      return togglePanel(sender);
     case 'tabs:list':
       return listTabs();
     case 'tabs:create':
@@ -47,6 +56,26 @@ async function handleMessage(message) {
     default:
       throw new Error(`Unknown message type: ${message?.type}`);
   }
+}
+
+async function togglePanel(sender = {}) {
+  if (sidePanelPorts.size > 0) {
+    for (const port of [...sidePanelPorts]) {
+      try {
+        port.postMessage({ type: 'panel:close' });
+      } catch {
+        sidePanelPorts.delete(port);
+      }
+    }
+    return { closed: true };
+  }
+
+  const windowId = sender.tab?.windowId;
+  if (chrome.sidePanel?.open && Number.isFinite(windowId)) {
+    await chrome.sidePanel.open({ windowId });
+    return { opened: true };
+  }
+  throw new Error('Cannot open the side panel from this page.');
 }
 
 async function listTabs() {
