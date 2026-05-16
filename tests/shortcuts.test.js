@@ -39,6 +39,11 @@ test('creates shortcuts from keyboard events and matches configured actions', ()
   assert.equal(shortcutMatchesEvent('Control+Enter', event), false);
 });
 
+test('uses physical key codes for modified letter shortcuts on macOS', () => {
+  assert.equal(shortcutFromEvent(keyEvent({ key: 'å', code: 'KeyA', altKey: true })), 'Alt+A');
+  assert.equal(shortcutFromEvent(keyEvent({ key: '†', code: 'KeyT', ctrlKey: true, altKey: true })), 'Control+Alt+T');
+});
+
 test('merges stored shortcut overrides with defaults and drops unknown actions', () => {
   const shortcuts = mergeShortcuts({
     askSubmit: 'Control+Enter',

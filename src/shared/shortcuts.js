@@ -142,6 +142,8 @@ function normalizeEventKey(event) {
   if (event.key === ' ') return 'Space';
   if (event.key === '+') return '+';
   if (event.key?.startsWith('Arrow')) return event.key;
+  const physicalKey = keyFromEventCode(event.code);
+  if ((event.ctrlKey || event.altKey || event.metaKey) && physicalKey) return physicalKey;
   if (event.key && event.key.length === 1) return event.key.toUpperCase();
   return normalizeKey(event.key || event.code || '');
 }
@@ -149,4 +151,11 @@ function normalizeEventKey(event) {
 function shouldKeepShift(event, normalizedKey) {
   if (!event.shiftKey) return false;
   return normalizedKey.length > 1;
+}
+
+function keyFromEventCode(code = '') {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (code.startsWith('Arrow')) return code;
+  return '';
 }
