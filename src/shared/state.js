@@ -1,0 +1,119 @@
+import { mergeShortcuts } from './shortcuts.js';
+
+export const STORAGE_KEY = 'spaceTabsState';
+export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
+
+export function createDefaultState(localConfig = {}) {
+  const ai = localConfig.ai || {};
+  return {
+    version: 4,
+    activeSpaceId: 'default',
+    spaces: [
+      { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
+    ],
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    groupOrder: {},
+    tabOrder: {},
+    collapsedGroups: {},
+    askSessions: {},
+    activeAskSessionKey: '',
+    spaceSnapshots: {},
+    shortcuts: mergeShortcuts(),
+    ai: {
+      provider: ai.provider || 'openai-compatible',
+      baseUrl: normalizeUrl(ai.baseUrl || 'https://api.z.ai/api/coding/paas/v4'),
+      model: ai.model || 'glm-5.1',
+      apiKey: ai.apiKey || '',
+      thinking: ai.thinking || 'disabled',
+      language: ai.language || 'zh-CN',
+      temperature: Number(ai.temperature ?? 0.6),
+      maxTokens: Number(ai.maxTokens ?? 2048),
+    },
+  };
+}
+
+export function mergeStoredState(stored, defaults = createDefaultState()) {
+  if (!stored || typeof stored !== 'object') return defaults;
+  const compatibleSpaceModel = stored.version === defaults.version;
+  const spaces = compatibleSpaceModel
+    ? validSpaces(stored.spaces, defaults.spaces)
+    : migrateSpaces(stored.spaces, defaults.spaces);
+  const activeSpaceId = spaces.some((space) => space.id === stored.activeSpaceId)
+    ? stored.activeSpaceId
+    : spaces[0].id;
+
+  return {
+    version: defaults.version,
+    activeSpaceId,
+    spaces,
+    groupSpaces: compatibleSpaceModel ? { ...defaults.groupSpaces, ...(stored.groupSpaces || {}) } : defaults.groupSpaces,
+    tabSpaces: compatibleSpaceModel ? { ...defaults.tabSpaces, ...(stored.tabSpaces || {}) } : defaults.tabSpaces,
+    renamedTabs: { ...defaults.renamedTabs, ...(stored.renamedTabs || {}) },
+    groupOrder: compatibleSpaceModel ? { ...defaults.groupOrder, ...(stored.groupOrder || {}) } : defaults.groupOrder,
+    tabOrder: compatibleSpaceModel ? { ...defaults.tabOrder, ...(stored.tabOrder || {}) } : defaults.tabOrder,
+    collapsedGroups: compatibleSpaceModel ? { ...defaults.collapsedGroups, ...(stored.collapsedGroups || {}) } : defaults.collapsedGroups,
+    askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
+    activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
+    spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
+    shortcuts: mergeShortcuts(stored.shortcuts, defaults.shortcuts),
+    ai: { ...defaults.ai, ...(stored.ai || {}) },
+  };
+}
+
+export function serializeTab(tab) {
+  return {
+    id: tab.id,
+    title: tab.title || 'Untitled',
+    url: tab.url || '',
+    favIconUrl: tab.favIconUrl || '',
+    pinned: Boolean(tab.pinned),
+    muted: Boolean(tab.mutedInfo?.muted),
+    active: Boolean(tab.active),
+    groupId: tab.groupId ?? -1,
+    index: tab.index ?? 0,
+    windowId: tab.windowId,
+    audible: Boolean(tab.audible),
+  };
+}
+
+export function serializeGroup(group) {
+  return {
+    id: group.id,
+    title: group.title || 'Group',
+    color: group.color || 'grey',
+    collapsed: Boolean(group.collapsed),
+  };
+}
+
+function normalizeUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function validSpaces(spaces, fallback) {
+  if (!Array.isArray(spaces) || spaces.length === 0) return fallback;
+  const valid = spaces
+    .filter((space) => typeof space?.id === 'string' && typeof space?.name === 'string')
+    .map((space) => ({
+      id: space.id,
+      name: space.name,
+      icon: space.icon || space.name.slice(0, 1).toUpperCase(),
+      color: space.color || 'blue',
+    }));
+  return valid.length ? valid : fallback;
+}
+
+function migrateSpaces(spaces, fallback) {
+  const custom = validSpaces(spaces, [])
+    .filter((space) => !isLegacyBuiltInSpace(space));
+  return custom.length ? custom : fallback;
+}
+
+function isLegacyBuiltInSpace(space) {
+  return (
+    (space.id === 'work' && space.name === 'Work') ||
+    (space.id === 'focus' && space.name === 'Focus') ||
+    (space.id === 'personal' && space.name === 'Personal')
+  );
+}

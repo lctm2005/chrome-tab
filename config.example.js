@@ -1,0 +1,12 @@
+window.SPACE_TABS_CONFIG = {
+  ai: {
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    model: 'glm-5.1',
+    apiKey: '',
+    thinking: 'disabled',
+    language: 'zh-CN',
+    temperature: 0.6,
+    maxTokens: 2048
+  }
+};
