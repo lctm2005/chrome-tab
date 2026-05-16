@@ -1,7 +1,5 @@
 export function shouldAutoCloseTab(tab = {}) {
-  const url = String(tab.url || '');
-  if (tab.pinned) return false;
-  return /^https?:\/\//i.test(url) || /^chrome:\/\/newtab\/?$/i.test(url);
+  return !tab.pinned;
 }
 
 export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {

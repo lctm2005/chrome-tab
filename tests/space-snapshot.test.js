@@ -43,13 +43,21 @@ test('snapshots a Space as TabGroup -> Tab restore data', () => {
         { title: 'B', url: 'https://example.com/b#section' },
       ],
     },
+    {
+      title: 'Ungrouped',
+      color: 'grey',
+      collapsed: false,
+      tabs: [
+        { title: 'Chrome', url: 'chrome://extensions' },
+      ],
+    },
   ]);
 });
 
-test('only auto closes normal unpinned web tabs', () => {
+test('auto closes any unpinned tab owned by a Space', () => {
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'http://example.com', pinned: false }), true);
-  assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), false);
-  assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), false);
+  assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), true);
+  assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: true }), false);
 });
