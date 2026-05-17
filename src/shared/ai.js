@@ -58,6 +58,9 @@ export function languageInstruction(language) {
 
 export function formatAIError(error) {
   const message = String(error?.message || error || '').trim();
+  if (/api key is missing|missing api key|add it in settings/i.test(message)) {
+    return 'AI API key is missing. Add it in Settings.';
+  }
   if (/insufficient|balance|quota|余额不足|账户余额/i.test(message)) {
     return 'AI provider rejected the request: insufficient balance. Update the BYOK account or API key in Settings.';
   }

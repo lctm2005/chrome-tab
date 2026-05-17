@@ -5,6 +5,7 @@ import {
   buildChatCompletionRequest,
   createPrompt,
   extractAssistantText,
+  formatAIError,
   getOriginPattern,
   getZaiFallbackBaseUrl,
   languageInstruction,
@@ -65,6 +66,17 @@ test('extracts assistant text from OpenAI-compatible responses', () => {
   assert.equal(
     extractAssistantText({ choices: [{ delta: { content: 'Hi' } }] }),
     'Hi'
+  );
+});
+
+test('keeps missing API key errors distinct from provider rejection', () => {
+  assert.equal(
+    formatAIError(new Error('AI API key is missing. Add it in Settings.')),
+    'AI API key is missing. Add it in Settings.'
+  );
+  assert.equal(
+    formatAIError(new Error('401 invalid api key')),
+    'AI provider rejected the request: check the BYOK API key and model settings.'
   );
 });
 

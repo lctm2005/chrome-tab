@@ -117,6 +117,8 @@ const els = {
   modelInput: document.querySelector('#modelInput'),
   languageInput: document.querySelector('#languageInput'),
   apiKeyInput: document.querySelector('#apiKeyInput'),
+  apiKeyStatus: document.querySelector('#apiKeyStatus'),
+  clearApiKeyButton: document.querySelector('#clearApiKeyButton'),
   thinkingInput: document.querySelector('#thinkingInput'),
   maxTokensInput: document.querySelector('#maxTokensInput'),
   saveSettingsButton: document.querySelector('#saveSettingsButton'),
@@ -205,6 +207,7 @@ function bindEvents() {
   els.askAIButton.addEventListener('click', () => runTask(askCustomPrompt));
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
+  els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
@@ -1407,6 +1410,9 @@ async function testAI() {
   const requestId = beginAIRequest();
   try {
     const settings = currentAISettingsFromForm();
+    if (!settings.apiKey) {
+      throw new Error('AI API key is missing. Add it in Settings.');
+    }
     await ensureAIHostPermission(settings);
     const { text } = await send('ai:chat', {
       settings,
@@ -1652,9 +1658,19 @@ function renderSettings() {
   els.modelInput.value = state.ai.model;
   els.languageInput.value = state.ai.language || 'zh-CN';
   els.apiKeyInput.value = state.ai.apiKey;
+  els.apiKeyInput.placeholder = state.ai.apiKey ? 'API key configured' : 'Paste API key';
+  els.apiKeyStatus.textContent = apiKeyStatusText();
+  els.clearApiKeyButton.hidden = !state.ai.apiKey;
+  els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
   els.maxTokensInput.value = state.ai.maxTokens;
   renderShortcutSettings();
+}
+
+function apiKeyStatusText() {
+  if (localConfig.ai?.apiKey) return 'API key is configured by config.local.js.';
+  if (state.ai.apiKey) return 'API key is configured for this Chrome session.';
+  return 'No API key configured.';
 }
 
 function renderShortcutSettings() {
@@ -1693,10 +1709,24 @@ async function saveSettings(event) {
   state.ai = currentAISettingsFromForm();
   state.shortcuts = shortcuts;
   await ensureAIHostPermission(state.ai).catch(() => null);
-  await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
+  if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
+  else await secretRemove(SECRET_STORAGE_KEY);
   await saveState();
   els.settingsDialog.close();
   render();
+}
+
+async function clearApiKey() {
+  if (localConfig.ai?.apiKey) {
+    setSettingsStatus('API key comes from config.local.js. Remove it there and reload the extension.');
+    return;
+  }
+  state.ai.apiKey = '';
+  els.apiKeyInput.value = '';
+  await secretRemove(SECRET_STORAGE_KEY);
+  await saveState();
+  renderSettings();
+  setSettingsStatus('API key cleared. AI requests are disabled until you add a key.');
 }
 
 function currentAISettingsFromForm() {
@@ -1818,6 +1848,11 @@ async function secretGet() {
 async function secretSet(value) {
   if (extensionRuntime && chrome.storage.session) return chrome.storage.session.set(value);
   sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify(value));
+}
+
+async function secretRemove(key) {
+  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.remove(key);
+  sessionStorage.removeItem(key);
 }
 
 function stateForStorage() {
