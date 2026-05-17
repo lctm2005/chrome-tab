@@ -67,6 +67,11 @@ export function closableTabsOutsideSpace(tabs = [], state, activeSpaceId, should
   });
 }
 
+export function fallbackSpaceAfterDelete(spaces = [], deletedSpaceId, preferredSpaceId = 'default') {
+  const remaining = spaces.filter((space) => space?.id && space.id !== deletedSpaceId);
+  return remaining.find((space) => space.id === preferredSpaceId) || remaining[0] || null;
+}
+
 export function removeSpaceReferences(state, spaceId) {
   for (const [groupId, ownerSpaceId] of Object.entries(state.groupSpaces || {})) {
     if (ownerSpaceId === spaceId) delete state.groupSpaces[groupId];

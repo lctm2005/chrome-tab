@@ -6,6 +6,7 @@ import {
   cleanupMissingEntities,
   closableTabsForSpace,
   closableTabsOutsideSpace,
+  fallbackSpaceAfterDelete,
   removeSpaceReferences,
   syncCollapsedGroupsFromChrome,
 } from '../src/shared/space-membership.js';
@@ -98,6 +99,18 @@ test('treats unassigned normal tabs as outside the active Space during switching
   const closeable = closableTabsOutsideSpace(tabs, state, 'default', (tab) => tab.url.startsWith('https://'));
 
   assert.deepEqual(closeable.map((tab) => tab.id), [8]);
+});
+
+test('chooses the default Space as the delete fallback when available', () => {
+  const spaces = [
+    { id: 'work', name: 'Work' },
+    { id: 'default', name: 'Space' },
+    { id: 'focus', name: 'Focus' },
+  ];
+
+  assert.deepEqual(fallbackSpaceAfterDelete(spaces, 'work'), { id: 'default', name: 'Space' });
+  assert.deepEqual(fallbackSpaceAfterDelete(spaces, 'default'), { id: 'work', name: 'Work' });
+  assert.equal(fallbackSpaceAfterDelete([{ id: 'default', name: 'Space' }], 'default'), null);
 });
 
 test('removes Space ownership, ordering, and snapshots when deleting a Space', () => {

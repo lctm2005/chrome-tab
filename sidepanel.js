@@ -44,6 +44,7 @@ import {
   cleanupMissingEntities,
   closableTabsForSpace,
   closableTabsOutsideSpace,
+  fallbackSpaceAfterDelete,
   removeSpaceReferences,
   syncCollapsedGroupsFromChrome,
   tabBelongsToSpace as entityBelongsToSpace,
@@ -53,7 +54,6 @@ import {
   compactTabForAI,
   decorateTabs,
   domainFromUrl,
-  isPageShortcutCapableUrl,
   planTidyGroups,
   planTidyTabNames,
   preferredFocusableTab,
@@ -626,9 +626,21 @@ async function deleteSpace(space) {
   if (!ok) return;
 
   await loadTabs({ adopt: true });
+  const deletingActiveSpace = state.activeSpaceId === space.id;
+  const fallback = fallbackSpaceAfterDelete(state.spaces, space.id);
+
+  if (deletingActiveSpace && fallback) {
+    snapshotOpenSpace(space.id);
+    activeView = 'space';
+    state.activeSpaceId = fallback.id;
+    await ensureSpaceOpenFromSnapshot(fallback.id, { active: true });
+    await focusFirstTabInSpace(fallback.id, { force: true });
+    await collapseGroupsInSpace(fallback.id);
+    await saveState();
+  }
+
   await closeSpaceTabs(space.id, () => true);
 
-  const fallback = state.spaces.find((item) => item.id !== space.id);
   state.spaces = state.spaces.filter((item) => item.id !== space.id);
   removeSpaceReferences(state, space.id);
   activeView = 'space';
@@ -636,11 +648,9 @@ async function deleteSpace(space) {
 
   await loadTabs({ adopt: false });
   if (state.activeSpaceId) {
-    if (!tabs.some((tab) => tabBelongsToSpace(tab, state.activeSpaceId))) {
-      await restoreSpaceSnapshot(state.activeSpaceId);
-      await loadTabs({ adopt: false });
-    }
-    await ensureSpaceHasOpenTab(state.activeSpaceId);
+    await ensureSpaceOpenFromSnapshot(state.activeSpaceId);
+    await focusFirstTabInSpace(state.activeSpaceId, { force: true });
+    await collapseGroupsInSpace(state.activeSpaceId);
   }
   await closeTabsOutsideActiveSpace();
   await saveState();
@@ -828,6 +838,7 @@ async function switchSpace(spaceId) {
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
   await closeTabsOutsideActiveSpace();
   await focusFirstTabInSpace(spaceId, { force: true });
+  await collapseGroupsInSpace(spaceId);
   await saveState();
   await refreshTabs();
 }
@@ -879,16 +890,12 @@ async function restoreSpaceSnapshot(spaceId) {
   const snapshot = state.spaceSnapshots[spaceId];
   if (!snapshot || snapshotTabCount(snapshot) === 0) return;
 
-  let firstTabId = null;
-  let preferredTabId = null;
   for (const group of snapshot.groups || []) {
     const createdTabIds = [];
     for (const tab of group.tabs || []) {
       const created = await send('tabs:create', { url: tab.url, active: false });
       const tabId = created.tab?.id;
       if (!tabId) continue;
-      if (!firstTabId) firstTabId = tabId;
-      if (!preferredTabId && isPageShortcutCapableUrl(tab.url)) preferredTabId = tabId;
       createdTabIds.push(tabId);
     }
 
@@ -902,16 +909,14 @@ async function restoreSpaceSnapshot(spaceId) {
       title: group.title,
       color: group.color,
       tabIds: createdTabIds,
-      collapsed: Boolean(group.collapsed),
+      collapsed: true,
     });
     if (result.groupId) {
       state.groupSpaces[result.groupId] = spaceId;
+      state.collapsedGroups[`group:${result.groupId}`] = true;
       addGroupOrderKey(spaceId, `group:${result.groupId}`);
     }
   }
-
-  const focusTabId = preferredTabId || firstTabId;
-  if (focusTabId) await send('tabs:focus', { tabId: focusTabId });
 }
 
 async function ensureSpaceHasOpenTab(spaceId, options = {}) {
@@ -921,6 +926,33 @@ async function ensureSpaceHasOpenTab(spaceId, options = {}) {
   const tabId = created.tab?.id;
   if (tabId) state.tabSpaces[tabId] = spaceId;
   await loadTabs({ adopt: false });
+}
+
+async function ensureSpaceOpenFromSnapshot(spaceId, options = {}) {
+  await loadTabs({ adopt: false });
+  if (!tabs.some((tab) => tabBelongsToSpace(tab, spaceId))) {
+    await restoreSpaceSnapshot(spaceId);
+    await loadTabs({ adopt: false });
+  }
+  await ensureSpaceHasOpenTab(spaceId, options);
+  await collapseGroupsInSpace(spaceId);
+}
+
+async function collapseGroupsInSpace(spaceId) {
+  await loadTabs({ adopt: false });
+  const groupIds = new Set(
+    tabs
+      .filter((tab) => tab.groupId > 0 && tabBelongsToSpace(tab, spaceId))
+      .map((tab) => tab.groupId)
+  );
+  for (const group of groups) {
+    if (!groupIds.has(group.id)) continue;
+    state.collapsedGroups[`group:${group.id}`] = true;
+    if (!group.collapsed) {
+      await send('groups:update', { groupId: group.id, update: { collapsed: true } });
+    }
+  }
+  if (groupIds.size) await loadTabs({ adopt: false });
 }
 
 async function focusFirstTabInSpace(spaceId, options = {}) {
