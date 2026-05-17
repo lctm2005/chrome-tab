@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=7">
+    <link rel="stylesheet" href="sidepanel.css?v=8">
   </head>
   <body>
     <div class="shell">
@@ -100,6 +100,16 @@
         </div>
         <button type="button" id="testAIButton" class="secondary-button">Test AI</button>
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
+        <section class="arc-import-settings">
+          <h3>Arc Import</h3>
+          <p>Select Arc's <code>StorableSidebar.json</code>. Import appends Spaces and keeps the current Space active.</p>
+          <label class="file-picker">
+            Arc sidebar file
+            <input id="arcImportInput" type="file" accept=".json,application/json">
+          </label>
+          <button type="button" id="importArcButton" class="secondary-button" disabled>Append Import</button>
+          <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
+        </section>
         <section class="shortcut-settings">
           <h3>Shortcuts</h3>
           <div id="shortcutsList" class="shortcuts-list"></div>
@@ -112,6 +122,6 @@
     </dialog>
 
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=7"></script>
+    <script type="module" src="sidepanel.js?v=8"></script>
   </body>
 </html>

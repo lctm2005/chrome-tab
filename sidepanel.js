@@ -6,6 +6,10 @@ import {
   sessionKeyForTab,
   updateAskSessionMessage,
 } from './src/shared/ask-session.js';
+import {
+  appendArcImportPlan,
+  createArcImportPlan,
+} from './src/shared/arc-import.js';
 import { renderMarkdown } from './src/shared/markdown.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
@@ -74,6 +78,7 @@ let activePanelAction = '';
 let panelPort = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
+let pendingArcImportText = '';
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -92,6 +97,9 @@ const els = {
   summarizePageButton: document.querySelector('#summarizePageButton'),
   testAIButton: document.querySelector('#testAIButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
+  arcImportInput: document.querySelector('#arcImportInput'),
+  importArcButton: document.querySelector('#importArcButton'),
+  arcImportStatus: document.querySelector('#arcImportStatus'),
   spacesList: document.querySelector('#spacesList'),
   contextMenu: document.querySelector('#contextMenu'),
   actionDialog: document.querySelector('#actionDialog'),
@@ -195,6 +203,8 @@ function bindEvents() {
   els.askAIButton.addEventListener('click', () => runTask(askCustomPrompt));
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
+  els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
+  els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
   document.addEventListener('click', hideContextMenu);
   document.addEventListener('keydown', handleDocumentKeydown);
@@ -1264,6 +1274,53 @@ async function testAI() {
   }
 }
 
+async function previewArcImportFile() {
+  const file = els.arcImportInput.files?.[0];
+  pendingArcImportText = '';
+  els.importArcButton.disabled = true;
+  if (!file) {
+    setArcImportStatus('No Arc file selected.');
+    return;
+  }
+
+  if (file.size > 20 * 1024 * 1024) {
+    setArcImportStatus('This file is too large to import safely. Select Arc StorableSidebar.json.');
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
+    pendingArcImportText = text;
+    els.importArcButton.disabled = plan.spaces.length === 0;
+    setArcImportStatus(formatArcImportSummary(plan.summary, 'Ready to append'));
+  } catch (error) {
+    setArcImportStatus(`Cannot read Arc file: ${error.message || String(error)}`);
+  }
+}
+
+async function importArcFile() {
+  if (!pendingArcImportText) {
+    setArcImportStatus('Choose an Arc sidebar file first.');
+    return;
+  }
+
+  try {
+    const plan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
+    const result = appendArcImportPlan(state, plan);
+    await saveState();
+    render();
+    pendingArcImportText = '';
+    els.arcImportInput.value = '';
+    els.importArcButton.disabled = true;
+    const message = `Imported ${result.importedSpaces} Spaces and ${result.importedTabs} tabs. Current Space stayed active.`;
+    setArcImportStatus(message);
+    setSettingsStatus(message);
+  } catch (error) {
+    setArcImportStatus(`Import failed: ${error.message || String(error)}`);
+  }
+}
+
 function showTabContextMenu(event, tab) {
   event.preventDefault();
   event.stopPropagation();
@@ -1785,6 +1842,20 @@ function groupColor(color) {
 
 function setSettingsStatus(text) {
   els.settingsStatus.textContent = text;
+}
+
+function setArcImportStatus(text) {
+  els.arcImportStatus.textContent = text;
+}
+
+function formatArcImportSummary(summary, prefix = 'Arc import') {
+  if (!summary || summary.spaces === 0) return 'No Arc Spaces found in this file.';
+  const skipped = Object.entries(summary.skipped || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([key, count]) => `${count} ${key}`)
+    .join(', ');
+  const skippedText = skipped ? ` Skipped: ${skipped}.` : '';
+  return `${prefix}: ${summary.spaces} Spaces, ${summary.folders} folders, ${summary.tabs} tabs from ${summary.source}.${skippedText}`;
 }
 
 function renderAskMessages() {

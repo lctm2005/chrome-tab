@@ -182,6 +182,13 @@ menu button:first-child,
   color: var(--text);
 }
 
+.secondary-button:disabled,
+menu button:disabled,
+.action-buttons button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .space-view {
   display: flex;
   grid-row: 3;
@@ -648,6 +655,7 @@ menu button:first-child,
 
 dialog {
   width: min(92vw, 360px);
+  max-height: min(88vh, 720px);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 0;
@@ -665,6 +673,11 @@ dialog::backdrop {
   flex-direction: column;
   gap: 12px;
   padding: 14px;
+}
+
+.settings {
+  max-height: calc(min(88vh, 720px) - 2px);
+  overflow: auto;
 }
 
 .dialog-title {
@@ -687,15 +700,40 @@ dialog::backdrop {
   font-weight: 690;
 }
 
+.arc-import-settings,
 .shortcut-settings {
   display: grid;
   gap: 8px;
+}
+
+.arc-import-settings p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.arc-import-settings code {
+  border-radius: 5px;
+  padding: 1px 4px;
+  background: rgba(37, 35, 31, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
 }
 
 .shortcut-settings h3 {
   color: #4f4941;
   font-size: 12px;
   font-weight: 760;
+}
+
+.arc-import-settings h3 {
+  color: #4f4941;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.file-picker input {
+  padding: 7px;
 }
 
 .shortcuts-list {

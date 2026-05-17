@@ -17,6 +17,7 @@ Space Tabs is a Chrome side panel extension for managing browser workspaces with
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
 - Ask Page: separate Ask view with Markdown answers, Summary, abort, and tab-bound chat sessions.
+- Arc import: append Arc `StorableSidebar.json` Spaces and folders as Space snapshots.
 - BYOK AI: configure OpenAI-compatible providers such as GLM-5.1 without hardcoding credentials.
 - Shortcuts: built-in keyboard actions with user-editable bindings in Settings.
 
@@ -40,6 +41,12 @@ Open `Settings` in the side panel and configure:
 - `Language`: controls Ask and Summary output language.
 
 For local preview or development, copy `config.example.js` to `config.local.js` and fill local values there. `config.local.js` is ignored by Git.
+
+## Arc Import
+
+Open `Settings`, choose Arc's `StorableSidebar.json`, review the import summary, then click `Append Import`.
+
+The importer appends Spaces and does not switch away from the current Space. Arc folders become Chrome tab groups, loose Arc tabs become Ungrouped tabs, and imported tabs are stored as Space snapshots until you open that Space.
 
 ## Shortcuts
 
