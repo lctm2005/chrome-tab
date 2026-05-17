@@ -636,6 +636,7 @@ async function deleteSpace(space) {
     await ensureSpaceOpenFromSnapshot(fallback.id, { active: true });
     await focusFirstTabInSpace(fallback.id, { force: true });
     await collapseGroupsInSpace(fallback.id);
+    await discardInactiveTabsInSpace(fallback.id);
     await saveState();
   }
 
@@ -651,6 +652,7 @@ async function deleteSpace(space) {
     await ensureSpaceOpenFromSnapshot(state.activeSpaceId);
     await focusFirstTabInSpace(state.activeSpaceId, { force: true });
     await collapseGroupsInSpace(state.activeSpaceId);
+    await discardInactiveTabsInSpace(state.activeSpaceId);
   }
   await closeTabsOutsideActiveSpace();
   await saveState();
@@ -839,6 +841,7 @@ async function switchSpace(spaceId) {
   await closeTabsOutsideActiveSpace();
   await focusFirstTabInSpace(spaceId, { force: true });
   await collapseGroupsInSpace(spaceId);
+  await discardInactiveTabsInSpace(spaceId);
   await saveState();
   await refreshTabs();
 }
@@ -953,6 +956,25 @@ async function collapseGroupsInSpace(spaceId) {
     }
   }
   if (groupIds.size) await loadTabs({ adopt: false });
+}
+
+async function discardRestoredTabs(tabIds = []) {
+  for (const tabId of tabIds) {
+    try {
+      await send('tabs:discard', { tabId });
+    } catch {
+      // Some URLs or Chrome states cannot be discarded; keep restore best-effort.
+    }
+  }
+}
+
+async function discardInactiveTabsInSpace(spaceId) {
+  await loadTabs({ adopt: false });
+  const discardableTabIds = tabs
+    .filter((tab) => tabBelongsToSpace(tab, spaceId) && !tab.active && !tab.pinned)
+    .map((tab) => tab.id);
+  await discardRestoredTabs(discardableTabIds);
+  if (discardableTabIds.length) await loadTabs({ adopt: false });
 }
 
 async function focusFirstTabInSpace(spaceId, options = {}) {

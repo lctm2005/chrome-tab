@@ -112,6 +112,11 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         tabs = tabs.map((tab) => ({ ...tab, active: tab.id === id }));
         return { tab: { ...tabs.find((tab) => tab.id === id) } };
       }
+      case 'tabs:discard': {
+        const id = Number(payload.tabId);
+        tabs = tabs.map((tab) => tab.id === id ? { ...tab, discarded: true } : tab);
+        return { tab: { ...tabs.find((tab) => tab.id === id) } };
+      }
       case 'tabs:close': {
         const id = Number(payload.tabId);
         const closingWasActive = tabs.some((tab) => tab.id === id && tab.active);

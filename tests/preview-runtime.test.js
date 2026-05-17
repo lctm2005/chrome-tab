@@ -48,6 +48,15 @@ test('preview command handler supports tab creation, focus, and close', async ()
   assert.equal(listed.tabs.some((tab) => tab.id === 2), false);
 });
 
+test('preview command handler supports discarding background tabs', async () => {
+  const send = createPreviewCommandHandler();
+
+  await send('tabs:discard', { tabId: 2 });
+  const listed = await send('tabs:list');
+
+  assert.equal(listed.tabs.find((tab) => tab.id === 2).discarded, true);
+});
+
 test('preview command handler supports group rename and tab ungroup', async () => {
   const send = createPreviewCommandHandler();
 

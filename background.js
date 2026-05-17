@@ -43,6 +43,8 @@ async function handleMessage(message, sender = {}) {
       return createTab(message.url, message.active);
     case 'tabs:focus':
       return focusTab(message.tabId);
+    case 'tabs:discard':
+      return discardTab(message.tabId);
     case 'tabs:close':
       return closeTab(message.tabId);
     case 'tabs:group':
@@ -154,6 +156,11 @@ async function createTab(url = 'chrome://newtab', active = true) {
 async function focusTab(tabId) {
   const tab = await chrome.tabs.update(Number(tabId), { active: true });
   if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+  return { tab: serializeTab(tab) };
+}
+
+async function discardTab(tabId) {
+  const tab = await chrome.tabs.discard(Number(tabId));
   return { tab: serializeTab(tab) };
 }
 
