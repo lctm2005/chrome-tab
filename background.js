@@ -3,6 +3,9 @@ import { serializeGroup, serializeTab } from './src/shared/state.js';
 
 const activeAIRequests = new Map();
 const sidePanelPorts = new Map();
+const BOOKMARK_ROOT_TITLE = 'Space Tabs';
+const BOOKMARK_SPACE_MARKER = 'space:';
+const MAX_BOOKMARK_FOLDER_DEPTH = 3;
 
 chrome.runtime.onInstalled.addListener(async () => {
   if (chrome.sidePanel?.setPanelBehavior) {
@@ -59,6 +62,12 @@ async function handleMessage(message, sender = {}) {
       return updateGroup(message.groupId, message.update);
     case 'groups:move':
       return moveGroup(message.groupId, message.index);
+    case 'bookmarks:saveSpaceSnapshot':
+      return saveSpaceSnapshotToBookmarks(message.space, message.snapshot);
+    case 'bookmarks:loadSpaceSnapshot':
+      return loadSpaceSnapshotFromBookmarks(message.spaceId);
+    case 'bookmarks:removeSpace':
+      return removeSpaceBookmarks(message.spaceId);
     case 'page:outline':
       return extractTabOutline(message.tabId);
     case 'page:extract':
@@ -211,6 +220,148 @@ async function updateGroup(groupId, update = {}) {
 async function moveGroup(groupId, index) {
   await chrome.tabGroups.move(Number(groupId), { index: Math.max(0, Number(index) || 0) });
   return {};
+}
+
+async function saveSpaceSnapshotToBookmarks(space = {}, snapshot = {}) {
+  const root = await ensureBookmarkRoot();
+  const existing = await findSpaceBookmarkFolder(space.id, root);
+  if (existing) await chrome.bookmarks.removeTree(existing.id);
+
+  const bookmarkGroups = Array.isArray(snapshot?.groups)
+    ? snapshot.groups
+      .map((group) => ({
+        ...group,
+        tabs: Array.isArray(group?.tabs) ? group.tabs.filter((tab) => isBookmarkableUrl(tab?.url)) : [],
+      }))
+      .filter((group) => group.tabs.length > 0)
+    : [];
+
+  if (!space?.id || bookmarkGroups.length === 0) {
+    return { saved: false };
+  }
+
+  const spaceFolder = await chrome.bookmarks.create({
+    parentId: root.id,
+    title: bookmarkSpaceTitle(space),
+  });
+
+  for (const group of bookmarkGroups) {
+    const leaf = await ensureBookmarkPath(spaceFolder.id, bookmarkPathForGroup(group));
+    for (const tab of group.tabs) {
+      await chrome.bookmarks.create({
+        parentId: leaf.id,
+        title: String(tab.title || tab.url || 'Untitled').slice(0, 240),
+        url: tab.url,
+      });
+    }
+  }
+
+  return { saved: true, rootId: root.id, spaceFolderId: spaceFolder.id };
+}
+
+async function loadSpaceSnapshotFromBookmarks(spaceId) {
+  const root = await getBookmarkRoot();
+  if (!root) return { snapshot: null };
+  const spaceFolder = await findSpaceBookmarkFolder(spaceId, root);
+  if (!spaceFolder) return { snapshot: null };
+
+  const [tree] = await chrome.bookmarks.getSubTree(spaceFolder.id);
+  const groups = [];
+  collectBookmarkGroups(tree, [], groups);
+
+  return {
+    snapshot: {
+      version: 1,
+      updatedAt: Date.now(),
+      groups,
+    },
+  };
+}
+
+async function removeSpaceBookmarks(spaceId) {
+  const root = await getBookmarkRoot();
+  if (!root) return { removed: false };
+  const existing = await findSpaceBookmarkFolder(spaceId, root);
+  if (existing) await chrome.bookmarks.removeTree(existing.id);
+  return { removed: Boolean(existing) };
+}
+
+async function getBookmarkParent() {
+  const [tree] = await chrome.bookmarks.getTree();
+  return tree.children?.find((node) => node.id === '2') || tree.children?.find((node) => !node.url) || tree;
+}
+
+async function getBookmarkRoot() {
+  const parent = await getBookmarkParent();
+  return parent.children?.find((node) => !node.url && node.title === BOOKMARK_ROOT_TITLE) || null;
+}
+
+async function ensureBookmarkRoot() {
+  const parent = await getBookmarkParent();
+  const existing = parent.children?.find((node) => !node.url && node.title === BOOKMARK_ROOT_TITLE);
+  if (existing) return existing;
+  return chrome.bookmarks.create({ parentId: parent.id, title: BOOKMARK_ROOT_TITLE });
+}
+
+async function findSpaceBookmarkFolder(spaceId, root = null) {
+  if (!spaceId) return null;
+  const bookmarkRoot = root || await getBookmarkRoot();
+  if (!bookmarkRoot) return null;
+  const [tree] = await chrome.bookmarks.getSubTree(bookmarkRoot.id);
+  const marker = `[${BOOKMARK_SPACE_MARKER}${spaceId}]`;
+  return (tree.children || []).find((node) => !node.url && node.title.includes(marker)) || null;
+}
+
+function bookmarkSpaceTitle(space = {}) {
+  return `${String(space.name || 'Space').trim() || 'Space'} [${BOOKMARK_SPACE_MARKER}${space.id}]`;
+}
+
+function bookmarkPathForGroup(group = {}) {
+  const rawParts = String(group.title || 'Ungrouped')
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const parts = rawParts.length ? rawParts : ['Ungrouped'];
+  if (parts.length <= MAX_BOOKMARK_FOLDER_DEPTH) return parts;
+  return [
+    ...parts.slice(0, MAX_BOOKMARK_FOLDER_DEPTH - 1),
+    parts.slice(MAX_BOOKMARK_FOLDER_DEPTH - 1).join(' / '),
+  ];
+}
+
+async function ensureBookmarkPath(parentId, parts) {
+  let parent = (await chrome.bookmarks.get(parentId))[0];
+  for (const title of parts) {
+    const [freshParent] = await chrome.bookmarks.getSubTree(parent.id);
+    let child = freshParent.children?.find((node) => !node.url && node.title === title);
+    if (!child) child = await chrome.bookmarks.create({ parentId: parent.id, title });
+    parent = child;
+  }
+  return parent;
+}
+
+function collectBookmarkGroups(node, path, groups) {
+  const children = Array.isArray(node?.children) ? node.children : [];
+  const bookmarks = children.filter((child) => child.url && isBookmarkableUrl(child.url));
+  if (bookmarks.length && path.length) {
+    groups.push({
+      title: path.join(' / '),
+      color: path.join(' / ') === 'Ungrouped' ? 'grey' : 'blue',
+      collapsed: true,
+      tabs: bookmarks.map((bookmark) => ({
+        title: bookmark.title || bookmark.url,
+        url: bookmark.url,
+      })),
+    });
+  }
+
+  for (const child of children) {
+    if (!child.url) collectBookmarkGroups(child, [...path, child.title || 'Folder'].slice(0, MAX_BOOKMARK_FOLDER_DEPTH), groups);
+  }
+}
+
+function isBookmarkableUrl(url) {
+  return /^(https?:|file:)/.test(String(url || '')) || url === 'chrome://newtab';
 }
 
 async function extractActivePage() {

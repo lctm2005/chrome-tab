@@ -71,6 +71,8 @@ let state = createDefaultState(localConfig);
 let tabs = [];
 let groups = [];
 let spaceView = [];
+let dormantSpaceView = [];
+let dormantSpaceViewSpaceId = '';
 let activeView = 'space';
 let dragState = null;
 let activeAIRequestId = '';
@@ -324,8 +326,9 @@ function togglePanel() {
   setTimeout(() => setStatus('Use the Chrome shortcut again to open Space Tabs.'), 120);
 }
 
-async function refreshTabs() {
+async function refreshTabs(options = {}) {
   await loadTabs();
+  await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
   await saveState();
 }
@@ -339,10 +342,22 @@ async function loadTabs({ adopt = true } = {}) {
   syncCollapsedGroupsFromChrome(state, groups);
 }
 
+async function loadDormantSpaceView(spaceId, options = {}) {
+  if (!options.force && dormantSpaceViewSpaceId === spaceId) return;
+  let snapshot = null;
+  if (extensionRuntime) {
+    const response = await send('bookmarks:loadSpaceSnapshot', { spaceId }).catch(() => null);
+    snapshot = response?.snapshot || null;
+  }
+  snapshot ||= state.spaceSnapshots?.[spaceId] || null;
+  dormantSpaceView = dormantGroupsFromSnapshot(snapshot);
+  dormantSpaceViewSpaceId = spaceId;
+}
+
 function render() {
   const activeSpace = currentSpace();
   const searchedTabs = searchTabs(tabs, els.searchInput.value);
-  spaceView = buildSpaceView({
+  const liveSpaceView = buildSpaceView({
     activeSpaceId: state.activeSpaceId,
     tabs: searchedTabs,
     groups,
@@ -353,6 +368,7 @@ function render() {
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
   });
+  spaceView = mergeDormantSpaceView(liveSpaceView, dormantSpaceView, els.searchInput.value);
   syncSelectedTabsToVisibleSpace();
 
   const isAskView = activeView === 'ask';
@@ -385,6 +401,61 @@ function render() {
   updatePanelActionUI();
 }
 
+function mergeDormantSpaceView(liveView, dormantView, query) {
+  const openUrls = new Set(liveView.flatMap((group) => group.tabs.map((tab) => tab.url).filter(Boolean)));
+  const needle = String(query || '').trim().toLowerCase();
+  const dormantGroups = dormantView
+    .map((group) => ({
+      ...group,
+      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
+      tabs: group.tabs.filter((tab) => {
+        if (openUrls.has(tab.url)) return false;
+        if (!needle) return true;
+        return [tab.title, tab.displayTitle, tab.url, tab.domain]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(needle));
+      }),
+    }))
+    .filter((group) => group.tabs.length > 0);
+
+  const ungrouped = liveView.find((group) => group.key === 'ungrouped') || null;
+  const liveGroups = liveView.filter((group) => group.key !== 'ungrouped');
+  return ungrouped ? [...liveGroups, ...dormantGroups, ungrouped] : [...liveGroups, ...dormantGroups];
+}
+
+function dormantGroupsFromSnapshot(snapshot = {}) {
+  return (snapshot?.groups || [])
+    .map((group, groupIndex) => {
+      const title = group.title || 'Ungrouped';
+      const key = `bookmark:${groupIndex}:${title}`;
+      return {
+        id: key,
+        key,
+        title,
+        color: group.color || (title === 'Ungrouped' ? 'grey' : 'blue'),
+        collapsed: Boolean(state.collapsedGroups[key] ?? true),
+        dormant: true,
+        tabs: (group.tabs || []).map((tab, tabIndex) => ({
+          id: `${key}:${tabIndex}`,
+          title: tab.title || tab.url || 'Untitled',
+          displayTitle: tab.title || tab.url || 'Untitled',
+          url: tab.url,
+          domain: domainFromUrl(tab.url),
+          favIconUrl: '',
+          active: false,
+          pinned: false,
+          muted: false,
+          groupId: -1,
+          index: tabIndex,
+          audible: false,
+          dormant: true,
+          dormantGroupKey: key,
+        })),
+      };
+    })
+    .filter((group) => group.tabs.length > 0);
+}
+
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
   const tabGroups = isSpaceGroupsCollapsed()
@@ -407,13 +478,15 @@ function renderGroups() {
 function createGroupCard(group) {
   const card = document.createElement('section');
   card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
-  card.draggable = true;
+  card.draggable = !group.dormant;
   card.dataset.groupKey = group.key;
-  card.addEventListener('dragstart', (event) => startGroupDrag(event, group));
-  card.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
-  card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
-  card.addEventListener('drop', (event) => dropGroup(event, group));
-  card.addEventListener('dragend', clearDragState);
+  if (!group.dormant) {
+    card.addEventListener('dragstart', (event) => startGroupDrag(event, group));
+    card.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('drop', (event) => dropGroup(event, group));
+    card.addEventListener('dragend', clearDragState);
+  }
 
   const header = document.createElement('div');
   header.className = 'group-header';
@@ -423,13 +496,15 @@ function createGroupCard(group) {
     <span>${group.tabs.length}</span>
   `;
   header.addEventListener('click', () => runTask(() => toggleGroup(group)));
-  header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
+  if (!group.dormant) header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
 
   const list = document.createElement('div');
   list.className = 'tab-list';
   list.dataset.groupKey = group.key;
-  list.addEventListener('dragover', (event) => acceptTabDrop(event));
-  list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
+  if (!group.dormant) {
+    list.addEventListener('dragover', (event) => acceptTabDrop(event));
+    list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
+  }
   if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
 
   card.append(header, list);
@@ -470,14 +545,15 @@ function createUngroupedSection(group) {
 
 function createTabRow(tab, groupKey) {
   const row = document.createElement('div');
-  const selected = selectedTabIds.has(tab.id);
+  const selected = !tab.dormant && selectedTabIds.has(tab.id);
   row.className = [
     'tab-row',
     tab.active ? 'active' : '',
+    tab.dormant ? 'dormant' : '',
     selected ? 'selected' : '',
   ].filter(Boolean).join(' ');
   row.tabIndex = 0;
-  row.draggable = true;
+  row.draggable = !tab.dormant;
   row.dataset.tabId = String(tab.id);
   row.dataset.groupKey = groupKey;
   row.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -501,21 +577,27 @@ function createTabRow(tab, groupKey) {
 
   const actions = document.createElement('div');
   actions.className = 'row-actions';
-  actions.append(
-    actionButton('✎', 'Rename in panel', () => renameTab(tab)),
-    actionButton('×', 'Close', () => closeTab(tab)),
-  );
+  if (tab.dormant) {
+    actions.append(actionButton('↗', 'Open', () => openDormantTab(tab, groupKey)));
+  } else {
+    actions.append(
+      actionButton('✎', 'Rename in panel', () => renameTab(tab)),
+      actionButton('×', 'Close', () => closeTab(tab)),
+    );
+  }
 
   row.append(favicon, label, actions);
   row.addEventListener('click', (event) => handleTabClick(event, tab));
-  row.addEventListener('contextmenu', (event) => showTabContextMenu(event, tab));
-  row.addEventListener('dragstart', (event) => startTabDrag(event, tab, groupKey));
-  row.addEventListener('dragover', (event) => acceptTabDrop(event));
-  row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
-  row.addEventListener('drop', (event) => dropTabBefore(event, tab, groupKey));
-  row.addEventListener('dragend', clearDragState);
+  if (!tab.dormant) {
+    row.addEventListener('contextmenu', (event) => showTabContextMenu(event, tab));
+    row.addEventListener('dragstart', (event) => startTabDrag(event, tab, groupKey));
+    row.addEventListener('dragover', (event) => acceptTabDrop(event));
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', (event) => dropTabBefore(event, tab, groupKey));
+    row.addEventListener('dragend', clearDragState);
+  }
   row.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') runTask(() => focusTab(tab));
+    if (event.key === 'Enter') runTask(() => tab.dormant ? openDormantTab(tab, groupKey) : focusTab(tab));
   });
   return row;
 }
@@ -630,7 +712,7 @@ async function deleteSpace(space) {
   const fallback = fallbackSpaceAfterDelete(state.spaces, space.id);
 
   if (deletingActiveSpace && fallback) {
-    snapshotOpenSpace(space.id);
+    await snapshotOpenSpace(space.id);
     activeView = 'space';
     state.activeSpaceId = fallback.id;
     await ensureSpaceOpenFromSnapshot(fallback.id, { active: true });
@@ -644,6 +726,7 @@ async function deleteSpace(space) {
 
   state.spaces = state.spaces.filter((item) => item.id !== space.id);
   removeSpaceReferences(state, space.id);
+  await send('bookmarks:removeSpace', { spaceId: space.id }).catch(() => null);
   activeView = 'space';
   if (state.activeSpaceId === space.id && fallback) state.activeSpaceId = fallback.id;
 
@@ -693,6 +776,11 @@ async function clearUngroupedTabs(group) {
 }
 
 function handleTabClick(event, tab) {
+  if (tab.dormant) {
+    event.preventDefault();
+    runTask(() => openDormantTab(tab, tab.dormantGroupKey));
+    return;
+  }
   const additive = event.metaKey || event.ctrlKey;
   const range = event.shiftKey;
   updateTabSelection(tab.id, { additive, range });
@@ -821,21 +909,51 @@ async function moveGroupToSpace(group, spaceId) {
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
+async function openDormantTab(tab, groupKey) {
+  const url = tab?.url || '';
+  if (!url) return;
+  const created = await send('tabs:create', { url, active: true });
+  const tabId = created.tab?.id;
+  if (!tabId) return;
+
+  const dormantGroup = dormantSpaceView.find((group) => group.key === groupKey || group.key === tab.dormantGroupKey);
+  if (!dormantGroup || isUngroupedSnapshotGroup(dormantGroup)) {
+    state.tabSpaces[tabId] = state.activeSpaceId;
+  } else {
+    const existing = groups.find((group) => (
+      state.groupSpaces[group.id] === state.activeSpaceId &&
+      group.title === dormantGroup.title
+    ));
+    const result = existing
+      ? await send('tabs:groupExisting', { groupId: existing.id, tabIds: [tabId] })
+      : await send('tabs:group', {
+        title: dormantGroup.title,
+        color: dormantGroup.color,
+        tabIds: [tabId],
+        collapsed: false,
+      });
+    if (result.groupId) {
+      state.groupSpaces[result.groupId] = state.activeSpaceId;
+      addGroupOrderKey(state.activeSpaceId, `group:${result.groupId}`);
+    }
+    delete state.tabSpaces[tabId];
+  }
+
+  await saveState();
+  await refreshTabs();
+}
+
 async function switchSpace(spaceId) {
   const previousSpaceId = state.activeSpaceId;
   await loadTabs({ adopt: true });
-  snapshotOpenSpace(previousSpaceId);
+  await snapshotOpenSpace(previousSpaceId);
 
   activeView = 'space';
 
-  const hasOpenTargetTabs = tabs.some((tab) => tabBelongsToSpace(tab, spaceId));
-  if (!hasOpenTargetTabs) {
-    await restoreSpaceSnapshot(spaceId);
-    await loadTabs({ adopt: false });
-  }
   await ensureSpaceHasOpenTab(spaceId, { active: false });
 
   state.activeSpaceId = spaceId;
+  await loadDormantSpaceView(spaceId, { force: true });
   await focusFirstTabInSpace(spaceId, { force: true });
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
   await closeTabsOutsideActiveSpace();
@@ -851,7 +969,7 @@ async function closeTabsOutsideActiveSpace() {
 
   for (const space of state.spaces) {
     if (space.id === state.activeSpaceId) continue;
-    snapshotOpenSpace(space.id);
+    await snapshotOpenSpace(space.id);
     await closeSpaceTabs(space.id, shouldAutoCloseTab, { reloadBeforeClose: false });
   }
 
@@ -883,43 +1001,24 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
   await loadTabs({ adopt: false });
 }
 
-function snapshotOpenSpace(spaceId) {
+async function snapshotOpenSpace(spaceId) {
   const view = buildSpaceViewForSpace(spaceId);
   const snapshot = buildSpaceSnapshot({ view });
-  if (snapshotTabCount(snapshot) > 0) state.spaceSnapshots[spaceId] = snapshot;
+  if (snapshotTabCount(snapshot) === 0) return;
+  const previousSnapshot = state.spaceSnapshots[spaceId];
+  state.spaceSnapshots[spaceId] = snapshot;
+  const space = state.spaces.find((item) => item.id === spaceId);
+  if (space && !sameSnapshotGroups(previousSnapshot, snapshot)) await saveSpaceSnapshotToBookmarks(space, snapshot);
 }
 
-async function restoreSpaceSnapshot(spaceId) {
-  const snapshot = state.spaceSnapshots[spaceId];
-  if (!snapshot || snapshotTabCount(snapshot) === 0) return;
+async function saveSpaceSnapshotToBookmarks(space, snapshot) {
+  if (!extensionRuntime || snapshotTabCount(snapshot) === 0) return;
+  await send('bookmarks:saveSpaceSnapshot', { space, snapshot }).catch(() => null);
+  if (space?.id === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+}
 
-  for (const group of snapshot.groups || []) {
-    const createdTabIds = [];
-    for (const tab of group.tabs || []) {
-      const created = await send('tabs:create', { url: tab.url, active: false });
-      const tabId = created.tab?.id;
-      if (!tabId) continue;
-      createdTabIds.push(tabId);
-    }
-
-    if (createdTabIds.length === 0) continue;
-    if (isUngroupedSnapshotGroup(group)) {
-      for (const tabId of createdTabIds) state.tabSpaces[tabId] = spaceId;
-      continue;
-    }
-
-    const result = await send('tabs:group', {
-      title: group.title,
-      color: group.color,
-      tabIds: createdTabIds,
-      collapsed: true,
-    });
-    if (result.groupId) {
-      state.groupSpaces[result.groupId] = spaceId;
-      state.collapsedGroups[`group:${result.groupId}`] = true;
-      addGroupOrderKey(spaceId, `group:${result.groupId}`);
-    }
-  }
+function sameSnapshotGroups(left, right) {
+  return JSON.stringify(left?.groups || []) === JSON.stringify(right?.groups || []);
 }
 
 async function ensureSpaceHasOpenTab(spaceId, options = {}) {
@@ -932,11 +1031,7 @@ async function ensureSpaceHasOpenTab(spaceId, options = {}) {
 }
 
 async function ensureSpaceOpenFromSnapshot(spaceId, options = {}) {
-  await loadTabs({ adopt: false });
-  if (!tabs.some((tab) => tabBelongsToSpace(tab, spaceId))) {
-    await restoreSpaceSnapshot(spaceId);
-    await loadTabs({ adopt: false });
-  }
+  await loadDormantSpaceView(spaceId, { force: true });
   await ensureSpaceHasOpenTab(spaceId, options);
   await collapseGroupsInSpace(spaceId);
 }
@@ -986,7 +1081,7 @@ async function focusFirstTabInSpace(spaceId, options = {}) {
 async function toggleGroup(group) {
   const nextCollapsed = !group.collapsed;
   state.collapsedGroups[group.key] = nextCollapsed;
-  if (group.id !== 'ungrouped') {
+  if (!group.dormant && group.id !== 'ungrouped') {
     await send('groups:update', { groupId: group.id, update: { collapsed: nextCollapsed } });
   }
   await saveState();
@@ -1362,6 +1457,7 @@ async function importArcFile() {
   try {
     const plan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
     const result = appendArcImportPlan(state, plan);
+    await saveArcImportBookmarks(plan);
     await saveState();
     render();
     pendingArcImportText = '';
@@ -1372,6 +1468,15 @@ async function importArcFile() {
     setSettingsStatus(message);
   } catch (error) {
     setArcImportStatus(`Import failed: ${error.message || String(error)}`);
+  }
+}
+
+async function saveArcImportBookmarks(plan) {
+  const spaces = Array.isArray(plan?.spaces) ? plan.spaces : [];
+  const snapshots = plan?.spaceSnapshots || {};
+  for (const space of spaces) {
+    const snapshot = snapshots[space.id];
+    if (snapshot) await saveSpaceSnapshotToBookmarks(space, snapshot);
   }
 }
 
@@ -1794,7 +1899,7 @@ function buildSpaceViewForSpace(spaceId) {
 }
 
 function currentOrderedTabIds() {
-  return spaceView.flatMap((group) => group.tabs.map((tab) => tab.id));
+  return spaceView.flatMap((group) => group.tabs.filter((tab) => !tab.dormant).map((tab) => tab.id));
 }
 
 function updateTabSelection(tabId, options = {}) {

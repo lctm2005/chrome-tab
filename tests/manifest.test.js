@@ -16,11 +16,10 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.deepEqual(manifest.content_scripts[0].js, ['content-script.js']);
   assert.equal(manifest.content_scripts[0].run_at, 'document_start');
   await access(new URL('../content-script.js', import.meta.url));
-  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'activeTab']) {
+  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'bookmarks', 'scripting', 'activeTab']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
   assert.equal(manifest.permissions.includes('downloads'), false);
-  assert.equal(manifest.permissions.includes('bookmarks'), false);
   assert.ok(manifest.host_permissions.includes('https://api.z.ai/*'));
   assert.ok(manifest.optional_host_permissions.includes('https://*/*'));
   assert.ok(manifest.optional_host_permissions.includes('http://*/*'));
