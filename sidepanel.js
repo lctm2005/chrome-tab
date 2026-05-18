@@ -36,6 +36,7 @@ import {
 import {
   buildSpaceSnapshot,
   isUngroupedSnapshotGroup,
+  richestSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
 } from './src/shared/space-snapshot.js';
@@ -58,7 +59,6 @@ import {
   planTidyTabNames,
   preferredFocusableTab,
   sanitizeTidyGroups,
-  searchTabs,
   titleForDomain,
 } from './src/shared/tab-utils.js';
 
@@ -87,8 +87,6 @@ const els = {
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
-  spaceSearch: document.querySelector('#spaceSearch'),
-  searchInput: document.querySelector('#searchInput'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   autoGroupButton: document.querySelector('#autoGroupButton'),
   groupsList: document.querySelector('#groupsList'),
@@ -200,7 +198,6 @@ function bindEvents() {
     renderSettings();
     els.settingsDialog.showModal();
   });
-  els.searchInput.addEventListener('input', render);
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
   els.autoGroupButton.addEventListener('click', () => runTask(autoGroupTabs));
   els.collapseGroupsButton.addEventListener('click', () => runTask(toggleSpaceGroups));
@@ -279,13 +276,6 @@ function isEditableTarget(target) {
 }
 
 async function runShortcutAction(action) {
-  if (action === 'focusSearch') {
-    activeView = 'space';
-    render();
-    els.searchInput.focus();
-    els.searchInput.select();
-    return;
-  }
   if (action === 'openAsk') {
     openAskPage();
     return;
@@ -352,17 +342,16 @@ async function loadDormantSpaceView(spaceId, options = {}) {
     const response = await send('bookmarks:loadSpaceSnapshot', { spaceId }).catch(() => null);
     snapshot = response?.snapshot || null;
   }
-  snapshot ||= state.spaceSnapshots?.[spaceId] || null;
+  snapshot = richestSnapshot(snapshot, state.spaceSnapshots?.[spaceId]);
   dormantSpaceView = dormantGroupsFromSnapshot(snapshot);
   dormantSpaceViewSpaceId = spaceId;
 }
 
 function render() {
   const activeSpace = currentSpace();
-  const searchedTabs = searchTabs(tabs, els.searchInput.value);
   const liveSpaceView = buildSpaceView({
     activeSpaceId: state.activeSpaceId,
-    tabs: searchedTabs,
+    tabs,
     groups,
     groupSpaces: state.groupSpaces,
     tabSpaces: state.tabSpaces,
@@ -371,7 +360,7 @@ function render() {
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
   });
-  spaceView = mergeDormantSpaceView(liveSpaceView, dormantSpaceView, els.searchInput.value);
+  spaceView = mergeDormantSpaceView(liveSpaceView, dormantSpaceView);
   syncSelectedTabsToVisibleSpace();
 
   const isAskView = activeView === 'ask';
@@ -385,7 +374,6 @@ function render() {
     : extensionRuntime
       ? `${tabCount(spaceView)} tabs in ${activeSpace.name}`
       : `${tabCount(spaceView)} preview tabs in ${activeSpace.name}`;
-  els.spaceSearch.hidden = isAskView || groupsCollapsed;
   els.groupsList.hidden = isAskView;
   els.askPageView.hidden = !isAskView;
   els.tidyNamesButton.hidden = isAskView;
@@ -404,20 +392,13 @@ function render() {
   updatePanelActionUI();
 }
 
-function mergeDormantSpaceView(liveView, dormantView, query) {
+function mergeDormantSpaceView(liveView, dormantView) {
   const openUrls = new Set(liveView.flatMap((group) => group.tabs.map((tab) => tab.url).filter(Boolean)));
-  const needle = String(query || '').trim().toLowerCase();
   const dormantGroups = dormantView
     .map((group) => ({
       ...group,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-      tabs: group.tabs.filter((tab) => {
-        if (openUrls.has(tab.url)) return false;
-        if (!needle) return true;
-        return [tab.title, tab.displayTitle, tab.url, tab.domain]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(needle));
-      }),
+      tabs: group.tabs.filter((tab) => !openUrls.has(tab.url)),
     }))
     .filter((group) => group.tabs.length > 0);
 

@@ -2,7 +2,6 @@ export const SHORTCUT_ACTIONS = [
   { id: 'togglePanel', label: 'Toggle panel', defaultShortcut: 'Meta+S' },
   { id: 'askSubmit', label: 'Submit Ask', defaultShortcut: 'Meta+Enter' },
   { id: 'askAbort', label: 'Stop Ask', defaultShortcut: 'Control+C' },
-  { id: 'focusSearch', label: 'Focus Space search', defaultShortcut: '/' },
   { id: 'openAsk', label: 'Open Ask Page', defaultShortcut: 'Alt+A' },
   { id: 'tidyNames', label: 'Tidy names', defaultShortcut: 'Control+Alt+T' },
   { id: 'autoGroup', label: 'Auto group', defaultShortcut: 'Control+Alt+G' },

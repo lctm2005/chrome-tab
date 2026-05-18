@@ -27,14 +27,24 @@ chrome.storage?.onChanged?.addListener((changes, areaName) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  handlePageShortcutKeydown(event);
+}, true);
+
+window.addEventListener('keydown', (event) => {
+  handlePageShortcutKeydown(event);
+}, true);
+
+function handlePageShortcutKeydown(event) {
+  if (event.spaceTabsShortcutHandled) return;
   const action = pageShortcutActionFromEvent(event);
   if (!action) return;
+  event.spaceTabsShortcutHandled = true;
   event.preventDefault();
   event.stopImmediatePropagation();
   sendRuntimeMessage(action === 'togglePanel'
     ? { type: 'panel:toggle' }
     : { type: 'shortcut:action', action });
-}, true);
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'page:outline') return false;

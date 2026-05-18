@@ -225,9 +225,9 @@ async function main() {
   record('New Tab row creates a tab owned by active Space', newTabRows >= 1, `${newTabRows} rows`);
 
   await evaluate(client, `document.querySelector('#collapseGroupsButton').click()`);
-  await waitFor(client, `document.querySelector('#spaceSearch')?.hidden === true`);
+  await waitFor(client, `document.querySelector('#groupsList')?.classList.contains('groups-collapsed')`);
   await evaluate(client, `document.querySelector('#collapseGroupsButton').click()`);
-  await waitFor(client, `document.querySelector('#spaceSearch')?.hidden === false`);
+  await waitFor(client, `!document.querySelector('#groupsList')?.classList.contains('groups-collapsed')`);
   record('Space collapse toggle hides and restores group content', true);
 
   await evaluate(client, `document.querySelector('#settingsButton').click()`);

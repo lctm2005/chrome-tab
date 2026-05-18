@@ -7,8 +7,14 @@ async function loadContentScript(initialShortcuts = {}) {
   const listeners = new Map();
   const storageListeners = [];
   const messages = [];
+  const windowListeners = new Map();
   const code = await readFile(new URL('../content-script.js', import.meta.url), 'utf8');
   const context = {
+    window: {
+      addEventListener(type, listener) {
+        windowListeners.set(type, listener);
+      },
+    },
     document: {
       addEventListener(type, listener) {
         listeners.set(type, listener);
@@ -47,7 +53,7 @@ async function loadContentScript(initialShortcuts = {}) {
     },
   };
   vm.runInNewContext(code, context);
-  return { listeners, storageListeners, messages };
+  return { listeners, storageListeners, windowListeners, messages };
 }
 
 function keyEvent(overrides) {
@@ -71,9 +77,10 @@ function keyEvent(overrides) {
 }
 
 test('content script forwards Space shortcuts when focus is on a web page', async () => {
-  const { listeners, messages } = await loadContentScript();
+  const { listeners, messages, windowListeners } = await loadContentScript();
   const event = keyEvent({ key: 'ArrowRight', code: 'ArrowRight', ctrlKey: true, altKey: true });
 
+  windowListeners.get('keydown')(event);
   listeners.get('keydown')(event);
 
   assert.deepEqual(asPlainMessages(messages), [{ type: 'shortcut:action', action: 'nextSpace' }]);
