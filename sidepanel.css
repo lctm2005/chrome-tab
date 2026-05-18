@@ -221,6 +221,62 @@ menu button:disabled,
   background: rgba(255, 255, 255, 0.66);
 }
 
+.folder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.folder-header {
+  display: grid;
+  grid-template-columns: 14px 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  margin-left: calc(var(--folder-depth, 0) * 12px);
+  border-radius: 8px;
+  padding: 5px 8px;
+  background: rgba(244, 238, 226, 0.78);
+  color: #4f4941;
+  text-align: left;
+}
+
+.folder-header:hover,
+.folder-header:active {
+  background: rgba(235, 228, 214, 0.96);
+}
+
+.folder-caret,
+.folder-icon {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1;
+}
+
+.folder-header strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-header span:last-child {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.folder-children {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: calc((var(--folder-depth, 0) + 1) * 12px);
+  padding-left: 8px;
+  border-left: 1px solid rgba(37, 35, 31, 0.1);
+}
+
 .group-header {
   display: flex;
   min-height: 28px;

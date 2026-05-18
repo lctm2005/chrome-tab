@@ -473,9 +473,106 @@ function renderGroups() {
     return;
   }
 
-  const nodes = tabGroups.map(createGroupCard);
+  const nodes = createFolderTree(tabGroups).map(createFolderTreeNode);
   if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
   els.groupsList.replaceChildren(...nodes);
+}
+
+function createFolderTree(groupsToRender) {
+  const root = [];
+  const folders = new Map();
+
+  for (const group of groupsToRender) {
+    const parts = folderTitleParts(group.title);
+    if (parts.length <= 1) {
+      root.push({ type: 'group', group });
+      continue;
+    }
+
+    let children = root;
+    const folderParts = parts.slice(0, -1);
+    for (let index = 0; index < folderParts.length; index += 1) {
+      const path = folderParts.slice(0, index + 1);
+      const key = folderKey(path);
+      let folder = folders.get(key);
+      if (!folder) {
+        folder = {
+          type: 'folder',
+          key,
+          title: folderParts[index],
+          path,
+          children: [],
+        };
+        folders.set(key, folder);
+        children.push(folder);
+      }
+      children = folder.children;
+    }
+    children.push({
+      type: 'group',
+      group: {
+        ...group,
+        displayTitle: parts.at(-1),
+      },
+    });
+  }
+
+  return root;
+}
+
+function createFolderTreeNode(node) {
+  if (node.type === 'folder') return createFolderSection(node);
+  return createGroupCard(node.group);
+}
+
+function createFolderSection(folder) {
+  const collapsed = Boolean(state.collapsedGroups[folder.key]);
+  const section = document.createElement('section');
+  section.className = `folder-section${collapsed ? ' collapsed' : ''}`;
+  section.dataset.folderKey = folder.key;
+  section.style.setProperty('--folder-depth', String(Math.max(0, folder.path.length - 1)));
+
+  const header = document.createElement('button');
+  header.className = 'folder-header';
+  header.type = 'button';
+  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  header.innerHTML = `
+    <span class="folder-caret">${collapsed ? '›' : '⌄'}</span>
+    <span class="folder-icon">▣</span>
+    <strong>${escapeHtml(folder.title)}</strong>
+    <span>${folderTabCount(folder)}</span>
+  `;
+  header.addEventListener('click', () => runTask(() => toggleFolder(folder.key)));
+
+  const children = document.createElement('div');
+  children.className = 'folder-children';
+  if (!collapsed) children.replaceChildren(...folder.children.map(createFolderTreeNode));
+
+  section.append(header, children);
+  return section;
+}
+
+async function toggleFolder(folderKey) {
+  state.collapsedGroups[folderKey] = !state.collapsedGroups[folderKey];
+  await saveState();
+  render();
+}
+
+function folderTabCount(folder) {
+  return folder.children.reduce((sum, child) => (
+    sum + (child.type === 'folder' ? folderTabCount(child) : child.group.tabs.length)
+  ), 0);
+}
+
+function folderTitleParts(title) {
+  return String(title || '')
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function folderKey(parts) {
+  return `folder:${state.activeSpaceId}:${parts.join('/')}`;
 }
 
 function createGroupCard(group) {
@@ -495,7 +592,7 @@ function createGroupCard(group) {
   header.className = 'group-header';
   header.innerHTML = `
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
-    <h2>${escapeHtml(group.title)}</h2>
+    <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
     <span>${group.tabs.length}</span>
   `;
   header.addEventListener('click', () => runTask(() => toggleGroup(group)));
