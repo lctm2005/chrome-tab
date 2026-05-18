@@ -1,52 +1,70 @@
 # Space Tabs
 
-![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)
-![Side Panel](https://img.shields.io/badge/API-Side%20Panel-34A853)
-![BYOK](https://img.shields.io/badge/AI-BYOK-111111)
-![Tests](https://img.shields.io/badge/tests-node%20--test-2F63FF)
+Space Tabs is a Chrome side panel extension for managing browser workspaces with a Space -> Folder -> Tab Group -> Tab model.
 
-Space Tabs is a Chrome side panel extension for managing browser workspaces with a Space -> Tab Group -> Tab model. It keeps the UI close to a compact vertical tab workflow while adding panel-only tab naming, automatic grouping, page-aware AI, and bring-your-own-key model configuration.
+It is built for an Arc-like workflow in Chrome: each Space keeps its own working context, saved tabs are backed by Chrome bookmarks, and dormant tabs stay unloaded until you explicitly open them.
 
 ## Features
 
-- Spaces: switch between separate work contexts and restore the tabs that belong to each Space.
-- Tab Groups: keep Chrome tab groups and Space group state in sync, including collapse and expand state.
-- Ungrouped tabs: Arc-style temporary tab area with quick new tab and clear actions.
+- Spaces: switch between separate work contexts without keeping every saved tab loaded.
+- Folders: show bookmark-backed nested folders, up to three levels deep.
+- Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
+- Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Auto Group: classify tabs into Chrome tab groups while keeping Space ownership separate.
+- Auto Group: group ungrouped tabs locally, with optional BYOK AI support.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
-- Ask Page: separate Ask view with Markdown answers, Summary, abort, and tab-bound chat sessions.
-- Arc import: append Arc `StorableSidebar.json` Spaces and folders as Space snapshots.
-- BYOK AI: configure OpenAI-compatible providers such as GLM-5.1 without hardcoding credentials.
+- Ask Page: optional page summary and Q&A with a user-provided OpenAI-compatible API key.
+- Arc import: append Arc `StorableSidebar.json` Spaces and folders as saved Space content.
 - Shortcuts: built-in keyboard actions with user-editable bindings in Settings.
 
-## Install
+## Install From Package
 
-1. Open `chrome://extensions`.
-2. Enable `Developer mode`.
-3. Click `Load unpacked`.
-4. Select this repository directory.
-5. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
+1. Download one of the zip files from `dist/`.
+2. Unzip it to a local folder.
+3. Open `chrome://extensions`.
+4. Enable `Developer mode`.
+5. Click `Load unpacked`.
+6. Select the unzipped extension folder.
+7. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
 
-After pulling new code, reload the unpacked extension from `chrome://extensions` so Chrome picks up the latest files.
+Available packages:
+
+- `dist/space-tabs-0.4.0-after-folder-tree.zip`: latest package with nested folder UI.
+- `dist/space-tabs-0.4.0-before-folder-tree-587dbba.zip`: previous package before the nested folder UI change.
+
+## Install From Source
+
+1. Clone or download this repository.
+2. Open `chrome://extensions`.
+3. Enable `Developer mode`.
+4. Click `Load unpacked`.
+5. Select the repository directory.
+6. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
+
+After updating the source files, reload the unpacked extension from `chrome://extensions`.
 
 ## AI Setup
+
+AI features are optional and use your own API key.
 
 Open `Settings` in the side panel and configure:
 
 - `Base URL`: OpenAI-compatible chat completions endpoint root.
 - `Model`: for example `glm-5.1`.
-- `API Key`: stored locally by Chrome; never commit it to the repository.
+- `API Key`: stored locally by Chrome for the current extension session.
 - `Language`: controls Ask and Summary output language.
 
-For local preview or development, copy `config.example.js` to `config.local.js` and fill local values there. `config.local.js` is ignored by Git.
+If no API key is configured, normal Space, folder, bookmark, and tab management features continue to work.
 
 ## Arc Import
 
-Open `Settings`, choose Arc's `StorableSidebar.json`, review the import summary, then click `Append Import`.
+1. Open `Settings`.
+2. Choose Arc's `StorableSidebar.json`.
+3. Review the import summary.
+4. Click `Append Import`.
 
-The importer appends Spaces and does not switch away from the current Space. Arc folders become Chrome tab groups, loose Arc tabs become Ungrouped tabs, and imported tabs are stored as Space snapshots until you open that Space.
+The importer appends Spaces and keeps the current Space active. Arc folders become nested folder paths, leaf folders become Chrome tab groups when opened, and saved tabs remain dormant until selected.
 
 ## Shortcuts
 
@@ -65,43 +83,3 @@ Default bindings:
 | Next Space | `Ctrl+Alt+Right` |
 
 You can edit common shortcuts in `Settings`.
-
-## Development
-
-This project is intentionally dependency-light. It uses native ES modules and Chrome Extension APIs.
-
-```bash
-npm test
-npm run check
-```
-
-Useful files:
-
-- `manifest.json`: Chrome MV3 extension manifest.
-- `background.js`: service worker and Chrome API bridge.
-- `content-script.js`: page extraction, outline extraction, and page-level shortcuts.
-- `sidepanel.html`: side panel document.
-- `sidepanel.js`: UI behavior and Space workflows.
-- `src/shared/`: pure helpers used by the extension and tests.
-- `tests/`: Node test suite for AI requests, shortcuts, Space membership, snapshots, tab utilities, and selection.
-
-## Security And Privacy
-
-- API keys are user-provided and should stay in Chrome local storage or ignored local config only.
-- Do not commit `config.local.js`.
-- A lightweight content script runs on normal web pages to support page-level shortcuts and outline lookup.
-- Ask and Summary extract active page text only when the user explicitly starts that action.
-- Optional host permissions are requested for active page extraction when Chrome requires them.
-- Stored Ask sessions are capped and pruned to limit local storage growth.
-
-## Verification
-
-Before publishing or handing off changes, run:
-
-```bash
-npm test
-npm run check
-git diff --check
-```
-
-For extension behavior changes, also reload the unpacked extension in real Chrome and verify the side panel workflow manually.
