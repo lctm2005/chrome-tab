@@ -65,6 +65,13 @@ const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
 const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
 const previewSend = createPreviewCommandHandler();
+const AUTO_GROUP_ICON = `
+  <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
+    <path d="M7.4 5.5h9.2a1.4 1.4 0 0 1 1.3.9l.8 2.1H5.3l.8-2.1a1.4 1.4 0 0 1 1.3-.9Z"></path>
+    <path d="M9 12.7h6"></path>
+  </svg>
+`;
 
 let state = createDefaultState(localConfig);
 let tabs = [];
@@ -365,9 +372,7 @@ function render() {
     ? panelActionStatus(activePanelAction)
     : isAskView
     ? activePageStatus()
-    : extensionRuntime
-      ? `${tabCount(spaceView)} tabs in ${activeSpace.name}`
-      : `${tabCount(spaceView)} preview tabs in ${activeSpace.name}`;
+    : '';
   els.groupsList.hidden = isAskView;
   els.askPageView.hidden = !isAskView;
   els.tidyNamesButton.hidden = isAskView;
@@ -633,18 +638,10 @@ function createTabRow(tab, groupKey) {
   row.dataset.groupKey = groupKey;
   row.setAttribute('aria-selected', selected ? 'true' : 'false');
 
-  const favicon = document.createElement('span');
-  favicon.className = 'favicon';
-  if (tab.favIconUrl) {
-    const img = document.createElement('img');
-    img.src = tab.favIconUrl;
-    img.alt = '';
-    favicon.append(img);
-  } else {
-    favicon.textContent = (tab.displayTitle || tab.title || tab.domain || '?').slice(0, 1).toUpperCase();
-  }
+  const favicon = createFavicon(tab);
 
   const label = document.createElement('div');
+  label.className = 'tab-label';
   label.innerHTML = `
     <div class="tab-title">${escapeHtml(tab.displayTitle || tab.title || tab.url || 'Untitled')}</div>
     <div class="tab-domain">${escapeHtml(tab.domain || tab.url || '')}</div>
@@ -675,6 +672,20 @@ function createTabRow(tab, groupKey) {
     if (event.key === 'Enter') runTask(() => tab.dormant ? openDormantTab(tab, groupKey) : focusTab(tab));
   });
   return row;
+}
+
+function createFavicon(tab) {
+  const favicon = document.createElement('span');
+  favicon.className = 'favicon';
+  if (tab.favIconUrl) {
+    const img = document.createElement('img');
+    img.src = tab.favIconUrl;
+    img.alt = '';
+    favicon.append(img);
+  } else {
+    favicon.textContent = (tab.displayTitle || tab.title || tab.domain || '?').slice(0, 1).toUpperCase();
+  }
+  return favicon;
 }
 
 function renderSpaces() {
@@ -1374,8 +1385,8 @@ function updatePanelActionUI() {
   els.tidyNamesButton.disabled = busy;
   els.autoGroupButton.disabled = busy;
   els.collapseGroupsButton.disabled = busy;
-  els.tidyNamesButton.textContent = tidyBusy ? '…' : '🧹';
-  els.autoGroupButton.textContent = groupBusy ? '…' : '🗂';
+  els.tidyNamesButton.textContent = tidyBusy ? '...' : '🧹';
+  els.autoGroupButton.innerHTML = groupBusy ? '...' : AUTO_GROUP_ICON;
   els.tidyNamesButton.classList.toggle('busy', tidyBusy);
   els.autoGroupButton.classList.toggle('busy', groupBusy);
 }
