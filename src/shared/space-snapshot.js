@@ -26,14 +26,6 @@ export function snapshotTabCount(snapshot = {}) {
   return (snapshot.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
-export function richestSnapshot(primarySnapshot, localSnapshot) {
-  if (!primarySnapshot) return localSnapshot || null;
-  if (!localSnapshot) return primarySnapshot;
-  if (snapshotTabCount(localSnapshot) > snapshotTabCount(primarySnapshot)) return localSnapshot;
-  if (Number(localSnapshot.updatedAt || 0) > Number(primarySnapshot.updatedAt || 0)) return localSnapshot;
-  return primarySnapshot;
-}
-
 export function isUngroupedSnapshotGroup(group = {}) {
   return group.title === 'Ungrouped' && (group.color || 'grey') === 'grey';
 }

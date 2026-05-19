@@ -2,12 +2,12 @@
 
 Space Tabs is a Chrome side panel extension for managing browser workspaces with a Space -> Folder -> Tab Group -> Tab model.
 
-It is built for an Arc-like workflow in Chrome: each Space keeps its own working context, saved tabs are backed by Chrome bookmarks, and dormant tabs stay unloaded until you explicitly open them.
+It is built for an Arc-like workflow in Chrome: each Space keeps its own working context, saved tabs are stored locally by the extension, and dormant tabs stay unloaded until you explicitly open them.
 
 ## Features
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
-- Folders: show bookmark-backed nested folders, up to three levels deep.
+- Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
@@ -30,7 +30,7 @@ It is built for an Arc-like workflow in Chrome: each Space keeps its own working
 
 Available packages:
 
-- `dist/space-tabs-0.4.0-after-folder-tree.zip`: latest package with nested folder UI.
+- `dist/space-tabs-0.4.0-after-folder-tree.zip`: latest package with local saved tabs and nested folder UI.
 - `dist/space-tabs-0.4.0-before-folder-tree-587dbba.zip`: previous package before the nested folder UI change.
 
 ## Install From Source
@@ -55,7 +55,7 @@ Open `Settings` in the side panel and configure:
 - `API Key`: stored locally by Chrome for the current extension session.
 - `Language`: controls Ask and Summary output language.
 
-If no API key is configured, normal Space, folder, bookmark, and tab management features continue to work.
+If no API key is configured, normal Space, folder, and tab management features continue to work.
 
 ## Arc Import
 

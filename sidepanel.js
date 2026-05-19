@@ -36,7 +36,6 @@ import {
 import {
   buildSpaceSnapshot,
   isUngroupedSnapshotGroup,
-  richestSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
 } from './src/shared/space-snapshot.js';
@@ -337,12 +336,7 @@ async function loadTabs({ adopt = true } = {}) {
 
 async function loadDormantSpaceView(spaceId, options = {}) {
   if (!options.force && dormantSpaceViewSpaceId === spaceId) return;
-  let snapshot = null;
-  if (extensionRuntime) {
-    const response = await send('bookmarks:loadSpaceSnapshot', { spaceId }).catch(() => null);
-    snapshot = response?.snapshot || null;
-  }
-  snapshot = richestSnapshot(snapshot, state.spaceSnapshots?.[spaceId]);
+  const snapshot = state.spaceSnapshots?.[spaceId] || null;
   dormantSpaceView = dormantGroupsFromSnapshot(snapshot);
   dormantSpaceViewSpaceId = spaceId;
 }
@@ -411,7 +405,7 @@ function dormantGroupsFromSnapshot(snapshot = {}) {
   return (snapshot?.groups || [])
     .map((group, groupIndex) => {
       const title = group.title || 'Ungrouped';
-      const key = `bookmark:${groupIndex}:${title}`;
+      const key = `snapshot:${groupIndex}:${title}`;
       return {
         id: key,
         key,
@@ -807,7 +801,6 @@ async function deleteSpace(space) {
 
   state.spaces = state.spaces.filter((item) => item.id !== space.id);
   removeSpaceReferences(state, space.id);
-  await send('bookmarks:removeSpace', { spaceId: space.id }).catch(() => null);
   activeView = 'space';
   if (state.activeSpaceId === space.id && fallback) state.activeSpaceId = fallback.id;
 
@@ -1088,14 +1081,9 @@ async function snapshotOpenSpace(spaceId) {
   if (snapshotTabCount(snapshot) === 0) return;
   const previousSnapshot = state.spaceSnapshots[spaceId];
   state.spaceSnapshots[spaceId] = snapshot;
-  const space = state.spaces.find((item) => item.id === spaceId);
-  if (space && !sameSnapshotGroups(previousSnapshot, snapshot)) await saveSpaceSnapshotToBookmarks(space, snapshot);
-}
-
-async function saveSpaceSnapshotToBookmarks(space, snapshot) {
-  if (!extensionRuntime || snapshotTabCount(snapshot) === 0) return;
-  await send('bookmarks:saveSpaceSnapshot', { space, snapshot }).catch(() => null);
-  if (space?.id === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+  if (!sameSnapshotGroups(previousSnapshot, snapshot) && spaceId === dormantSpaceViewSpaceId) {
+    dormantSpaceViewSpaceId = '';
+  }
 }
 
 function sameSnapshotGroups(left, right) {
@@ -1541,7 +1529,6 @@ async function importArcFile() {
   try {
     const plan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
     const result = appendArcImportPlan(state, plan);
-    await saveArcImportBookmarks(plan);
     await saveState();
     render();
     pendingArcImportText = '';
@@ -1552,15 +1539,6 @@ async function importArcFile() {
     setSettingsStatus(message);
   } catch (error) {
     setArcImportStatus(`Import failed: ${error.message || String(error)}`);
-  }
-}
-
-async function saveArcImportBookmarks(plan) {
-  const spaces = Array.isArray(plan?.spaces) ? plan.spaces : [];
-  const snapshots = plan?.spaceSnapshots || {};
-  for (const space of spaces) {
-    const snapshot = snapshots[space.id];
-    if (snapshot) await saveSpaceSnapshotToBookmarks(space, snapshot);
   }
 }
 

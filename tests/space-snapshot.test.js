@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   buildSpaceSnapshot,
-  richestSnapshot,
   shouldAutoCloseTab,
 } from '../src/shared/space-snapshot.js';
 
@@ -61,32 +60,4 @@ test('auto closes any unpinned tab owned by a Space', () => {
   assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: true }), false);
-});
-
-test('prefers the local snapshot when bookmarks dropped unbookmarkable tabs', () => {
-  const bookmarkSnapshot = {
-    version: 1,
-    updatedAt: 10,
-    groups: [
-      {
-        title: 'Ungrouped',
-        tabs: [{ title: 'Web', url: 'https://example.com' }],
-      },
-    ],
-  };
-  const localSnapshot = {
-    version: 1,
-    updatedAt: 9,
-    groups: [
-      {
-        title: 'Ungrouped',
-        tabs: [
-          { title: 'Web', url: 'https://example.com' },
-          { title: 'Extensions', url: 'chrome://extensions' },
-        ],
-      },
-    ],
-  };
-
-  assert.equal(richestSnapshot(bookmarkSnapshot, localSnapshot), localSnapshot);
 });

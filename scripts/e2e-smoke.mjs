@@ -143,17 +143,6 @@ async function main() {
     } else {
       await chrome.storage.local.clear();
       if (chrome.storage.session) await chrome.storage.session.remove(SECRET_STORAGE_KEY);
-      const [tree] = await chrome.bookmarks.getTree();
-      const parent = tree.children?.find((node) => node.id === '2') || tree.children?.find((node) => !node.url) || tree;
-      const existingRoot = parent.children?.find((node) => !node.url && node.title === 'Space Tabs');
-      if (existingRoot) await chrome.bookmarks.removeTree(existingRoot.id);
-      const root = await chrome.bookmarks.create({ parentId: parent.id, title: 'Space Tabs' });
-      const space = await chrome.bookmarks.create({ parentId: root.id, title: 'Folder Demo [space:folder-demo]' });
-      const work = await chrome.bookmarks.create({ parentId: space.id, title: 'Work' });
-      const client = await chrome.bookmarks.create({ parentId: work.id, title: 'Client' });
-      const docs = await chrome.bookmarks.create({ parentId: client.id, title: 'Docs' });
-      await chrome.bookmarks.create({ parentId: docs.id, title: 'Nested Spec', url: 'https://example.com/nested-spec' });
-      await chrome.bookmarks.create({ parentId: docs.id, title: 'Nested Plan', url: 'https://example.com/nested-plan' });
     }
     const state = {
       version: 4,
@@ -251,7 +240,7 @@ async function main() {
   })()`);
   record('snapshot-backed dormant Space loads collapsed saved tabs', folderState.rows === 0, JSON.stringify(folderState));
   if (folderState.headers.includes('Work / Client / Docs')) {
-    bugs.push('Multi-level bookmark folders are flattened into one Group header ("Work / Client / Docs") instead of a visible folder tree.');
+    bugs.push('Multi-level folders are flattened into one Group header ("Work / Client / Docs") instead of a visible folder tree.');
   }
   record(
     'multi-level folders render as visible nested folder tree',
