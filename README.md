@@ -30,7 +30,8 @@ It is built for an Arc-like workflow in Chrome: each Space keeps its own working
 
 Available packages:
 
-- `dist/space-tabs-0.4.0-after-folder-tree.zip`: latest package with local saved tabs and nested folder UI.
+- `dist/space-tabs-0.4.1-local-storage.zip`: latest package with local saved tabs, nested folder UI, and the redesigned side panel.
+- `dist/space-tabs-0.4.0-after-folder-tree.zip`: previous package before the versioned local-storage package.
 - `dist/space-tabs-0.4.0-before-folder-tree-587dbba.zip`: previous package before the nested folder UI change.
 
 ## Install From Source
