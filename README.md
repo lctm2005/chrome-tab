@@ -20,7 +20,7 @@ It is built for an Arc-like workflow in Chrome: each Space keeps its own working
 
 ## Install From Package
 
-1. Download one of the zip files from `dist/`.
+1. Download the zip file from `dist/`.
 2. Unzip it to a local folder.
 3. Open `chrome://extensions`.
 4. Enable `Developer mode`.
@@ -28,11 +28,9 @@ It is built for an Arc-like workflow in Chrome: each Space keeps its own working
 6. Select the unzipped extension folder.
 7. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
 
-Available packages:
+Available package:
 
-- `dist/space-tabs-0.4.1-local-storage.zip`: latest package with local saved tabs, nested folder UI, and the redesigned side panel.
-- `dist/space-tabs-0.4.0-after-folder-tree.zip`: previous package before the versioned local-storage package.
-- `dist/space-tabs-0.4.0-before-folder-tree-587dbba.zip`: previous package before the nested folder UI change.
+- `dist/space-tabs-0.4.2-space-switch-fix.zip`: latest package with stable Space switching, local saved tabs, nested folder UI, and the redesigned side panel.
 
 ## Install From Source
 

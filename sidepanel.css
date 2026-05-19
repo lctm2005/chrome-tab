@@ -320,6 +320,10 @@ h1 {
   padding-left: 14px;
 }
 
+.folder-direct-list {
+  padding-left: 0;
+}
+
 .ungrouped-section {
   min-height: 130px;
   flex: 1 0 auto;

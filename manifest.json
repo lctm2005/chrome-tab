@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Space Tabs",
   "description": "A Chrome side panel for Spaces, tab groups, panel-only tab renaming, auto grouping, and BYOK AI.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "Open Space Tabs",

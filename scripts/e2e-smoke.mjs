@@ -209,7 +209,7 @@ async function main() {
   record('add Space dialog creates and activates a Space', true);
 
   await evaluate(client, `document.querySelector('.new-tab-row').click()`);
-  await waitFor(client, `document.querySelector('#syncStatus')?.textContent.includes('E2E Space')`);
+  await waitFor(client, `document.querySelectorAll('.tab-row').length >= 1`);
   const newTabRows = await evaluate(client, `document.querySelectorAll('.tab-row').length`);
   record('New Tab row creates a tab owned by active Space', newTabRows >= 1, `${newTabRows} rows`);
 
@@ -247,6 +247,92 @@ async function main() {
     folderState.folders.join(' / ') === 'Work / Client' && folderState.headers.includes('Docs'),
     JSON.stringify(folderState)
   );
+
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    const space = buttons.find((button) => button.title === 'Space');
+    space.click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  await waitFor(client, `(() => {
+    const headers = [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent);
+    return headers.includes('Research') && headers.includes('Build') && headers.includes('Inbox');
+  })()`);
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    const folder = buttons.find((button) => button.title === 'Folder Demo');
+    folder.click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Folder Demo'`);
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    const space = buttons.find((button) => button.title === 'Space');
+    space.click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  const roundTripState = await waitFor(client, `(() => {
+    const headers = [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent);
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const defaultSnapshotGroups = (stored.spaceSnapshots?.default?.groups || []).map((group) => group.title);
+    const folderSnapshotGroups = (stored.spaceSnapshots?.['folder-demo']?.groups || []).map((group) => group.title);
+    return {
+      headers,
+      defaultSnapshotGroups,
+      folderSnapshotGroups,
+    };
+  })()`);
+  const defaultContentSurvived = ['Research', 'Build', 'Inbox']
+    .every((title) => roundTripState.headers.includes(title) && roundTripState.defaultSnapshotGroups.includes(title));
+  const folderContentSurvived = roundTripState.folderSnapshotGroups.includes('Work / Client / Docs');
+  const placeholderTabsDidNotPersist = !roundTripState.defaultSnapshotGroups.includes('Ungrouped') &&
+    !roundTripState.folderSnapshotGroups.includes('Ungrouped');
+  record(
+    'Space round trip keeps dormant content instead of replacing it with placeholder tabs',
+    defaultContentSurvived && folderContentSurvived && placeholderTabsDidNotPersist,
+    JSON.stringify(roundTripState)
+  );
+  if (!defaultContentSurvived || !folderContentSurvived || !placeholderTabsDidNotPersist) {
+    bugs.push('Switching Spaces overwrote dormant snapshots with placeholder New Tab content.');
+  }
+
+  for (let index = 0; index < 3; index += 1) {
+    await evaluate(client, `(() => {
+      const buttons = [...document.querySelectorAll('.space')];
+      buttons.find((button) => button.title === 'Folder Demo').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Folder Demo'`);
+    await evaluate(client, `(() => {
+      const buttons = [...document.querySelectorAll('.space')];
+      buttons.find((button) => button.title === 'Space').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  }
+  const stressState = await evaluate(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    return {
+      headers: [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
+      defaultSnapshotGroups: (stored.spaceSnapshots?.default?.groups || []).map((group) => group.title),
+      folderSnapshotGroups: (stored.spaceSnapshots?.['folder-demo']?.groups || []).map((group) => group.title),
+    };
+  })()`);
+  const repeatedSwitchesKeptContent = ['Research', 'Build', 'Inbox']
+    .every((title) => stressState.headers.includes(title) && stressState.defaultSnapshotGroups.includes(title)) &&
+    stressState.folderSnapshotGroups.includes('Work / Client / Docs') &&
+    !stressState.defaultSnapshotGroups.includes('Ungrouped') &&
+    !stressState.folderSnapshotGroups.includes('Ungrouped');
+  record(
+    'repeated Space switches keep saved content stable',
+    repeatedSwitchesKeptContent,
+    JSON.stringify(stressState)
+  );
+  if (!repeatedSwitchesKeptContent) {
+    bugs.push('Repeated Space switching destabilized saved Space snapshots.');
+  }
 
     console.log(JSON.stringify({ results, bugs }, null, 2));
   } finally {

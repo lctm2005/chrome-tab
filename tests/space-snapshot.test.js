@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildSpaceSnapshot,
+  mergeSpaceSnapshot,
   shouldAutoCloseTab,
 } from '../src/shared/space-snapshot.js';
 
@@ -60,4 +61,84 @@ test('auto closes any unpinned tab owned by a Space', () => {
   assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: true }), false);
+});
+
+test('merges live tabs without dropping dormant snapshot content', () => {
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        collapsed: true,
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        collapsed: true,
+        tabs: [
+          { title: 'Paper', url: 'https://example.com/paper' },
+        ],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        collapsed: false,
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+        ],
+      },
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        collapsed: false,
+        tabs: [
+          { title: 'New Tab', url: 'chrome://newtab' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(live, stored), {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        collapsed: false,
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        collapsed: true,
+        tabs: [
+          { title: 'Paper', url: 'https://example.com/paper' },
+        ],
+      },
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        collapsed: false,
+        tabs: [
+          { title: 'New Tab', url: 'chrome://newtab' },
+        ],
+      },
+    ],
+  });
 });

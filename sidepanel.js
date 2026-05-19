@@ -10,6 +10,7 @@ import {
   appendArcImportPlan,
   createArcImportPlan,
 } from './src/shared/arc-import.js';
+import { createFolderTree } from './src/shared/folder-tree.js';
 import { renderMarkdown } from './src/shared/markdown.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
@@ -36,6 +37,7 @@ import {
 import {
   buildSpaceSnapshot,
   isUngroupedSnapshotGroup,
+  mergeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
 } from './src/shared/space-snapshot.js';
@@ -79,6 +81,7 @@ let groups = [];
 let spaceView = [];
 let dormantSpaceView = [];
 let dormantSpaceViewSpaceId = '';
+const syntheticPlaceholderTabIds = new Set();
 let activeView = 'space';
 let dragState = null;
 let activeAIRequestId = '';
@@ -453,55 +456,14 @@ function renderGroups() {
     return;
   }
 
-  const nodes = createFolderTree(tabGroups).map(createFolderTreeNode);
+  const nodes = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId }).map(createFolderTreeNode);
   if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
   els.groupsList.replaceChildren(...nodes);
 }
 
-function createFolderTree(groupsToRender) {
-  const root = [];
-  const folders = new Map();
-
-  for (const group of groupsToRender) {
-    const parts = folderTitleParts(group.title);
-    if (parts.length <= 1) {
-      root.push({ type: 'group', group });
-      continue;
-    }
-
-    let children = root;
-    const folderParts = parts.slice(0, -1);
-    for (let index = 0; index < folderParts.length; index += 1) {
-      const path = folderParts.slice(0, index + 1);
-      const key = folderKey(path);
-      let folder = folders.get(key);
-      if (!folder) {
-        folder = {
-          type: 'folder',
-          key,
-          title: folderParts[index],
-          path,
-          children: [],
-        };
-        folders.set(key, folder);
-        children.push(folder);
-      }
-      children = folder.children;
-    }
-    children.push({
-      type: 'group',
-      group: {
-        ...group,
-        displayTitle: parts.at(-1),
-      },
-    });
-  }
-
-  return root;
-}
-
 function createFolderTreeNode(node) {
   if (node.type === 'folder') return createFolderSection(node);
+  if (node.type === 'folder-tabs') return createFolderTabs(node.group);
   return createGroupCard(node.group);
 }
 
@@ -544,17 +506,6 @@ function folderTabCount(folder) {
   ), 0);
 }
 
-function folderTitleParts(title) {
-  return String(title || '')
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function folderKey(parts) {
-  return `folder:${state.activeSpaceId}:${parts.join('/')}`;
-}
-
 function createGroupCard(group) {
   const card = document.createElement('section');
   card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
@@ -589,6 +540,18 @@ function createGroupCard(group) {
 
   card.append(header, list);
   return card;
+}
+
+function createFolderTabs(group) {
+  const list = document.createElement('div');
+  list.className = 'tab-list folder-direct-list';
+  list.dataset.groupKey = group.key;
+  if (!group.dormant) {
+    list.addEventListener('dragover', (event) => acceptTabDrop(event));
+    list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
+  }
+  list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
+  return list;
 }
 
 function createUngroupedSection(group) {
@@ -847,12 +810,18 @@ async function clearUngroupedTabs(group) {
   if (remainingSpaceTabs.length === 0) {
     const created = await send('tabs:create', { url: 'chrome://newtab', active: false });
     const tabId = created.tab?.id;
-    if (tabId) state.tabSpaces[tabId] = state.activeSpaceId;
+    if (tabId) {
+      state.tabSpaces[tabId] = state.activeSpaceId;
+      if ((created.tab?.url || 'chrome://newtab') === 'chrome://newtab') {
+        syntheticPlaceholderTabIds.add(Number(tabId));
+      }
+    }
   }
 
   for (const tab of closable) {
     delete state.tabSpaces[tab.id];
     delete state.renamedTabs[tab.id];
+    syntheticPlaceholderTabIds.delete(Number(tab.id));
     await send('tabs:close', { tabId: tab.id });
   }
   await saveState();
@@ -965,6 +934,7 @@ async function groupSelectedTabs(tabIds) {
 async function closeTab(tab) {
   delete state.tabSpaces[tab.id];
   delete state.renamedTabs[tab.id];
+  syntheticPlaceholderTabIds.delete(Number(tab.id));
   await saveState();
   await send('tabs:close', { tabId: tab.id });
   await refreshTabs();
@@ -1063,6 +1033,7 @@ async function closeTabsOutsideActiveSpace() {
   for (const tab of unownedOrForeignTabs) {
     delete state.tabSpaces[tab.id];
     delete state.renamedTabs[tab.id];
+    syntheticPlaceholderTabIds.delete(Number(tab.id));
     await send('tabs:close', { tabId: tab.id });
   }
   await loadTabs({ adopt: false });
@@ -1081,6 +1052,7 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
   for (const tab of closableTabs) {
     delete state.tabSpaces[tab.id];
     delete state.renamedTabs[tab.id];
+    syntheticPlaceholderTabIds.delete(Number(tab.id));
     await send('tabs:close', { tabId: tab.id });
   }
   await loadTabs({ adopt: false });
@@ -1088,7 +1060,8 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
 
 async function snapshotOpenSpace(spaceId) {
   const view = buildSpaceViewForSpace(spaceId);
-  const snapshot = buildSpaceSnapshot({ view });
+  const liveSnapshot = buildSpaceSnapshot({ view });
+  const snapshot = mergeSpaceSnapshot(liveSnapshot, state.spaceSnapshots[spaceId]);
   if (snapshotTabCount(snapshot) === 0) return;
   const previousSnapshot = state.spaceSnapshots[spaceId];
   state.spaceSnapshots[spaceId] = snapshot;
@@ -1106,7 +1079,12 @@ async function ensureSpaceHasOpenTab(spaceId, options = {}) {
   if (tabs.some((tab) => tabBelongsToSpace(tab, spaceId))) return;
   const created = await send('tabs:create', { url: 'chrome://newtab', active: options.active !== false });
   const tabId = created.tab?.id;
-  if (tabId) state.tabSpaces[tabId] = spaceId;
+  if (tabId) {
+    state.tabSpaces[tabId] = spaceId;
+    if ((created.tab?.url || 'chrome://newtab') === 'chrome://newtab') {
+      syntheticPlaceholderTabIds.add(Number(tabId));
+    }
+  }
   await loadTabs({ adopt: false });
 }
 
@@ -1997,7 +1975,16 @@ function buildSpaceViewForSpace(spaceId) {
     tabOrder: state.tabOrder,
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
-  });
+  })
+    .map((group) => ({
+      ...group,
+      tabs: group.tabs.filter((tab) => !isSyntheticPlaceholderTab(tab)),
+    }))
+    .filter((group) => group.tabs.length > 0 || group.key === 'ungrouped');
+}
+
+function isSyntheticPlaceholderTab(tab) {
+  return syntheticPlaceholderTabIds.has(Number(tab.id)) && tab.url === 'chrome://newtab';
 }
 
 function currentOrderedTabIds() {
