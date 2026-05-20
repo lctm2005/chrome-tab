@@ -58,6 +58,7 @@ import {
   domainFromUrl,
   planTidyGroups,
   planTidyTabNames,
+  planDuplicateUrlClosures,
   preferredFocusableTab,
   sanitizeTidyGroups,
   titleForDomain,
@@ -522,10 +523,17 @@ function createGroupCard(group) {
   const header = document.createElement('div');
   header.className = 'group-header';
   header.innerHTML = `
+    <span class="group-grip" title="Drag group">⋮⋮</span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
-    <span>${group.tabs.length}</span>
+    <span class="group-count">${group.tabs.length}</span>
   `;
+  if (!group.dormant) {
+    const actions = document.createElement('div');
+    actions.className = 'group-actions';
+    actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
+    header.append(actions);
+  }
   header.addEventListener('click', () => runTask(() => toggleGroup(group)));
   if (!group.dormant) header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
 
@@ -543,6 +551,35 @@ function createGroupCard(group) {
 }
 
 function createFolderTabs(group) {
+  const section = document.createElement('section');
+  section.className = `folder-direct-group${group.collapsed ? ' collapsed' : ''}`;
+  section.dataset.groupKey = group.key;
+  section.draggable = !group.dormant;
+  if (!group.dormant) {
+    section.addEventListener('dragstart', (event) => startGroupDrag(event, group));
+    section.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
+    section.addEventListener('dragleave', () => section.classList.remove('drag-over'));
+    section.addEventListener('drop', (event) => dropGroup(event, group));
+    section.addEventListener('dragend', clearDragState);
+  }
+
+  const header = document.createElement('div');
+  header.className = 'group-header folder-direct-header';
+  header.innerHTML = `
+    <span class="group-grip" title="Drag group">⋮⋮</span>
+    <span class="group-dot" style="background:${groupColor(group.color)}"></span>
+    <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
+    <span class="group-count">${group.tabs.length}</span>
+  `;
+  if (!group.dormant) {
+    const actions = document.createElement('div');
+    actions.className = 'group-actions';
+    actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
+    header.append(actions);
+    header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
+  }
+  header.addEventListener('click', () => runTask(() => toggleGroup(group)));
+
   const list = document.createElement('div');
   list.className = 'tab-list folder-direct-list';
   list.dataset.groupKey = group.key;
@@ -550,8 +587,9 @@ function createFolderTabs(group) {
     list.addEventListener('dragover', (event) => acceptTabDrop(event));
     list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
   }
-  list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
-  return list;
+  if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
+  section.append(header, list);
+  return section;
 }
 
 function createUngroupedSection(group) {
@@ -964,6 +1002,24 @@ async function moveGroupToSpace(group, spaceId) {
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
+async function deleteGroup(group) {
+  if (!group || group.id === 'ungrouped' || group.dormant) return;
+  const tabIds = group.tabs.map((tab) => Number(tab.id)).filter(Number.isFinite);
+  if (tabIds.length === 0) return;
+
+  await send('tabs:ungroup', { tabIds });
+  for (const tabId of tabIds) state.tabSpaces[tabId] = state.activeSpaceId;
+  delete state.groupSpaces[group.id];
+  delete state.collapsedGroups[group.key];
+  delete state.tabOrder[state.activeSpaceId]?.[group.key];
+  state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
+    .filter((key) => key !== group.key);
+
+  await saveState();
+  await refreshTabs();
+  setStatus(`Deleted group "${group.displayTitle || group.title}". Tabs were kept in Ungrouped.`);
+}
+
 async function openDormantTab(tab, groupKey) {
   const url = tab?.url || '';
   if (!url) return;
@@ -1262,11 +1318,22 @@ async function tidyTabNames() {
 
   beginPanelAction('tidyNames');
   try {
-    const tabsWithContext = await addTidyContext(visibleTabs);
+    const duplicateTabIds = planDuplicateUrlClosures(visibleTabs);
+    const duplicateTabIdSet = new Set(duplicateTabIds);
+    for (const tabId of duplicateTabIds) {
+      delete state.tabSpaces[tabId];
+      delete state.renamedTabs[tabId];
+      syntheticPlaceholderTabIds.delete(Number(tabId));
+      await send('tabs:close', { tabId });
+    }
+
+    const remainingTabs = visibleTabs.filter((tab) => !duplicateTabIdSet.has(Number(tab.id)));
+    const tabsWithContext = await addTidyContext(remainingTabs);
     Object.assign(state.renamedTabs, planTidyTabNames(tabsWithContext));
     await saveState();
     await refreshTabs();
-    setStatus(`Renamed ${visibleTabs.length} tabs in the panel only.`);
+    const duplicateText = duplicateTabIds.length ? ` Removed ${duplicateTabIds.length} duplicate tabs.` : '';
+    setStatus(`Renamed ${remainingTabs.length} tabs in the panel only.${duplicateText}`);
   } finally {
     endPanelAction();
   }
@@ -1566,6 +1633,7 @@ function showGroupContextMenu(event, group) {
   event.stopPropagation();
   showContextMenu(event, [
     menuAction('Rename', () => renameGroup(group)),
+    menuAction('Delete Group', () => deleteGroup(group)),
     menuSeparator(),
     menuLabel('Move to'),
     ...state.spaces

@@ -6,6 +6,7 @@ import {
   decorateTabs,
   domainFromUrl,
   isPageShortcutCapableUrl,
+  planDuplicateUrlClosures,
   planTidyGroups,
   planTidyTabNames,
   preferredFocusableTab,
@@ -42,17 +43,19 @@ test('plans tidy groups from tab domains and titles', () => {
   assert.deepEqual(groups[0].tabIds, [1, 2]);
 });
 
-test('keeps Claude Code tabs out of Monica groups when sanitizing AI plans', () => {
+test('keeps AI topic groups intact across different domains', () => {
   const tabs = [
     { id: 1, title: 'Claude Code overview', url: 'https://docs.anthropic.com/en/docs/claude-code/overview' },
-    { id: 2, title: 'Monica AI Tool dashboard', url: 'https://monica.im/home' },
+    { id: 2, title: 'Claude Code GitHub Actions setup', url: 'https://github.com/example/claude-code-actions' },
+    { id: 3, title: 'Monica AI Tool dashboard', url: 'https://monica.im/home' },
   ];
   const groups = sanitizeTidyGroups([
-    { title: 'Monica', color: 'purple', tabIds: [1, 2] },
+    { title: 'Claude Code', color: 'purple', tabIds: [1, 2, 2, 999] },
+    { title: 'Monica', color: 'green', tabIds: [2, 3] },
   ], tabs);
 
-  assert.deepEqual(groups.map((group) => group.title), ['Claude', 'Monica']);
-  assert.deepEqual(groups.map((group) => group.tabIds), [[1], [2]]);
+  assert.deepEqual(groups.map((group) => group.title), ['Claude Code', 'Monica']);
+  assert.deepEqual(groups.map((group) => group.tabIds), [[1, 2], [3]]);
 });
 
 test('searches tabs by title, URL, and domain', () => {
@@ -76,6 +79,29 @@ test('prefers web pages when choosing a tab to keep shortcuts usable', () => {
   assert.equal(isPageShortcutCapableUrl('chrome://newtab'), false);
   assert.equal(preferredFocusableTab(tabs).id, 3);
   assert.equal(preferredFocusableTab(tabs.slice(0, 2)).id, 1);
+});
+
+test('plans exact duplicate webpage URL closures while keeping one tab', () => {
+  const closeIds = planDuplicateUrlClosures([
+    { id: 1, url: 'https://example.com/a', index: 0 },
+    { id: 2, url: 'https://example.com/a', index: 1, active: true },
+    { id: 3, url: 'https://example.com/a', index: 2 },
+    { id: 4, url: 'https://example.com/a#section', index: 3 },
+    { id: 5, url: 'chrome://newtab', index: 4 },
+    { id: 6, url: 'chrome://newtab', index: 5 },
+  ]);
+
+  assert.deepEqual(closeIds, [1, 3]);
+});
+
+test('prefers pinned duplicate webpage tabs when no duplicate is active', () => {
+  const closeIds = planDuplicateUrlClosures([
+    { id: 1, url: 'https://example.com/a', index: 0 },
+    { id: 2, url: 'https://example.com/a', index: 1, pinned: true },
+    { id: 3, url: 'https://example.com/a', index: 2 },
+  ]);
+
+  assert.deepEqual(closeIds, [1, 3]);
 });
 
 test('plans a Chrome tab group for the active space', () => {

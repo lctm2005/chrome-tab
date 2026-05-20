@@ -197,6 +197,7 @@ h1 {
 }
 
 .group-card,
+.folder-direct-group,
 .folder-section,
 .ungrouped-section {
   display: flex;
@@ -205,11 +206,13 @@ h1 {
   min-width: 0;
 }
 
-.group-card {
+.group-card,
+.folder-direct-group {
   background: transparent;
 }
 
 .group-card.drag-over,
+.folder-direct-group.drag-over,
 .tab-row.drag-over,
 .tab-list.drag-over {
   outline: 2px solid rgba(109, 121, 255, 0.58);
@@ -240,8 +243,22 @@ h1 {
 }
 
 .group-header {
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 13px 18px minmax(0, 1fr) auto auto;
   margin: 2px 0 0;
+}
+
+.folder-direct-header {
+  margin-left: 0;
+}
+
+.group-card[draggable="true"] .group-header,
+.folder-direct-group[draggable="true"] .group-header {
+  cursor: grab;
+}
+
+.group-card[draggable="true"] .group-header:active,
+.folder-direct-group[draggable="true"] .group-header:active {
+  cursor: grabbing;
 }
 
 .folder-header:hover,
@@ -257,11 +274,19 @@ h1 {
 }
 
 .folder-caret,
-.folder-icon {
+.folder-icon,
+.group-grip {
   color: var(--text-soft);
   font-size: 11px;
   font-weight: 780;
   line-height: 1;
+}
+
+.group-grip {
+  width: 13px;
+  overflow: hidden;
+  opacity: 0.5;
+  letter-spacing: -2px;
 }
 
 .folder-icon {
@@ -287,8 +312,35 @@ h1 {
 }
 
 .folder-header span:last-child,
-.group-header > span:last-child {
+.group-count {
   display: none;
+}
+
+.group-actions {
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+}
+
+.group-header:hover .group-actions,
+.group-header:focus-within .group-actions {
+  opacity: 1;
+}
+
+.group-actions button {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.group-actions button:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--text);
 }
 
 .folder-children {

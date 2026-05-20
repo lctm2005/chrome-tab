@@ -89,7 +89,12 @@ export function createPrompt(kind, context = {}) {
     return [
       {
         role: 'system',
-        content: 'Group browser tabs into concise work buckets. Return only JSON: [{"title":"Group","tabIds":[1,2],"color":"blue"}].',
+        content: [
+          'Group browser tabs into concise topic/work buckets using page titles first, then URLs only as supporting context.',
+          'Do not group merely because tabs share a domain or website; mix different domains when their titles describe the same subject.',
+          'Keep unrelated pages separate even when they are from the same domain.',
+          'Return only JSON: [{"title":"Topic","tabIds":[1,2],"color":"blue"}].',
+        ].join(' '),
       },
       {
         role: 'user',
@@ -112,7 +117,7 @@ export function createPrompt(kind, context = {}) {
 
 export function parseTidyGroups(text) {
   try {
-    const parsed = JSON.parse(text);
+    const parsed = parseJsonArray(text);
     if (!Array.isArray(parsed)) return [];
     return parsed
       .map((group) => ({
@@ -126,6 +131,61 @@ export function parseTidyGroups(text) {
   } catch {
     return [];
   }
+}
+
+function parseJsonArray(text) {
+  const value = String(text || '').trim();
+  const candidates = [
+    value,
+    fencedJson(value),
+    bracketedJsonArray(value),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // Try the next likely JSON array shape.
+    }
+  }
+  return [];
+}
+
+function fencedJson(value) {
+  const match = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return match?.[1]?.trim() || '';
+}
+
+function bracketedJsonArray(value) {
+  const start = value.indexOf('[');
+  if (start < 0) return '';
+
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '[') depth += 1;
+    if (char === ']') {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+  return '';
 }
 
 function normalizeGroupColor(color) {

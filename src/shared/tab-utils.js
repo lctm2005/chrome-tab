@@ -65,38 +65,42 @@ export function planTidyGroups(tabs) {
 
 export function sanitizeTidyGroups(plannedGroups, tabs) {
   const tabsById = new Map((tabs || []).map((tab) => [Number(tab.id), tab]));
+  const assigned = new Set();
   const sanitized = [];
 
   for (const group of plannedGroups || []) {
-    const ids = (group.tabIds || []).map(Number).filter((id) => tabsById.has(id));
+    const ids = uniqueNumbers(group.tabIds)
+      .filter((id) => tabsById.has(id) && !assigned.has(id));
     if (ids.length === 0) continue;
-
-    const localBuckets = new Map();
-    for (const id of ids) {
-      const tab = tabsById.get(id);
-      const localTitle = titleForDomain(domainFromUrl(tab.url), tab.title);
-      if (!localBuckets.has(localTitle)) localBuckets.set(localTitle, []);
-      localBuckets.get(localTitle).push(id);
-    }
-
-    if (localBuckets.size <= 1) {
-      sanitized.push({ ...group, tabIds: ids });
-      continue;
-    }
-
-    for (const [title, tabIds] of localBuckets.entries()) {
-      sanitized.push({
-        title,
-        tabIds,
-        color: group.color || GROUP_COLORS[sanitized.length % GROUP_COLORS.length],
-      });
-    }
+    ids.forEach((id) => assigned.add(id));
+    sanitized.push({
+      title: compactGroupTitle(group.title),
+      tabIds: ids,
+      color: group.color,
+    });
   }
 
   return sanitized.map((group, index) => ({
     ...group,
     color: group.color || GROUP_COLORS[index % GROUP_COLORS.length],
   }));
+}
+
+function uniqueNumbers(values = []) {
+  const seen = new Set();
+  const ids = [];
+  for (const value of values || []) {
+    const id = Number(value);
+    if (!Number.isFinite(id) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function compactGroupTitle(title) {
+  const text = String(title || 'Tabs').replace(/\s+/g, ' ').trim();
+  return (text || 'Tabs').slice(0, 32);
 }
 
 export function buildSpaceView({
@@ -159,6 +163,33 @@ export function buildSpaceView({
 
 export function planTidyTabNames(tabs) {
   return Object.fromEntries(tabs.map((tab) => [tab.id, tidyPanelName(tab)]));
+}
+
+export function planDuplicateUrlClosures(tabs = []) {
+  const buckets = new Map();
+  for (const tab of tabs || []) {
+    if (!tab?.id || !isPageShortcutCapableUrl(tab.url)) continue;
+    const url = String(tab.url || '').trim();
+    if (!url) continue;
+    if (!buckets.has(url)) buckets.set(url, []);
+    buckets.get(url).push(tab);
+  }
+
+  const closeIds = [];
+  for (const bucket of buckets.values()) {
+    if (bucket.length < 2) continue;
+    const keep = preferredDuplicateUrlTab(bucket);
+    for (const tab of bucket) {
+      if (Number(tab.id) !== Number(keep.id)) closeIds.push(Number(tab.id));
+    }
+  }
+  return closeIds;
+}
+
+function preferredDuplicateUrlTab(tabs) {
+  return tabs.find((tab) => tab.active) ||
+    tabs.find((tab) => tab.pinned) ||
+    [...tabs].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0))[0];
 }
 
 export function tidyPanelName(tab) {

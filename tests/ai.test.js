@@ -10,6 +10,7 @@ import {
   getZaiFallbackBaseUrl,
   languageInstruction,
   normalizeBaseUrl,
+  parseTidyGroups,
 } from '../src/shared/ai.js';
 
 test('normalizes OpenAI-compatible base URLs without duplicating chat/completions', () => {
@@ -96,4 +97,32 @@ test('adds language instructions to Ask and Summary prompts', () => {
     language: 'en',
   });
   assert.match(custom[0].content, /Respond in English/);
+});
+
+test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
+  const prompt = createPrompt('tidy-tabs', {
+    tabs: [
+      { id: 1, title: 'AI browser tab grouping research', url: 'https://example.com/a' },
+      { id: 2, title: 'Chrome extension AI tab organizer', url: 'https://another.example/b' },
+    ],
+  });
+
+  assert.match(prompt[0].content, /page titles first/);
+  assert.match(prompt[0].content, /Do not group merely because tabs share a domain/);
+  assert.match(prompt[0].content, /mix different domains/);
+});
+
+test('parses tidy-tabs JSON even when the model wraps it in markdown', () => {
+  const groups = parseTidyGroups([
+    'Here is the grouping:',
+    '```json',
+    '[{"title":"AI Tab Organizers","tabIds":[1,2],"color":"cyan"}]',
+    '```',
+  ].join('\n'));
+
+  assert.deepEqual(groups, [{
+    title: 'AI Tab Organizers',
+    tabIds: [1, 2],
+    color: 'cyan',
+  }]);
 });
