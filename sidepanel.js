@@ -56,6 +56,7 @@ import {
   compactTabForAI,
   decorateTabs,
   domainFromUrl,
+  groupTitleKey,
   planTidyGroups,
   planTidyTabNames,
   planDuplicateUrlClosures,
@@ -1340,12 +1341,14 @@ async function tidyTabNames() {
 }
 
 async function autoGroupTabs() {
+  await loadTabs({ adopt: true });
   const candidates = tabs.filter((tab) => (
     state.tabSpaces[tab.id] === state.activeSpaceId &&
     tab.groupId <= 0 &&
     !tab.url.startsWith('chrome://')
   ));
-  if (candidates.length === 0) {
+  const duplicateGroupCount = countDuplicateActiveGroups();
+  if (candidates.length === 0 && duplicateGroupCount === 0) {
     setStatus('No ungrouped tabs in this Space to auto group.');
     return;
   }
@@ -1353,6 +1356,9 @@ async function autoGroupTabs() {
   beginPanelAction('autoGroup');
   let plannedGroups = [];
   try {
+    let mergedGroups = await mergeDuplicateGroupsInActiveSpace();
+    if (mergedGroups) await loadTabs({ adopt: false });
+
     if (state.ai.apiKey) {
       try {
         await ensureAIHostPermission();
@@ -1367,18 +1373,88 @@ async function autoGroupTabs() {
     }
 
     if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
+    const existingGroupsByTitle = activeChromeGroupsByTitle();
+    let createdGroups = 0;
     for (const group of plannedGroups) {
-      const result = await send('tabs:group', group);
-      if (result.groupId) state.groupSpaces[result.groupId] = state.activeSpaceId;
+      const titleKey = groupTitleKey(group.title);
+      const existingGroup = existingGroupsByTitle.get(titleKey);
+      const result = existingGroup
+        ? await send('tabs:groupExisting', { groupId: existingGroup.id, tabIds: group.tabIds })
+        : await send('tabs:group', group);
+      if (result.groupId) {
+        state.groupSpaces[result.groupId] = state.activeSpaceId;
+        addGroupOrderKey(state.activeSpaceId, `group:${result.groupId}`);
+        existingGroupsByTitle.set(titleKey, {
+          id: result.groupId,
+          title: group.title,
+          color: group.color,
+        });
+        if (!existingGroup) createdGroups += 1;
+      }
       for (const tabId of group.tabIds) delete state.tabSpaces[tabId];
     }
 
+    await loadTabs({ adopt: false });
+    mergedGroups += await mergeDuplicateGroupsInActiveSpace();
     await saveState();
     await refreshTabs();
-    setStatus(`Created ${plannedGroups.length} tab groups in ${currentSpace().name}.`);
+    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const parts = [];
+    if (createdGroups) parts.push(`created ${createdGroups}`);
+    if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
+    if (mergedGroups) parts.push(`merged ${mergedGroups} duplicate groups`);
+    setStatus(`Auto group updated ${currentSpace().name}: ${parts.join(', ') || 'nothing changed'}.`);
   } finally {
     endPanelAction();
   }
+}
+
+function activeChromeGroupsByTitle() {
+  const byTitle = new Map();
+  for (const group of groups) {
+    if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
+    const titleKey = groupTitleKey(group.title);
+    if (!titleKey || byTitle.has(titleKey)) continue;
+    byTitle.set(titleKey, group);
+  }
+  return byTitle;
+}
+
+function countDuplicateActiveGroups() {
+  return duplicateActiveGroupBuckets().reduce((sum, bucket) => sum + bucket.length - 1, 0);
+}
+
+function duplicateActiveGroupBuckets() {
+  const buckets = new Map();
+  for (const group of groups) {
+    if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
+    const titleKey = groupTitleKey(group.title);
+    if (!titleKey) continue;
+    if (!buckets.has(titleKey)) buckets.set(titleKey, []);
+    buckets.get(titleKey).push(group);
+  }
+  return [...buckets.values()].filter((bucket) => bucket.length > 1);
+}
+
+async function mergeDuplicateGroupsInActiveSpace() {
+  let merged = 0;
+  for (const bucket of duplicateActiveGroupBuckets()) {
+    const [keep, ...duplicates] = bucket;
+    for (const duplicate of duplicates) {
+      const tabIds = tabs
+        .filter((tab) => tab.groupId === duplicate.id)
+        .map((tab) => tab.id);
+      if (tabIds.length) await send('tabs:groupExisting', { groupId: keep.id, tabIds });
+      delete state.groupSpaces[duplicate.id];
+      delete state.collapsedGroups[`group:${duplicate.id}`];
+      delete state.tabOrder[state.activeSpaceId]?.[`group:${duplicate.id}`];
+      state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
+        .filter((key) => key !== `group:${duplicate.id}`);
+      merged += 1;
+    }
+    addGroupOrderKey(state.activeSpaceId, `group:${keep.id}`);
+  }
+  return merged;
 }
 
 async function addTidyContext(visibleTabs) {

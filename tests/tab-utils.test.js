@@ -48,14 +48,16 @@ test('keeps AI topic groups intact across different domains', () => {
     { id: 1, title: 'Claude Code overview', url: 'https://docs.anthropic.com/en/docs/claude-code/overview' },
     { id: 2, title: 'Claude Code GitHub Actions setup', url: 'https://github.com/example/claude-code-actions' },
     { id: 3, title: 'Monica AI Tool dashboard', url: 'https://monica.im/home' },
+    { id: 4, title: 'Claude Code troubleshooting', url: 'https://example.com/claude-code-debug' },
   ];
   const groups = sanitizeTidyGroups([
     { title: 'Claude Code', color: 'purple', tabIds: [1, 2, 2, 999] },
     { title: 'Monica', color: 'green', tabIds: [2, 3] },
+    { title: '  claude   code  ', color: 'blue', tabIds: [4] },
   ], tabs);
 
   assert.deepEqual(groups.map((group) => group.title), ['Claude Code', 'Monica']);
-  assert.deepEqual(groups.map((group) => group.tabIds), [[1, 2], [3]]);
+  assert.deepEqual(groups.map((group) => group.tabIds), [[1, 2, 4], [3]]);
 });
 
 test('searches tabs by title, URL, and domain', () => {

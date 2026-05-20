@@ -66,6 +66,7 @@ export function planTidyGroups(tabs) {
 export function sanitizeTidyGroups(plannedGroups, tabs) {
   const tabsById = new Map((tabs || []).map((tab) => [Number(tab.id), tab]));
   const assigned = new Set();
+  const sanitizedByTitle = new Map();
   const sanitized = [];
 
   for (const group of plannedGroups || []) {
@@ -73,17 +74,29 @@ export function sanitizeTidyGroups(plannedGroups, tabs) {
       .filter((id) => tabsById.has(id) && !assigned.has(id));
     if (ids.length === 0) continue;
     ids.forEach((id) => assigned.add(id));
-    sanitized.push({
-      title: compactGroupTitle(group.title),
-      tabIds: ids,
-      color: group.color,
-    });
+    const title = compactGroupTitle(group.title);
+    const titleKey = groupTitleKey(title);
+    const existing = sanitizedByTitle.get(titleKey);
+    if (existing) {
+      existing.tabIds.push(...ids);
+      continue;
+    }
+    const sanitizedGroup = { title, tabIds: ids, color: group.color };
+    sanitizedByTitle.set(titleKey, sanitizedGroup);
+    sanitized.push(sanitizedGroup);
   }
 
   return sanitized.map((group, index) => ({
     ...group,
     color: group.color || GROUP_COLORS[index % GROUP_COLORS.length],
   }));
+}
+
+export function groupTitleKey(title) {
+  return String(title || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function uniqueNumbers(values = []) {
