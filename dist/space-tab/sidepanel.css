@@ -426,17 +426,24 @@ h1 {
 }
 
 
-.group-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  box-shadow: 0 0 8px rgba(120, 121, 255, 0.25);
+.group-icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
   flex-shrink: 0;
   transition: transform 0.25s ease;
 }
 
-.group-header:hover .group-dot {
-  transform: scale(1.2);
+.group-folder-icon {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+}
+
+.group-header:hover .group-icon {
+  transform: scale(1.08);
 }
 
 .group-actions {
