@@ -1,9 +1,11 @@
-export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpaceId) {
+export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpaceId, options = {}) {
   cleanupMissingEntities(state, tabs, groups);
 
-  for (const group of groups) {
-    if (state.groupSpaces[group.id] === undefined) {
-      state.groupSpaces[group.id] = activeSpaceId;
+  if (options.adoptGroups === true) {
+    for (const group of groups) {
+      if (state.groupSpaces[group.id] === undefined) {
+        state.groupSpaces[group.id] = activeSpaceId;
+      }
     }
   }
 

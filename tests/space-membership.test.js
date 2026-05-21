@@ -11,7 +11,7 @@ import {
   syncCollapsedGroupsFromChrome,
 } from '../src/shared/space-membership.js';
 
-test('adopts new ungrouped tabs and new Chrome groups into the active Space', () => {
+test('adopts new ungrouped tabs without auto-adopting Chrome groups', () => {
   const state = {
     groupSpaces: { 7: 'work' },
     tabSpaces: { 4: 'work', 99: 'stale' },
@@ -30,11 +30,31 @@ test('adopts new ungrouped tabs and new Chrome groups into the active Space', ()
   ], 'focus');
 
   assert.equal(state.groupSpaces[7], 'work');
-  assert.equal(state.groupSpaces[8], 'focus');
+  assert.equal(state.groupSpaces[8], undefined);
   assert.equal(state.tabSpaces[3], 'focus');
   assert.equal(state.tabSpaces[4], 'work');
   assert.equal(state.tabSpaces[99], undefined);
   assert.equal(state.renamedTabs[99], undefined);
+});
+
+test('can explicitly adopt new Chrome groups into the active Space', () => {
+  const state = {
+    groupSpaces: { 7: 'work' },
+    tabSpaces: {},
+    renamedTabs: {},
+    collapsedGroups: {},
+  };
+
+  adoptUnassignedEntities(state, [
+    { id: 1, groupId: 7 },
+    { id: 2, groupId: 8 },
+  ], [
+    { id: 7 },
+    { id: 8 },
+  ], 'focus', { adoptGroups: true });
+
+  assert.equal(state.groupSpaces[7], 'work');
+  assert.equal(state.groupSpaces[8], 'focus');
 });
 
 test('syncs Chrome tab group collapsed state into Space state', () => {

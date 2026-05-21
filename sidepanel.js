@@ -142,12 +142,17 @@ async function init() {
     await loadState();
     bindEvents();
     renderSettings();
-    await refreshTabs();
-    if (extensionRuntime) setInterval(refreshTabs, 2500);
+    await refreshTabs({ adopt: true, adoptGroups: !hasKnownSpaceOwnership() });
+    if (extensionRuntime) setInterval(() => refreshTabs({ adopt: true }), 2500);
   } catch (error) {
     els.syncStatus.textContent = 'Failed to initialize';
     if (activeView === 'ask') addAskMessage('assistant', formatAIError(error));
   }
+}
+
+function hasKnownSpaceOwnership() {
+  return Object.keys(state.groupSpaces || {}).length > 0 ||
+    Object.keys(state.tabSpaces || {}).length > 0;
 }
 
 function connectPanelPort() {
@@ -331,17 +336,17 @@ function togglePanel() {
 }
 
 async function refreshTabs(options = {}) {
-  await loadTabs();
+  await loadTabs({ adopt: Boolean(options.adopt), adoptGroups: Boolean(options.adoptGroups) });
   await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
   await saveState();
 }
 
-async function loadTabs({ adopt = true } = {}) {
+async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
   const response = await send('tabs:list');
   tabs = decorateTabs(response.tabs || [], state);
   groups = response.groups || [];
-  if (adopt) adoptUnassignedEntities(state, tabs, groups, state.activeSpaceId);
+  if (adopt) adoptUnassignedEntities(state, tabs, groups, state.activeSpaceId, { adoptGroups });
   else cleanupMissingEntities(state, tabs, groups);
   syncCollapsedGroupsFromChrome(state, groups);
 }
