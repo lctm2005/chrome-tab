@@ -530,7 +530,7 @@ function createGroupCard(group) {
   const header = document.createElement('div');
   header.className = 'group-header';
   header.innerHTML = `
-    <span class="group-grip" title="Drag group"><svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
+    <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
     <span class="group-count">${group.tabs.length}</span>
@@ -573,7 +573,7 @@ function createFolderTabs(group) {
   const header = document.createElement('div');
   header.className = 'group-header folder-direct-header';
   header.innerHTML = `
-    <span class="group-grip" title="Drag group"><svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
+    <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
     <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
     <span class="group-count">${group.tabs.length}</span>
@@ -689,6 +689,7 @@ function createFavicon(tab) {
     const img = document.createElement('img');
     img.src = tab.favIconUrl;
     img.alt = '';
+    img.draggable = false;
     favicon.append(img);
   } else {
     favicon.textContent = (tab.displayTitle || tab.title || tab.domain || '?').slice(0, 1).toUpperCase();
