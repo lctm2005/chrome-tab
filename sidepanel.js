@@ -383,7 +383,9 @@ function render() {
   els.tidyNamesButton.hidden = isAskView;
   els.autoGroupButton.hidden = isAskView;
   els.collapseGroupsButton.hidden = isAskView;
-  els.collapseGroupsButton.textContent = groupsCollapsed ? '⌄' : '⌃';
+  els.collapseGroupsButton.innerHTML = groupsCollapsed
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
   els.collapseGroupsButton.title = groupsCollapsed ? 'Expand groups' : 'Collapse groups';
   els.collapseGroupsButton.setAttribute('aria-label', els.collapseGroupsButton.title);
   els.collapseGroupsButton.classList.toggle('active', groupsCollapsed);
@@ -480,9 +482,13 @@ function createFolderSection(folder) {
   header.className = 'folder-header';
   header.type = 'button';
   header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+  const caretSvg = `<svg class="folder-caret-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+  const folderSvg = `<svg class="folder-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+
   header.innerHTML = `
-    <span class="folder-caret">${collapsed ? '›' : '⌄'}</span>
-    <span class="folder-icon">▣</span>
+    <span class="folder-caret">${caretSvg}</span>
+    <span class="folder-icon">${folderSvg}</span>
     <strong>${escapeHtml(folder.title)}</strong>
     <span>${folderTabCount(folder)}</span>
   `;
@@ -524,7 +530,7 @@ function createGroupCard(group) {
   const header = document.createElement('div');
   header.className = 'group-header';
   header.innerHTML = `
-    <span class="group-grip" title="Drag group">⋮⋮</span>
+    <span class="group-grip" title="Drag group"><svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
     <span class="group-count">${group.tabs.length}</span>
@@ -567,7 +573,7 @@ function createFolderTabs(group) {
   const header = document.createElement('div');
   header.className = 'group-header folder-direct-header';
   header.innerHTML = `
-    <span class="group-grip" title="Drag group">⋮⋮</span>
+    <span class="group-grip" title="Drag group"><svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
     <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
     <span class="group-count">${group.tabs.length}</span>
@@ -708,7 +714,7 @@ function renderSpaces() {
   askButton.type = 'button';
   askButton.title = 'Ask Page';
   askButton.setAttribute('aria-label', 'Ask Page');
-  askButton.textContent = '🧠';
+  askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2Z"/></svg>`;
   askButton.addEventListener('click', () => runTask(openAskPage));
 
   const addButton = document.createElement('button');
@@ -716,7 +722,7 @@ function renderSpaces() {
   addButton.type = 'button';
   addButton.title = 'Add Space';
   addButton.setAttribute('aria-label', 'Add Space');
-  addButton.textContent = '+';
+  addButton.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
   addButton.addEventListener('click', () => runTask(addSpace));
 
   const spacesGroup = document.createElement('div');
@@ -2059,7 +2065,15 @@ function actionButton(text, title, handler) {
   button.type = 'button';
   button.title = title;
   button.setAttribute('aria-label', title);
-  button.textContent = text;
+  if (text === '×') {
+    button.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+  } else if (text === '✎') {
+    button.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`;
+  } else if (text === '↗') {
+    button.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`;
+  } else {
+    button.textContent = text;
+  }
   button.addEventListener('click', (event) => {
     event.stopPropagation();
     runTask(handler);
