@@ -306,6 +306,13 @@ h1 {
 }
 
 .folder-header,
+.group-header,
+.tab-row {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.folder-header,
 .group-header {
   display: grid;
   grid-template-columns: 16px 20px minmax(0, 1fr) auto;
@@ -330,13 +337,11 @@ h1 {
   margin-left: 0;
 }
 
-.group-card[draggable="true"] .group-header,
-.folder-direct-group[draggable="true"] .group-header {
+.group-header[draggable="true"] {
   cursor: grab;
 }
 
-.group-card[draggable="true"] .group-header:active,
-.folder-direct-group[draggable="true"] .group-header:active {
+.group-header[draggable="true"]:active {
   cursor: grabbing;
 }
 

@@ -522,18 +522,20 @@ function folderTabCount(folder) {
 function createGroupCard(group) {
   const card = document.createElement('section');
   card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
-  card.draggable = !group.dormant;
   card.dataset.groupKey = group.key;
   if (!group.dormant) {
-    card.addEventListener('dragstart', (event) => startGroupDrag(event, group));
     card.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
     card.addEventListener('drop', (event) => dropGroup(event, group));
-    card.addEventListener('dragend', clearDragState);
   }
 
   const header = document.createElement('div');
   header.className = 'group-header';
+  header.draggable = !group.dormant;
+  if (!group.dormant) {
+    header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
+    header.addEventListener('dragend', clearDragState);
+  }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
@@ -566,17 +568,19 @@ function createFolderTabs(group) {
   const section = document.createElement('section');
   section.className = `folder-direct-group${group.collapsed ? ' collapsed' : ''}`;
   section.dataset.groupKey = group.key;
-  section.draggable = !group.dormant;
   if (!group.dormant) {
-    section.addEventListener('dragstart', (event) => startGroupDrag(event, group));
     section.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
     section.addEventListener('dragleave', () => section.classList.remove('drag-over'));
     section.addEventListener('drop', (event) => dropGroup(event, group));
-    section.addEventListener('dragend', clearDragState);
   }
 
   const header = document.createElement('div');
   header.className = 'group-header folder-direct-header';
+  header.draggable = !group.dormant;
+  if (!group.dormant) {
+    header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
+    header.addEventListener('dragend', clearDragState);
+  }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     <span class="group-dot" style="background:${groupColor(group.color)}"></span>
@@ -1216,7 +1220,7 @@ async function toggleGroup(group) {
 }
 
 function startGroupDrag(event, group) {
-  if (event.target.closest('.tab-row')) return;
+  if (event.target.closest('.tab-row, button, .group-actions')) return;
   dragState = { type: 'group', groupKey: group.key };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', group.key);
