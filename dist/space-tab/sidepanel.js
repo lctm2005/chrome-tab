@@ -92,6 +92,9 @@ let panelPort = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
 let pendingArcImportText = '';
+let renderedGroupContexts = new Map();
+let renderedGroupDragContexts = new Map();
+let lastGroupDragEndedAt = 0;
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -224,6 +227,8 @@ function bindEvents() {
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
+  els.groupsList.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
+  els.groupsList.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   document.addEventListener('click', hideContextMenu);
   document.addEventListener('keydown', handleDocumentKeydown);
 }
@@ -489,6 +494,8 @@ function renderGroups() {
   const tabGroups = isSpaceGroupsCollapsed()
     ? []
     : spaceView.filter((group) => group.key !== 'ungrouped');
+  renderedGroupContexts = new Map();
+  renderedGroupDragContexts = new Map();
 
   if (tabGroups.length === 0 && !ungrouped) {
     const empty = document.createElement('div');
@@ -498,9 +505,58 @@ function renderGroups() {
     return;
   }
 
-  const nodes = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId }).map(createFolderTreeNode);
+  const tree = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId });
+  renderedGroupContexts = groupContextsFromFolderTree(tree);
+  renderedGroupDragContexts = groupDragContextsFromFolderTree(tree);
+  const nodes = tree.map(createFolderTreeNode);
   if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
   els.groupsList.replaceChildren(...nodes);
+}
+
+function groupContextsFromFolderTree(nodes) {
+  const contexts = new Map();
+  for (const node of nodes) {
+    if (node.type === 'folder') {
+      for (const [key, group] of groupContextsFromFolderTree(node.children)) {
+        contexts.set(key, group);
+      }
+      continue;
+    }
+    if (node.group?.key) contexts.set(node.group.key, node.group);
+  }
+  return contexts;
+}
+
+function groupDragContextsFromFolderTree(nodes) {
+  const contexts = new Map();
+  for (const node of nodes) {
+    if (node.type === 'folder') {
+      const childContexts = groupDragContextsFromFolderTree(node.children);
+      const groupKeys = [];
+      for (const [key, context] of childContexts) {
+        contexts.set(key, context);
+        if (context.type === 'group') groupKeys.push(...context.groupKeys);
+      }
+      contexts.set(node.key, {
+        type: 'folder',
+        key: node.key,
+        groupKeys: uniqueKeys(groupKeys),
+      });
+      continue;
+    }
+    if (node.group?.key && !node.group.dormant) {
+      contexts.set(node.group.key, {
+        type: 'group',
+        key: node.group.key,
+        groupKeys: [node.group.key],
+      });
+    }
+  }
+  return contexts;
+}
+
+function uniqueKeys(keys) {
+  return [...new Set(keys.filter(Boolean))];
 }
 
 function createFolderTreeNode(node) {
@@ -509,8 +565,34 @@ function createFolderTreeNode(node) {
   return createGroupCard(node.group);
 }
 
+function handleGroupHeaderContextMenu(event) {
+  const group = groupContextFromEvent(event);
+  if (!group) return;
+  showGroupContextMenu(event, group);
+}
+
+function handleGroupHeaderMouseDown(event) {
+  const isSecondaryMouse = event.button === 2 || (event.button === 0 && event.ctrlKey);
+  if (!isSecondaryMouse) return;
+  const group = groupContextFromEvent(event);
+  if (!group) return;
+  showGroupContextMenu(event, group);
+}
+
+function groupContextFromEvent(event) {
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const header = target?.closest?.('.group-header');
+  if (!header || !els.groupsList.contains(header)) return null;
+  const key = header.dataset.groupKey || header.closest('[data-group-key]')?.dataset.groupKey;
+  const group = key ? renderedGroupContexts.get(key) : null;
+  if (!group || group.dormant) return null;
+  return group;
+}
+
 function createFolderSection(folder) {
   const collapsed = Boolean(state.collapsedGroups[folder.key]);
+  const dragContext = renderedGroupDragContexts.get(folder.key);
+  const canDragFolder = Boolean(dragContext?.groupKeys?.length);
   const section = document.createElement('section');
   section.className = `folder-section${collapsed ? ' collapsed' : ''}`;
   section.dataset.folderKey = folder.key;
@@ -519,7 +601,16 @@ function createFolderSection(folder) {
   const header = document.createElement('button');
   header.className = 'folder-header';
   header.type = 'button';
+  header.draggable = canDragFolder;
+  header.dataset.dragKey = folder.key;
   header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (canDragFolder) {
+    header.addEventListener('dragstart', (event) => startFolderDrag(event, folder));
+    header.addEventListener('dragend', clearDragState);
+    header.addEventListener('dragover', (event) => acceptGroupDrop(event, folder));
+    header.addEventListener('dragleave', () => header.classList.remove('drag-over'));
+    header.addEventListener('drop', (event) => dropGroup(event, folder));
+  }
 
   const caretSvg = `<svg class="folder-caret-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
   const folderSvg = folderIconSvg('folder-svg-icon');
@@ -530,7 +621,7 @@ function createFolderSection(folder) {
     <strong>${escapeHtml(folder.title)}</strong>
     <span>${folderTabCount(folder)}</span>
   `;
-  header.addEventListener('click', () => runTask(() => toggleFolder(folder.key)));
+  header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
 
   const children = document.createElement('div');
   children.className = 'folder-children';
@@ -564,6 +655,8 @@ function createGroupCard(group) {
 
   const header = document.createElement('div');
   header.className = 'group-header';
+  header.dataset.groupKey = group.key;
+  header.dataset.dragKey = group.key;
   header.draggable = !group.dormant;
   if (!group.dormant) {
     header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
@@ -581,8 +674,7 @@ function createGroupCard(group) {
     actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
     header.append(actions);
   }
-  header.addEventListener('click', () => runTask(() => toggleGroup(group)));
-  if (!group.dormant) header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
+  header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
 
   const list = document.createElement('div');
   list.className = 'tab-list';
@@ -609,6 +701,8 @@ function createFolderTabs(group) {
 
   const header = document.createElement('div');
   header.className = 'group-header folder-direct-header';
+  header.dataset.groupKey = group.key;
+  header.dataset.dragKey = group.key;
   header.draggable = !group.dormant;
   if (!group.dormant) {
     header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
@@ -625,9 +719,8 @@ function createFolderTabs(group) {
     actions.className = 'group-actions';
     actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
     header.append(actions);
-    header.addEventListener('contextmenu', (event) => showGroupContextMenu(event, group));
   }
-  header.addEventListener('click', () => runTask(() => toggleGroup(group)));
+  header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
 
   const list = document.createElement('div');
   list.className = 'tab-list folder-direct-list';
@@ -1037,7 +1130,7 @@ async function closeTab(tab) {
 }
 
 async function moveTabToSpace(tab, spaceId) {
-  if (tab.groupId > 0) {
+  if (isGroupedTab(tab)) {
     await send('tabs:ungroup', { tabIds: [tab.id] });
   }
   state.tabSpaces[tab.id] = spaceId;
@@ -1212,7 +1305,7 @@ async function collapseGroupsInSpace(spaceId) {
   await loadTabs({ adopt: false });
   const groupIds = new Set(
     tabs
-      .filter((tab) => tab.groupId > 0 && tabBelongsToSpace(tab, spaceId))
+      .filter((tab) => isGroupedTab(tab) && tabBelongsToSpace(tab, spaceId))
       .map((tab) => tab.groupId)
   );
   for (const group of groups) {
@@ -1260,34 +1353,91 @@ async function toggleGroup(group) {
   await refreshTabs();
 }
 
-function startGroupDrag(event, group) {
-  if (event.target.closest('.tab-row, button, .group-actions')) return;
-  dragState = { type: 'group', groupKey: group.key };
-  event.dataTransfer.effectAllowed = 'move';
-  event.dataTransfer.setData('text/plain', group.key);
+function handleFolderHeaderClick(event, folder) {
+  if (shouldSuppressHeaderClickAfterDrag(event)) return;
+  runTask(() => toggleFolder(folder.key));
 }
 
-function acceptGroupDrop(event, group) {
-  if (dragState?.type !== 'group' || dragState.groupKey === group.key) return;
+function handleGroupHeaderClick(event, group) {
+  if (shouldSuppressHeaderClickAfterDrag(event)) return;
+  runTask(() => toggleGroup(group));
+}
+
+function shouldSuppressHeaderClickAfterDrag(event) {
+  if (Date.now() - lastGroupDragEndedAt > 350) return false;
   event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function startGroupDrag(event, group) {
+  if (isInteractiveDragTarget(event.target)) return;
+  const context = dragContextForTarget(group);
+  if (!context?.groupKeys?.length) return;
+  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', context.key);
+}
+
+function startFolderDrag(event, folder) {
+  if (isInteractiveDragTarget(event.target)) return;
+  const context = dragContextForTarget(folder);
+  if (!context?.groupKeys?.length) return;
+  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', context.key);
+}
+
+function acceptGroupDrop(event, target) {
+  const targetContext = dragContextForTarget(target);
+  if (!canDropGroupContext(targetContext)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
   event.currentTarget.classList.add('drag-over');
 }
 
-function dropGroup(event, targetGroup) {
-  if (dragState?.type !== 'group') return;
+function dropGroup(event, target) {
+  const targetContext = dragContextForTarget(target);
+  if (!canDropGroupContext(targetContext)) return;
+  const sourceKeys = [...dragState.groupKeys];
+  const targetKeys = [...targetContext.groupKeys];
   event.preventDefault();
+  event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask(() => reorderGroup(dragState.groupKey, targetGroup.key));
+  runTask(() => reorderGroupBlock(sourceKeys, targetKeys));
 }
 
-async function reorderGroup(sourceKey, targetKey) {
-  if (!sourceKey || sourceKey === targetKey) return;
-  const order = reorderKeys(spaceView.map((group) => group.key), sourceKey, targetKey);
+function canDropGroupContext(targetContext) {
+  if (dragState?.type !== 'group' || !targetContext?.groupKeys?.length) return false;
+  const sourceKeySet = new Set(dragState.groupKeys);
+  return targetContext.groupKeys.some((key) => !sourceKeySet.has(key));
+}
+
+function dragContextForTarget(target) {
+  const key = typeof target === 'string' ? target : target?.key;
+  return key ? renderedGroupDragContexts.get(key) : null;
+}
+
+function isInteractiveDragTarget(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest?.('.tab-row, button:not(.folder-header), .group-actions'));
+}
+
+async function reorderGroupBlock(sourceKeys, targetKeys) {
+  const sourceKeySet = new Set(sourceKeys);
+  const targetKey = targetKeys.find((key) => !sourceKeySet.has(key));
+  if (!sourceKeySet.size || !targetKey) return;
+
+  const visibleKeys = spaceView.map((group) => group.key);
+  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
+  if (sourceBlock.length === 0) return;
+
+  const order = reorderKeyBlock(visibleKeys, sourceBlock, targetKey);
   state.groupOrder[state.activeSpaceId] = order;
 
-  const sourceGroupId = groupIdFromKey(sourceKey);
+  const sourceGroupId = sourceBlock.length === 1 ? groupIdFromKey(sourceBlock[0]) : null;
   const targetIndex = firstTabIndexForGroupKey(targetKey);
-  if (sourceGroupId && Number.isFinite(targetIndex)) {
+  if (sourceGroupId !== null && Number.isFinite(targetIndex)) {
     await send('groups:move', { groupId: sourceGroupId, index: targetIndex });
   }
 
@@ -1330,11 +1480,11 @@ async function reorderTab(tabId, targetGroupKey, beforeTabId) {
   if (!tab || !sourceGroup || !targetGroup) return;
 
   const targetGroupId = groupIdFromKey(targetGroupKey);
-  if (targetGroupId && tab.groupId !== targetGroupId) {
+  if (targetGroupId !== null && tab.groupId !== targetGroupId) {
     await send('tabs:groupExisting', { groupId: targetGroupId, tabIds: [tab.id] });
     state.groupSpaces[targetGroupId] = state.activeSpaceId;
     delete state.tabSpaces[tab.id];
-  } else if (!targetGroupId && tab.groupId > 0) {
+  } else if (targetGroupId === null && isGroupedTab(tab)) {
     await send('tabs:ungroup', { tabIds: [tab.id] });
     state.tabSpaces[tab.id] = state.activeSpaceId;
   }
@@ -1363,6 +1513,7 @@ async function reorderTab(tabId, targetGroupKey, beforeTabId) {
 
 function clearDragState(event) {
   event?.currentTarget?.classList?.remove('drag-over');
+  if (dragState?.type === 'group') lastGroupDragEndedAt = Date.now();
   dragState = null;
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
@@ -1401,7 +1552,7 @@ async function autoGroupTabs() {
   await loadTabs({ adopt: true });
   const candidates = tabs.filter((tab) => (
     state.tabSpaces[tab.id] === state.activeSpaceId &&
-    tab.groupId <= 0 &&
+    !isGroupedTab(tab) &&
     !tab.url.startsWith('chrome://')
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
@@ -2225,6 +2376,10 @@ function tabBelongsToSpace(tab, spaceId) {
   return entityBelongsToSpace(tab, state, spaceId);
 }
 
+function isGroupedTab(tab) {
+  return Number.isFinite(Number(tab?.groupId)) && Number(tab.groupId) !== -1;
+}
+
 function addGroupOrderKey(spaceId, key) {
   const order = state.groupOrder[spaceId] || [];
   if (!order.includes(key)) state.groupOrder[spaceId] = [...order, key];
@@ -2235,10 +2390,12 @@ function ensureTabOrderForSpace(spaceId) {
   return state.tabOrder[spaceId];
 }
 
-function reorderKeys(keys, sourceKey, targetKey) {
-  const next = keys.filter((key) => key !== sourceKey);
+function reorderKeyBlock(keys, sourceKeys, targetKey) {
+  const sourceKeySet = new Set(sourceKeys);
+  const block = sourceKeys.filter((key) => keys.includes(key));
+  const next = keys.filter((key) => !sourceKeySet.has(key));
   const targetIndex = next.indexOf(targetKey);
-  next.splice(targetIndex < 0 ? next.length : targetIndex, 0, sourceKey);
+  next.splice(targetIndex < 0 ? next.length : targetIndex, 0, ...block);
   return next;
 }
 

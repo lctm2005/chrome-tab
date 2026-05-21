@@ -290,6 +290,7 @@ h1 {
 
 .group-card.drag-over,
 .folder-direct-group.drag-over,
+.folder-header.drag-over,
 .tab-row.drag-over,
 .tab-list.drag-over {
   outline: 2px solid var(--accent);
@@ -337,10 +338,12 @@ h1 {
   margin-left: 0;
 }
 
+.folder-header[draggable="true"],
 .group-header[draggable="true"] {
   cursor: grab;
 }
 
+.folder-header[draggable="true"]:active,
 .group-header[draggable="true"]:active {
   cursor: grabbing;
 }

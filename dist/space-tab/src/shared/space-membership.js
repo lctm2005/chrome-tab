@@ -10,7 +10,7 @@ export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpa
   }
 
   for (const tab of tabs) {
-    if (tab.groupId > 0) {
+    if (isGroupedTab(tab)) {
       delete state.tabSpaces[tab.id];
       continue;
     }
@@ -44,7 +44,7 @@ export function syncCollapsedGroupsFromChrome(state, groups = []) {
 }
 
 export function tabBelongsToSpace(tab, state, spaceId) {
-  if (tab.groupId > 0) return state.groupSpaces[tab.groupId] === spaceId;
+  if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] === spaceId;
   return state.tabSpaces[tab.id] === spaceId;
 }
 
@@ -57,8 +57,12 @@ export function closableTabsForSpace(tabs = [], state, spaceId, shouldClose) {
 }
 
 export function tabHasSpaceOwner(tab, state) {
-  if (tab.groupId > 0) return state.groupSpaces[tab.groupId] !== undefined;
+  if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] !== undefined;
   return state.tabSpaces[tab.id] !== undefined;
+}
+
+function isGroupedTab(tab) {
+  return Number.isFinite(Number(tab?.groupId)) && Number(tab.groupId) !== -1;
 }
 
 export function closableTabsOutsideSpace(tabs = [], state, activeSpaceId, shouldClose) {

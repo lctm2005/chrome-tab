@@ -139,6 +139,24 @@ test('builds a Space -> TabGroup -> Tab view', () => {
   assert.deepEqual(view[0].tabs.map((tab) => tab.id), [1]);
 });
 
+test('treats Chrome tab group id 0 as a real group', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'work',
+    groupSpaces: { 0: 'work' },
+    tabs: [
+      { id: 1, title: 'Spec', url: 'https://docs.example.com', groupId: 0 },
+      { id: 2, title: 'Loose', url: 'https://loose.example.com', groupId: -1 },
+    ],
+    groups: [
+      { id: 0, title: 'Zero', color: 'blue' },
+    ],
+  });
+
+  assert.equal(view.length, 1);
+  assert.equal(view[0].key, 'group:0');
+  assert.deepEqual(view[0].tabs.map((tab) => tab.id), [1]);
+});
+
 test('builds Space view using saved group order, tab order, and collapsed state', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',

@@ -57,6 +57,27 @@ test('can explicitly adopt new Chrome groups into the active Space', () => {
   assert.equal(state.groupSpaces[8], 'focus');
 });
 
+test('recognizes Chrome tab group id 0 as grouped', () => {
+  const state = {
+    groupSpaces: { 0: 'work' },
+    tabSpaces: { 1: 'stale' },
+    renamedTabs: {},
+    collapsedGroups: {},
+  };
+
+  adoptUnassignedEntities(state, [
+    { id: 1, groupId: 0 },
+  ], [
+    { id: 0 },
+  ], 'focus');
+
+  assert.equal(state.groupSpaces[0], 'work');
+  assert.equal(state.tabSpaces[1], undefined);
+  assert.deepEqual(closableTabsForSpace([
+    { id: 1, groupId: 0 },
+  ], state, 'work', () => true).map((tab) => tab.id), [1]);
+});
+
 test('syncs Chrome tab group collapsed state into Space state', () => {
   const state = { collapsedGroups: { 'group:7': false } };
 

@@ -139,7 +139,9 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
       case 'tabs:ungroup': {
         const ids = new Set((payload.tabIds || []).map(Number));
         tabs = tabs.map((tab) => ids.has(tab.id) ? { ...tab, groupId: -1 } : tab);
-        const usedGroupIds = new Set(tabs.map((tab) => tab.groupId).filter((id) => id > 0));
+        const usedGroupIds = new Set(tabs
+          .map((tab) => tab.groupId)
+          .filter((id) => Number.isFinite(Number(id)) && Number(id) !== -1));
         groups = groups.filter((group) => usedGroupIds.has(group.id));
         return {};
       }

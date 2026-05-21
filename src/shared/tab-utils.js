@@ -129,21 +129,22 @@ export function buildSpaceView({
 }) {
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const visibleTabs = tabs.filter((tab) => {
-    if (tab.groupId > 0) return groupSpaces[tab.groupId] === activeSpaceId;
+    if (isGroupedTab(tab)) return groupSpaces[tab.groupId] === activeSpaceId;
     return tabSpaces[tab.id] === activeSpaceId;
   });
   const buckets = new Map();
 
   for (const tab of visibleTabs) {
-    const key = tab.groupId > 0 ? `group:${tab.groupId}` : 'ungrouped';
+    const grouped = isGroupedTab(tab);
+    const key = grouped ? `group:${tab.groupId}` : 'ungrouped';
     if (!buckets.has(key)) {
       const group = groupsById.get(tab.groupId);
       buckets.set(key, {
         key,
-        id: tab.groupId > 0 ? tab.groupId : 'ungrouped',
-        title: tab.groupId > 0 ? (group?.title || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title)) : 'Ungrouped',
-        color: tab.groupId > 0 ? (group?.color || 'grey') : 'grey',
-        collapsed: tab.groupId > 0
+        id: grouped ? tab.groupId : 'ungrouped',
+        title: grouped ? (group?.title || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title)) : 'Ungrouped',
+        color: grouped ? (group?.color || 'grey') : 'grey',
+        collapsed: grouped
           ? Boolean(group?.collapsed ?? collapsedGroups[key])
           : Boolean(collapsedGroups[key]),
         tabs: [],
@@ -172,6 +173,10 @@ export function buildSpaceView({
     }));
 
   return sortBySavedOrder(orderedGroups, groupOrder[activeSpaceId] || [], (group) => group.key);
+}
+
+function isGroupedTab(tab) {
+  return Number.isFinite(Number(tab?.groupId)) && Number(tab.groupId) !== -1;
 }
 
 export function planTidyTabNames(tabs) {

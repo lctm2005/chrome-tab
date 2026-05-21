@@ -1,5 +1,7 @@
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +11,7 @@ const preview = process.env.PREVIEW !== '0';
 const previewPort = Number(process.env.PREVIEW_PORT || 8765);
 const repoRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const base = `http://127.0.0.1:${port}`;
+const autoChrome = process.env.E2E_AUTO_CHROME !== '0';
 const sidepanelUrl = preview
   ? (process.env.PREVIEW_URL || `http://127.0.0.1:${previewPort}/sidepanel.html`)
   : `chrome-extension://${extensionId}/sidepanel.html`;
@@ -44,6 +47,108 @@ async function startPreviewServer() {
     server.listen(previewPort, '127.0.0.1', resolve);
   });
   return server;
+}
+
+async function startChromeForCdp() {
+  if (await canReachCdp()) return null;
+  if (!autoChrome) {
+    throw new Error(`Cannot reach Chrome CDP at ${base}. Start Chrome with --remote-debugging-port=${port}, or unset E2E_AUTO_CHROME=0.`);
+  }
+
+  const executable = await findChromeExecutable();
+  const userDataDir = await mkdtemp(join(tmpdir(), 'space-tabs-e2e-'));
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--remote-allow-origins=*',
+    ...(preview ? ['--headless=new', '--disable-gpu'] : []),
+    'about:blank',
+  ];
+  const child = spawn(executable, args, { stdio: 'ignore' });
+  let exited = false;
+  child.once('exit', () => {
+    exited = true;
+  });
+  child.unref();
+
+  try {
+    await waitForCdp();
+  } catch (error) {
+    child.kill('SIGTERM');
+    await rm(userDataDir, { recursive: true, force: true });
+    throw error;
+  }
+
+  return {
+    child,
+    userDataDir,
+    async close() {
+      if (!exited) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => {
+          const timeout = setTimeout(resolve, 2000);
+          child.once('exit', () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        });
+      }
+      await rm(userDataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+async function canReachCdp() {
+  try {
+    await json(`${base}/json/version`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForCdp(timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await canReachCdp()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for Chrome CDP at ${base}.`);
+}
+
+async function findChromeExecutable() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) return candidate;
+  }
+
+  throw new Error('Could not find Chrome. Set CHROME_PATH to the Chrome executable and rerun npm run e2e:smoke.');
+}
+
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function json(url, options) {
@@ -118,9 +223,11 @@ async function waitFor(client, expression, timeoutMs = 5000) {
 
 async function main() {
   const previewServer = await startPreviewServer();
-  const target = await sidepanelTarget();
-  const client = createClient(target.webSocketDebuggerUrl);
+  const chrome = await startChromeForCdp();
+  let client = null;
   try {
+    const target = await sidepanelTarget();
+    client = createClient(target.webSocketDebuggerUrl);
     await client.ready;
     await client.send('Runtime.enable');
     await client.send('Page.enable');
@@ -336,7 +443,8 @@ async function main() {
 
     console.log(JSON.stringify({ results, bugs }, null, 2));
   } finally {
-    client.close();
+    client?.close();
+    await chrome?.close();
     await new Promise((resolve) => previewServer?.close(resolve) ?? resolve());
   }
 }
