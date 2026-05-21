@@ -337,6 +337,10 @@ function togglePanel() {
 
 async function refreshTabs(options = {}) {
   await loadTabs({ adopt: Boolean(options.adopt), adoptGroups: Boolean(options.adoptGroups) });
+  if (options.reconcileGroups !== false) {
+    const mergedGroups = await mergeDuplicateGroupsInActiveSpace();
+    if (mergedGroups) await loadTabs({ adopt: false });
+  }
   await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
   await saveState();
@@ -405,17 +409,46 @@ function render() {
 
 function mergeDormantSpaceView(liveView, dormantView) {
   const openUrls = new Set(liveView.flatMap((group) => group.tabs.map((tab) => tab.url).filter(Boolean)));
-  const dormantGroups = dormantView
-    .map((group) => ({
+  const ungrouped = cloneGroup(liveView.find((group) => group.key === 'ungrouped') || null);
+  const liveGroups = liveView
+    .filter((group) => group.key !== 'ungrouped')
+    .map(cloneGroup);
+  const liveGroupsByTitle = new Map();
+  for (const group of liveGroups) {
+    const titleKey = groupTitleKey(group.title);
+    if (titleKey && !liveGroupsByTitle.has(titleKey)) liveGroupsByTitle.set(titleKey, group);
+  }
+
+  const dormantGroups = [];
+  const dormantUngroupedTabs = [];
+  for (const group of dormantView || []) {
+    const dormantGroup = {
       ...group,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
       tabs: group.tabs.filter((tab) => !openUrls.has(tab.url)),
-    }))
-    .filter((group) => group.tabs.length > 0);
+    };
+    if (dormantGroup.tabs.length === 0) continue;
 
-  const ungrouped = liveView.find((group) => group.key === 'ungrouped') || null;
-  const liveGroups = liveView.filter((group) => group.key !== 'ungrouped');
+    if (isUngroupedSnapshotGroup(dormantGroup)) {
+      dormantUngroupedTabs.push(...dormantGroup.tabs);
+      continue;
+    }
+
+    const matchingLiveGroup = liveGroupsByTitle.get(groupTitleKey(dormantGroup.title));
+    if (matchingLiveGroup) {
+      matchingLiveGroup.tabs.push(...dormantGroup.tabs);
+      continue;
+    }
+
+    dormantGroups.push(dormantGroup);
+  }
+
+  if (ungrouped) ungrouped.tabs.push(...dormantUngroupedTabs);
   return ungrouped ? [...liveGroups, ...dormantGroups, ungrouped] : [...liveGroups, ...dormantGroups];
+}
+
+function cloneGroup(group) {
+  return group ? { ...group, tabs: [...(group.tabs || [])] } : null;
 }
 
 function dormantGroupsFromSnapshot(snapshot = {}) {
@@ -489,7 +522,7 @@ function createFolderSection(folder) {
   header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 
   const caretSvg = `<svg class="folder-caret-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
-  const folderSvg = `<svg class="folder-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+  const folderSvg = folderIconSvg('folder-svg-icon');
 
   header.innerHTML = `
     <span class="folder-caret">${caretSvg}</span>
@@ -538,7 +571,7 @@ function createGroupCard(group) {
   }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
-    <span class="group-dot" style="background:${groupColor(group.color)}"></span>
+    ${groupFolderIcon(group.color)}
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
     <span class="group-count">${group.tabs.length}</span>
   `;
@@ -583,7 +616,7 @@ function createFolderTabs(group) {
   }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
-    <span class="group-dot" style="background:${groupColor(group.color)}"></span>
+    ${groupFolderIcon(group.color)}
     <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
     <span class="group-count">${group.tabs.length}</span>
   `;
@@ -638,6 +671,14 @@ function createUngroupedSection(group) {
 
   section.append(divider, newTabButton, list);
   return section;
+}
+
+function groupFolderIcon(color) {
+  return `<span class="group-icon" style="color:${groupColor(color)}">${folderIconSvg('group-folder-icon')}</span>`;
+}
+
+function folderIconSvg(className) {
+  return `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
 }
 
 function createTabRow(tab, groupKey) {
@@ -1050,7 +1091,7 @@ async function openDormantTab(tab, groupKey) {
   } else {
     const existing = groups.find((group) => (
       state.groupSpaces[group.id] === state.activeSpaceId &&
-      group.title === dormantGroup.title
+      groupTitleKey(group.title) === groupTitleKey(dormantGroup.title)
     ));
     const result = existing
       ? await send('tabs:groupExisting', { groupId: existing.id, tabIds: [tabId] })
