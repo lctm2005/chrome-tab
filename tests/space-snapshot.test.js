@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   buildSpaceSnapshot,
+  dropTemporarySnapshotGroups,
   mergeSpaceSnapshot,
+  removeSnapshotTab,
   shouldAutoCloseTab,
 } from '../src/shared/space-snapshot.js';
 
@@ -61,6 +63,82 @@ test('auto closes any unpinned tab owned by a Space', () => {
   assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: true }), false);
+});
+
+test('drops temporary ungrouped tabs from a stored snapshot', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+      },
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        tabs: [{ title: 'Search', url: 'https://google.com' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(dropTemporarySnapshotGroups(snapshot), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+      },
+    ],
+  });
+});
+
+test('removes one opened dormant tab from its snapshot group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        tabs: [{ title: 'Paper', url: 'https://example.com/paper' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(removeSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://example.com/spec',
+  }), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        tabs: [{ title: 'Paper', url: 'https://example.com/paper' }],
+      },
+    ],
+  });
 });
 
 test('merges live tabs without dropping dormant snapshot content', () => {

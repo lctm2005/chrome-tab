@@ -196,6 +196,7 @@ function snapshotTabSpacesByUrl(snapshots) {
   const map = new Map();
   for (const [spaceId, snapshot] of Object.entries(snapshots || {})) {
     for (const group of snapshot?.groups || []) {
+      if (isUngroupedSnapshotGroup(group)) continue;
       for (const tab of group.tabs || []) {
         if (!tab.url) continue;
         if (!map.has(tab.url)) map.set(tab.url, new Set());

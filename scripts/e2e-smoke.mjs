@@ -280,6 +280,8 @@ async function main() {
     state.spaces = [
       { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
       { id: 'folder-demo', name: 'Folder Demo', icon: 'F', color: 'green' },
+      { id: 'dormant-demo', name: 'Dormant Demo', icon: 'D', color: 'purple' },
+      { id: 'temp-demo', name: 'Temp Demo', icon: 'T', color: 'orange' },
     ];
     state.activeSpaceId = 'default';
     state.spaceSnapshots['folder-demo'] = {
@@ -292,6 +294,32 @@ async function main() {
         tabs: [
           { title: 'Nested Spec', url: 'https://example.com/nested-spec' },
           { title: 'Nested Plan', url: 'https://example.com/nested-plan' },
+        ],
+      }],
+    };
+    state.spaceSnapshots['dormant-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [{
+        title: 'Search',
+        color: 'blue',
+        collapsed: true,
+        tabs: [
+          { title: 'Baidu', url: 'https://baidu.com' },
+          { title: 'Google', url: 'https://www.google.com' },
+        ],
+      }],
+    };
+    state.spaceSnapshots['temp-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [{
+        title: 'Ungrouped',
+        color: 'grey',
+        collapsed: false,
+        tabs: [
+          { title: 'Leftover Search', url: 'https://google.com/search?q=leftover' },
+          { title: 'Leftover Baidu', url: 'https://baidu.com' },
         ],
       }],
     };
@@ -441,7 +469,209 @@ async function main() {
     bugs.push('Repeated Space switching destabilized saved Space snapshots.');
   }
 
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    buttons.find((button) => button.title === 'Dormant Demo').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Dormant Demo'`);
+  await waitFor(client, `[...document.querySelectorAll('.group-header h2')].some((node) => node.textContent === 'Search')`);
+  await evaluate(client, `(() => {
+    const header = [...document.querySelectorAll('.group-header')]
+      .find((node) => node.querySelector('h2')?.textContent === 'Search');
+    if (header?.closest('.collapsed')) header.click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelectorAll('.tab-row.dormant').length === 2`);
+  await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
+  const firstDormantOpenState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const searchSnapshot = (stored.spaceSnapshots?.['dormant-demo']?.groups || [])
+      .find((group) => group.title === 'Search');
+    const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const searchRows = rows.filter((row) => /Baidu|Google|baidu|google/i.test(row.text));
+    return {
+      snapshotUrls: (searchSnapshot?.tabs || []).map((tab) => tab.url),
+      searchRows,
+      dormantRows: rows.filter((row) => row.dormant).length,
+    };
+  })()`);
+  record(
+    'opening one dormant grouped tab shows one live row and one remaining dormant row',
+    firstDormantOpenState.snapshotUrls.length === 2 &&
+      new Set(firstDormantOpenState.snapshotUrls).size === 2 &&
+      firstDormantOpenState.searchRows.length === 2 &&
+      firstDormantOpenState.dormantRows === 1,
+    JSON.stringify(firstDormantOpenState)
+  );
+  if (firstDormantOpenState.searchRows.length !== 2 || firstDormantOpenState.dormantRows !== 1) {
+    bugs.push('Opening a dormant grouped tab left duplicate dormant/live rows.');
+  }
+
+  await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
+  const allDormantOpenState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const searchSnapshot = (stored.spaceSnapshots?.['dormant-demo']?.groups || [])
+      .find((group) => group.title === 'Search');
+    const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const searchRows = rows.filter((row) => /Baidu|Google|baidu|google/i.test(row.text));
+    return {
+      snapshotUrls: (searchSnapshot?.tabs || []).map((tab) => tab.url),
+      searchRows,
+      dormantRows: rows.filter((row) => row.dormant).length,
+    };
+  })()`);
+  record(
+    'opening all dormant grouped tabs leaves only live rows',
+    allDormantOpenState.snapshotUrls.length === 2 &&
+      new Set(allDormantOpenState.snapshotUrls).size === 2 &&
+      allDormantOpenState.searchRows.length === 2 &&
+      allDormantOpenState.dormantRows === 0,
+    JSON.stringify(allDormantOpenState)
+  );
+  if (allDormantOpenState.searchRows.length !== 2 || allDormantOpenState.dormantRows !== 0) {
+    bugs.push('Opening all dormant grouped tabs did not fully drain the dormant snapshot.');
+  }
+
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    buttons.find((button) => button.title === 'Temp Demo').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo'`);
+  const tempPurgeState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const tempGroups = stored.spaceSnapshots?.['temp-demo']?.groups || [];
+    const dormantRows = document.querySelectorAll('.ungrouped-section .tab-row.dormant').length;
+    const loaded = document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo';
+    return loaded ? { tempGroups: tempGroups.map((group) => group.title), dormantRows } : null;
+  })()`);
+  record(
+    'legacy dormant temporary Ungrouped rows are purged on Space load',
+    tempPurgeState.dormantRows === 0 && !tempPurgeState.tempGroups.includes('Ungrouped'),
+    JSON.stringify(tempPurgeState)
+  );
+  if (tempPurgeState.dormantRows !== 0 || tempPurgeState.tempGroups.includes('Ungrouped')) {
+    bugs.push('Legacy dormant temporary Ungrouped rows were visible or persisted after loading the Space.');
+  }
+
+  await evaluate(client, `(() => {
+    const STORAGE_KEY = 'spaceTabsState';
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}').spaceTabsState || {};
+    stored.spaceSnapshots = stored.spaceSnapshots || {};
+    stored.spaceSnapshots['temp-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [{
+        title: 'Ungrouped',
+        color: 'grey',
+        collapsed: false,
+        tabs: [
+          { title: 'Injected Leftover', url: 'https://example.com/injected-leftover' },
+        ],
+      }],
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: stored }));
+    location.reload();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo'`);
+  const tempReloadPurgeState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const tempGroups = stored.spaceSnapshots?.['temp-demo']?.groups || [];
+    const dormantRows = document.querySelectorAll('.ungrouped-section .tab-row.dormant').length;
+    return { tempGroups: tempGroups.map((group) => group.title), dormantRows };
+  })()`);
+  record(
+    'reloaded legacy temporary snapshot still does not resurrect Ungrouped rows',
+    tempReloadPurgeState.dormantRows === 0 && !tempReloadPurgeState.tempGroups.includes('Ungrouped'),
+    JSON.stringify(tempReloadPurgeState)
+  );
+  if (tempReloadPurgeState.dormantRows !== 0 || tempReloadPurgeState.tempGroups.includes('Ungrouped')) {
+    bugs.push('Reloading a legacy temporary snapshot resurrected Ungrouped rows.');
+  }
+
+  for (let index = 0; index < 8; index += 1) {
+    await evaluate(client, `(() => {
+      const buttons = [...document.querySelectorAll('.space')];
+      buttons.find((button) => button.title === 'Dormant Demo').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Dormant Demo'`);
+    await evaluate(client, `(() => {
+      const buttons = [...document.querySelectorAll('.space')];
+      buttons.find((button) => button.title === 'Temp Demo').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo'`);
+    await evaluate(client, `(() => {
+      const buttons = [...document.querySelectorAll('.space')];
+      buttons.find((button) => button.title === 'Space').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  }
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    buttons.find((button) => button.title === 'Dormant Demo').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Dormant Demo'`);
+  await evaluate(client, `(() => {
+    const header = [...document.querySelectorAll('.group-header')]
+      .find((node) => node.querySelector('h2')?.textContent === 'Search');
+    if (header?.closest('.collapsed')) header.click();
+    return true;
+  })()`);
+  const brutalStressState = await evaluate(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const snapshots = stored.spaceSnapshots || {};
+    const defaultGroups = (snapshots.default?.groups || []).map((group) => group.title);
+    const dormantGroups = snapshots['dormant-demo']?.groups || [];
+    const tempGroups = snapshots['temp-demo']?.groups || [];
+    const searchRows = [...document.querySelectorAll('.tab-row')]
+      .filter((row) => /Baidu|Google|baidu|google/i.test(row.textContent))
+      .map((row) => ({
+        text: row.textContent,
+        dormant: row.classList.contains('dormant'),
+      }));
+    return {
+      defaultGroups,
+      dormantGroups: dormantGroups.map((group) => ({
+        title: group.title,
+        count: (group.tabs || []).length,
+      })),
+      tempGroups: tempGroups.map((group) => group.title),
+      searchRows,
+      activeRows: document.querySelectorAll('.tab-row').length,
+      activeDormantRows: document.querySelectorAll('.tab-row.dormant').length,
+    };
+  })()`);
+  const brutalStressStable = ['Research', 'Build', 'Inbox'].every((title) => brutalStressState.defaultGroups.includes(title)) &&
+    !brutalStressState.defaultGroups.includes('Ungrouped') &&
+    !brutalStressState.tempGroups.includes('Ungrouped') &&
+    brutalStressState.dormantGroups.every((group) => group.title !== 'Search' || group.count === 2) &&
+    brutalStressState.searchRows.length === 2;
+  record(
+    'brutal repeated Space switching does not duplicate saved grouped rows',
+    brutalStressStable,
+    JSON.stringify(brutalStressState)
+  );
+  if (!brutalStressStable) {
+    bugs.push('Brutal repeated Space switching duplicated saved grouped rows or resurrected temporary rows.');
+  }
+
     console.log(JSON.stringify({ results, bugs }, null, 2));
+    const failures = results.filter((result) => !result.ok);
+    if (failures.length || bugs.length) {
+      throw new Error(`E2E smoke failed: ${failures.map((failure) => failure.name).join(', ') || bugs.join('; ')}`);
+    }
   } finally {
     client?.close();
     await chrome?.close();

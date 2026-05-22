@@ -150,7 +150,7 @@ test('restores Space ownership for Chrome-restored groups and tabs from snapshot
   cleanupMissingEntities(state, tabs, groups);
 
   assert.deepEqual(state.groupSpaces, { 99: 'arc-work' });
-  assert.deepEqual(state.tabSpaces, { 12: 'arc-work' });
+  assert.deepEqual(state.tabSpaces, {});
   assert.deepEqual(state.groupOrder['arc-work'], ['group:7', 'group:99']);
 });
 
@@ -195,8 +195,36 @@ test('restores non-imported Space groups after Chrome assigns new ids', () => {
   cleanupMissingEntities(state, tabs, groups);
 
   assert.deepEqual(state.groupSpaces, { 88: 'default' });
-  assert.deepEqual(state.tabSpaces, { 43: 'default' });
+  assert.deepEqual(state.tabSpaces, {});
   assert.deepEqual(state.groupOrder.default, ['group:21', 'ungrouped', 'group:88']);
+});
+
+test('does not restore temporary ungrouped tabs from snapshots', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    groupOrder: {},
+    spaceSnapshots: {
+      default: {
+        groups: [
+          {
+            title: 'Ungrouped',
+            color: 'grey',
+            tabs: [
+              { title: 'Search', url: 'https://google.com' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  restoreSnapshotOwnership(state, [
+    { id: 10, groupId: -1, url: 'https://google.com' },
+  ], []);
+
+  assert.deepEqual(state.tabSpaces, {});
 });
 
 test('finds close candidates by Space ownership without touching other Spaces', () => {

@@ -26,6 +26,41 @@ export function snapshotTabCount(snapshot = {}) {
   return (snapshot.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
+export function dropTemporarySnapshotGroups(snapshot) {
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    groups: (snapshot.groups || []).filter((group) => !isUngroupedSnapshotGroup(group)),
+  };
+}
+
+export function removeSnapshotTab(snapshot, target = {}) {
+  if (!snapshot) return null;
+  const targetUrl = String(target.url || '');
+  const targetGroupTitle = String(target.groupTitle || '');
+  const targetGroupColor = String(target.groupColor || '');
+  let removed = false;
+  const groups = [];
+
+  for (const group of snapshot.groups || []) {
+    const groupMatches = (
+      (!targetGroupTitle || String(group.title || 'Ungrouped') === targetGroupTitle) &&
+      (!targetGroupColor || String(group.color || 'grey') === targetGroupColor)
+    );
+    const tabs = [];
+    for (const tab of group.tabs || []) {
+      if (!removed && groupMatches && targetUrl && tab.url === targetUrl) {
+        removed = true;
+        continue;
+      }
+      tabs.push(tab);
+    }
+    if (tabs.length > 0) groups.push({ ...group, tabs });
+  }
+
+  return { ...snapshot, groups };
+}
+
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   if (!storedSnapshot || snapshotTabCount(storedSnapshot) === 0) return liveSnapshot || null;
   if (!liveSnapshot || snapshotTabCount(liveSnapshot) === 0) return storedSnapshot;

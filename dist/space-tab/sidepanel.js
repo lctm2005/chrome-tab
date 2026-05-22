@@ -36,8 +36,10 @@ import {
 } from './src/shared/tab-selection.js';
 import {
   buildSpaceSnapshot,
+  dropTemporarySnapshotGroups,
   isUngroupedSnapshotGroup,
   mergeSpaceSnapshot,
+  removeSnapshotTab,
   shouldAutoCloseTab,
   snapshotTabCount,
 } from './src/shared/space-snapshot.js';
@@ -1003,8 +1005,9 @@ async function newTabInActiveSpace() {
 }
 
 async function clearUngroupedTabs(group) {
-  const closable = group.tabs.filter(shouldAutoCloseTab);
-  if (closable.length === 0) return;
+  const closable = group.tabs.filter((tab) => !tab.dormant && shouldAutoCloseTab(tab));
+  const dormantClosable = group.tabs.filter((tab) => tab.dormant && shouldAutoCloseTab(tab));
+  if (closable.length === 0 && dormantClosable.length === 0) return;
 
   const closingIds = new Set(closable.map((tab) => tab.id));
   const remainingSpaceTabs = tabs.filter((tab) => (
@@ -1027,9 +1030,10 @@ async function clearUngroupedTabs(group) {
     syntheticPlaceholderTabIds.delete(Number(tab.id));
     await send('tabs:close', { tabId: tab.id });
   }
+  if (dormantClosable.length > 0) removeTemporarySnapshotTabs(state.activeSpaceId);
   await saveState();
-  await refreshTabs();
-  setStatus(`Cleared ${closable.length} temporary tabs.`);
+  await refreshTabs({ reloadDormant: dormantClosable.length > 0 });
+  setStatus(`Cleared ${closable.length + dormantClosable.length} temporary tabs.`);
 }
 
 function handleTabClick(event, tab) {
@@ -1215,6 +1219,7 @@ async function openDormantTab(tab, groupKey) {
     delete state.tabSpaces[tabId];
   }
 
+  removeOpenedDormantTabFromSnapshot(tab, dormantGroup);
   await saveState();
   await refreshTabs();
 }
@@ -1282,15 +1287,40 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
 function snapshotOpenSpace(spaceId) {
   if (!spaceId) return;
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
-  const view = buildSpaceViewForSpace(spaceId);
+  const view = buildSpaceViewForSpace(spaceId).filter((group) => group.key !== 'ungrouped');
   const liveSnapshot = buildSpaceSnapshot({ view });
-  const snapshot = mergeSpaceSnapshot(liveSnapshot, state.spaceSnapshots[spaceId]);
-  if (snapshotTabCount(snapshot) === 0) return;
+  const storedSnapshot = dropTemporarySnapshotGroups(state.spaceSnapshots[spaceId]);
+  const snapshot = mergeSpaceSnapshot(liveSnapshot, storedSnapshot);
   const previousSnapshot = state.spaceSnapshots[spaceId];
+  if (snapshotTabCount(snapshot) === 0) {
+    delete state.spaceSnapshots[spaceId];
+    if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+    return;
+  }
   state.spaceSnapshots[spaceId] = snapshot;
   if (!sameSnapshotGroups(previousSnapshot, snapshot) && spaceId === dormantSpaceViewSpaceId) {
     dormantSpaceViewSpaceId = '';
   }
+}
+
+function removeTemporarySnapshotTabs(spaceId) {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
+  const snapshot = dropTemporarySnapshotGroups(state.spaceSnapshots?.[spaceId]);
+  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
+  else state.spaceSnapshots[spaceId] = snapshot;
+  if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+}
+
+function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
+  const snapshot = removeSnapshotTab(state.spaceSnapshots[state.activeSpaceId], {
+    url: tab?.url,
+    groupTitle: dormantGroup?.title,
+    groupColor: dormantGroup?.color,
+  });
+  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  else state.spaceSnapshots[state.activeSpaceId] = snapshot;
+  if (state.activeSpaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
 }
 
 function sameSnapshotGroups(left, right) {
