@@ -22,6 +22,19 @@ export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpa
   cleanupMissingEntities(state, tabs, groups);
 }
 
+export function restoreSnapshotOwnership(state, tabs = [], groups = []) {
+  const snapshots = state?.spaceSnapshots || {};
+  if (!snapshots || Object.keys(snapshots).length === 0) return;
+
+  if (!state.groupSpaces || typeof state.groupSpaces !== 'object') state.groupSpaces = {};
+  if (!state.tabSpaces || typeof state.tabSpaces !== 'object') state.tabSpaces = {};
+
+  const tabsByGroupId = groupedTabsByGroupId(tabs);
+  const snapshotGroups = snapshotGroupCandidates(snapshots);
+  restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups);
+  restoreUngroupedOwnership(state, tabs, snapshotTabSpacesByUrl(snapshots));
+}
+
 export function cleanupMissingEntities(state, tabs = [], groups = []) {
   const liveTabIds = new Set(tabs.map((tab) => Number(tab.id)));
   const liveGroupIds = new Set(groups.map((group) => Number(group.id)));
@@ -88,4 +101,117 @@ export function removeSpaceReferences(state, spaceId) {
   delete state.groupOrder[spaceId];
   delete state.tabOrder[spaceId];
   delete state.spaceSnapshots[spaceId];
+}
+
+function restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups) {
+  for (const group of groups || []) {
+    if (state.groupSpaces[group.id] !== undefined) continue;
+    const groupTabs = tabsByGroupId.get(Number(group.id)) || [];
+    const groupUrls = new Set(groupTabs.map((tab) => tab.url).filter(Boolean));
+    if (groupUrls.size === 0) continue;
+
+    const match = bestSnapshotGroupMatch(group, groupUrls, snapshotGroups);
+    if (!match) continue;
+
+    state.groupSpaces[group.id] = match.spaceId;
+    rememberGroupOrderKey(state, match.spaceId, `group:${group.id}`);
+  }
+}
+
+function restoreUngroupedOwnership(state, tabs, tabSpacesByUrl) {
+  for (const tab of tabs || []) {
+    if (isGroupedTab(tab) || state.tabSpaces[tab.id] !== undefined || !tab.url) continue;
+    const spaceIds = tabSpacesByUrl.get(tab.url) || new Set();
+    if (spaceIds.size === 1) state.tabSpaces[tab.id] = [...spaceIds][0];
+  }
+}
+
+function bestSnapshotGroupMatch(group, groupUrls, snapshotGroups) {
+  let best = null;
+  let ambiguous = false;
+
+  for (const candidate of snapshotGroups) {
+    if (!groupMatchesSnapshot(group, candidate)) continue;
+    const overlap = countUrlOverlap(groupUrls, candidate.urls);
+    if (overlap === 0) continue;
+    if (!best || overlap > best.overlap) {
+      best = { ...candidate, overlap };
+      ambiguous = false;
+    } else if (overlap === best.overlap && candidate.spaceId !== best.spaceId) {
+      ambiguous = true;
+    }
+  }
+
+  return ambiguous ? null : best;
+}
+
+function groupMatchesSnapshot(group, candidate) {
+  const liveTitle = String(group?.title || 'Group');
+  const snapshotTitle = String(candidate.title || 'Group');
+  const chromeSnapshotTitle = snapshotTitle.slice(0, 32);
+  return (
+    (liveTitle === snapshotTitle || liveTitle === chromeSnapshotTitle) &&
+    String(group?.color || 'grey') === String(candidate.color || 'grey')
+  );
+}
+
+function countUrlOverlap(leftUrls, rightUrls) {
+  let count = 0;
+  for (const url of rightUrls) {
+    if (leftUrls.has(url)) count += 1;
+  }
+  return count;
+}
+
+function groupedTabsByGroupId(tabs) {
+  const map = new Map();
+  for (const tab of tabs || []) {
+    if (!isGroupedTab(tab)) continue;
+    const groupId = Number(tab.groupId);
+    if (!map.has(groupId)) map.set(groupId, []);
+    map.get(groupId).push(tab);
+  }
+  return map;
+}
+
+function snapshotGroupCandidates(snapshots) {
+  const candidates = [];
+  for (const [spaceId, snapshot] of Object.entries(snapshots || {})) {
+    for (const group of snapshot?.groups || []) {
+      if (isUngroupedSnapshotGroup(group)) continue;
+      const urls = new Set((group.tabs || []).map((tab) => tab.url).filter(Boolean));
+      if (urls.size === 0) continue;
+      candidates.push({
+        spaceId,
+        title: group.title || 'Group',
+        color: group.color || 'grey',
+        urls,
+      });
+    }
+  }
+  return candidates;
+}
+
+function snapshotTabSpacesByUrl(snapshots) {
+  const map = new Map();
+  for (const [spaceId, snapshot] of Object.entries(snapshots || {})) {
+    for (const group of snapshot?.groups || []) {
+      for (const tab of group.tabs || []) {
+        if (!tab.url) continue;
+        if (!map.has(tab.url)) map.set(tab.url, new Set());
+        map.get(tab.url).add(spaceId);
+      }
+    }
+  }
+  return map;
+}
+
+function isUngroupedSnapshotGroup(group = {}) {
+  return group.title === 'Ungrouped' && (group.color || 'grey') === 'grey';
+}
+
+function rememberGroupOrderKey(state, spaceId, key) {
+  if (!state.groupOrder || typeof state.groupOrder !== 'object') return;
+  const order = state.groupOrder[spaceId] || [];
+  if (!order.includes(key)) state.groupOrder[spaceId] = [...order, key];
 }

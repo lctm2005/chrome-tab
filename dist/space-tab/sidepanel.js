@@ -48,6 +48,7 @@ import {
   closableTabsOutsideSpace,
   fallbackSpaceAfterDelete,
   removeSpaceReferences,
+  restoreSnapshotOwnership,
   syncCollapsedGroupsFromChrome,
   tabBelongsToSpace as entityBelongsToSpace,
 } from './src/shared/space-membership.js';
@@ -172,11 +173,16 @@ function connectPanelPort() {
   });
   notifyPanelVisibility(true);
   document.addEventListener('visibilitychange', () => {
-    notifyPanelVisibility(document.visibilityState !== 'hidden');
+    const visible = document.visibilityState !== 'hidden';
+    if (!visible) persistCurrentSpaceSnapshot();
+    notifyPanelVisibility(visible);
   });
   window.addEventListener('focus', () => notifyPanelVisibility(true));
   window.addEventListener('pageshow', () => notifyPanelVisibility(true));
-  window.addEventListener('pagehide', () => notifyPanelVisibility(false));
+  window.addEventListener('pagehide', () => {
+    persistCurrentSpaceSnapshot();
+    notifyPanelVisibility(false);
+  });
 }
 
 function notifyPanelVisibility(visible) {
@@ -185,6 +191,12 @@ function notifyPanelVisibility(visible) {
   } catch {
     // The port is intentionally best-effort; Chrome can keep side panels alive while hidden.
   }
+}
+
+function persistCurrentSpaceSnapshot() {
+  if (!state?.activeSpaceId) return;
+  snapshotOpenSpace(state.activeSpaceId);
+  void saveState();
 }
 
 async function loadState() {
@@ -346,6 +358,7 @@ async function refreshTabs(options = {}) {
     const mergedGroups = await mergeDuplicateGroupsInActiveSpace();
     if (mergedGroups) await loadTabs({ adopt: false });
   }
+  snapshotOpenSpace(state.activeSpaceId);
   await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
   await saveState();
@@ -355,6 +368,7 @@ async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
   const response = await send('tabs:list');
   tabs = decorateTabs(response.tabs || [], state);
   groups = response.groups || [];
+  restoreSnapshotOwnership(state, tabs, groups);
   if (adopt) adoptUnassignedEntities(state, tabs, groups, state.activeSpaceId, { adoptGroups });
   else cleanupMissingEntities(state, tabs, groups);
   syncCollapsedGroupsFromChrome(state, groups);
@@ -1265,7 +1279,9 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
   await loadTabs({ adopt: false });
 }
 
-async function snapshotOpenSpace(spaceId) {
+function snapshotOpenSpace(spaceId) {
+  if (!spaceId) return;
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
   const view = buildSpaceViewForSpace(spaceId);
   const liveSnapshot = buildSpaceSnapshot({ view });
   const snapshot = mergeSpaceSnapshot(liveSnapshot, state.spaceSnapshots[spaceId]);

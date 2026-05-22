@@ -8,6 +8,7 @@ import {
   closableTabsOutsideSpace,
   fallbackSpaceAfterDelete,
   removeSpaceReferences,
+  restoreSnapshotOwnership,
   syncCollapsedGroupsFromChrome,
 } from '../src/shared/space-membership.js';
 
@@ -106,6 +107,96 @@ test('can clean closed tabs and groups without adopting new entities', () => {
   assert.deepEqual(state.groupSpaces, { 7: 'work' });
   assert.deepEqual(state.tabSpaces, { 4: 'work' });
   assert.deepEqual(state.renamedTabs, {});
+});
+
+test('restores Space ownership for Chrome-restored groups and tabs from snapshots', () => {
+  const state = {
+    groupSpaces: { 7: 'arc-work' },
+    tabSpaces: { 4: 'arc-work' },
+    renamedTabs: {},
+    groupOrder: { 'arc-work': ['group:7'] },
+    spaceSnapshots: {
+      'arc-work': {
+        groups: [
+          {
+            title: 'Docs / Long Folder Name That Chrome Truncates',
+            color: 'blue',
+            tabs: [
+              { title: 'Spec', url: 'https://example.com/spec' },
+              { title: 'Plan', url: 'https://example.com/plan' },
+            ],
+          },
+          {
+            title: 'Ungrouped',
+            color: 'grey',
+            tabs: [
+              { title: 'Inbox', url: 'https://example.com/inbox' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  const tabs = [
+    { id: 10, groupId: 99, url: 'https://example.com/spec' },
+    { id: 11, groupId: 99, url: 'https://example.com/plan' },
+    { id: 12, groupId: -1, url: 'https://example.com/inbox' },
+  ];
+  const groups = [
+    { id: 99, title: 'Docs / Long Folder Name That Chr', color: 'blue' },
+  ];
+
+  restoreSnapshotOwnership(state, tabs, groups);
+  cleanupMissingEntities(state, tabs, groups);
+
+  assert.deepEqual(state.groupSpaces, { 99: 'arc-work' });
+  assert.deepEqual(state.tabSpaces, { 12: 'arc-work' });
+  assert.deepEqual(state.groupOrder['arc-work'], ['group:7', 'group:99']);
+});
+
+test('restores non-imported Space groups after Chrome assigns new ids', () => {
+  const state = {
+    groupSpaces: { 21: 'default' },
+    tabSpaces: { 31: 'default' },
+    renamedTabs: {},
+    groupOrder: { default: ['group:21', 'ungrouped'] },
+    spaceSnapshots: {
+      default: {
+        groups: [
+          {
+            title: 'Local Work',
+            color: 'green',
+            tabs: [
+              { title: 'Issue', url: 'https://example.com/issue' },
+              { title: 'Notes', url: 'https://example.com/notes' },
+            ],
+          },
+          {
+            title: 'Ungrouped',
+            color: 'grey',
+            tabs: [
+              { title: 'Loose', url: 'https://example.com/loose' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  const tabs = [
+    { id: 41, groupId: 88, url: 'https://example.com/issue' },
+    { id: 42, groupId: 88, url: 'https://example.com/notes' },
+    { id: 43, groupId: -1, url: 'https://example.com/loose' },
+  ];
+  const groups = [
+    { id: 88, title: 'Local Work', color: 'green' },
+  ];
+
+  restoreSnapshotOwnership(state, tabs, groups);
+  cleanupMissingEntities(state, tabs, groups);
+
+  assert.deepEqual(state.groupSpaces, { 88: 'default' });
+  assert.deepEqual(state.tabSpaces, { 43: 'default' });
+  assert.deepEqual(state.groupOrder.default, ['group:21', 'ungrouped', 'group:88']);
 });
 
 test('finds close candidates by Space ownership without touching other Spaces', () => {
