@@ -6,6 +6,7 @@ import {
   dropTemporarySnapshotGroups,
   mergeSpaceSnapshot,
   removeSnapshotTab,
+  sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
 } from '../src/shared/space-snapshot.js';
 
@@ -96,6 +97,47 @@ test('drops temporary ungrouped tabs from a stored snapshot', () => {
   });
 });
 
+test('sanitizes invalid and new-tab placeholder rows from stored grouped snapshots', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Bigmodel',
+        color: 'blue',
+        tabs: [
+          { title: '智谱AI开放平台', url: 'https://bigmodel.cn/glm-coding' },
+          { title: 'Untitled' },
+          { title: 'New Tab', url: 'chrome://newtab' },
+          { title: '', url: '   ' },
+        ],
+      },
+      {
+        title: 'Only placeholders',
+        color: 'grey',
+        tabs: [
+          { title: 'Untitled' },
+          { title: 'New Tab', url: 'chrome://newtab' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(sanitizeSpaceSnapshot(snapshot), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Bigmodel',
+        color: 'blue',
+        tabs: [
+          { title: '智谱AI开放平台', url: 'https://bigmodel.cn/glm-coding' },
+        ],
+      },
+    ],
+  });
+});
+
 test('removes one opened dormant tab from its snapshot group', () => {
   const snapshot = {
     version: 1,
@@ -181,9 +223,7 @@ test('merges live tabs without dropping dormant snapshot content', () => {
         title: 'Ungrouped',
         color: 'grey',
         collapsed: false,
-        tabs: [
-          { title: 'New Tab', url: 'chrome://newtab' },
-        ],
+        tabs: [],
       },
     ],
   };
@@ -207,14 +247,6 @@ test('merges live tabs without dropping dormant snapshot content', () => {
         collapsed: true,
         tabs: [
           { title: 'Paper', url: 'https://example.com/paper' },
-        ],
-      },
-      {
-        title: 'Ungrouped',
-        color: 'grey',
-        collapsed: false,
-        tabs: [
-          { title: 'New Tab', url: 'chrome://newtab' },
         ],
       },
     ],

@@ -40,6 +40,7 @@ import {
   isUngroupedSnapshotGroup,
   mergeSpaceSnapshot,
   removeSnapshotTab,
+  sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
 } from './src/shared/space-snapshot.js';
@@ -206,6 +207,7 @@ async function loadState() {
   const defaults = createDefaultState(localConfig);
   const stored = await storageGet();
   state = mergeStoredState(stored[STORAGE_KEY], defaults);
+  sanitizeStoredSpaceSnapshots();
   const secrets = await secretGet();
 
   if (localConfig.ai?.apiKey) {
@@ -377,7 +379,7 @@ async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
 
 async function loadDormantSpaceView(spaceId, options = {}) {
   if (!options.force && dormantSpaceViewSpaceId === spaceId) return;
-  const snapshot = state.spaceSnapshots?.[spaceId] || null;
+  const snapshot = sanitizeStoredSpaceSnapshot(spaceId);
   dormantSpaceView = dormantGroupsFromSnapshot(snapshot);
   dormantSpaceViewSpaceId = spaceId;
 }
@@ -1360,6 +1362,28 @@ function snapshotOpenSpace(spaceId) {
   if (!sameSnapshotGroups(previousSnapshot, snapshot) && spaceId === dormantSpaceViewSpaceId) {
     dormantSpaceViewSpaceId = '';
   }
+}
+
+function sanitizeStoredSpaceSnapshots() {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') {
+    state.spaceSnapshots = {};
+    return;
+  }
+  for (const spaceId of Object.keys(state.spaceSnapshots)) {
+    sanitizeStoredSpaceSnapshot(spaceId);
+  }
+}
+
+function sanitizeStoredSpaceSnapshot(spaceId) {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return null;
+  const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots[spaceId]);
+  if (snapshotTabCount(snapshot) === 0) {
+    delete state.spaceSnapshots[spaceId];
+    if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+    return null;
+  }
+  state.spaceSnapshots[spaceId] = snapshot;
+  return snapshot;
 }
 
 function removeTemporarySnapshotTabs(spaceId) {

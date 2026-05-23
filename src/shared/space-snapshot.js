@@ -2,6 +2,11 @@ export function shouldAutoCloseTab(tab = {}) {
   return !tab.pinned;
 }
 
+export function isRestorableSnapshotTab(tab = {}) {
+  const url = String(tab.url || '').trim();
+  return Boolean(url) && url !== 'chrome://newtab';
+}
+
 export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {
   return {
     version: 1,
@@ -13,9 +18,10 @@ export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {
         collapsed: Boolean(group.collapsed),
         tabs: (group.tabs || [])
           .filter(shouldAutoCloseTab)
+          .filter(isRestorableSnapshotTab)
           .map((tab) => ({
             title: tab.displayTitle || tab.title || tab.url || 'Untitled',
-            url: tab.url,
+            url: String(tab.url || '').trim(),
           })),
       }))
       .filter((group) => group.tabs.length > 0),
@@ -27,6 +33,7 @@ export function snapshotTabCount(snapshot = {}) {
 }
 
 export function dropTemporarySnapshotGroups(snapshot) {
+  snapshot = sanitizeSpaceSnapshot(snapshot);
   if (!snapshot) return null;
   return {
     ...snapshot,
@@ -35,6 +42,7 @@ export function dropTemporarySnapshotGroups(snapshot) {
 }
 
 export function removeSnapshotTab(snapshot, target = {}) {
+  snapshot = sanitizeSpaceSnapshot(snapshot);
   if (!snapshot) return null;
   const targetUrl = String(target.url || '');
   const targetGroupTitle = String(target.groupTitle || '');
@@ -62,6 +70,8 @@ export function removeSnapshotTab(snapshot, target = {}) {
 }
 
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
+  liveSnapshot = sanitizeSpaceSnapshot(liveSnapshot);
+  storedSnapshot = sanitizeSpaceSnapshot(storedSnapshot);
   if (!storedSnapshot || snapshotTabCount(storedSnapshot) === 0) return liveSnapshot || null;
   if (!liveSnapshot || snapshotTabCount(liveSnapshot) === 0) return storedSnapshot;
 
@@ -100,6 +110,25 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
 
 export function isUngroupedSnapshotGroup(group = {}) {
   return group.title === 'Ungrouped' && (group.color || 'grey') === 'grey';
+}
+
+export function sanitizeSpaceSnapshot(snapshot) {
+  if (!snapshot) return null;
+  const groups = (snapshot.groups || [])
+    .map((group) => ({
+      ...group,
+      title: group.title || 'Ungrouped',
+      color: group.color || (group.title === 'Ungrouped' ? 'grey' : 'blue'),
+      tabs: (group.tabs || [])
+        .filter(isRestorableSnapshotTab)
+        .map((tab) => ({
+          ...tab,
+          title: tab.title || tab.url || 'Untitled',
+          url: String(tab.url || '').trim(),
+        })),
+    }))
+    .filter((group) => group.tabs.length > 0);
+  return { ...snapshot, groups };
 }
 
 function snapshotTabs(snapshot = {}) {

@@ -307,6 +307,8 @@ async function main() {
         tabs: [
           { title: 'Baidu', url: 'https://baidu.com' },
           { title: 'Google', url: 'https://www.google.com' },
+          { title: 'Untitled' },
+          { title: 'New Tab', url: 'chrome://newtab' },
         ],
       }],
     };
