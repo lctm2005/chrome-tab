@@ -1279,14 +1279,23 @@ async function switchSpace(spaceId) {
 
   activeView = 'space';
 
-  await ensureSpaceHasOpenTab(spaceId, { active: false });
+  const keepAliveTab = await ensureSpaceHasOpenTab(spaceId, { active: true });
 
   state.activeSpaceId = spaceId;
   await loadDormantSpaceView(spaceId, { force: true });
-  await focusFirstTabInSpace(spaceId, { force: true });
+  await focusFirstTabInSpace(spaceId, {
+    force: true,
+    allowEphemeral: true,
+    ephemeralTabId: keepAliveTab?.id,
+  });
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
+  await closeEphemeralTabsExcept(keepAliveTab?.id);
   await closeTabsOutsideActiveSpace();
-  await focusFirstTabInSpace(spaceId, { force: true });
+  await focusFirstTabInSpace(spaceId, {
+    force: true,
+    allowEphemeral: true,
+    ephemeralTabId: keepAliveTab?.id,
+  });
   await collapseGroupsInSpace(spaceId);
   await discardInactiveTabsInSpace(spaceId);
   await saveState();
@@ -1338,6 +1347,19 @@ async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
 async function closeEphemeralTabs() {
   await loadTabs({ adopt: false });
   const ephemeralTabs = tabs.filter((tab) => isEphemeralTab(tab));
+  for (const tab of ephemeralTabs) {
+    forgetEphemeralTab(tab.id);
+    await send('tabs:close', { tabId: tab.id });
+  }
+  if (ephemeralTabs.length) await loadTabs({ adopt: false });
+}
+
+async function closeEphemeralTabsExcept(keepTabId) {
+  await loadTabs({ adopt: false });
+  const keepId = Number(keepTabId);
+  const ephemeralTabs = tabs.filter((tab) => (
+    isEphemeralTab(tab) && Number(tab.id) !== keepId
+  ));
   for (const tab of ephemeralTabs) {
     forgetEphemeralTab(tab.id);
     await send('tabs:close', { tabId: tab.id });
@@ -1416,7 +1438,8 @@ function hasDormantContent(spaceId) {
 
 async function ensureSpaceHasOpenTab(spaceId, options = {}) {
   await loadTabs({ adopt: false });
-  if (tabs.some((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId))) return;
+  const existing = preferredFocusableTab(tabs.filter((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId)));
+  if (existing) return existing;
   const created = await send('tabs:create', { url: 'chrome://newtab', active: options.active !== false });
   const tabId = created.tab?.id;
   if (tabId) {
@@ -1424,6 +1447,7 @@ async function ensureSpaceHasOpenTab(spaceId, options = {}) {
     else state.tabSpaces[tabId] = spaceId;
   }
   await loadTabs({ adopt: false });
+  return created.tab || null;
 }
 
 async function ensureSpaceOpenFromSnapshot(spaceId, options = {}) {
@@ -1459,7 +1483,16 @@ async function discardInactiveTabsInSpace(spaceId) {
 
 async function focusFirstTabInSpace(spaceId, options = {}) {
   await loadTabs({ adopt: false });
-  const target = preferredFocusableTab(tabs.filter((tab) => tabBelongsToSpace(tab, spaceId)));
+  const spaceTabs = tabs.filter((tab) => tabBelongsToSpace(tab, spaceId));
+  const preferredEphemeral = tabs.find((tab) => (
+    options.allowEphemeral &&
+    Number.isFinite(Number(options.ephemeralTabId)) &&
+    Number(tab.id) === Number(options.ephemeralTabId) &&
+    isEphemeralTab(tab)
+  ));
+  const target = preferredFocusableTab(spaceTabs) ||
+    preferredEphemeral ||
+    (options.allowEphemeral ? preferredFocusableTab(tabs.filter(isEphemeralTab)) : null);
   if (target && (options.force || !target.active)) await send('tabs:focus', { tabId: target.id });
 }
 

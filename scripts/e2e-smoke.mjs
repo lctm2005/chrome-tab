@@ -345,6 +345,31 @@ async function main() {
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'E2E Space'`);
   record('add Space dialog creates and activates a Space', true);
 
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    buttons.find((button) => button.title === 'Space').click();
+    return true;
+  })()`);
+  const emptySpaceSwitchState = await waitFor(client, `(() => {
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'Space') return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const rows = [...document.querySelectorAll('.tab-row')].map((row) => row.textContent);
+    return {
+      rows,
+      ephemeralTabIds: stored.ephemeralTabIds || [],
+      defaultSnapshotGroups: (stored.spaceSnapshots?.default?.groups || []).map((group) => group.title),
+      e2eSnapshot: stored.spaceSnapshots?.['e2e-space'] || null,
+    };
+  })()`);
+  record(
+    'switching away from a brand-new empty Space keeps a hidden active carrier without leaking rows',
+    emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
+      ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
+      !emptySpaceSwitchState.e2eSnapshot &&
+      !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab|chrome/i.test(text)),
+    JSON.stringify(emptySpaceSwitchState)
+  );
+
   await evaluate(client, `document.querySelector('.new-tab-row').click()`);
   await waitFor(client, `document.querySelectorAll('.tab-row').length >= 1`);
   const newTabRows = await evaluate(client, `document.querySelectorAll('.tab-row').length`);
