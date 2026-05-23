@@ -4,11 +4,13 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createArcImportPlan } from '../src/shared/arc-import.js';
 
 const port = Number(process.env.CDP_PORT || 9223);
 const extensionId = process.env.EXT_ID || 'fignfifoniblkonapihmkfakmlgkbkcf';
 const preview = process.env.PREVIEW !== '0';
 const previewPort = Number(process.env.PREVIEW_PORT || 8765);
+const arcImportFile = process.env.ARC_IMPORT_FILE || '';
 const repoRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const base = `http://127.0.0.1:${port}`;
 const autoChrome = process.env.E2E_AUTO_CHROME !== '0';
@@ -332,6 +334,81 @@ async function main() {
     await client.send('Page.reload', { ignoreCache: true });
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
+
+    if (arcImportFile) {
+      const arcImportText = await readFile(arcImportFile, 'utf8');
+      const existingSpaces = await evaluate(client, `(() => {
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        return stored.spaces || [];
+      })()`);
+      const arcPlan = createArcImportPlan(arcImportText, { existingSpaces, now: 1779000000000 });
+      await evaluate(client, `(() => {
+        const STORAGE_KEY = 'spaceTabsState';
+        const plan = ${JSON.stringify(arcPlan)};
+        const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}').spaceTabsState || {};
+        stored.spaces = [...(stored.spaces || []), ...plan.spaces];
+        stored.spaceSnapshots = { ...(stored.spaceSnapshots || {}), ...(plan.spaceSnapshots || {}) };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: stored }));
+        location.reload();
+        return true;
+      })()`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+      for (const space of arcPlan.spaces) {
+        await evaluate(client, `(() => {
+          const title = ${JSON.stringify(space.name)};
+          const button = [...document.querySelectorAll('.space')]
+            .find((node) => node.title === title);
+          button?.click();
+          return Boolean(button);
+        })()`);
+        const arcSwitchState = await waitFor(client, `(() => {
+          const title = ${JSON.stringify(space.name)};
+          if (document.querySelector('#activeSpaceName')?.textContent !== title) return null;
+          const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+          const snapshot = stored.spaceSnapshots?.[${JSON.stringify(space.id)}] || null;
+          const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
+            text: row.textContent,
+            dormant: row.classList.contains('dormant'),
+          }));
+          const visibleGroupLabels = [
+            ...[...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
+            ...[...document.querySelectorAll('.folder-header strong')].map((node) => node.textContent),
+          ];
+          return {
+            activeSpaceId: stored.activeSpaceId,
+            rows: rows.length,
+            dormantRows: rows.filter((row) => row.dormant).length,
+            visibleGroupLabels,
+            snapshotGroups: (snapshot?.groups || []).length,
+            snapshotTabs: (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0),
+            ephemeralTabIds: stored.ephemeralTabIds || [],
+            leakedPlaceholders: rows
+              .map((row) => row.text)
+              .filter((text) => /Untitled|New Tab|chrome/i.test(text)),
+          };
+        })()`);
+        const hasSnapshotTabs = arcSwitchState.snapshotTabs > 0;
+        record(
+          `Arc imported Space activates: ${space.name}`,
+          arcSwitchState.activeSpaceId === space.id &&
+            (hasSnapshotTabs
+              ? arcSwitchState.visibleGroupLabels.length > 0 &&
+                arcSwitchState.leakedPlaceholders.length === 0 &&
+                arcSwitchState.ephemeralTabIds.length === 1
+              : arcSwitchState.rows >= 1 &&
+                arcSwitchState.dormantRows === 0 &&
+                arcSwitchState.ephemeralTabIds.length === 0),
+          JSON.stringify(arcSwitchState)
+        );
+      }
+      await evaluate(client, `(() => {
+        const button = [...document.querySelectorAll('.space')]
+          .find((node) => node.title === 'Space');
+        button.click();
+        return true;
+      })()`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+    }
 
   await evaluate(client, `document.querySelector('.add-space').click()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open`);
