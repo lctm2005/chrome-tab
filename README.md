@@ -71,7 +71,7 @@ Default bindings:
 
 | Action | Shortcut |
 | --- | --- |
-| Toggle panel | `Cmd+S` on macOS, `Ctrl+Shift+S` elsewhere |
+| Toggle panel | `Alt+S` |
 | Ask submit | `Cmd+Enter` |
 | Abort Ask | `Ctrl+C` |
 | Open Ask Page | `Alt+A` |

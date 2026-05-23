@@ -320,7 +320,7 @@ h1 {
   align-items: center;
   gap: 6px;
   min-height: 32px;
-  margin-left: calc(var(--folder-depth, 0) * 12px);
+  margin-left: 0;
   padding: 6px 8px;
   background: transparent;
   color: var(--text-soft);
@@ -358,7 +358,6 @@ h1 {
   color: var(--text);
 }
 
-/* Custom caret icon, clean transitions */
 .folder-caret {
   display: grid;
   place-items: center;
@@ -367,16 +366,19 @@ h1 {
   height: 14px;
 }
 
-.folder-caret-icon {
-  width: 14px;
-  height: 14px;
-  stroke: currentColor;
-  stroke-width: 2.5;
-  transition: transform 0.2s ease;
+.folder-caret::before {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  content: "";
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform 0.18s ease;
 }
 
-.folder-section.collapsed .folder-caret-icon {
-  transform: rotate(-90deg);
+.folder-section.collapsed > .folder-header .folder-caret::before {
+  transform: rotate(-45deg);
 }
 
 .folder-icon {
@@ -489,10 +491,9 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  margin-left: calc((var(--folder-depth, 0) + 1) * 12px);
+  margin-left: 12px;
   padding-left: 8px;
   border-left: 1px solid var(--line);
-  animation: slideDown 0.2s ease-out;
 }
 
 .tab-list {

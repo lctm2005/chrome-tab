@@ -15,6 +15,9 @@ test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.name), ['Space']);
   assert.deepEqual(state.groupSpaces, {});
+  assert.deepEqual(state.virtualGroups, {});
+  assert.deepEqual(state.tabGroups, {});
+  assert.deepEqual(state.ephemeralTabIds, []);
   assert.deepEqual(state.groupOrder, {});
   assert.deepEqual(state.tabOrder, {});
   assert.deepEqual(state.collapsedGroups, {});
@@ -22,12 +25,25 @@ test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
   assert.deepEqual(state.askSessions, {});
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
-  assert.equal(state.shortcuts.togglePanel, 'Meta+S');
+  assert.equal(state.shortcuts.togglePanel, 'Alt+S');
   assert.equal(state.ai.model, 'glm-5.1');
   assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
   assert.equal(state.ai.apiKey, 'secret');
   assert.equal(state.ai.language, 'zh-CN');
   assert.equal(STORAGE_KEY, 'spaceTabsState');
+});
+
+test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    shortcuts: {
+      togglePanel: 'Meta+S',
+      askSubmit: 'Control+Enter',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
+  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
 test('merges stored state without dropping new defaults', () => {

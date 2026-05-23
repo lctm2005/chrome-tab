@@ -10,7 +10,7 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
   assert.equal(manifest.background.type, 'module');
-  assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Command+S');
+  assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Alt+S');
   assert.equal(manifest.commands._execute_action.description, 'Toggle Space Tabs');
   assert.deepEqual(manifest.content_scripts[0].matches, ['http://*/*', 'https://*/*']);
   assert.deepEqual(manifest.content_scripts[0].js, ['content-script.js']);

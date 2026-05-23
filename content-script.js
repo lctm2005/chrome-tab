@@ -9,7 +9,7 @@ const PAGE_SHORTCUT_ACTIONS = [
   'nextSpace',
 ];
 const DEFAULT_SHORTCUTS = {
-  togglePanel: 'Meta+S',
+  togglePanel: 'Alt+S',
   openAsk: 'Alt+A',
   tidyNames: 'Control+Alt+T',
   autoGroup: 'Control+Alt+G',
@@ -17,6 +17,7 @@ const DEFAULT_SHORTCUTS = {
   previousSpace: 'Control+Alt+ArrowLeft',
   nextSpace: 'Control+Alt+ArrowRight',
 };
+const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 
 let activeShortcuts = mergeContentShortcuts();
 
@@ -82,7 +83,10 @@ function pageShortcutActionFromEvent(event) {
 function mergeContentShortcuts(stored = {}) {
   const next = {};
   for (const action of PAGE_SHORTCUT_ACTIONS) {
-    next[action] = normalizeContentShortcut(stored[action] || DEFAULT_SHORTCUTS[action]);
+    const storedShortcut = normalizeContentShortcut(stored[action] || '');
+    next[action] = action === 'togglePanel' && storedShortcut === LEGACY_TOGGLE_PANEL_SHORTCUT
+      ? DEFAULT_SHORTCUTS[action]
+      : normalizeContentShortcut(storedShortcut || DEFAULT_SHORTCUTS[action]);
   }
   return next;
 }

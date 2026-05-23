@@ -23,7 +23,7 @@ export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {
 }
 
 export function snapshotTabCount(snapshot = {}) {
-  return (snapshot.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
+  return (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
 export function dropTemporarySnapshotGroups(snapshot) {

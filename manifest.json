@@ -38,8 +38,8 @@
   "commands": {
     "_execute_action": {
       "suggested_key": {
-        "default": "Ctrl+Shift+S",
-        "mac": "Command+S"
+        "default": "Alt+S",
+        "mac": "Alt+S"
       },
       "description": "Toggle Space Tabs"
     }

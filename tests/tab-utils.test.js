@@ -180,7 +180,32 @@ test('builds Space view using saved group order, tab order, and collapsed state'
   assert.deepEqual(view[1].tabs.map((tab) => tab.id), [2, 1]);
 });
 
-test('uses Chrome tab group collapsed state when building grouped Space rows', () => {
+test('builds Space view from local virtual groups before Chrome groups', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'default',
+    tabSpaces: { 1: 'default', 2: 'default' },
+    tabGroups: { 1: 'vgroup:docs' },
+    virtualGroups: {
+      'vgroup:docs': { title: 'Docs', color: 'green', spaceId: 'default' },
+    },
+    groupOrder: { default: ['vgroup:docs', 'ungrouped'] },
+    tabs: [
+      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: 8 },
+      { id: 2, title: 'Loose', url: 'https://loose.example.com', groupId: 8 },
+    ],
+    groups: [
+      { id: 8, title: 'Chrome Group', color: 'blue' },
+    ],
+    includeUngrouped: true,
+  });
+
+  assert.deepEqual(view.map((group) => group.key), ['vgroup:docs', 'ungrouped']);
+  assert.equal(view[0].title, 'Docs');
+  assert.deepEqual(view[0].tabs.map((tab) => tab.id), [1]);
+  assert.deepEqual(view[1].tabs.map((tab) => tab.id), [2]);
+});
+
+test('uses local collapsed state over Chrome tab group state', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',
     groupSpaces: { 8: 'default' },
@@ -193,7 +218,7 @@ test('uses Chrome tab group collapsed state when building grouped Space rows', (
     ],
   });
 
-  assert.equal(view[0].collapsed, true);
+  assert.equal(view[0].collapsed, false);
 });
 
 test('can keep an empty Ungrouped bucket visible as a drop target', () => {

@@ -10,6 +10,7 @@ export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpa
   }
 
   for (const tab of tabs) {
+    if (state.tabSpaces[tab.id] !== undefined) continue;
     if (isGroupedTab(tab)) {
       delete state.tabSpaces[tab.id];
       continue;
@@ -48,6 +49,13 @@ export function cleanupMissingEntities(state, tabs = [], groups = []) {
   for (const groupId of Object.keys(state.groupSpaces || {})) {
     if (!liveGroupIds.has(Number(groupId))) delete state.groupSpaces[groupId];
   }
+  for (const tabId of Object.keys(state.tabGroups || {})) {
+    if (!liveTabIds.has(Number(tabId))) delete state.tabGroups[tabId];
+  }
+  const usedVirtualGroups = new Set(Object.values(state.tabGroups || {}));
+  for (const groupKey of Object.keys(state.virtualGroups || {})) {
+    if (!usedVirtualGroups.has(groupKey)) delete state.virtualGroups[groupKey];
+  }
 }
 
 export function syncCollapsedGroupsFromChrome(state, groups = []) {
@@ -57,6 +65,7 @@ export function syncCollapsedGroupsFromChrome(state, groups = []) {
 }
 
 export function tabBelongsToSpace(tab, state, spaceId) {
+  if (state.tabSpaces?.[tab.id] !== undefined) return state.tabSpaces[tab.id] === spaceId;
   if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] === spaceId;
   return state.tabSpaces[tab.id] === spaceId;
 }
@@ -70,6 +79,7 @@ export function closableTabsForSpace(tabs = [], state, spaceId, shouldClose) {
 }
 
 export function tabHasSpaceOwner(tab, state) {
+  if (state.tabSpaces?.[tab.id] !== undefined) return true;
   if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] !== undefined;
   return state.tabSpaces[tab.id] !== undefined;
 }
@@ -101,6 +111,12 @@ export function removeSpaceReferences(state, spaceId) {
   delete state.groupOrder[spaceId];
   delete state.tabOrder[spaceId];
   delete state.spaceSnapshots[spaceId];
+  for (const [groupKey, group] of Object.entries(state.virtualGroups || {})) {
+    if (group?.spaceId === spaceId) delete state.virtualGroups[groupKey];
+  }
+  for (const [tabId, groupKey] of Object.entries(state.tabGroups || {})) {
+    if (!state.virtualGroups?.[groupKey]) delete state.tabGroups[tabId];
+  }
 }
 
 function restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups) {

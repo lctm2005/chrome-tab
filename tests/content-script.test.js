@@ -97,6 +97,15 @@ test('content script honors customized Space shortcuts', async () => {
   assert.deepEqual(asPlainMessages(messages), [{ type: 'shortcut:action', action: 'nextSpace' }]);
 });
 
+test('content script migrates legacy Cmd+S toggle shortcut to Alt+S', async () => {
+  const { listeners, messages } = await loadContentScript({ togglePanel: 'Meta+S' });
+
+  listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', metaKey: true }));
+  listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', altKey: true }));
+
+  assert.deepEqual(asPlainMessages(messages), [{ type: 'panel:toggle' }]);
+});
+
 test('content script does not steal plain web page typing shortcuts', async () => {
   const { listeners, messages } = await loadContentScript();
   const event = keyEvent({ key: '/', code: 'Slash' });

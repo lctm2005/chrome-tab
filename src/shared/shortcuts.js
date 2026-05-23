@@ -1,5 +1,5 @@
 export const SHORTCUT_ACTIONS = [
-  { id: 'togglePanel', label: 'Toggle panel', defaultShortcut: 'Meta+S' },
+  { id: 'togglePanel', label: 'Toggle panel', defaultShortcut: 'Alt+S' },
   { id: 'askSubmit', label: 'Submit Ask', defaultShortcut: 'Meta+Enter' },
   { id: 'askAbort', label: 'Stop Ask', defaultShortcut: 'Control+C' },
   { id: 'openAsk', label: 'Open Ask Page', defaultShortcut: 'Alt+A' },

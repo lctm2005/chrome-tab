@@ -122,6 +122,8 @@ export function buildSpaceView({
   groups = [],
   groupSpaces = {},
   tabSpaces = {},
+  virtualGroups = {},
+  tabGroups = {},
   groupOrder = {},
   tabOrder = {},
   collapsedGroups = {},
@@ -129,23 +131,34 @@ export function buildSpaceView({
 }) {
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const visibleTabs = tabs.filter((tab) => {
+    if (tabSpaces[tab.id] !== undefined) return tabSpaces[tab.id] === activeSpaceId;
     if (isGroupedTab(tab)) return groupSpaces[tab.groupId] === activeSpaceId;
     return tabSpaces[tab.id] === activeSpaceId;
   });
   const buckets = new Map();
 
   for (const tab of visibleTabs) {
-    const grouped = isGroupedTab(tab);
-    const key = grouped ? `group:${tab.groupId}` : 'ungrouped';
+    const virtualGroupKey = tabGroups[tab.id];
+    const virtualGroup = virtualGroupKey ? virtualGroups[virtualGroupKey] : null;
+    const grouped = Boolean(virtualGroup) || (tabSpaces[tab.id] === undefined && isGroupedTab(tab));
+    const key = virtualGroup
+      ? virtualGroupKey
+      : grouped
+      ? `group:${tab.groupId}`
+      : 'ungrouped';
     if (!buckets.has(key)) {
       const group = groupsById.get(tab.groupId);
       buckets.set(key, {
         key,
-        id: grouped ? tab.groupId : 'ungrouped',
-        title: grouped ? (group?.title || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title)) : 'Ungrouped',
-        color: grouped ? (group?.color || 'grey') : 'grey',
+        id: virtualGroup ? virtualGroupKey : grouped ? tab.groupId : 'ungrouped',
+        title: virtualGroup
+          ? virtualGroup.title
+          : grouped
+          ? (group?.title || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title))
+          : 'Ungrouped',
+        color: virtualGroup ? (virtualGroup.color || 'grey') : grouped ? (group?.color || 'grey') : 'grey',
         collapsed: grouped
-          ? Boolean(group?.collapsed ?? collapsedGroups[key])
+          ? Boolean(collapsedGroups[key] ?? virtualGroup?.collapsed ?? group?.collapsed)
           : Boolean(collapsedGroups[key]),
         tabs: [],
       });

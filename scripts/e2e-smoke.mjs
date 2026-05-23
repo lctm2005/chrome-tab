@@ -384,6 +384,57 @@ async function main() {
   );
 
   await evaluate(client, `(() => {
+    const workHeader = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    workHeader.click();
+    return true;
+  })()`);
+  const collapsedFolderState = await waitFor(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    if (!workSection?.classList.contains('collapsed')) return null;
+    return {
+      collapsed: workSection.classList.contains('collapsed'),
+      expanded: workSection.querySelector(':scope > .folder-header')?.getAttribute('aria-expanded'),
+      childFolders: workSection.querySelectorAll(':scope > .folder-children > .folder-section').length,
+      groupHeaders: [...workSection.querySelectorAll(':scope > .folder-children .group-header h2')]
+        .map((node) => node.textContent),
+    };
+  })()`);
+  record(
+    'folder collapse click updates nested folder DOM',
+    collapsedFolderState.collapsed &&
+      collapsedFolderState.expanded === 'false' &&
+      collapsedFolderState.childFolders === 0 &&
+      collapsedFolderState.groupHeaders.length === 0,
+    JSON.stringify(collapsedFolderState)
+  );
+
+  await evaluate(client, `(() => {
+    const workHeader = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    workHeader.click();
+    return true;
+  })()`);
+  const expandedFolderState = await waitFor(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    if (!workSection || workSection.classList.contains('collapsed')) return null;
+    return {
+      expanded: workSection.querySelector(':scope > .folder-header')?.getAttribute('aria-expanded'),
+      folders: [...workSection.querySelectorAll('.folder-header strong')].map((node) => node.textContent),
+      groupHeaders: [...workSection.querySelectorAll('.group-header h2')].map((node) => node.textContent),
+    };
+  })()`);
+  record(
+    'folder expand click restores nested folder DOM',
+    expandedFolderState.expanded === 'true' &&
+      expandedFolderState.folders.includes('Client') &&
+      expandedFolderState.groupHeaders.includes('Docs'),
+    JSON.stringify(expandedFolderState)
+  );
+
+  await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
     const space = buttons.find((button) => button.title === 'Space');
     space.click();
@@ -493,22 +544,36 @@ async function main() {
       dormant: row.classList.contains('dormant'),
     }));
     const searchRows = rows.filter((row) => /Baidu|Google|baidu|google/i.test(row.text));
+    const allRowText = rows.map((row) => row.text);
     return {
       snapshotUrls: (searchSnapshot?.tabs || []).map((tab) => tab.url),
       searchRows,
       dormantRows: rows.filter((row) => row.dormant).length,
+      allRowText,
+      virtualGroups: Object.values(stored.virtualGroups || {}).map((group) => group.title),
+      tabGroupCount: Object.keys(stored.tabGroups || {}).length,
+      ephemeralTabIds: stored.ephemeralTabIds || [],
     };
   })()`);
   record(
-    'opening one dormant grouped tab shows one live row and one remaining dormant row',
+    'opening one dormant grouped tab uses local virtual grouping without leaked new tabs',
     firstDormantOpenState.snapshotUrls.length === 2 &&
       new Set(firstDormantOpenState.snapshotUrls).size === 2 &&
       firstDormantOpenState.searchRows.length === 2 &&
-      firstDormantOpenState.dormantRows === 1,
+      firstDormantOpenState.dormantRows === 1 &&
+      firstDormantOpenState.virtualGroups.includes('Search') &&
+      firstDormantOpenState.tabGroupCount >= 1 &&
+      firstDormantOpenState.ephemeralTabIds.length === 0 &&
+      !firstDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text)),
     JSON.stringify(firstDormantOpenState)
   );
-  if (firstDormantOpenState.searchRows.length !== 2 || firstDormantOpenState.dormantRows !== 1) {
-    bugs.push('Opening a dormant grouped tab left duplicate dormant/live rows.');
+  if (
+    firstDormantOpenState.searchRows.length !== 2 ||
+    firstDormantOpenState.dormantRows !== 1 ||
+    firstDormantOpenState.ephemeralTabIds.length !== 0 ||
+    firstDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text))
+  ) {
+    bugs.push('Opening a dormant grouped tab left duplicate dormant/live rows or leaked a new-tab carrier.');
   }
 
   await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
@@ -521,10 +586,15 @@ async function main() {
       dormant: row.classList.contains('dormant'),
     }));
     const searchRows = rows.filter((row) => /Baidu|Google|baidu|google/i.test(row.text));
+    const allRowText = rows.map((row) => row.text);
     return {
       snapshotUrls: (searchSnapshot?.tabs || []).map((tab) => tab.url),
       searchRows,
       dormantRows: rows.filter((row) => row.dormant).length,
+      allRowText,
+      virtualGroups: Object.values(stored.virtualGroups || {}).map((group) => group.title),
+      tabGroupCount: Object.keys(stored.tabGroups || {}).length,
+      ephemeralTabIds: stored.ephemeralTabIds || [],
     };
   })()`);
   record(
@@ -532,11 +602,20 @@ async function main() {
     allDormantOpenState.snapshotUrls.length === 2 &&
       new Set(allDormantOpenState.snapshotUrls).size === 2 &&
       allDormantOpenState.searchRows.length === 2 &&
-      allDormantOpenState.dormantRows === 0,
+      allDormantOpenState.dormantRows === 0 &&
+      allDormantOpenState.virtualGroups.includes('Search') &&
+      allDormantOpenState.tabGroupCount >= 2 &&
+      allDormantOpenState.ephemeralTabIds.length === 0 &&
+      !allDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text)),
     JSON.stringify(allDormantOpenState)
   );
-  if (allDormantOpenState.searchRows.length !== 2 || allDormantOpenState.dormantRows !== 0) {
-    bugs.push('Opening all dormant grouped tabs did not fully drain the dormant snapshot.');
+  if (
+    allDormantOpenState.searchRows.length !== 2 ||
+    allDormantOpenState.dormantRows !== 0 ||
+    allDormantOpenState.ephemeralTabIds.length !== 0 ||
+    allDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text))
+  ) {
+    bugs.push('Opening all dormant grouped tabs did not fully drain the dormant snapshot or leaked a new-tab carrier.');
   }
 
   await evaluate(client, `(() => {

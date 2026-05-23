@@ -58,7 +58,7 @@ test('can explicitly adopt new Chrome groups into the active Space', () => {
   assert.equal(state.groupSpaces[8], 'focus');
 });
 
-test('recognizes Chrome tab group id 0 as grouped', () => {
+test('lets local tab ownership override Chrome tab group id 0', () => {
   const state = {
     groupSpaces: { 0: 'work' },
     tabSpaces: { 1: 'stale' },
@@ -73,10 +73,10 @@ test('recognizes Chrome tab group id 0 as grouped', () => {
   ], 'focus');
 
   assert.equal(state.groupSpaces[0], 'work');
-  assert.equal(state.tabSpaces[1], undefined);
+  assert.equal(state.tabSpaces[1], 'stale');
   assert.deepEqual(closableTabsForSpace([
     { id: 1, groupId: 0 },
-  ], state, 'work', () => true).map((tab) => tab.id), [1]);
+  ], state, 'stale', () => true).map((tab) => tab.id), [1]);
 });
 
 test('syncs Chrome tab group collapsed state into Space state', () => {
@@ -106,6 +106,30 @@ test('can clean closed tabs and groups without adopting new entities', () => {
 
   assert.deepEqual(state.groupSpaces, { 7: 'work' });
   assert.deepEqual(state.tabSpaces, { 4: 'work' });
+  assert.deepEqual(state.renamedTabs, {});
+});
+
+test('cleans local virtual group mappings for closed tabs', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: { 4: 'work', 9: 'work' },
+    tabGroups: { 4: 'vgroup:docs', 9: 'vgroup:stale' },
+    virtualGroups: {
+      'vgroup:docs': { title: 'Docs', color: 'blue', spaceId: 'work' },
+      'vgroup:stale': { title: 'Stale', color: 'grey', spaceId: 'work' },
+    },
+    renamedTabs: { 9: 'Gone' },
+  };
+
+  cleanupMissingEntities(state, [
+    { id: 4, groupId: -1 },
+  ], []);
+
+  assert.deepEqual(state.tabSpaces, { 4: 'work' });
+  assert.deepEqual(state.tabGroups, { 4: 'vgroup:docs' });
+  assert.deepEqual(state.virtualGroups, {
+    'vgroup:docs': { title: 'Docs', color: 'blue', spaceId: 'work' },
+  });
   assert.deepEqual(state.renamedTabs, {});
 });
 

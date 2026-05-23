@@ -1,7 +1,8 @@
-import { mergeShortcuts } from './shortcuts.js';
+import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
+const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -13,6 +14,9 @@ export function createDefaultState(localConfig = {}) {
     ],
     groupSpaces: {},
     tabSpaces: {},
+    virtualGroups: {},
+    tabGroups: {},
+    ephemeralTabIds: [],
     renamedTabs: {},
     groupOrder: {},
     tabOrder: {},
@@ -51,6 +55,11 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     spaces,
     groupSpaces: compatibleSpaceModel ? { ...defaults.groupSpaces, ...(stored.groupSpaces || {}) } : defaults.groupSpaces,
     tabSpaces: compatibleSpaceModel ? { ...defaults.tabSpaces, ...(stored.tabSpaces || {}) } : defaults.tabSpaces,
+    virtualGroups: compatibleSpaceModel ? { ...defaults.virtualGroups, ...(stored.virtualGroups || {}) } : defaults.virtualGroups,
+    tabGroups: compatibleSpaceModel ? { ...defaults.tabGroups, ...(stored.tabGroups || {}) } : defaults.tabGroups,
+    ephemeralTabIds: compatibleSpaceModel && Array.isArray(stored.ephemeralTabIds)
+      ? stored.ephemeralTabIds.map(Number).filter(Number.isFinite)
+      : defaults.ephemeralTabIds,
     renamedTabs: { ...defaults.renamedTabs, ...(stored.renamedTabs || {}) },
     groupOrder: compatibleSpaceModel ? { ...defaults.groupOrder, ...(stored.groupOrder || {}) } : defaults.groupOrder,
     tabOrder: compatibleSpaceModel ? { ...defaults.tabOrder, ...(stored.tabOrder || {}) } : defaults.tabOrder,
@@ -59,9 +68,17 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
-    shortcuts: mergeShortcuts(stored.shortcuts, defaults.shortcuts),
+    shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts),
     ai: { ...defaults.ai, ...(stored.ai || {}) },
   };
+}
+
+function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}) {
+  const shortcuts = mergeShortcuts(storedShortcuts, defaultShortcuts);
+  if (normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT) {
+    shortcuts.togglePanel = defaultShortcuts.togglePanel;
+  }
+  return shortcuts;
 }
 
 export function serializeTab(tab) {
