@@ -1200,6 +1200,10 @@ dialog::backdrop {
   margin-bottom: 2px;
 }
 
+.file-picker input {
+  padding: 8px;
+}
+
 .shortcuts-list {
   display: grid;
   gap: 6px;

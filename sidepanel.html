@@ -118,9 +118,13 @@
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
         <section class="arc-import-settings">
           <h3>Arc Import</h3>
-          <p>Reads <code>StorableSidebar.json</code> from this extension folder. Import appends Spaces and keeps the current Space active.</p>
-          <button type="button" id="importArcButton" class="secondary-button">Append Import</button>
-          <div id="arcImportStatus" class="settings-status">Ready to append Arc import.</div>
+          <p>Select Arc's <code>StorableSidebar.json</code>. Import appends Spaces and keeps the current Space active.</p>
+          <label class="file-picker">
+            Arc sidebar file
+            <input id="arcImportInput" type="file" accept=".json,application/json">
+          </label>
+          <button type="button" id="importArcButton" class="secondary-button" disabled>Append Import</button>
+          <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
         </section>
         <section class="shortcut-settings">
           <h3>Shortcuts</h3>

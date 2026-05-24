@@ -73,8 +73,6 @@ const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
 const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
 const previewSend = createPreviewCommandHandler();
-const ARC_IMPORT_FILE = 'StorableSidebar.json';
-const ARC_IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
     <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
@@ -97,6 +95,7 @@ let activePanelAction = '';
 let panelPort = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
+let pendingArcImportText = '';
 let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
@@ -117,6 +116,7 @@ const els = {
   summarizePageButton: document.querySelector('#summarizePageButton'),
   testAIButton: document.querySelector('#testAIButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
+  arcImportInput: document.querySelector('#arcImportInput'),
   importArcButton: document.querySelector('#importArcButton'),
   arcImportStatus: document.querySelector('#arcImportStatus'),
   spacesList: document.querySelector('#spacesList'),
@@ -241,6 +241,7 @@ function bindEvents() {
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
   els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
+  els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
@@ -2014,53 +2015,51 @@ async function testAI() {
   }
 }
 
-async function importArcFile() {
+async function previewArcImportFile() {
+  const file = els.arcImportInput.files?.[0];
+  pendingArcImportText = '';
   els.importArcButton.disabled = true;
-  setArcImportStatus(`Reading ${ARC_IMPORT_FILE}...`);
-  try {
-    const text = await readArcImportFile();
-    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
-    if (plan.spaces.length === 0) {
-      setArcImportStatus(formatArcImportSummary(plan.summary));
-      return;
-    }
+  if (!file) {
+    setArcImportStatus('No Arc file selected.');
+    return;
+  }
 
+  if (file.size > 20 * 1024 * 1024) {
+    setArcImportStatus('This file is too large to import safely. Select Arc StorableSidebar.json.');
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
+    pendingArcImportText = text;
+    els.importArcButton.disabled = plan.spaces.length === 0;
+    setArcImportStatus(formatArcImportSummary(plan.summary, 'Ready to append'));
+  } catch (error) {
+    setArcImportStatus(`Cannot read Arc file: ${error.message || String(error)}`);
+  }
+}
+
+async function importArcFile() {
+  if (!pendingArcImportText) {
+    setArcImportStatus('Choose an Arc sidebar file first.');
+    return;
+  }
+
+  try {
+    const plan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
     const result = appendArcImportPlan(state, plan);
     await saveState();
     render();
+    pendingArcImportText = '';
+    els.arcImportInput.value = '';
+    els.importArcButton.disabled = true;
     const message = `Imported ${result.importedSpaces} Spaces and ${result.importedTabs} tabs. Current Space stayed active.`;
     setArcImportStatus(message);
     setSettingsStatus(message);
   } catch (error) {
     setArcImportStatus(`Import failed: ${error.message || String(error)}`);
-  } finally {
-    els.importArcButton.disabled = false;
   }
-}
-
-async function readArcImportFile() {
-  const response = await fetch(arcImportFileUrl(), { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`Cannot read ${ARC_IMPORT_FILE}. Make sure it exists next to sidepanel.html.`);
-  }
-
-  const size = Number(response.headers.get('content-length') || 0);
-  if (size > ARC_IMPORT_MAX_BYTES) {
-    throw new Error(`${ARC_IMPORT_FILE} is too large to import safely.`);
-  }
-
-  const text = await response.text();
-  if (text.length > ARC_IMPORT_MAX_BYTES) {
-    throw new Error(`${ARC_IMPORT_FILE} is too large to import safely.`);
-  }
-  return text;
-}
-
-function arcImportFileUrl() {
-  if (extensionRuntime && chrome?.runtime?.getURL) {
-    return chrome.runtime.getURL(ARC_IMPORT_FILE);
-  }
-  return ARC_IMPORT_FILE;
 }
 
 function showTabContextMenu(event, tab) {

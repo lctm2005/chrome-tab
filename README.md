@@ -58,9 +58,10 @@ If no API key is configured, normal Space, folder, and tab management features c
 
 ## Arc Import
 
-1. Put Arc's `StorableSidebar.json` in the extension folder next to `sidepanel.html`.
-2. Open `Settings`.
-3. Click `Append Import`.
+1. Open `Settings`.
+2. Choose Arc's `StorableSidebar.json`.
+3. Review the import summary.
+4. Click `Append Import`.
 
 The importer appends Spaces and keeps the current Space active. Arc folders become nested folder paths, leaf folders become Chrome tab groups when opened, and saved tabs remain dormant until selected.
 
