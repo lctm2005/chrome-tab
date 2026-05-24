@@ -1,4 +1,5 @@
 config.local.js
+StorableSidebar.json
 *.crx
 *.pem
 .DS_Store
