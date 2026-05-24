@@ -611,27 +611,48 @@ async function main() {
     return headers.includes('Research') && headers.includes('Build') && headers.includes('Inbox');
   })()`);
   const groupContextMenuState = await evaluate(client, `(() => {
-    const header = [...document.querySelectorAll('.group-header')]
-      .find((node) => node.querySelector('h2')?.textContent === 'Research');
-    const event = new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      button: 2,
-      clientX: 32,
-      clientY: 32,
+    return [...document.querySelectorAll('.group-header')].map((header, index) => {
+      const rect = header.getBoundingClientRect();
+      const x = Math.round(rect.left + Math.min(24, Math.max(1, rect.width / 2)));
+      const y = Math.round(rect.top + Math.max(1, rect.height / 2));
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: x,
+        clientY: y,
+      });
+      const mouseDownResult = header.dispatchEvent(mouseDown);
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: x,
+        clientY: y,
+      });
+      const dispatchResult = header.dispatchEvent(event);
+      const menu = document.querySelector('#contextMenu');
+      const result = {
+        index,
+        title: header.querySelector('h2')?.textContent || '',
+        mouseDownPrevented: mouseDown.defaultPrevented || mouseDownResult === false,
+        prevented: event.defaultPrevented || dispatchResult === false,
+        menuHidden: menu?.hidden,
+        menuText: menu?.textContent || '',
+      };
+      document.body.click();
+      return result;
     });
-    const dispatchResult = header.dispatchEvent(event);
-    return {
-      prevented: event.defaultPrevented || dispatchResult === false,
-      menuHidden: document.querySelector('#contextMenu')?.hidden,
-      menuText: document.querySelector('#contextMenu')?.textContent || '',
-    };
   })()`);
   record(
-    'group header right-click opens custom menu and suppresses Chrome menu',
-    groupContextMenuState.prevented &&
-      groupContextMenuState.menuHidden === false &&
-      groupContextMenuState.menuText.includes('Rename'),
+    'all group header right-clicks open custom menu and suppress Chrome menu',
+    groupContextMenuState.length >= 3 &&
+      groupContextMenuState.every((item) => (
+        item.mouseDownPrevented &&
+        item.prevented &&
+        item.menuHidden === false &&
+        item.menuText.includes('Rename')
+      )),
     JSON.stringify(groupContextMenuState)
   );
   await evaluate(client, `document.body.click()`);

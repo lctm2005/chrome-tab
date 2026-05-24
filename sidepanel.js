@@ -631,9 +631,7 @@ function handleGroupHeaderMouseDown(event) {
   if (!header) return;
   event.preventDefault();
   event.stopPropagation();
-  const group = groupContextFromHeader(header);
-  if (group) showGroupContextMenu(event, group);
-  else hideContextMenu();
+  hideContextMenu();
 }
 
 function groupHeaderFromEvent(event) {
