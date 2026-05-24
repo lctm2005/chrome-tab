@@ -577,6 +577,45 @@ async function main() {
       expandedFolderState.groupHeaders.includes('Docs'),
     JSON.stringify(expandedFolderState)
   );
+  const dormantGroupContextMenuState = await evaluate(client, `(() => {
+    const header = [...document.querySelectorAll('.group-header')]
+      .find((node) => node.querySelector('h2')?.textContent === 'Docs');
+    const rect = header.getBoundingClientRect();
+    const x = Math.round(rect.left + Math.min(24, Math.max(1, rect.width / 2)));
+    const y = Math.round(rect.top + Math.max(1, rect.height / 2));
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: x,
+      clientY: y,
+    });
+    const mouseDownResult = header.dispatchEvent(mouseDown);
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: x,
+      clientY: y,
+    });
+    const dispatchResult = header.dispatchEvent(event);
+    const menu = document.querySelector('#contextMenu');
+    return {
+      mouseDownPrevented: mouseDown.defaultPrevented || mouseDownResult === false,
+      prevented: event.defaultPrevented || dispatchResult === false,
+      menuHidden: menu?.hidden,
+      menuText: menu?.textContent || '',
+    };
+  })()`);
+  record(
+    'dormant imported group right-click opens custom menu',
+    dormantGroupContextMenuState.mouseDownPrevented &&
+      dormantGroupContextMenuState.prevented &&
+      dormantGroupContextMenuState.menuHidden === false &&
+      dormantGroupContextMenuState.menuText.includes('Rename'),
+    JSON.stringify(dormantGroupContextMenuState)
+  );
+  await evaluate(client, `document.body.click()`);
   const folderContextMenuState = await evaluate(client, `(() => {
     const header = [...document.querySelectorAll('.folder-header')]
       .find((node) => node.querySelector('strong')?.textContent === 'Work');

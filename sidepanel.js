@@ -646,7 +646,7 @@ function groupContextFromHeader(header) {
   if (!header.classList.contains('group-header')) return null;
   const key = header.dataset.groupKey || header.closest('[data-group-key]')?.dataset.groupKey;
   const group = key ? renderedGroupContexts.get(key) : null;
-  if (!group || group.dormant) return null;
+  if (!group) return null;
   return group;
 }
 
@@ -1128,7 +1128,9 @@ async function renameGroup(group) {
   const clean = nextName.trim();
   if (!clean) return;
 
-  if (group.id === 'ungrouped') {
+  if (group.dormant) {
+    renameDormantSnapshotGroup(group, clean);
+  } else if (group.id === 'ungrouped') {
     const tabIds = group.tabs.map((tab) => tab.id);
     if (tabIds.length === 0) return;
     const groupKey = createVirtualGroup({ title: clean, color: nextGroupColor() });
@@ -1209,7 +1211,9 @@ async function moveTabToSpace(tab, spaceId) {
 }
 
 async function moveGroupToSpace(group, spaceId) {
-  if (group.id === 'ungrouped') {
+  if (group.dormant) {
+    moveDormantSnapshotGroup(group, spaceId);
+  } else if (group.id === 'ungrouped') {
     for (const tab of group.tabs) state.tabSpaces[tab.id] = spaceId;
   } else if (isVirtualGroupKey(group.key)) {
     state.virtualGroups[group.key] = {
@@ -1241,7 +1245,14 @@ async function moveGroupToSpace(group, spaceId) {
 }
 
 async function deleteGroup(group) {
-  if (!group || group.id === 'ungrouped' || group.dormant) return;
+  if (!group || group.id === 'ungrouped') return;
+  if (group.dormant) {
+    deleteDormantSnapshotGroup(group);
+    await saveState();
+    await refreshTabs();
+    setStatus(`Deleted saved group "${group.displayTitle || group.title}".`);
+    return;
+  }
   const tabIds = group.tabs.map((tab) => Number(tab.id)).filter(Number.isFinite);
   if (tabIds.length === 0) return;
 
@@ -1437,6 +1448,80 @@ function removeTemporarySnapshotTabs(spaceId) {
   if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
   else state.spaceSnapshots[spaceId] = snapshot;
   if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+}
+
+function renameDormantSnapshotGroup(group, title) {
+  updateDormantSnapshotGroup(group, (snapshotGroup) => ({
+    ...snapshotGroup,
+    title,
+  }));
+}
+
+function deleteDormantSnapshotGroup(group) {
+  updateDormantSnapshotGroup(group, () => null);
+}
+
+function moveDormantSnapshotGroup(group, spaceId) {
+  let movingGroup = null;
+  updateDormantSnapshotGroup(group, (snapshotGroup) => {
+    movingGroup = snapshotGroup;
+    return null;
+  });
+  if (!movingGroup) return;
+
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
+  const targetSnapshot = sanitizeSpaceSnapshot(state.spaceSnapshots[spaceId]) || {
+    version: 1,
+    updatedAt: Date.now(),
+    groups: [],
+  };
+  targetSnapshot.groups = [...(targetSnapshot.groups || []), movingGroup];
+  targetSnapshot.updatedAt = Date.now();
+  state.spaceSnapshots[spaceId] = targetSnapshot;
+}
+
+function updateDormantSnapshotGroup(group, updater) {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
+  const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots[state.activeSpaceId]);
+  if (!snapshot) return;
+  const groupIndex = snapshotGroupIndexFromKey(group.key);
+  let changed = false;
+  const groups = [];
+
+  for (let index = 0; index < (snapshot.groups || []).length; index += 1) {
+    const snapshotGroup = snapshot.groups[index];
+    const matches = index === groupIndex || (
+      groupIndex < 0 &&
+      snapshotGroup.title === group.title &&
+      (snapshotGroup.color || 'grey') === (group.color || 'grey')
+    );
+    if (!matches) {
+      groups.push(snapshotGroup);
+      continue;
+    }
+    const nextGroup = updater({
+      ...snapshotGroup,
+      tabs: [...(snapshotGroup.tabs || [])],
+    });
+    if (nextGroup && (nextGroup.tabs || []).length > 0) groups.push(nextGroup);
+    changed = true;
+  }
+
+  if (!changed) return;
+  const nextSnapshot = {
+    ...snapshot,
+    updatedAt: Date.now(),
+    groups,
+  };
+  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+}
+
+function snapshotGroupIndexFromKey(key) {
+  const match = String(key || '').match(/^snapshot:(\d+):/);
+  return match ? Number(match[1]) : -1;
 }
 
 function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
