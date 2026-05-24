@@ -34,6 +34,25 @@ test('preview command handler returns tab group metadata', async () => {
   assert.equal(listed.groups.some((group) => group.title === 'Research'), true);
 });
 
+test('preview command handler can record command history for e2e invariants', async () => {
+  globalThis.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+  try {
+    const send = createPreviewCommandHandler();
+    await send('tabs:create', { url: 'https://example.com/new' });
+    await send('tabs:focus', { tabId: 2 });
+
+    assert.deepEqual(
+      globalThis.__SPACE_TABS_PREVIEW_COMMANDS__.map((command) => command.type),
+      ['tabs:create', 'tabs:focus']
+    );
+    assert.deepEqual(globalThis.__SPACE_TABS_PREVIEW_COMMANDS__[0].payload, {
+      url: 'https://example.com/new',
+    });
+  } finally {
+    delete globalThis.__SPACE_TABS_PREVIEW_COMMANDS__;
+  }
+});
+
 test('preview command handler supports tab creation, focus, and close', async () => {
   const send = createPreviewCommandHandler();
   const created = await send('tabs:create', { url: 'https://example.com/new' });

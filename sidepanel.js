@@ -1279,7 +1279,7 @@ async function switchSpace(spaceId) {
 
   activeView = 'space';
 
-  if (shouldUseDormantOnlySwitch(spaceId)) {
+  if (shouldUseLocalOnlySwitch(spaceId)) {
     state.activeSpaceId = spaceId;
     await loadDormantSpaceView(spaceId, { force: true });
     await saveState();
@@ -1310,8 +1310,7 @@ async function switchSpace(spaceId) {
   await refreshTabs();
 }
 
-function shouldUseDormantOnlySwitch(spaceId) {
-  if (!hasDormantContent(spaceId)) return false;
+function shouldUseLocalOnlySwitch(spaceId) {
   return !tabs.some((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId));
 }
 

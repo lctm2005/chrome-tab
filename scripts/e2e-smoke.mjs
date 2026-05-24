@@ -17,6 +17,19 @@ const autoChrome = process.env.E2E_AUTO_CHROME !== '0';
 const sidepanelUrl = preview
   ? (process.env.PREVIEW_URL || `http://127.0.0.1:${previewPort}/sidepanel.html`)
   : `chrome-extension://${extensionId}/sidepanel.html`;
+const dormantSwitchMutationCommands = [
+  'tabs:create',
+  'tabs:focus',
+  'tabs:discard',
+  'tabs:close',
+  'tabs:group',
+  'tabs:ungroup',
+  'tabs:groupExisting',
+  'tabs:move',
+  'groups:move',
+  'groups:update',
+];
+const carrierMutationCommands = ['tabs:create', 'tabs:close'];
 
 const contentTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -354,6 +367,7 @@ async function main() {
       })()`);
       await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
       for (const space of arcPlan.spaces) {
+        await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
         await evaluate(client, `(() => {
           const title = ${JSON.stringify(space.name)};
           const button = [...document.querySelectorAll('.space')]
@@ -374,6 +388,9 @@ async function main() {
             ...[...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
             ...[...document.querySelectorAll('.folder-header strong')].map((node) => node.textContent),
           ];
+          const mutationCommands = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
+          const chromeMutations = (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+            .filter((command) => mutationCommands.has(command.type));
           return {
             activeSpaceId: stored.activeSpaceId,
             rows: rows.length,
@@ -382,9 +399,10 @@ async function main() {
             snapshotGroups: (snapshot?.groups || []).length,
             snapshotTabs: (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0),
             ephemeralTabIds: stored.ephemeralTabIds || [],
+            chromeMutations,
             leakedPlaceholders: rows
               .map((row) => row.text)
-              .filter((text) => /Untitled|New Tab|chrome/i.test(text)),
+              .filter((text) => /Untitled|New Tab/i.test(text)),
           };
         })()`);
         const hasSnapshotTabs = arcSwitchState.snapshotTabs > 0;
@@ -394,10 +412,13 @@ async function main() {
             (hasSnapshotTabs
               ? arcSwitchState.visibleGroupLabels.length > 0 &&
                 arcSwitchState.leakedPlaceholders.length === 0 &&
-                arcSwitchState.ephemeralTabIds.length === 0
-              : arcSwitchState.rows >= 1 &&
+                arcSwitchState.ephemeralTabIds.length === 0 &&
+                arcSwitchState.chromeMutations.length === 0
+              : arcSwitchState.rows === 0 &&
                 arcSwitchState.dormantRows === 0 &&
-                arcSwitchState.ephemeralTabIds.length === 0),
+                arcSwitchState.ephemeralTabIds.length === 0 &&
+                arcSwitchState.chromeMutations.length === 0 &&
+                arcSwitchState.leakedPlaceholders.length === 0),
           JSON.stringify(arcSwitchState)
         );
       }
@@ -410,6 +431,7 @@ async function main() {
       await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
     }
 
+  await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
   await evaluate(client, `document.querySelector('.add-space').click()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open`);
   await evaluate(client, `(() => {
@@ -420,8 +442,22 @@ async function main() {
     return true;
   })()`);
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'E2E Space'`);
-  record('add Space dialog creates and activates a Space', true);
+  const newEmptySpaceState = await waitFor(client, `(() => {
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'E2E Space') return null;
+    const mutationCommands = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
+    return {
+      rows: document.querySelectorAll('.tab-row').length,
+      chromeMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => mutationCommands.has(command.type)),
+    };
+  })()`);
+  record(
+    'add Space dialog creates and activates an empty local Space without Chrome mutations',
+    newEmptySpaceState.rows === 0 && newEmptySpaceState.chromeMutations.length === 0,
+    JSON.stringify(newEmptySpaceState)
+  );
 
+  await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
     buttons.find((button) => button.title === 'Space').click();
@@ -431,19 +467,23 @@ async function main() {
     if (document.querySelector('#activeSpaceName')?.textContent !== 'Space') return null;
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const rows = [...document.querySelectorAll('.tab-row')].map((row) => row.textContent);
+    const carrierMutations = new Set(${JSON.stringify(carrierMutationCommands)});
     return {
       rows,
       ephemeralTabIds: stored.ephemeralTabIds || [],
       defaultSnapshotGroups: (stored.spaceSnapshots?.default?.groups || []).map((group) => group.title),
       e2eSnapshot: stored.spaceSnapshots?.['e2e-space'] || null,
+      carrierMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => carrierMutations.has(command.type)),
     };
   })()`);
   record(
-    'switching away from a brand-new empty Space shows dormant target without creating a carrier',
+    'switching away from a brand-new empty Space does not create or close carrier tabs',
     emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
-      !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab|chrome/i.test(text)),
+      emptySpaceSwitchState.carrierMutations.length === 0 &&
+      !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab/i.test(text)),
     JSON.stringify(emptySpaceSwitchState)
   );
 

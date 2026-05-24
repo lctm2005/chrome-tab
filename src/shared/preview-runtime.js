@@ -87,6 +87,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
   let nextGroupId = Math.max(...groups.map((group) => group.id), 0) + 1;
 
   return async function send(type, payload = {}) {
+    recordPreviewCommand(type, payload);
     switch (type) {
       case 'tabs:list':
         return { tabs: cloneTabs(tabs), groups: groups.map((group) => ({ ...group })) };
@@ -200,6 +201,28 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         throw new Error(`Preview mode does not support command: ${type}`);
     }
   };
+}
+
+function recordPreviewCommand(type, payload) {
+  const host = typeof globalThis === 'undefined' ? null : globalThis;
+  const history = host?.__SPACE_TABS_PREVIEW_COMMANDS__;
+  if (!Array.isArray(history)) return;
+  history.push({ type, payload: structuredCloneSafe(payload) });
+}
+
+function structuredCloneSafe(value) {
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(value);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return value;
+  }
 }
 
 function cloneTabs(tabs) {
