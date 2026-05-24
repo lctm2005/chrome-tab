@@ -154,49 +154,85 @@ async function createTab(url = 'chrome://newtab', active = true) {
 }
 
 async function focusTab(tabId) {
-  const tab = await chrome.tabs.update(Number(tabId), { active: true });
-  if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
-  return { tab: serializeTab(tab) };
+  try {
+    const tab = await chrome.tabs.update(Number(tabId), { active: true });
+    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
+    return { tab: serializeTab(tab) };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { tab: null, missing: true };
+    throw error;
+  }
 }
 
 async function discardTab(tabId) {
-  const tab = await chrome.tabs.discard(Number(tabId));
-  return { tab: serializeTab(tab) };
+  try {
+    const tab = await chrome.tabs.discard(Number(tabId));
+    return { tab: serializeTab(tab) };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { tab: null, missing: true };
+    throw error;
+  }
 }
 
 async function closeTab(tabId) {
-  await chrome.tabs.remove(Number(tabId));
-  return {};
+  try {
+    await chrome.tabs.remove(Number(tabId));
+    return {};
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { missing: true };
+    throw error;
+  }
 }
 
 async function groupTabs(tabIds, title = 'Tabs', color = 'blue', collapsed = false) {
-  const ids = tabIds.map(Number).filter(Number.isFinite);
-  if (ids.length === 0) return { groupId: null };
-  const groupId = await chrome.tabs.group({ tabIds: ids });
-  await chrome.tabGroups.update(groupId, {
-    title: String(title || 'Tabs').slice(0, 32),
-    color,
-    collapsed: Boolean(collapsed),
-  });
-  return { groupId };
+  const ids = await existingTabIds(tabIds);
+  if (ids.length === 0) return { groupId: null, missing: true };
+  try {
+    const groupId = await chrome.tabs.group({ tabIds: ids });
+    await chrome.tabGroups.update(groupId, {
+      title: String(title || 'Tabs').slice(0, 32),
+      color,
+      collapsed: Boolean(collapsed),
+    });
+    return { groupId };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { groupId: null, missing: true };
+    throw error;
+  }
 }
 
 async function addTabsToGroup(groupId, tabIds) {
-  const ids = tabIds.map(Number).filter(Number.isFinite);
-  if (!Number.isFinite(Number(groupId)) || ids.length === 0) return { groupId: null };
-  const nextGroupId = await chrome.tabs.group({ groupId: Number(groupId), tabIds: ids });
-  return { groupId: nextGroupId };
+  const ids = await existingTabIds(tabIds);
+  if (!Number.isFinite(Number(groupId)) || ids.length === 0) return { groupId: null, missing: ids.length === 0 };
+  try {
+    const nextGroupId = await chrome.tabs.group({ groupId: Number(groupId), tabIds: ids });
+    return { groupId: nextGroupId };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { groupId: null, missing: true };
+    throw error;
+  }
 }
 
 async function moveTab(tabId, index) {
-  await chrome.tabs.move(Number(tabId), { index: Math.max(0, Number(index) || 0) });
-  return {};
+  try {
+    await chrome.tabs.move(Number(tabId), { index: Math.max(0, Number(index) || 0) });
+    return {};
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { missing: true };
+    throw error;
+  }
 }
 
 async function ungroupTabs(tabIds) {
-  const ids = tabIds.map(Number).filter(Number.isFinite);
-  if (ids.length) await chrome.tabs.ungroup(ids);
-  return {};
+  const ids = await existingTabIds(tabIds);
+  if (!ids.length) return { missing: true };
+  try {
+    await chrome.tabs.ungroup(ids);
+    return {};
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { missing: true };
+    throw error;
+  }
 }
 
 async function updateGroup(groupId, update = {}) {
@@ -204,13 +240,41 @@ async function updateGroup(groupId, update = {}) {
   if ('title' in update) safeUpdate.title = String(update.title || 'Group').slice(0, 32);
   if ('color' in update) safeUpdate.color = update.color;
   if ('collapsed' in update) safeUpdate.collapsed = Boolean(update.collapsed);
-  const group = await chrome.tabGroups.update(Number(groupId), safeUpdate);
-  return { group: serializeGroup(group) };
+  try {
+    const group = await chrome.tabGroups.update(Number(groupId), safeUpdate);
+    return { group: serializeGroup(group) };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { group: null, missing: true };
+    throw error;
+  }
 }
 
 async function moveGroup(groupId, index) {
-  await chrome.tabGroups.move(Number(groupId), { index: Math.max(0, Number(index) || 0) });
-  return {};
+  try {
+    await chrome.tabGroups.move(Number(groupId), { index: Math.max(0, Number(index) || 0) });
+    return {};
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { missing: true };
+    throw error;
+  }
+}
+
+async function existingTabIds(tabIds = []) {
+  const ids = tabIds.map(Number).filter(Number.isFinite);
+  const existing = [];
+  for (const id of ids) {
+    try {
+      await chrome.tabs.get(id);
+      existing.push(id);
+    } catch (error) {
+      if (!isMissingChromeEntityError(error)) throw error;
+    }
+  }
+  return existing;
+}
+
+function isMissingChromeEntityError(error) {
+  return /No (tab|group) with id/i.test(error?.message || String(error));
 }
 
 async function extractActivePage() {

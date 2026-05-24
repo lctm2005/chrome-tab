@@ -577,6 +577,27 @@ async function main() {
       expandedFolderState.groupHeaders.includes('Docs'),
     JSON.stringify(expandedFolderState)
   );
+  const folderContextMenuState = await evaluate(client, `(() => {
+    const header = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 24,
+      clientY: 24,
+    });
+    const dispatchResult = header.dispatchEvent(event);
+    return {
+      prevented: event.defaultPrevented || dispatchResult === false,
+      menuHidden: document.querySelector('#contextMenu')?.hidden,
+    };
+  })()`);
+  record(
+    'folder header right-click suppresses Chrome context menu',
+    folderContextMenuState.prevented && folderContextMenuState.menuHidden,
+    JSON.stringify(folderContextMenuState)
+  );
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
@@ -589,6 +610,31 @@ async function main() {
     const headers = [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent);
     return headers.includes('Research') && headers.includes('Build') && headers.includes('Inbox');
   })()`);
+  const groupContextMenuState = await evaluate(client, `(() => {
+    const header = [...document.querySelectorAll('.group-header')]
+      .find((node) => node.querySelector('h2')?.textContent === 'Research');
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 32,
+      clientY: 32,
+    });
+    const dispatchResult = header.dispatchEvent(event);
+    return {
+      prevented: event.defaultPrevented || dispatchResult === false,
+      menuHidden: document.querySelector('#contextMenu')?.hidden,
+      menuText: document.querySelector('#contextMenu')?.textContent || '',
+    };
+  })()`);
+  record(
+    'group header right-click opens custom menu and suppresses Chrome menu',
+    groupContextMenuState.prevented &&
+      groupContextMenuState.menuHidden === false &&
+      groupContextMenuState.menuText.includes('Rename'),
+    JSON.stringify(groupContextMenuState)
+  );
+  await evaluate(client, `document.body.click()`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
     const folder = buttons.find((button) => button.title === 'Folder Demo');

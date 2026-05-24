@@ -244,8 +244,8 @@ function bindEvents() {
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
-  els.groupsList.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
-  els.groupsList.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
+  window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
+  window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   document.addEventListener('click', hideContextMenu);
   document.addEventListener('keydown', handleDocumentKeydown);
 }
@@ -616,23 +616,36 @@ function createFolderTreeNode(node) {
 }
 
 function handleGroupHeaderContextMenu(event) {
-  const group = groupContextFromEvent(event);
-  if (!group) return;
-  showGroupContextMenu(event, group);
+  const header = groupHeaderFromEvent(event);
+  if (!header) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const group = groupContextFromHeader(header);
+  if (group) showGroupContextMenu(event, group);
+  else hideContextMenu();
 }
 
 function handleGroupHeaderMouseDown(event) {
   const isSecondaryMouse = event.button === 2 || (event.button === 0 && event.ctrlKey);
   if (!isSecondaryMouse) return;
-  const group = groupContextFromEvent(event);
-  if (!group) return;
-  showGroupContextMenu(event, group);
+  const header = groupHeaderFromEvent(event);
+  if (!header) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const group = groupContextFromHeader(header);
+  if (group) showGroupContextMenu(event, group);
+  else hideContextMenu();
 }
 
-function groupContextFromEvent(event) {
+function groupHeaderFromEvent(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-  const header = target?.closest?.('.group-header');
+  const header = target?.closest?.('.group-header, .folder-header');
   if (!header || !els.groupsList.contains(header)) return null;
+  return header;
+}
+
+function groupContextFromHeader(header) {
+  if (!header.classList.contains('group-header')) return null;
   const key = header.dataset.groupKey || header.closest('[data-group-key]')?.dataset.groupKey;
   const group = key ? renderedGroupContexts.get(key) : null;
   if (!group || group.dormant) return null;
