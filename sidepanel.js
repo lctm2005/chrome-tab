@@ -1274,10 +1274,18 @@ async function openDormantTab(tab, groupKey) {
 
 async function switchSpace(spaceId) {
   const previousSpaceId = state.activeSpaceId;
-  await loadTabs({ adopt: true });
+  await loadTabs({ adopt: false });
   await snapshotOpenSpace(previousSpaceId);
 
   activeView = 'space';
+
+  if (shouldUseDormantOnlySwitch(spaceId)) {
+    state.activeSpaceId = spaceId;
+    await loadDormantSpaceView(spaceId, { force: true });
+    await saveState();
+    await refreshTabs();
+    return;
+  }
 
   const keepAliveTab = await ensureSpaceHasOpenTab(spaceId, { active: true });
 
@@ -1300,6 +1308,11 @@ async function switchSpace(spaceId) {
   await discardInactiveTabsInSpace(spaceId);
   await saveState();
   await refreshTabs();
+}
+
+function shouldUseDormantOnlySwitch(spaceId) {
+  if (!hasDormantContent(spaceId)) return false;
+  return !tabs.some((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId));
 }
 
 async function closeTabsOutsideActiveSpace() {

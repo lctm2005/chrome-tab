@@ -268,7 +268,7 @@ test('finds close candidates by Space ownership without touching other Spaces', 
   assert.deepEqual(closeable.map((tab) => tab.id), [1]);
 });
 
-test('treats unassigned normal tabs as outside the active Space during switching', () => {
+test('does not close unassigned normal tabs during Space switching', () => {
   const state = {
     groupSpaces: { 7: 'default' },
     tabSpaces: { 4: 'default' },
@@ -276,13 +276,15 @@ test('treats unassigned normal tabs as outside the active Space during switching
   const tabs = [
     { id: 1, groupId: 7, url: 'https://example.com/active-group' },
     { id: 4, groupId: -1, url: 'https://example.com/active-loose' },
+    { id: 5, groupId: -1, url: 'https://example.com/foreign-owned' },
     { id: 8, groupId: -1, url: 'https://example.com/unassigned' },
     { id: 9, groupId: -1, url: 'chrome://extensions' },
   ];
+  state.tabSpaces[5] = 'focus';
 
   const closeable = closableTabsOutsideSpace(tabs, state, 'default', (tab) => tab.url.startsWith('https://'));
 
-  assert.deepEqual(closeable.map((tab) => tab.id), [8]);
+  assert.deepEqual(closeable.map((tab) => tab.id), [5]);
 });
 
 test('chooses the default Space as the delete fallback when available', () => {

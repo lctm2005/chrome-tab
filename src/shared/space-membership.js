@@ -91,7 +91,7 @@ function isGroupedTab(tab) {
 export function closableTabsOutsideSpace(tabs = [], state, activeSpaceId, shouldClose) {
   return tabs.filter((tab) => {
     if (!shouldClose(tab)) return false;
-    if (!tabHasSpaceOwner(tab, state)) return true;
+    if (!tabHasSpaceOwner(tab, state)) return false;
     return !tabBelongsToSpace(tab, state, activeSpaceId);
   });
 }

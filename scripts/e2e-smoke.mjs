@@ -394,7 +394,7 @@ async function main() {
             (hasSnapshotTabs
               ? arcSwitchState.visibleGroupLabels.length > 0 &&
                 arcSwitchState.leakedPlaceholders.length === 0 &&
-                arcSwitchState.ephemeralTabIds.length === 1
+                arcSwitchState.ephemeralTabIds.length === 0
               : arcSwitchState.rows >= 1 &&
                 arcSwitchState.dormantRows === 0 &&
                 arcSwitchState.ephemeralTabIds.length === 0),
@@ -439,8 +439,8 @@ async function main() {
     };
   })()`);
   record(
-    'switching away from a brand-new empty Space keeps a hidden active carrier without leaking rows',
-    emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
+    'switching away from a brand-new empty Space shows dormant target without creating a carrier',
+    emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
       !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab|chrome/i.test(text)),
