@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import {
   buildSpaceSnapshot,
   dropTemporarySnapshotGroups,
+  isRestorableSnapshotTab,
   mergeSpaceSnapshot,
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
+  snapshotTabCount,
 } from '../src/shared/space-snapshot.js';
 
 test('snapshots a Space as TabGroup -> Tab restore data', () => {
@@ -138,6 +140,42 @@ test('sanitizes invalid and new-tab placeholder rows from stored grouped snapsho
   });
 });
 
+test('trims snapshot URLs, fills default metadata, and counts remaining tabs', () => {
+  const snapshot = sanitizeSpaceSnapshot({
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: '',
+        tabs: [
+          { title: '', url: ' https://example.com/a ' },
+          { title: 'New tab', url: 'chrome://newtab' },
+        ],
+      },
+      {
+        title: 'No tabs',
+        color: 'purple',
+        tabs: [{ title: '', url: '   ' }],
+      },
+    ],
+  });
+
+  assert.deepEqual(snapshot, {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        tabs: [{ title: ' https://example.com/a ', url: 'https://example.com/a' }],
+      },
+    ],
+  });
+  assert.equal(snapshotTabCount(snapshot), 1);
+  assert.equal(isRestorableSnapshotTab({ url: 'chrome://newtab' }), false);
+  assert.equal(isRestorableSnapshotTab({ url: ' file:///tmp/demo.html ' }), true);
+});
+
 test('removes one opened dormant tab from its snapshot group', () => {
   const snapshot = {
     version: 1,
@@ -181,6 +219,33 @@ test('removes one opened dormant tab from its snapshot group', () => {
       },
     ],
   });
+});
+
+test('removes only the first matching dormant duplicate from a snapshot group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Spec A', url: 'https://example.com/spec' },
+          { title: 'Spec B', url: 'https://example.com/spec' },
+        ],
+      },
+    ],
+  };
+
+  const result = removeSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://example.com/spec',
+  });
+
+  assert.deepEqual(result.groups[0].tabs, [
+    { title: 'Spec B', url: 'https://example.com/spec' },
+  ]);
 });
 
 test('merges live tabs without dropping dormant snapshot content', () => {
@@ -251,4 +316,21 @@ test('merges live tabs without dropping dormant snapshot content', () => {
       },
     ],
   });
+});
+
+test('keeps stored dormant snapshots when live content is empty', () => {
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot({ version: 1, updatedAt: 2, groups: [] }, stored), stored);
+  assert.equal(mergeSpaceSnapshot(null, { version: 1, updatedAt: 1, groups: [] }), null);
 });

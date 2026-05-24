@@ -283,3 +283,112 @@ test('appends imported Spaces without changing the active Space', () => {
   assert.deepEqual(state.spaces.map((space) => space.id), ['default', 'arc-work']);
   assert.equal(state.spaceSnapshots['arc-work'].groups[0].tabs[0].title, 'Spec');
 });
+
+test('deduplicates Arc container references and generated Space ids', () => {
+  const arcData = {
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['space-a', 'space-b'] } },
+      spaceModels: [
+        {
+          value: {
+            id: 'space-a',
+            title: 'Work',
+            newContainerIDs: ['container-a', 'container-a'],
+          },
+        },
+        {
+          value: {
+            id: 'space-b',
+            title: 'Work',
+            containerIDs: ['container-b'],
+          },
+        },
+      ],
+      items: [
+        {
+          value: {
+            id: 'container-a',
+            data: { itemContainer: { containerType: { spaceItems: { _0: 'space-a' } } } },
+            childrenIds: ['tab-a'],
+          },
+        },
+        {
+          value: {
+            id: 'tab-a',
+            title: 'Spec',
+            data: { tab: { savedURL: 'https://example.com/spec' } },
+            childrenIds: [],
+          },
+        },
+        {
+          value: {
+            id: 'container-b',
+            data: { itemContainer: { containerType: { spaceItems: { _0: 'space-b' } } } },
+            childrenIds: ['tab-b'],
+          },
+        },
+        {
+          value: {
+            id: 'tab-b',
+            title: 'Plan',
+            data: { tab: { savedURL: 'file:///Users/test/plan.html' } },
+            childrenIds: [],
+          },
+        },
+      ],
+    },
+  };
+
+  const plan = createArcImportPlan(arcData, {
+    existingSpaces: [
+      { id: 'arc-space-a', name: 'Work' },
+      { id: 'arc-space-a-2', name: 'Work (Arc)' },
+    ],
+    now: 3,
+  });
+
+  assert.deepEqual(plan.spaces.map((space) => space.id), ['arc-space-a-3', 'arc-space-b']);
+  assert.deepEqual(plan.spaces.map((space) => space.name), ['Work (Arc 2)', 'Work (Arc 3)']);
+  assert.deepEqual(plan.summary, {
+    source: 'sidebarSyncState',
+    spaces: 2,
+    folders: 0,
+    tabs: 2,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 0,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+  });
+  assert.deepEqual(plan.spaceSnapshots['arc-space-a-3'].groups[0].tabs, [
+    { title: 'Spec', url: 'https://example.com/spec' },
+  ]);
+  assert.deepEqual(plan.spaceSnapshots['arc-space-b'].groups[0].tabs, [
+    { title: 'Plan', url: 'file:///Users/test/plan.html' },
+  ]);
+});
+
+test('handles missing Arc data as a no-op plan and rejects empty files', () => {
+  assert.throws(() => createArcImportPlan(''), /Arc import file is empty/);
+  const plan = createArcImportPlan({}, { now: 4 });
+
+  assert.deepEqual(plan, {
+    spaces: [],
+    spaceSnapshots: {},
+    summary: {
+      source: 'unknown',
+      spaces: 0,
+      folders: 0,
+      tabs: 0,
+      skipped: {
+        emptyFolders: 0,
+        invalidTabs: 0,
+        unsupportedItems: 0,
+        easel: 0,
+        splitView: 0,
+      },
+    },
+  });
+});

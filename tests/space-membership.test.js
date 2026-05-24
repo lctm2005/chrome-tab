@@ -223,6 +223,86 @@ test('restores non-imported Space groups after Chrome assigns new ids', () => {
   assert.deepEqual(state.groupOrder.default, ['group:21', 'ungrouped', 'group:88']);
 });
 
+test('does not restore ambiguous snapshot group ownership', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    groupOrder: { work: [], personal: [] },
+    spaceSnapshots: {
+      work: {
+        groups: [
+          {
+            title: 'Docs',
+            color: 'blue',
+            tabs: [{ title: 'Spec', url: 'https://example.com/shared' }],
+          },
+        ],
+      },
+      personal: {
+        groups: [
+          {
+            title: 'Docs',
+            color: 'blue',
+            tabs: [{ title: 'Spec', url: 'https://example.com/shared' }],
+          },
+        ],
+      },
+    },
+  };
+
+  restoreSnapshotOwnership(state, [
+    { id: 10, groupId: 99, url: 'https://example.com/shared' },
+  ], [
+    { id: 99, title: 'Docs', color: 'blue' },
+  ]);
+
+  assert.deepEqual(state.groupSpaces, {});
+  assert.deepEqual(state.groupOrder, { work: [], personal: [] });
+});
+
+test('uses stronger URL overlap to resolve restored snapshot groups', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    groupOrder: { work: [], research: [] },
+    spaceSnapshots: {
+      work: {
+        groups: [
+          {
+            title: 'Docs',
+            color: 'blue',
+            tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+          },
+        ],
+      },
+      research: {
+        groups: [
+          {
+            title: 'Docs',
+            color: 'blue',
+            tabs: [
+              { title: 'Spec', url: 'https://example.com/spec' },
+              { title: 'Plan', url: 'https://example.com/plan' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  restoreSnapshotOwnership(state, [
+    { id: 10, groupId: 99, url: 'https://example.com/spec' },
+    { id: 11, groupId: 99, url: 'https://example.com/plan' },
+  ], [
+    { id: 99, title: 'Docs', color: 'blue' },
+  ]);
+
+  assert.deepEqual(state.groupSpaces, { 99: 'research' });
+  assert.deepEqual(state.groupOrder.research, ['group:99']);
+});
+
 test('does not restore temporary ungrouped tabs from snapshots', () => {
   const state = {
     groupSpaces: {},
@@ -246,6 +326,47 @@ test('does not restore temporary ungrouped tabs from snapshots', () => {
 
   restoreSnapshotOwnership(state, [
     { id: 10, groupId: -1, url: 'https://google.com' },
+  ], []);
+
+  assert.deepEqual(state.tabSpaces, {});
+});
+
+test('does not restore ungrouped URLs or ambiguous ungrouped ownership', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    groupOrder: {},
+    spaceSnapshots: {
+      work: {
+        groups: [
+          {
+            title: 'Docs',
+            color: 'blue',
+            tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+          },
+          {
+            title: 'Ungrouped',
+            color: 'grey',
+            tabs: [{ title: 'Loose', url: 'https://example.com/loose' }],
+          },
+        ],
+      },
+      personal: {
+        groups: [
+          {
+            title: 'Research',
+            color: 'green',
+            tabs: [{ title: 'Spec copy', url: 'https://example.com/spec' }],
+          },
+        ],
+      },
+    },
+  };
+
+  restoreSnapshotOwnership(state, [
+    { id: 10, groupId: -1, url: 'https://example.com/spec' },
+    { id: 11, groupId: -1, url: 'https://example.com/loose' },
   ], []);
 
   assert.deepEqual(state.tabSpaces, {});
@@ -303,6 +424,11 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
   const state = {
     groupSpaces: { 7: 'default', 8: 'focus' },
     tabSpaces: { 4: 'default', 5: 'focus' },
+    tabGroups: { 4: 'vgroup:dead', 5: 'vgroup:live' },
+    virtualGroups: {
+      'vgroup:dead': { title: 'Dead', spaceId: 'default' },
+      'vgroup:live': { title: 'Live', spaceId: 'focus' },
+    },
     groupOrder: { default: ['group:7'], focus: ['group:8'] },
     tabOrder: { default: { ungrouped: [4] }, focus: { ungrouped: [5] } },
     spaceSnapshots: { default: { groups: [] }, focus: { groups: [] } },
@@ -315,4 +441,8 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
   assert.equal(state.groupOrder.default, undefined);
   assert.equal(state.tabOrder.default, undefined);
   assert.equal(state.spaceSnapshots.default, undefined);
+  assert.deepEqual(state.virtualGroups, {
+    'vgroup:live': { title: 'Live', spaceId: 'focus' },
+  });
+  assert.deepEqual(state.tabGroups, { 5: 'vgroup:live' });
 });

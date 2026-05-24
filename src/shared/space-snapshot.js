@@ -115,18 +115,21 @@ export function isUngroupedSnapshotGroup(group = {}) {
 export function sanitizeSpaceSnapshot(snapshot) {
   if (!snapshot) return null;
   const groups = (snapshot.groups || [])
-    .map((group) => ({
-      ...group,
-      title: group.title || 'Ungrouped',
-      color: group.color || (group.title === 'Ungrouped' ? 'grey' : 'blue'),
-      tabs: (group.tabs || [])
-        .filter(isRestorableSnapshotTab)
-        .map((tab) => ({
-          ...tab,
-          title: tab.title || tab.url || 'Untitled',
-          url: String(tab.url || '').trim(),
-        })),
-    }))
+    .map((group) => {
+      const title = group.title || 'Ungrouped';
+      return {
+        ...group,
+        title,
+        color: group.color || (title === 'Ungrouped' ? 'grey' : 'blue'),
+        tabs: (group.tabs || [])
+          .filter(isRestorableSnapshotTab)
+          .map((tab) => ({
+            ...tab,
+            title: tab.title || tab.url || 'Untitled',
+            url: String(tab.url || '').trim(),
+          })),
+      };
+    })
     .filter((group) => group.tabs.length > 0);
   return { ...snapshot, groups };
 }

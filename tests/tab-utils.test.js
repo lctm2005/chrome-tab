@@ -205,6 +205,26 @@ test('builds Space view from local virtual groups before Chrome groups', () => {
   assert.deepEqual(view[1].tabs.map((tab) => tab.id), [2]);
 });
 
+test('uses local tab ownership ahead of Chrome group ownership in Space view', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'default',
+    groupSpaces: { 8: 'other' },
+    tabSpaces: { 1: 'default', 2: 'other' },
+    tabs: [
+      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: 8 },
+      { id: 2, title: 'Plan', url: 'https://docs.example.com/b', groupId: 8 },
+      { id: 3, title: 'Foreign', url: 'https://docs.example.com/c', groupId: 8 },
+    ],
+    groups: [
+      { id: 8, title: 'Chrome Group', color: 'blue' },
+    ],
+    includeUngrouped: true,
+  });
+
+  assert.deepEqual(view.map((group) => group.key), ['ungrouped']);
+  assert.deepEqual(view[0].tabs.map((tab) => tab.id), [1]);
+});
+
 test('uses local collapsed state over Chrome tab group state', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',
@@ -236,6 +256,30 @@ test('can keep an empty Ungrouped bucket visible as a drop target', () => {
 
   assert.deepEqual(view.map((group) => group.key), ['group:8', 'ungrouped']);
   assert.deepEqual(view.find((group) => group.key === 'ungrouped').tabs, []);
+});
+
+test('normalizes Space group plans and filters invalid tab ids', () => {
+  const plan = spaceGroupPlan({
+    space: { name: 'A very long Space name that Chrome should truncate safely', color: 'not-a-color' },
+    tabIds: [1, '2', 'bad', Number.NaN],
+  });
+
+  assert.deepEqual(plan, {
+    title: 'A very long Space name that Chro',
+    color: 'blue',
+    tabIds: [1, 2],
+  });
+});
+
+test('ignores pinned tabs when planning tidy groups', () => {
+  const groups = planTidyGroups([
+    { id: 1, title: 'Pinned GitHub issue', url: 'https://github.com/a/b/issues/1', pinned: true },
+    { id: 2, title: 'GitHub PR', url: 'https://github.com/a/b/pull/2' },
+  ]);
+
+  assert.deepEqual(groups, [
+    { title: 'GitHub', tabIds: [2], color: 'blue' },
+  ]);
 });
 
 test('plans readable panel-only tab names without creating tab groups', () => {
