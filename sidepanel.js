@@ -679,7 +679,6 @@ function createFolderSection(folder) {
     <span class="folder-caret" aria-hidden="true"></span>
     <span class="folder-icon">${folderSvg}</span>
     <strong>${escapeHtml(folder.title)}</strong>
-    <span>${folderTabCount(folder)}</span>
   `;
   header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
 
@@ -696,12 +695,6 @@ async function toggleFolder(folderKey) {
   await saveState();
   lastRenderedGroupsSignature = '';
   render();
-}
-
-function folderTabCount(folder) {
-  return folder.children.reduce((sum, child) => (
-    sum + (child.type === 'folder' ? folderTabCount(child) : child.group.tabs.length)
-  ), 0);
 }
 
 function createGroupCard(group) {
@@ -727,14 +720,11 @@ function createGroupCard(group) {
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     ${groupFolderIcon(group.color)}
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
-    <span class="group-count">${group.tabs.length}</span>
   `;
-  if (!group.dormant) {
-    const actions = document.createElement('div');
-    actions.className = 'group-actions';
-    actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
-    header.append(actions);
-  }
+  const actions = document.createElement('div');
+  actions.className = 'group-actions';
+  actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
+  header.append(actions);
   header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
 
   const list = document.createElement('div');
@@ -773,14 +763,11 @@ function createFolderTabs(group) {
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
     ${groupFolderIcon(group.color)}
     <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
-    <span class="group-count">${group.tabs.length}</span>
   `;
-  if (!group.dormant) {
-    const actions = document.createElement('div');
-    actions.className = 'group-actions';
-    actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
-    header.append(actions);
-  }
+  const actions = document.createElement('div');
+  actions.className = 'group-actions';
+  actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
+  header.append(actions);
   header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
 
   const list = document.createElement('div');
