@@ -479,7 +479,7 @@ function dormantGroupsFromSnapshot(snapshot = {}) {
   return (snapshot?.groups || [])
     .map((group, groupIndex) => {
       const title = group.title || 'Ungrouped';
-      const key = `snapshot:${groupIndex}:${title}`;
+      const key = snapshotGroupKey(groupIndex, group);
       return {
         id: key,
         key,
@@ -567,11 +567,12 @@ function groupDragContextsFromFolderTree(nodes) {
       });
       continue;
     }
-    if (node.group?.key && !node.group.dormant) {
+    if (node.group?.key) {
       contexts.set(node.group.key, {
         type: 'group',
         key: node.group.key,
         path: folderTitleParts(node.group.title),
+        dormant: Boolean(node.group.dormant),
         groupKeys: [node.group.key],
       });
     }
@@ -700,10 +701,11 @@ async function toggleFolder(folderKey) {
 }
 
 function createGroupCard(group) {
+  const canDragGroup = Boolean(group.key && group.key !== 'ungrouped');
   const card = document.createElement('section');
   card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
   card.dataset.groupKey = group.key;
-  if (!group.dormant) {
+  if (canDragGroup) {
     card.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
     card.addEventListener('drop', (event) => dropGroup(event, group));
@@ -713,8 +715,8 @@ function createGroupCard(group) {
   header.className = 'group-header';
   header.dataset.groupKey = group.key;
   header.dataset.dragKey = group.key;
-  header.draggable = !group.dormant;
-  if (!group.dormant) {
+  header.draggable = canDragGroup;
+  if (canDragGroup) {
     header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
     header.addEventListener('dragend', clearDragState);
   }
@@ -743,10 +745,11 @@ function createGroupCard(group) {
 }
 
 function createFolderTabs(group) {
+  const canDragGroup = Boolean(group.key && group.key !== 'ungrouped');
   const section = document.createElement('section');
   section.className = `folder-direct-group${group.collapsed ? ' collapsed' : ''}`;
   section.dataset.groupKey = group.key;
-  if (!group.dormant) {
+  if (canDragGroup) {
     section.addEventListener('dragover', (event) => acceptGroupDrop(event, group));
     section.addEventListener('dragleave', () => section.classList.remove('drag-over'));
     section.addEventListener('drop', (event) => dropGroup(event, group));
@@ -756,8 +759,8 @@ function createFolderTabs(group) {
   header.className = 'group-header folder-direct-header';
   header.dataset.groupKey = group.key;
   header.dataset.dragKey = group.key;
-  header.draggable = !group.dormant;
-  if (!group.dormant) {
+  header.draggable = canDragGroup;
+  if (canDragGroup) {
     header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
     header.addEventListener('dragend', clearDragState);
   }
@@ -1513,6 +1516,10 @@ function snapshotGroupIndexFromKey(key) {
   return match ? Number(match[1]) : -1;
 }
 
+function snapshotGroupKey(index, group = {}) {
+  return `snapshot:${index}:${group.title || 'Ungrouped'}`;
+}
+
 function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
   const snapshot = removeSnapshotTab(state.spaceSnapshots[state.activeSpaceId], {
@@ -1703,6 +1710,7 @@ async function reorderGroupBlock(sourceKeys, targetKeys, placement = 'before') {
 
   const order = reorderKeyBlock(visibleKeys, sourceBlock, targetKey, placement);
   state.groupOrder[state.activeSpaceId] = order;
+  reorderDormantSnapshotGroups(order);
 
   await saveState();
   await refreshTabs();
@@ -1718,16 +1726,23 @@ async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
   if (sourceBlock.length === 0) return;
 
   const nextKeys = [];
+  const dormantMoves = [];
   for (const sourceKey of sourceBlock) {
     const group = spaceView.find((item) => item.key === sourceKey);
     if (!group) continue;
     const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
     if (!nextTitle) continue;
-    nextKeys.push(retitleGroupForNestedMove(group, nextTitle));
+    if (group.dormant) {
+      dormantMoves.push({ key: group.key, title: nextTitle });
+      nextKeys.push(group.key);
+    } else {
+      nextKeys.push(retitleGroupForNestedMove(group, nextTitle));
+    }
   }
   if (nextKeys.length === 0) return;
 
   state.groupOrder[state.activeSpaceId] = groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys);
+  if (dormantMoves.length) moveDormantSnapshotGroupsIntoContext(dormantMoves, targetContext);
 
   await saveState();
   await refreshTabs();
@@ -1768,6 +1783,87 @@ function retitleGroupForNestedMove(group, title) {
     state.tabGroups[tab.id] = groupKey;
   }
   return groupKey;
+}
+
+function reorderDormantSnapshotGroups(orderedKeys) {
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const records = snapshotGroupRecords(snapshot);
+  const orderedIndexes = orderedKeys
+    .map(snapshotGroupIndexFromKey)
+    .filter((index) => index >= 0 && index < records.length);
+  if (orderedIndexes.length === 0) return;
+
+  const seen = new Set();
+  const groups = [];
+  for (const index of orderedIndexes) {
+    if (seen.has(index)) continue;
+    groups.push(records[index].group);
+    seen.add(index);
+  }
+  for (const record of records) {
+    if (!seen.has(record.index)) groups.push(record.group);
+  }
+  replaceActiveSpaceSnapshotGroups(groups);
+}
+
+function moveDormantSnapshotGroupsIntoContext(moves, targetContext) {
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const records = snapshotGroupRecords(snapshot);
+  const moveByIndex = new Map();
+  for (const move of moves) {
+    const index = snapshotGroupIndexFromKey(move.key);
+    if (index >= 0 && index < records.length) moveByIndex.set(index, move);
+  }
+  if (moveByIndex.size === 0) return;
+
+  const targetKeySet = new Set(targetContext?.groupKeys || []);
+  const base = records.filter((record) => !moveByIndex.has(record.index));
+  const moving = records
+    .filter((record) => moveByIndex.has(record.index))
+    .map((record) => ({
+      ...record,
+      group: {
+        ...record.group,
+        title: moveByIndex.get(record.index).title,
+      },
+    }));
+  const targetIndex = base.findLastIndex((record) => targetKeySet.has(record.key));
+  const insertAt = targetIndex < 0 ? base.length : targetIndex + 1;
+  const groups = base.map((record) => record.group);
+  groups.splice(insertAt, 0, ...moving.map((record) => record.group));
+  replaceActiveSpaceSnapshotGroups(groups);
+}
+
+function activeSpaceSnapshot() {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return null;
+  return sanitizeSpaceSnapshot(state.spaceSnapshots[state.activeSpaceId]);
+}
+
+function snapshotGroupRecords(snapshot) {
+  return (snapshot?.groups || []).map((group, index) => ({
+    index,
+    key: snapshotGroupKey(index, group),
+    group: {
+      ...group,
+      tabs: [...(group.tabs || [])],
+    },
+  }));
+}
+
+function replaceActiveSpaceSnapshotGroups(groups) {
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const nextSnapshot = {
+    ...snapshot,
+    updatedAt: Date.now(),
+    groups: groups.filter((group) => (group.tabs || []).length > 0),
+  };
+  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
 }
 
 function groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys) {

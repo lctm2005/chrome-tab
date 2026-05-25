@@ -296,6 +296,7 @@ async function main() {
       { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
       { id: 'folder-demo', name: 'Folder Demo', icon: 'F', color: 'green' },
       { id: 'dormant-demo', name: 'Dormant Demo', icon: 'D', color: 'purple' },
+      { id: 'drag-demo', name: 'Drag Demo', icon: 'R', color: 'pink' },
       { id: 'temp-demo', name: 'Temp Demo', icon: 'T', color: 'orange' },
     ];
     state.activeSpaceId = 'default';
@@ -326,6 +327,30 @@ async function main() {
           { title: 'New Tab', url: 'chrome://newtab' },
         ],
       }],
+    };
+    state.spaceSnapshots['drag-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [
+        {
+          title: 'Alpha',
+          color: 'blue',
+          collapsed: true,
+          tabs: [{ title: 'Alpha Tab', url: 'https://example.com/alpha' }],
+        },
+        {
+          title: 'Beta',
+          color: 'green',
+          collapsed: true,
+          tabs: [{ title: 'Beta Tab', url: 'https://example.com/beta' }],
+        },
+        {
+          title: 'Gamma',
+          color: 'purple',
+          collapsed: true,
+          tabs: [{ title: 'Gamma Tab', url: 'https://example.com/gamma' }],
+        },
+      ],
     };
     state.spaceSnapshots['temp-demo'] = {
       version: 1,
@@ -695,6 +720,136 @@ async function main() {
     JSON.stringify(groupContextMenuState)
   );
   await evaluate(client, `document.body.click()`);
+  await evaluate(client, `(() => {
+    const buttons = [...document.querySelectorAll('.space')];
+    buttons.find((button) => button.title === 'Drag Demo').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drag Demo'`);
+  const dormantDragSetup = await waitFor(client, `(() => {
+    const headers = [...document.querySelectorAll('.group-header')].map((header) => ({
+      title: header.querySelector('h2')?.textContent || '',
+      draggable: header.draggable,
+    }));
+    return headers.some((header) => header.title === 'Alpha') &&
+      headers.some((header) => header.title === 'Beta') &&
+      headers.some((header) => header.title === 'Gamma')
+      ? headers
+      : null;
+  })()`);
+  record(
+    'dormant imported groups expose group dragging',
+    dormantDragSetup
+      .filter((header) => ['Alpha', 'Beta', 'Gamma'].includes(header.title))
+      .every((header) => header.draggable),
+    JSON.stringify(dormantDragSetup)
+  );
+  await evaluate(client, `(() => {
+    function headerForTitle(title) {
+      return [...document.querySelectorAll('.group-header')]
+        .find((header) => header.querySelector('h2')?.textContent === title);
+    }
+    function dragGroup(sourceTitle, targetTitle, ratio) {
+      const source = headerForTitle(sourceTitle);
+      const target = headerForTitle(targetTitle);
+      const dataTransfer = new DataTransfer();
+      const rect = target.getBoundingClientRect();
+      const clientX = Math.round(rect.left + Math.max(1, rect.width / 2));
+      const clientY = Math.round(rect.top + Math.max(1, rect.height * ratio));
+      source.dispatchEvent(new DragEvent('dragstart', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+        clientX,
+        clientY,
+      }));
+      target.dispatchEvent(new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+        clientX,
+        clientY,
+      }));
+      target.dispatchEvent(new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+        clientX,
+        clientY,
+      }));
+      source.dispatchEvent(new DragEvent('dragend', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+        clientX,
+        clientY,
+      }));
+    }
+    dragGroup('Beta', 'Alpha', 0.1);
+    return true;
+  })()`);
+  const dormantSortState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const titles = (stored.spaceSnapshots?.['drag-demo']?.groups || []).map((group) => group.title);
+    return titles[0] === 'Beta' ? { titles } : null;
+  })()`);
+  record(
+    'dormant imported groups can be drag-sorted',
+    dormantSortState.titles.join(' > ') === 'Beta > Alpha > Gamma',
+    JSON.stringify(dormantSortState)
+  );
+  await evaluate(client, `(() => {
+    function headerForTitle(title) {
+      return [...document.querySelectorAll('.group-header')]
+        .find((header) => header.querySelector('h2')?.textContent === title);
+    }
+    const source = headerForTitle('Gamma');
+    const target = headerForTitle('Beta');
+    const dataTransfer = new DataTransfer();
+    const rect = target.getBoundingClientRect();
+    const clientX = Math.round(rect.left + Math.max(1, rect.width / 2));
+    const clientY = Math.round(rect.top + Math.max(1, rect.height / 2));
+    source.dispatchEvent(new DragEvent('dragstart', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    target.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    target.dispatchEvent(new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    source.dispatchEvent(new DragEvent('dragend', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    return true;
+  })()`);
+  const dormantNestState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const titles = (stored.spaceSnapshots?.['drag-demo']?.groups || []).map((group) => group.title);
+    return titles.includes('Beta / Gamma') ? { titles } : null;
+  })()`);
+  record(
+    'dormant imported groups can be dragged into another group',
+    dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha',
+    JSON.stringify(dormantNestState)
+  );
+  await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
     const folder = buttons.find((button) => button.title === 'Folder Demo');
