@@ -10,7 +10,7 @@ import {
   appendArcImportPlan,
   createArcImportPlan,
 } from './src/shared/arc-import.js';
-import { createFolderTree } from './src/shared/folder-tree.js';
+import { createFolderTree, folderTitleParts } from './src/shared/folder-tree.js';
 import { renderMarkdown } from './src/shared/markdown.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
@@ -557,11 +557,12 @@ function groupDragContextsFromFolderTree(nodes) {
       const groupKeys = [];
       for (const [key, context] of childContexts) {
         contexts.set(key, context);
-        if (context.type === 'group') groupKeys.push(...context.groupKeys);
+        groupKeys.push(...context.groupKeys);
       }
       contexts.set(node.key, {
         type: 'folder',
         key: node.key,
+        path: node.path,
         groupKeys: uniqueKeys(groupKeys),
       });
       continue;
@@ -570,6 +571,7 @@ function groupDragContextsFromFolderTree(nodes) {
       contexts.set(node.group.key, {
         type: 'group',
         key: node.group.key,
+        path: folderTitleParts(node.group.title),
         groupKeys: [node.group.key],
       });
     }
@@ -1622,7 +1624,7 @@ function startGroupDrag(event, group) {
   if (isInteractiveDragTarget(event.target)) return;
   const context = dragContextForTarget(group);
   if (!context?.groupKeys?.length) return;
-  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys };
+  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys, sourceContext: context };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
@@ -1631,7 +1633,7 @@ function startFolderDrag(event, folder) {
   if (isInteractiveDragTarget(event.target)) return;
   const context = dragContextForTarget(folder);
   if (!context?.groupKeys?.length) return;
-  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys };
+  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys, sourceContext: context };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
@@ -1649,10 +1651,27 @@ function dropGroup(event, target) {
   if (!canDropGroupContext(targetContext)) return;
   const sourceKeys = [...dragState.groupKeys];
   const targetKeys = [...targetContext.groupKeys];
+  const intent = groupDropIntent(event);
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask(() => reorderGroupBlock(sourceKeys, targetKeys));
+  runTask(() => (
+    intent === 'inside'
+      ? moveGroupBlockIntoContext(sourceKeys, targetContext)
+      : reorderGroupBlock(sourceKeys, targetKeys, intent)
+  ));
+}
+
+function groupDropIntent(event) {
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const header = target?.closest?.('.group-header, .folder-header');
+  const dropElement = header && event.currentTarget?.contains?.(header) ? header : event.currentTarget;
+  const rect = dropElement?.getBoundingClientRect?.();
+  if (!rect?.height) return 'inside';
+  const ratio = (event.clientY - rect.top) / rect.height;
+  if (ratio < 0.25) return 'before';
+  if (ratio > 0.75) return 'after';
+  return 'inside';
 }
 
 function canDropGroupContext(targetContext) {
@@ -1671,20 +1690,94 @@ function isInteractiveDragTarget(target) {
   return Boolean(element?.closest?.('.tab-row, button:not(.folder-header), .group-actions'));
 }
 
-async function reorderGroupBlock(sourceKeys, targetKeys) {
+async function reorderGroupBlock(sourceKeys, targetKeys, placement = 'before') {
   const sourceKeySet = new Set(sourceKeys);
-  const targetKey = targetKeys.find((key) => !sourceKeySet.has(key));
-  if (!sourceKeySet.size || !targetKey) return;
+  if (!sourceKeySet.size) return;
 
   const visibleKeys = spaceView.map((group) => group.key);
   const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
+  const targetBlock = targetKeys.filter((key) => visibleKeys.includes(key) && !sourceKeySet.has(key));
+  const targetKey = placement === 'after' ? targetBlock.at(-1) : targetBlock[0];
   if (sourceBlock.length === 0) return;
+  if (!targetKey) return;
 
-  const order = reorderKeyBlock(visibleKeys, sourceBlock, targetKey);
+  const order = reorderKeyBlock(visibleKeys, sourceBlock, targetKey, placement);
   state.groupOrder[state.activeSpaceId] = order;
 
   await saveState();
   await refreshTabs();
+}
+
+async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
+  const targetPath = targetContext?.path || [];
+  if (!targetPath.length) return;
+
+  const sourceContext = dragState?.sourceContext || dragContextForTarget(dragState?.key);
+  const visibleKeys = spaceView.map((group) => group.key);
+  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
+  if (sourceBlock.length === 0) return;
+
+  const nextKeys = [];
+  for (const sourceKey of sourceBlock) {
+    const group = spaceView.find((item) => item.key === sourceKey);
+    if (!group) continue;
+    const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
+    if (!nextTitle) continue;
+    nextKeys.push(retitleGroupForNestedMove(group, nextTitle));
+  }
+  if (nextKeys.length === 0) return;
+
+  state.groupOrder[state.activeSpaceId] = groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys);
+
+  await saveState();
+  await refreshTabs();
+}
+
+function groupTitleForNestedMove(group, sourceContext, targetPath) {
+  const groupPath = folderTitleParts(group.title);
+  const leafTitle = groupPath.at(-1) || group.displayTitle || group.title || 'Group';
+  const relativePath = sourceContext?.type === 'folder'
+    ? groupPath.slice(Math.max(0, (sourceContext.path || []).length - 1))
+    : [leafTitle];
+  const nestedPath = [...targetPath, ...(relativePath.length ? relativePath : [leafTitle])];
+  return uniqueAdjacentPathParts(nestedPath).join(' / ');
+}
+
+function uniqueAdjacentPathParts(parts) {
+  const compact = parts.map((part) => String(part || '').trim()).filter(Boolean);
+  return compact.filter((part, index) => index === 0 || part !== compact[index - 1]);
+}
+
+function retitleGroupForNestedMove(group, title) {
+  if (isVirtualGroupKey(group.key)) {
+    state.virtualGroups[group.key] = {
+      ...(state.virtualGroups[group.key] || {}),
+      id: group.key,
+      title,
+      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
+      spaceId: state.activeSpaceId,
+      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
+    };
+    return group.key;
+  }
+
+  const groupKey = createVirtualGroup({ title, color: group.color || nextGroupColor() });
+  state.collapsedGroups[groupKey] = Boolean(state.collapsedGroups[group.key] ?? group.collapsed);
+  for (const tab of group.tabs || []) {
+    state.tabSpaces[tab.id] = state.activeSpaceId;
+    state.tabGroups[tab.id] = groupKey;
+  }
+  return groupKey;
+}
+
+function groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys) {
+  const sourceKeySet = new Set(sourceKeys);
+  const nextKeySet = new Set(nextKeys);
+  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
+  const targetKeys = (targetContext.groupKeys || []).filter((key) => !sourceKeySet.has(key) && base.includes(key));
+  const targetIndex = targetKeys.length ? base.indexOf(targetKeys.at(-1)) + 1 : base.length;
+  base.splice(targetIndex, 0, ...uniqueKeys(nextKeys));
+  return base;
 }
 
 function startTabDrag(event, tab, groupKey) {
@@ -2679,12 +2772,15 @@ function ensureTabOrderForSpace(spaceId) {
   return state.tabOrder[spaceId];
 }
 
-function reorderKeyBlock(keys, sourceKeys, targetKey) {
+function reorderKeyBlock(keys, sourceKeys, targetKey, placement = 'before') {
   const sourceKeySet = new Set(sourceKeys);
   const block = sourceKeys.filter((key) => keys.includes(key));
   const next = keys.filter((key) => !sourceKeySet.has(key));
   const targetIndex = next.indexOf(targetKey);
-  next.splice(targetIndex < 0 ? next.length : targetIndex, 0, ...block);
+  const insertAt = targetIndex < 0
+    ? next.length
+    : targetIndex + (placement === 'after' ? 1 : 0);
+  next.splice(insertAt, 0, ...block);
   return next;
 }
 

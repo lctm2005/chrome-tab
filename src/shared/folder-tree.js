@@ -59,7 +59,7 @@ function folderPathKeysForGroups(groupsToRender) {
   return keys;
 }
 
-function folderTitleParts(title) {
+export function folderTitleParts(title) {
   return String(title || '')
     .split('/')
     .map((part) => part.trim())
