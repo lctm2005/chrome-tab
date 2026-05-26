@@ -36,6 +36,7 @@ import {
 } from './src/shared/tab-selection.js';
 import {
   buildSpaceSnapshot,
+  comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isUngroupedSnapshotGroup,
   mergeSpaceSnapshot,
@@ -876,7 +877,7 @@ function createTabRow(tab, groupKey) {
   } else {
     actions.append(
       actionButton('✎', 'Rename in panel', () => renameTab(tab)),
-      actionButton('×', 'Close', () => closeTab(tab)),
+      actionButton('×', 'Close', () => closeTab(tab, groupKey)),
     );
   }
 
@@ -1230,14 +1231,19 @@ async function groupSelectedTabs(tabIds) {
   setStatus(`Grouped ${selectedTabs.length} selected tabs.`);
 }
 
-async function closeTab(tab) {
+async function closeTab(tab, groupKey = '') {
+  const sourceGroup = groupKey
+    ? spaceView.find((group) => group.key === groupKey)
+    : spaceView.find((group) => (group.tabs || []).some((item) => Number(item.id) === Number(tab.id)));
+  removeClosedTabFromSnapshot(tab, sourceGroup);
+  removeTabFromSavedOrder(tab.id);
   delete state.tabSpaces[tab.id];
   delete state.renamedTabs[tab.id];
   delete state.tabGroups?.[tab.id];
   forgetEphemeralTab(tab.id);
   await saveState();
   await send('tabs:close', { tabId: tab.id });
-  await refreshTabs();
+  await refreshTabs({ reloadDormant: true });
 }
 
 async function moveTabToSpace(tab, spaceId) {
@@ -2260,6 +2266,121 @@ function removeDormantSnapshotTabsForOpenTabs(openTabs) {
   lastRenderedGroupsSignature = '';
 }
 
+function removeClosedTabFromSnapshot(tab, sourceGroup) {
+  const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots?.[state.activeSpaceId]);
+  if (!snapshot) return;
+  const target = snapshotRemovalTargetForClosedTab(tab, sourceGroup);
+  if (target.urlKeys.length === 0 && target.titleDomainPairs.length === 0) return;
+
+  let result = removeSnapshotTabsForTarget(snapshot, target, { requireGroup: true });
+  if (!result.changed && target.groupKey) {
+    result = removeSnapshotTabsForTarget(snapshot, target, { requireGroup: false });
+  }
+  if (!result.changed) return;
+
+  const nextSnapshot = {
+    ...snapshot,
+    updatedAt: Date.now(),
+    groups: result.groups,
+  };
+  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+  forgetRecentlyOpenedDormantTab(tab.id);
+}
+
+function snapshotRemovalTargetForClosedTab(tab, sourceGroup) {
+  pruneRecentlyOpenedDormantTabs();
+  const tabId = Number(tab?.id);
+  const recentlyOpenedMatches = recentlyOpenedDormantTabs.filter((item) => (
+    Number.isFinite(tabId) && Number(item.tabId) === tabId
+  ));
+  const urlKeys = uniqueKeys([
+    comparableSnapshotUrl(tab?.url),
+    ...recentlyOpenedMatches.map((item) => item.urlKey),
+  ]);
+  const titleDomainPairs = uniqueTitleDomainPairs([
+    {
+      titleKey: tabTitleMatchKey(tab),
+      domain: domainFromUrl(tab?.url),
+    },
+    ...recentlyOpenedMatches.map((item) => ({
+      titleKey: item.titleKey,
+      domain: item.domain,
+    })),
+  ]);
+  return {
+    urlKeys,
+    titleDomainPairs,
+    groupKey: groupTitleKey(sourceGroup?.title || ''),
+  };
+}
+
+function removeSnapshotTabsForTarget(snapshot, target, options = {}) {
+  const remainingUrlMatches = new Map(target.urlKeys.map((key) => [key, 1]));
+  let fallbackRemoved = false;
+  let changed = false;
+  const groups = [];
+
+  for (const group of snapshot.groups || []) {
+    const groupMatches = !options.requireGroup ||
+      !target.groupKey ||
+      groupTitleKey(group.title) === target.groupKey;
+    if (!groupMatches) {
+      groups.push(group);
+      continue;
+    }
+
+    const tabs = [];
+    for (const snapshotTab of group.tabs || []) {
+      const snapshotUrlKey = comparableSnapshotUrl(snapshotTab.url);
+      const remainingUrlCount = remainingUrlMatches.get(snapshotUrlKey) || 0;
+      if (snapshotUrlKey && remainingUrlCount > 0) {
+        remainingUrlMatches.set(snapshotUrlKey, remainingUrlCount - 1);
+        changed = true;
+        continue;
+      }
+
+      if (!fallbackRemoved && snapshotTabMatchesTitleDomain(snapshotTab, target.titleDomainPairs)) {
+        fallbackRemoved = true;
+        changed = true;
+        continue;
+      }
+
+      tabs.push(snapshotTab);
+    }
+    if (tabs.length > 0) groups.push({ ...group, tabs });
+  }
+
+  return { changed, groups };
+}
+
+function snapshotTabMatchesTitleDomain(tab, pairs) {
+  const titleKey = tabTitleMatchKey(tab);
+  const domain = domainFromUrl(tab?.url);
+  return (pairs || []).some((pair) => (
+    pair.titleKey &&
+    pair.domain &&
+    pair.domain !== 'unknown' &&
+    pair.titleKey === titleKey &&
+    pair.domain === domain
+  ));
+}
+
+function uniqueTitleDomainPairs(pairs) {
+  const seen = new Set();
+  const unique = [];
+  for (const pair of pairs || []) {
+    if (!pair?.titleKey || !pair?.domain || pair.domain === 'unknown') continue;
+    const key = `${pair.titleKey}\n${pair.domain}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ titleKey: pair.titleKey, domain: pair.domain });
+  }
+  return unique;
+}
+
 function rememberOpenedDormantTab(tab, dormantGroup, tabId) {
   const urlKey = comparableSnapshotUrl(tab?.url);
   const groupKey = groupTitleKey(dormantGroup?.title || '');
@@ -2316,20 +2437,14 @@ function pruneRecentlyOpenedDormantTabs() {
   recentlyOpenedDormantTabs = recentlyOpenedDormantTabs.filter((item) => Number(item.openedAt) >= cutoff);
 }
 
-function tabTitleMatchKey(tab) {
-  return groupTitleKey(tab?.displayTitle || tab?.title || tab?.url || '');
+function forgetRecentlyOpenedDormantTab(tabId) {
+  const id = Number(tabId);
+  if (!Number.isFinite(id)) return;
+  recentlyOpenedDormantTabs = recentlyOpenedDormantTabs.filter((item) => Number(item.tabId) !== id);
 }
 
-function comparableSnapshotUrl(url) {
-  const raw = String(url || '').trim();
-  if (!raw) return '';
-  try {
-    const parsed = new URL(raw);
-    parsed.hash = '';
-    return parsed.toString();
-  } catch {
-    return raw.split('#')[0] || raw;
-  }
+function tabTitleMatchKey(tab) {
+  return groupTitleKey(tab?.displayTitle || tab?.title || tab?.url || '');
 }
 
 function clearDragState(event) {
@@ -3260,6 +3375,16 @@ function addGroupOrderKey(spaceId, key) {
 function ensureTabOrderForSpace(spaceId) {
   if (!state.tabOrder[spaceId]) state.tabOrder[spaceId] = {};
   return state.tabOrder[spaceId];
+}
+
+function removeTabFromSavedOrder(tabId, spaceId = state.activeSpaceId) {
+  const id = Number(tabId);
+  const order = state.tabOrder?.[spaceId];
+  if (!Number.isFinite(id) || !order) return;
+  for (const key of Object.keys(order)) {
+    order[key] = (order[key] || []).filter((item) => Number(item) !== id);
+    if (order[key].length === 0) delete order[key];
+  }
 }
 
 function reorderKeyBlock(keys, sourceKeys, targetKey, placement = 'before') {

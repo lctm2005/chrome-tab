@@ -1016,6 +1016,40 @@ async function main() {
       !activatedTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')),
     JSON.stringify(activatedTagResidueState)
   );
+  const closeGroupTagDispatchState = await evaluate(client, `(() => {
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    const row = [...(card?.querySelectorAll('.tab-row') || [])]
+      .find((node) => !node.classList.contains('dormant') && node.textContent.includes('Browser Spaces Guide'));
+    const closeButton = row?.querySelector('button[aria-label="Close"]');
+    closeButton?.click();
+    return {
+      clicked: Boolean(closeButton),
+      rowText: row?.textContent || '',
+    };
+  })()`);
+  const closeGroupTagResidueState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    if (rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
+    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .map((tab) => tab.url);
+    return { rows, snapshotUrls };
+  })()`);
+  record(
+    'closing a live group tag removes it from snapshots without dormant residue',
+    closeGroupTagDispatchState.clicked &&
+      !closeGroupTagResidueState.rows.some((row) => row.text.includes('Browser Spaces Guide')) &&
+      closeGroupTagResidueState.snapshotUrls.includes('https://example.com/drop-saved') &&
+      !closeGroupTagResidueState.snapshotUrls.some((url) => String(url || '').includes('spaces-guide')),
+    JSON.stringify({ closeGroupTagDispatchState, closeGroupTagResidueState })
+  );
   await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];

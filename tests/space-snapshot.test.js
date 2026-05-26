@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildSpaceSnapshot,
+  comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
   mergeSpaceSnapshot,
@@ -333,4 +334,55 @@ test('keeps stored dormant snapshots when live content is empty', () => {
 
   assert.deepEqual(mergeSpaceSnapshot({ version: 1, updatedAt: 2, groups: [] }, stored), stored);
   assert.equal(mergeSpaceSnapshot(null, { version: 1, updatedAt: 1, groups: [] }), null);
+});
+
+test('treats query and hash changes as the same snapshot page', () => {
+  assert.equal(
+    comparableSnapshotUrl('https://cloud-boe.bytedance.net/logs?keyword=old#top'),
+    'https://cloud-boe.bytedance.net/logs'
+  );
+  assert.equal(comparableSnapshotUrl('/logs?keyword=old#top'), '/logs');
+
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Argos',
+        color: 'blue',
+        tabs: [
+          { title: '日志关键字检索 | Argos-BOE', url: 'https://cloud-boe.bytedance.net/logs?keyword=old' },
+          { title: '发布详情 - Lark-DevOps', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+        ],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'Argos',
+        color: 'blue',
+        tabs: [
+          { title: '日志关键字检索 | Argos-BOE', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(live, stored), {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'Argos',
+        color: 'blue',
+        tabs: [
+          { title: '日志关键字检索 | Argos-BOE', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
+          { title: '发布详情 - Lark-DevOps', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+        ],
+      },
+    ],
+  });
 });

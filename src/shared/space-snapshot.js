@@ -32,6 +32,19 @@ export function snapshotTabCount(snapshot = {}) {
   return (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
+export function comparableSnapshotUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return raw.split(/[?#]/)[0] || raw;
+  }
+}
+
 export function dropTemporarySnapshotGroups(snapshot) {
   snapshot = sanitizeSpaceSnapshot(snapshot);
   if (!snapshot) return null;
@@ -75,14 +88,17 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   if (!storedSnapshot || snapshotTabCount(storedSnapshot) === 0) return liveSnapshot || null;
   if (!liveSnapshot || snapshotTabCount(liveSnapshot) === 0) return storedSnapshot;
 
-  const liveUrls = new Set(snapshotTabs(liveSnapshot).map((tab) => tab.url).filter(Boolean));
+  const liveUrls = new Set(snapshotTabs(liveSnapshot)
+    .map((tab) => comparableSnapshotUrl(tab.url))
+    .filter(Boolean));
   const liveGroupsByKey = new Map((liveSnapshot.groups || []).map((group) => [snapshotGroupKey(group), group]));
   const mergedGroups = [];
 
   for (const storedGroup of storedSnapshot.groups || []) {
     const key = snapshotGroupKey(storedGroup);
     const liveGroup = liveGroupsByKey.get(key);
-    const dormantTabs = (storedGroup.tabs || []).filter((tab) => !liveUrls.has(tab.url));
+    const dormantTabs = (storedGroup.tabs || [])
+      .filter((tab) => !liveUrls.has(comparableSnapshotUrl(tab.url)));
     if (liveGroup) {
       mergedGroups.push({
         ...liveGroup,
