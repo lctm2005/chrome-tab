@@ -988,6 +988,34 @@ async function main() {
       dormantTabDropState.syntheticStateKeys.length === 0,
     JSON.stringify({ dormantTabDropDispatchState, dormantTabDropState })
   );
+  await evaluate(client, `(() => {
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const state = raw.spaceTabsState || {};
+    const group = state.spaceSnapshots?.['drop-demo']?.groups?.find((item) => item.title === 'Drop Target');
+    group.tabs.push({
+      title: 'Browser Spaces Guide',
+      url: 'https://example.com/spaces-guide#stale-dormant-row',
+    });
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    return true;
+  })()`);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
+  const activatedTagResidueState = await waitFor(client, `(() => {
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    return rows.length ? { rows } : null;
+  })()`);
+  record(
+    'activated group tags suppress URL-variant dormant residue',
+    activatedTagResidueState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      !activatedTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')),
+    JSON.stringify(activatedTagResidueState)
+  );
   await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];

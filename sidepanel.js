@@ -100,6 +100,7 @@ let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
 let lastRenderedGroupsSignature = '';
+let recentlyOpenedDormantTabs = [];
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -432,8 +433,8 @@ function render() {
 }
 
 function mergeDormantSpaceView(liveView, dormantView) {
-  const openUrls = new Set(liveView
-    .flatMap((group) => group.tabs.map((tab) => comparableSnapshotUrl(tab.url)).filter(Boolean)));
+  const liveTabs = liveView.flatMap((group) => group.tabs || []);
+  const openUrls = new Set(liveTabs.map((tab) => comparableSnapshotUrl(tab.url)).filter(Boolean));
   const ungrouped = cloneGroup(liveView.find((group) => group.key === 'ungrouped') || null);
   const liveGroups = liveView
     .filter((group) => group.key !== 'ungrouped')
@@ -447,10 +448,12 @@ function mergeDormantSpaceView(liveView, dormantView) {
   const dormantGroups = [];
   const dormantUngroupedTabs = [];
   for (const group of dormantView || []) {
+    const matchingLiveGroup = liveGroupsByTitle.get(groupTitleKey(group.title));
+    const liveCandidates = matchingLiveGroup?.tabs?.length ? matchingLiveGroup.tabs : liveTabs;
     const dormantGroup = {
       ...group,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-      tabs: group.tabs.filter((tab) => !openUrls.has(comparableSnapshotUrl(tab.url))),
+      tabs: group.tabs.filter((tab) => !isDormantTabAlreadyOpen(tab, group, liveCandidates, openUrls)),
     };
     if (dormantGroup.tabs.length === 0) continue;
 
@@ -459,7 +462,6 @@ function mergeDormantSpaceView(liveView, dormantView) {
       continue;
     }
 
-    const matchingLiveGroup = liveGroupsByTitle.get(groupTitleKey(dormantGroup.title));
     if (matchingLiveGroup) {
       matchingLiveGroup.tabs.push(...dormantGroup.tabs);
       continue;
@@ -1487,6 +1489,7 @@ async function openDormantTab(tab, groupKey) {
   }
 
   removeOpenedDormantTabFromSnapshot(tab, dormantGroup);
+  rememberOpenedDormantTab(tab, dormantGroup, tabId);
   await closeEphemeralTabs();
   await saveState();
   await refreshTabs();
@@ -2257,8 +2260,76 @@ function removeDormantSnapshotTabsForOpenTabs(openTabs) {
   lastRenderedGroupsSignature = '';
 }
 
+function rememberOpenedDormantTab(tab, dormantGroup, tabId) {
+  const urlKey = comparableSnapshotUrl(tab?.url);
+  const groupKey = groupTitleKey(dormantGroup?.title || '');
+  if (!urlKey || !groupKey) return;
+  pruneRecentlyOpenedDormantTabs();
+  recentlyOpenedDormantTabs.push({
+    urlKey,
+    titleKey: tabTitleMatchKey(tab),
+    domain: domainFromUrl(tab?.url),
+    groupKey,
+    tabId: Number.isFinite(Number(tabId)) ? Number(tabId) : null,
+    openedAt: Date.now(),
+  });
+}
+
+function isDormantTabAlreadyOpen(dormantTab, dormantGroup, liveTabs, openUrls) {
+  const urlKey = comparableSnapshotUrl(dormantTab?.url);
+  if (urlKey && openUrls.has(urlKey)) return true;
+
+  const opened = recentlyOpenedDormantRecordForTab(dormantTab, dormantGroup);
+  if (!opened) return false;
+  return (liveTabs || []).some((liveTab) => liveTabMatchesOpenedDormantRecord(liveTab, opened));
+}
+
+function recentlyOpenedDormantRecordForTab(tab, dormantGroup) {
+  pruneRecentlyOpenedDormantTabs();
+  const urlKey = comparableSnapshotUrl(tab?.url);
+  const titleKey = tabTitleMatchKey(tab);
+  const domain = domainFromUrl(tab?.url);
+  const groupKey = groupTitleKey(dormantGroup?.title || '');
+  return recentlyOpenedDormantTabs.find((opened) => (
+    opened.groupKey === groupKey &&
+    (
+      (urlKey && opened.urlKey === urlKey) ||
+      (titleKey && opened.titleKey === titleKey && opened.domain === domain)
+    )
+  )) || null;
+}
+
+function liveTabMatchesOpenedDormantRecord(tab, opened) {
+  if (Number.isFinite(Number(opened.tabId)) && Number(tab?.id) === Number(opened.tabId)) return true;
+  const urlKey = comparableSnapshotUrl(tab?.url);
+  if (urlKey && opened.urlKey === urlKey) return true;
+  return Boolean(
+    opened.titleKey &&
+    opened.domain &&
+    tabTitleMatchKey(tab) === opened.titleKey &&
+    domainFromUrl(tab?.url) === opened.domain
+  );
+}
+
+function pruneRecentlyOpenedDormantTabs() {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  recentlyOpenedDormantTabs = recentlyOpenedDormantTabs.filter((item) => Number(item.openedAt) >= cutoff);
+}
+
+function tabTitleMatchKey(tab) {
+  return groupTitleKey(tab?.displayTitle || tab?.title || tab?.url || '');
+}
+
 function comparableSnapshotUrl(url) {
-  return String(url || '').trim();
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return raw.split('#')[0] || raw;
+  }
 }
 
 function clearDragState(event) {
