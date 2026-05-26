@@ -863,6 +863,131 @@ async function main() {
     dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha',
     JSON.stringify(dormantNestState)
   );
+  await evaluate(client, `(() => {
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const state = raw.spaceTabsState || {};
+    state.spaces = state.spaces || [];
+    if (!state.spaces.some((space) => space.id === 'drop-demo')) {
+      state.spaces.push({ id: 'drop-demo', name: 'Drop Demo', icon: 'P', color: 'cyan' });
+    }
+    state.activeSpaceId = 'drop-demo';
+    state.tabSpaces = state.tabSpaces || {};
+    state.tabGroups = state.tabGroups || {};
+    state.virtualGroups = state.virtualGroups || {};
+    state.spaceSnapshots = state.spaceSnapshots || {};
+    state.tabSpaces[2] = 'drop-demo';
+    delete state.tabGroups[2];
+    state.spaceSnapshots['drop-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [{
+        title: 'Drop Target',
+        color: 'blue',
+        collapsed: false,
+        tabs: [
+          { title: 'Browser Spaces Guide', url: 'https://example.com/spaces-guide' },
+          { title: 'Saved Doc', url: 'https://example.com/drop-saved' },
+        ],
+      }],
+    };
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    return true;
+  })()`);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
+  await waitFor(client, `(() => {
+    const source = [...document.querySelectorAll('.ungrouped-section .tab-row')]
+      .some((row) => row.textContent.includes('Browser Spaces Guide'));
+    const target = [...document.querySelectorAll('.group-header h2')]
+      .some((node) => node.textContent === 'Drop Target');
+    return source && target;
+  })()`);
+  const dormantTabDropDispatchState = await evaluate(client, `(() => {
+    const source = [...document.querySelectorAll('.ungrouped-section .tab-row')]
+      .find((row) => row.textContent.includes('Browser Spaces Guide'));
+    const target = [...document.querySelectorAll('.group-card')]
+      .find((card) => card.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    const header = target?.querySelector('.group-header');
+    if (!source || !header) return { ok: false };
+    const dataTransfer = new DataTransfer();
+    const rect = header.getBoundingClientRect();
+    const clientX = Math.round(rect.left + Math.max(1, rect.width / 2));
+    const clientY = Math.round(rect.top + Math.max(1, rect.height / 2));
+    source.dispatchEvent(new DragEvent('dragstart', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    const over = new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    });
+    const overResult = header.dispatchEvent(over);
+    const drop = new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    });
+    const dropResult = header.dispatchEvent(drop);
+    source.dispatchEvent(new DragEvent('dragend', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientX,
+      clientY,
+    }));
+    return {
+      ok: true,
+      overPrevented: over.defaultPrevented || overResult === false,
+      dropPrevented: drop.defaultPrevented || dropResult === false,
+    };
+  })()`);
+  const dormantTabDropState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const virtualEntry = Object.entries(stored.virtualGroups || {})
+      .find(([, group]) => group?.spaceId === 'drop-demo' && group?.title === 'Drop Target');
+    const groupKey = virtualEntry?.[0] || '';
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .map((tab) => tab.url);
+    const syntheticStateKeys = [
+      ...Object.keys(stored.tabSpaces || {}),
+      ...Object.keys(stored.tabGroups || {}),
+    ].filter((key) => key.startsWith('snapshot:'));
+    return groupKey && stored.tabGroups?.['2'] === groupKey ? {
+      groupKey,
+      rows,
+      snapshotUrls,
+      syntheticStateKeys,
+    } : null;
+  })()`);
+  record(
+    'live tabs can drop onto imported group headers without leaving dormant residue',
+    dormantTabDropDispatchState.ok &&
+      dormantTabDropDispatchState.overPrevented &&
+      dormantTabDropDispatchState.dropPrevented &&
+      dormantTabDropState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      dormantTabDropState.rows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      !dormantTabDropState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      dormantTabDropState.snapshotUrls
+        .filter((url) => url === 'https://example.com/spaces-guide').length === 1 &&
+      dormantTabDropState.snapshotUrls.includes('https://example.com/drop-saved') &&
+      dormantTabDropState.syntheticStateKeys.length === 0,
+    JSON.stringify({ dormantTabDropDispatchState, dormantTabDropState })
+  );
   await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
