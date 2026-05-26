@@ -644,6 +644,14 @@ async function main() {
   const folderContextMenuState = await evaluate(client, `(() => {
     const header = [...document.querySelectorAll('.folder-header')]
       .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 24,
+      clientY: 24,
+    });
+    const mouseDownResult = header.dispatchEvent(mouseDown);
     const event = new MouseEvent('contextmenu', {
       bubbles: true,
       cancelable: true,
@@ -652,14 +660,20 @@ async function main() {
       clientY: 24,
     });
     const dispatchResult = header.dispatchEvent(event);
+    const menu = document.querySelector('#contextMenu');
     return {
+      mouseDownPrevented: mouseDown.defaultPrevented || mouseDownResult === false,
       prevented: event.defaultPrevented || dispatchResult === false,
-      menuHidden: document.querySelector('#contextMenu')?.hidden,
+      menuHidden: menu?.hidden,
+      menuText: menu?.textContent || '',
     };
   })()`);
   record(
-    'folder header right-click suppresses Chrome context menu',
-    folderContextMenuState.prevented && folderContextMenuState.menuHidden,
+    'folder header right-click opens custom menu and suppresses Chrome menu',
+    folderContextMenuState.mouseDownPrevented &&
+      folderContextMenuState.prevented &&
+      folderContextMenuState.menuHidden === false &&
+      folderContextMenuState.menuText.includes('Rename'),
     JSON.stringify(folderContextMenuState)
   );
 

@@ -624,7 +624,12 @@ function handleGroupHeaderContextMenu(event) {
   event.preventDefault();
   event.stopPropagation();
   const group = groupContextFromHeader(header);
-  if (group) showGroupContextMenu(event, group);
+  if (group) {
+    showGroupContextMenu(event, group);
+    return;
+  }
+  const folder = folderContextFromHeader(header);
+  if (folder) showFolderContextMenu(event, folder);
   else hideContextMenu();
 }
 
@@ -653,6 +658,15 @@ function groupContextFromHeader(header) {
   return group;
 }
 
+function folderContextFromHeader(header) {
+  if (!header.classList.contains('folder-header')) return null;
+  const key = header.dataset.folderKey ||
+    header.dataset.dragKey ||
+    header.closest('[data-folder-key]')?.dataset.folderKey;
+  const context = key ? renderedGroupDragContexts.get(key) : null;
+  return context?.type === 'folder' ? context : null;
+}
+
 function createFolderSection(folder) {
   const collapsed = Boolean(state.collapsedGroups[folder.key]);
   const dragContext = renderedGroupDragContexts.get(folder.key);
@@ -666,6 +680,7 @@ function createFolderSection(folder) {
   header.className = 'folder-header';
   header.type = 'button';
   header.draggable = canDragFolder;
+  header.dataset.folderKey = folder.key;
   header.dataset.dragKey = folder.key;
   header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   if (canDragFolder) {
@@ -1150,6 +1165,36 @@ async function renameGroup(group) {
   await refreshTabs();
 }
 
+async function renameFolderGroup(folderContext) {
+  const groups = groupsForFolderContext(folderContext);
+  if (groups.length === 0) return;
+
+  const sourcePath = folderContext.path || [];
+  const currentName = sourcePath.at(-1) || 'Group';
+  const nextName = await askText({
+    title: 'Rename Group',
+    label: 'Group title',
+    value: currentName,
+    confirmText: 'Save',
+  });
+  if (nextName === null) return;
+  const clean = nextName.trim();
+  if (!clean) return;
+
+  const replacements = new Map();
+  const visibleKeys = spaceView.map((group) => group.key);
+  for (const group of groups) {
+    const title = renamedFolderGroupTitle(group, sourcePath, clean);
+    const nextKey = retitleGroupWithoutSaving(group, title);
+    if (nextKey) replacements.set(group.key, nextKey);
+  }
+  replaceGroupOrderKeys(replacements, visibleKeys);
+
+  await saveState();
+  await refreshTabs();
+  setStatus(`Renamed group "${currentName}" to "${clean}".`);
+}
+
 async function groupSelectedTabs(tabIds) {
   const ids = tabIds.map(Number).filter(Number.isFinite);
   if (ids.length < 2) {
@@ -1236,6 +1281,16 @@ async function moveGroupToSpace(group, spaceId) {
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
+async function moveFolderGroupToSpace(folderContext, spaceId) {
+  const groups = groupsForFolderContext(folderContext);
+  if (groups.length === 0) return;
+  moveGroupsWithoutSaving(groups, spaceId);
+  await saveState();
+  await closeTabsOutsideActiveSpace();
+  await refreshTabs();
+  setStatus(`Moved group to ${spaceName(spaceId)}.`);
+}
+
 async function deleteGroup(group) {
   if (!group || group.id === 'ungrouped') return;
   if (group.dormant) {
@@ -1262,6 +1317,156 @@ async function deleteGroup(group) {
   await saveState();
   await refreshTabs();
   setStatus(`Deleted group "${group.displayTitle || group.title}". Tabs were kept in Ungrouped.`);
+}
+
+async function deleteFolderGroup(folderContext) {
+  const groups = groupsForFolderContext(folderContext);
+  if (groups.length === 0) return;
+  deleteGroupsWithoutSaving(groups);
+  await saveState();
+  await refreshTabs();
+  setStatus(`Deleted group "${folderContext.path?.at(-1) || 'Group'}". Tabs were kept in Ungrouped.`);
+}
+
+function groupsForFolderContext(folderContext) {
+  const seen = new Set();
+  return (folderContext?.groupKeys || [])
+    .map((key) => renderedGroupContexts.get(key))
+    .filter((group) => {
+      if (!group?.key || group.id === 'ungrouped' || seen.has(group.key)) return false;
+      seen.add(group.key);
+      return true;
+    });
+}
+
+function renamedFolderGroupTitle(group, sourcePath, nextLeafTitle) {
+  const currentPath = folderTitleParts(group.title);
+  const source = sourcePath || [];
+  const targetPath = [...source.slice(0, -1), nextLeafTitle];
+  const suffix = pathStartsWith(currentPath, source)
+    ? currentPath.slice(source.length)
+    : currentPath.slice(-1);
+  return uniqueAdjacentPathParts([...targetPath, ...suffix]).join(' / ');
+}
+
+function pathStartsWith(path, prefix) {
+  if (!prefix?.length || path.length < prefix.length) return false;
+  return prefix.every((part, index) => path[index] === part);
+}
+
+function retitleGroupWithoutSaving(group, title) {
+  if (!group || group.id === 'ungrouped') return '';
+  if (group.dormant) {
+    renameDormantSnapshotGroup(group, title);
+    return group.key;
+  }
+  if (isVirtualGroupKey(group.key)) {
+    state.virtualGroups[group.key] = {
+      ...(state.virtualGroups[group.key] || {}),
+      id: group.key,
+      title,
+      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
+      spaceId: state.activeSpaceId,
+      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
+    };
+    return group.key;
+  }
+  return retitleGroupForNestedMove(group, title);
+}
+
+function moveGroupsWithoutSaving(groups, spaceId) {
+  moveDormantSnapshotGroupsToSpace(groups.filter((group) => group.dormant), spaceId);
+  const removedKeys = new Set();
+  for (const group of groups.filter((item) => !item.dormant)) {
+    removedKeys.add(group.key);
+    if (group.id === 'ungrouped') {
+      for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
+    } else if (isVirtualGroupKey(group.key)) {
+      state.virtualGroups[group.key] = {
+        ...(state.virtualGroups[group.key] || {}),
+        id: group.key,
+        title: group.title,
+        color: group.color,
+        spaceId,
+      };
+      for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
+      addGroupOrderKey(spaceId, group.key);
+    } else {
+      const groupKey = createVirtualGroup({
+        title: group.displayTitle || group.title,
+        color: group.color || nextGroupColor(),
+        spaceId,
+      });
+      for (const tab of group.tabs || []) {
+        state.tabSpaces[tab.id] = spaceId;
+        state.tabGroups[tab.id] = groupKey;
+      }
+    }
+  }
+  state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
+    .filter((key) => !removedKeys.has(key));
+}
+
+function moveDormantSnapshotGroupsToSpace(groups, spaceId) {
+  if (!groups.length) return;
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const records = snapshotGroupRecords(snapshot);
+  const indexes = new Set(groups.map((group) => snapshotGroupIndexFromKey(group.key)).filter((index) => index >= 0));
+  if (indexes.size === 0) return;
+
+  const moving = records.filter((record) => indexes.has(record.index)).map((record) => record.group);
+  const remaining = records.filter((record) => !indexes.has(record.index)).map((record) => record.group);
+  replaceActiveSpaceSnapshotGroups(remaining);
+
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
+  const targetSnapshot = sanitizeSpaceSnapshot(state.spaceSnapshots[spaceId]) || {
+    version: 1,
+    updatedAt: Date.now(),
+    groups: [],
+  };
+  targetSnapshot.groups = [...(targetSnapshot.groups || []), ...moving];
+  targetSnapshot.updatedAt = Date.now();
+  state.spaceSnapshots[spaceId] = targetSnapshot;
+}
+
+function deleteGroupsWithoutSaving(groups) {
+  deleteDormantSnapshotGroups(groups.filter((group) => group.dormant));
+  const removedKeys = new Set();
+  for (const group of groups.filter((item) => !item.dormant)) {
+    if (!group || group.id === 'ungrouped') continue;
+    removedKeys.add(group.key);
+    for (const tab of group.tabs || []) {
+      const tabId = Number(tab.id);
+      if (!Number.isFinite(tabId)) continue;
+      state.tabSpaces[tabId] = state.activeSpaceId;
+      delete state.tabGroups?.[tabId];
+    }
+    if (isVirtualGroupKey(group.key)) delete state.virtualGroups?.[group.key];
+    else delete state.groupSpaces[group.id];
+    delete state.collapsedGroups[group.key];
+    delete state.tabOrder[state.activeSpaceId]?.[group.key];
+  }
+  state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
+    .filter((key) => !removedKeys.has(key));
+}
+
+function deleteDormantSnapshotGroups(groups) {
+  if (!groups.length) return;
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const records = snapshotGroupRecords(snapshot);
+  const indexes = new Set(groups.map((group) => snapshotGroupIndexFromKey(group.key)).filter((index) => index >= 0));
+  if (indexes.size === 0) return;
+  replaceActiveSpaceSnapshotGroups(records
+    .filter((record) => !indexes.has(record.index))
+    .map((record) => record.group));
+}
+
+function replaceGroupOrderKeys(replacements, fallbackOrder = []) {
+  if (!replacements?.size) return;
+  const order = fallbackOrder.length ? fallbackOrder : state.groupOrder[state.activeSpaceId] || [];
+  state.groupOrder[state.activeSpaceId] = uniqueKeys(order.map((key) => replacements.get(key) || key));
 }
 
 async function openDormantTab(tab, groupKey) {
@@ -2364,6 +2569,20 @@ function showGroupContextMenu(event, group) {
     ...state.spaces
       .filter((space) => space.id !== state.activeSpaceId)
       .map((space) => menuAction(space.name, () => moveGroupToSpace(group, space.id))),
+  ]);
+}
+
+function showFolderContextMenu(event, folderContext) {
+  event.preventDefault();
+  event.stopPropagation();
+  showContextMenu(event, [
+    menuAction('Rename', () => renameFolderGroup(folderContext)),
+    menuAction('Delete Group', () => deleteFolderGroup(folderContext)),
+    menuSeparator(),
+    menuLabel('Move to'),
+    ...state.spaces
+      .filter((space) => space.id !== state.activeSpaceId)
+      .map((space) => menuAction(space.name, () => moveFolderGroupToSpace(folderContext, space.id))),
   ]);
 }
 
