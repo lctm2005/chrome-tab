@@ -458,7 +458,7 @@ h1 {
 .folder-header,
 .group-header {
   display: grid;
-  grid-template-columns: 16px 20px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   min-height: 32px;
@@ -472,7 +472,7 @@ h1 {
 }
 
 .group-header {
-  grid-template-columns: 14px 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   margin: 0;
 }
 
@@ -501,11 +501,7 @@ h1 {
 }
 
 .folder-caret {
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  width: 14px;
-  height: 14px;
+  display: none !important;
 }
 
 .folder-caret::before {
@@ -555,13 +551,7 @@ h1 {
 }
 
 .group-grip {
-  color: var(--faint);
-  font-size: 11px;
-  font-weight: 800;
-  width: 14px;
-  cursor: grab;
-  text-align: center;
-  transition: color 0.2s;
+  display: none !important;
 }
 
 .group-grip svg {
@@ -633,9 +623,19 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  margin-left: 12px;
-  padding-left: 8px;
-  border-left: 1px solid var(--line);
+  margin-left: 10px;
+  padding-left: 6px;
+  border-left: none;
+}
+
+/* --- FLAT NESTED FOLDERS/GROUPS (ARC STYLE) --- */
+.folder-children .group-card,
+.folder-children .folder-direct-group,
+.folder-children .folder-section {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
 }
 
 .tab-list {
