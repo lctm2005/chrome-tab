@@ -325,3 +325,13 @@ test('keeps GitHub repository context when tidying panel names', () => {
   assert.equal(names[1], 'GitHub - AgriciDaniel/claude-code-router');
   assert.equal(names[2], 'GitHub - AgriciDaniel/claude-code-router PR #42 Fix request routing');
 });
+
+test('tidies names with loading/placeholder titles like dots using heading or domain fallback', () => {
+  const names = planTidyTabNames([
+    { id: 1, title: '...', url: 'https://bytedance.larkoffice.com/docx/123', outlineHeadings: ['Mail Harness 架构详情介绍', 'README'] },
+    { id: 2, title: 'loading...', url: 'https://bytedance.larkoffice.com/docx/456', outlineHeadings: [] },
+  ]);
+
+  assert.equal(names[1], 'Mail Harness 架构详情介绍');
+  assert.equal(names[2], 'bytedance.larkoffice.com');
+});

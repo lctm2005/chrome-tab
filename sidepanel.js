@@ -142,6 +142,7 @@ const els = {
   maxTokensInput: document.querySelector('#maxTokensInput'),
   saveSettingsButton: document.querySelector('#saveSettingsButton'),
   shortcutsList: document.querySelector('#shortcutsList'),
+  themeOptions: document.querySelector('.theme-options'),
 };
 
 init();
@@ -209,16 +210,18 @@ async function loadState() {
   const defaults = createDefaultState(localConfig);
   const stored = await storageGet();
   state = mergeStoredState(stored[STORAGE_KEY], defaults);
+  applyTheme(state.theme);
   sanitizeStoredSpaceSnapshots();
   const secrets = await secretGet();
 
   if (localConfig.ai?.apiKey) {
     state.ai = {
-      ...state.ai,
       ...localConfig.ai,
-      baseUrl: String(localConfig.ai.baseUrl || state.ai.baseUrl).trim().replace(/\/+$/, ''),
-      maxTokens: Number(localConfig.ai.maxTokens ?? state.ai.maxTokens),
-      temperature: Number(localConfig.ai.temperature ?? state.ai.temperature),
+      ...state.ai,
+      apiKey: localConfig.ai.apiKey,
+      baseUrl: String(state.ai.baseUrl || localConfig.ai.baseUrl || '').trim().replace(/\/+$/, ''),
+      maxTokens: Number(state.ai.maxTokens ?? localConfig.ai.maxTokens ?? 2048),
+      temperature: Number(state.ai.temperature ?? localConfig.ai.temperature ?? 0.6),
     };
   } else if (secrets[SECRET_STORAGE_KEY]?.ai?.apiKey) {
     state.ai.apiKey = secrets[SECRET_STORAGE_KEY].ai.apiKey;
@@ -233,6 +236,7 @@ async function saveState() {
 
 function bindEvents() {
   els.settingsButton.addEventListener('click', () => {
+    state.tempTheme = state.theme || 'purple';
     renderSettings();
     els.settingsDialog.showModal();
   });
@@ -246,6 +250,24 @@ function bindEvents() {
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
+
+  els.themeOptions.addEventListener('click', (event) => {
+    const btn = event.target.closest('.theme-option');
+    if (!btn) return;
+    state.tempTheme = btn.dataset.theme;
+    applyTheme(state.tempTheme);
+    for (const option of els.themeOptions.querySelectorAll('.theme-option')) {
+      option.classList.toggle('active', option.dataset.theme === state.tempTheme);
+    }
+  });
+
+  els.settingsDialog.addEventListener('close', () => {
+    if (state.tempTheme) {
+      applyTheme(state.theme);
+      delete state.tempTheme;
+    }
+  });
+
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   document.addEventListener('click', hideContextMenu);
@@ -3066,10 +3088,16 @@ function renderSettings() {
   els.apiKeyInput.value = state.ai.apiKey;
   els.apiKeyInput.placeholder = state.ai.apiKey ? 'API key configured' : 'Paste API key';
   els.apiKeyStatus.textContent = apiKeyStatusText();
-  els.clearApiKeyButton.hidden = !state.ai.apiKey;
+  els.clearApiKeyButton.hidden = !state.ai.apiKey || Boolean(localConfig.ai?.apiKey);
   els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
   els.maxTokensInput.value = state.ai.maxTokens;
+
+  const theme = state.tempTheme || state.theme || 'purple';
+  for (const option of els.themeOptions.querySelectorAll('.theme-option')) {
+    option.classList.toggle('active', option.dataset.theme === theme);
+  }
+
   renderShortcutSettings();
 }
 
@@ -3114,6 +3142,12 @@ async function saveSettings(event) {
   }
   state.ai = currentAISettingsFromForm();
   state.shortcuts = shortcuts;
+
+  if (state.tempTheme) {
+    state.theme = state.tempTheme;
+    delete state.tempTheme;
+  }
+
   await ensureAIHostPermission(state.ai).catch(() => null);
   if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
   else await secretRemove(SECRET_STORAGE_KEY);
@@ -3625,4 +3659,13 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function applyTheme(themeName) {
+  const name = themeName || 'purple';
+  if (name === 'purple') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', name);
+  }
 }

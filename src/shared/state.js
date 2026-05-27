@@ -8,6 +8,7 @@ export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
   return {
     version: 4,
+    theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
       { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
@@ -51,6 +52,7 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
 
   return {
     version: defaults.version,
+    theme: stored.theme || defaults.theme || 'purple',
     activeSpaceId,
     spaces,
     groupSpaces: compatibleSpaceModel ? { ...defaults.groupSpaces, ...(stored.groupSpaces || {}) } : defaults.groupSpaces,

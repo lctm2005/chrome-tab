@@ -225,8 +225,14 @@ function preferredDuplicateUrlTab(tabs) {
 
 export function tidyPanelName(tab) {
   const domain = domainFromUrl(tab.url);
-  const title = String(tab.title || '').replace(/\s+/g, ' ').trim();
+  let title = String(tab.title || '').replace(/\s+/g, ' ').trim();
   const path = safePath(tab.url);
+
+  if (/^(\.+|loading\.*)$/i.test(title)) {
+    const heading = bestContentHeading(tab.outlineHeadings);
+    title = heading || '';
+  }
+
   if (domain.includes('github.com')) {
     const repo = githubRepositoryName(path, tab.outlineHeadings);
     const heading = bestContentHeading(tab.outlineHeadings, [repo, 'GitHub']);

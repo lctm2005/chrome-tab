@@ -55,6 +55,148 @@
   }
 }
 
+/* --- THEMES OVERRIDES --- */
+
+/* Emerald (Mystic Green) */
+html[data-theme="emerald"] {
+  --bg: #040d0a;
+  --bg-gradient: linear-gradient(180deg, #071f18 0%, #040d0a 56%, #020605 100%);
+  --bg-elevated: #091813;
+  --accent: #10b981;
+  --accent-strong: #34d399;
+  --accent-soft: rgba(16, 185, 129, 0.15);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="emerald"] {
+    --bg: #f0fbf7;
+    --bg-gradient: linear-gradient(180deg, #f7fdfb 0%, #f0fbf7 60%, #e1f5ee 100%);
+    --bg-elevated: #ffffff;
+    --accent: #059669;
+    --accent-strong: #10b981;
+    --accent-soft: rgba(5, 150, 105, 0.1);
+  }
+}
+
+/* Ocean (Deep Cyan/Blue) */
+html[data-theme="ocean"] {
+  --bg: #030d12;
+  --bg-gradient: linear-gradient(180deg, #05212e 0%, #030d12 56%, #010609 100%);
+  --bg-elevated: #061822;
+  --accent: #0ea5e9;
+  --accent-strong: #38bdf8;
+  --accent-soft: rgba(14, 165, 233, 0.15);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="ocean"] {
+    --bg: #f0f9ff;
+    --bg-gradient: linear-gradient(180deg, #f8fafc 0%, #f0f9ff 60%, #e0f2fe 100%);
+    --bg-elevated: #ffffff;
+    --accent: #0284c7;
+    --accent-strong: #0ea5e9;
+    --accent-soft: rgba(2, 132, 199, 0.1);
+  }
+}
+
+/* Sunset (Vibrant Amber/Rose/Orange) */
+html[data-theme="sunset"] {
+  --bg: #0f0508;
+  --bg-gradient: linear-gradient(180deg, #240b15 0%, #0f0508 56%, #060203 100%);
+  --bg-elevated: #180a0f;
+  --accent: #f43f5e;
+  --accent-strong: #fb7185;
+  --accent-soft: rgba(244, 63, 94, 0.15);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="sunset"] {
+    --bg: #fff1f2;
+    --bg-gradient: linear-gradient(180deg, #fffafb 0%, #fff1f2 60%, #ffe4e6 100%);
+    --bg-elevated: #ffffff;
+    --accent: #e11d48;
+    --accent-strong: #f43f5e;
+    --accent-soft: rgba(225, 29, 72, 0.1);
+  }
+}
+
+/* Amber (Solar Orange/Gold) */
+html[data-theme="amber"] {
+  --bg: #0f0b03;
+  --bg-gradient: linear-gradient(180deg, #211807 0%, #0f0b03 56%, #070501 100%);
+  --bg-elevated: #171107;
+  --accent: #d97706;
+  --accent-strong: #f59e0b;
+  --accent-soft: rgba(217, 119, 6, 0.15);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="amber"] {
+    --bg: #fdf8f2;
+    --bg-gradient: linear-gradient(180deg, #fffdfa 0%, #fdf8f2 60%, #faf0e3 100%);
+    --bg-elevated: #ffffff;
+    --accent: #b45309;
+    --accent-strong: #d97706;
+    --accent-soft: rgba(180, 83, 9, 0.1);
+  }
+}
+
+/* Slate (Nordic Monochrome) */
+html[data-theme="slate"] {
+  --bg: #0f0f11;
+  --bg-gradient: linear-gradient(180deg, #1f1f23 0%, #0f0f11 56%, #080809 100%);
+  --bg-elevated: #17171a;
+  --accent: #6b7280;
+  --accent-strong: #9ca3af;
+  --accent-soft: rgba(107, 114, 128, 0.15);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="slate"] {
+    --bg: #f9fafb;
+    --bg-gradient: linear-gradient(180deg, #ffffff 0%, #f9fafb 60%, #f3f4f6 100%);
+    --bg-elevated: #ffffff;
+    --accent: #4b5563;
+    --accent-strong: #6b7280;
+    --accent-soft: rgba(75, 85, 99, 0.1);
+  }
+}
+
+/* --- THEME PICKER UI --- */
+.theme-options {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  align-items: center;
+}
+
+.theme-option {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  border: 2px solid transparent;
+  box-shadow: var(--shadow-sm);
+  padding: 0;
+  outline: none;
+}
+
+.theme-option:hover {
+  transform: scale(1.12);
+  box-shadow: var(--shadow-md);
+}
+
+.theme-option.active {
+  transform: scale(1.18);
+  border-color: var(--text);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.theme-option.purple { background: #6d79ff; }
+.theme-option.emerald { background: #10b981; }
+.theme-option.ocean { background: #0ea5e9; }
+.theme-option.sunset { background: #f43f5e; }
+.theme-option.amber { background: #d97706; }
+.theme-option.slate { background: #6b7280; }
+
+
 * {
   box-sizing: border-box;
 }
@@ -1295,6 +1437,7 @@ dialog::backdrop {
   color: var(--accent-strong);
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .link-button:hover {
