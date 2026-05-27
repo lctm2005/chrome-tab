@@ -477,8 +477,10 @@ async function main() {
     };
   })()`);
   record(
-    'add Space dialog creates and activates an empty local Space without Chrome mutations',
-    newEmptySpaceState.rows === 0 && newEmptySpaceState.chromeMutations.length === 0,
+    'add Space dialog activates a new Space with a fallback tab and closes previous Space tags',
+    newEmptySpaceState.rows === 1 &&
+      newEmptySpaceState.chromeMutations.some((command) => command.type === 'tabs:create') &&
+      newEmptySpaceState.chromeMutations.some((command) => command.type === 'tabs:close'),
     JSON.stringify(newEmptySpaceState)
   );
 
@@ -503,11 +505,12 @@ async function main() {
     };
   })()`);
   record(
-    'switching away from a brand-new empty Space does not create or close carrier tabs',
-    emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
+    'switching away from a brand-new Space closes its fallback tab after opening the target fallback',
+    emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
-      emptySpaceSwitchState.carrierMutations.length === 0 &&
+      emptySpaceSwitchState.carrierMutations.some((command) => command.type === 'tabs:create') &&
+      emptySpaceSwitchState.carrierMutations.some((command) => command.type === 'tabs:close') &&
       !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab/i.test(text)),
     JSON.stringify(emptySpaceSwitchState)
   );

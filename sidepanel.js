@@ -1587,14 +1587,6 @@ async function switchSpace(spaceId) {
 
   activeView = 'space';
 
-  if (shouldUseLocalOnlySwitch(spaceId)) {
-    state.activeSpaceId = spaceId;
-    await loadDormantSpaceView(spaceId, { force: true });
-    await saveState();
-    await refreshTabs();
-    return;
-  }
-
   const keepAliveTab = await ensureSpaceHasOpenTab(spaceId, { active: true });
 
   state.activeSpaceId = spaceId;
@@ -1616,10 +1608,6 @@ async function switchSpace(spaceId) {
   await discardInactiveTabsInSpace(spaceId);
   await saveState();
   await refreshTabs();
-}
-
-function shouldUseLocalOnlySwitch(spaceId) {
-  return !tabs.some((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId));
 }
 
 async function closeTabsOutsideActiveSpace() {
