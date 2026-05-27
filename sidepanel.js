@@ -81,6 +81,15 @@ const AUTO_GROUP_ICON = `
     <path d="M9 12.7h6"></path>
   </svg>
 `;
+const THEME_COLORS = [
+  { id: 'indigo', label: 'Indigo', swatch: '#6d79ff' },
+  { id: 'teal', label: 'Teal', swatch: '#14b8a6' },
+  { id: 'green', label: 'Green', swatch: '#22c55e' },
+  { id: 'rose', label: 'Rose', swatch: '#f43f5e' },
+  { id: 'amber', label: 'Amber', swatch: '#f59e0b' },
+  { id: 'slate', label: 'Slate', swatch: '#64748b' },
+];
+const DEFAULT_THEME_COLOR = THEME_COLORS[0].id;
 
 let state = createDefaultState(localConfig);
 let tabs = [];
@@ -141,6 +150,7 @@ const els = {
   thinkingInput: document.querySelector('#thinkingInput'),
   maxTokensInput: document.querySelector('#maxTokensInput'),
   saveSettingsButton: document.querySelector('#saveSettingsButton'),
+  themeColorList: document.querySelector('#themeColorList'),
   shortcutsList: document.querySelector('#shortcutsList'),
 };
 
@@ -150,6 +160,7 @@ async function init() {
   try {
     connectPanelPort();
     await loadState();
+    applyTheme();
     bindEvents();
     renderSettings();
     await refreshTabs({ adopt: true, adoptGroups: !hasKnownSpaceOwnership() });
@@ -3060,6 +3071,7 @@ function openActionDialog({
 }
 
 function renderSettings() {
+  renderThemeSettings();
   els.baseUrlInput.value = state.ai.baseUrl;
   els.modelInput.value = state.ai.model;
   els.languageInput.value = state.ai.language || 'zh-CN';
@@ -3071,6 +3083,33 @@ function renderSettings() {
   els.thinkingInput.value = state.ai.thinking;
   els.maxTokensInput.value = state.ai.maxTokens;
   renderShortcutSettings();
+}
+
+function renderThemeSettings() {
+  const currentColor = normalizeThemeColor(state.theme?.color);
+  const options = THEME_COLORS.map((themeColor) => {
+    const label = document.createElement('label');
+    label.className = 'theme-color-option';
+    label.title = themeColor.label;
+
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'themeColor';
+    input.value = themeColor.id;
+    input.checked = themeColor.id === currentColor;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'theme-swatch';
+    swatch.style.setProperty('--theme-swatch-color', themeColor.swatch);
+
+    const text = document.createElement('span');
+    text.className = 'theme-color-name';
+    text.textContent = themeColor.label;
+
+    label.append(input, swatch, text);
+    return label;
+  });
+  els.themeColorList.replaceChildren(...options);
 }
 
 function apiKeyStatusText() {
@@ -3114,12 +3153,30 @@ async function saveSettings(event) {
   }
   state.ai = currentAISettingsFromForm();
   state.shortcuts = shortcuts;
+  state.theme = currentThemeFromForm();
+  applyTheme();
   await ensureAIHostPermission(state.ai).catch(() => null);
   if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
   else await secretRemove(SECRET_STORAGE_KEY);
   await saveState();
   els.settingsDialog.close();
   render();
+}
+
+function currentThemeFromForm() {
+  const selected = els.themeColorList.querySelector('input[name="themeColor"]:checked');
+  return {
+    ...state.theme,
+    color: normalizeThemeColor(selected?.value),
+  };
+}
+
+function normalizeThemeColor(color) {
+  return THEME_COLORS.some((themeColor) => themeColor.id === color) ? color : DEFAULT_THEME_COLOR;
+}
+
+function applyTheme() {
+  document.documentElement.dataset.themeColor = normalizeThemeColor(state.theme?.color);
 }
 
 async function clearApiKey() {

@@ -3,6 +3,7 @@ import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
+const THEME_COLORS = new Set(['indigo', 'teal', 'green', 'rose', 'amber', 'slate']);
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -26,6 +27,9 @@ export function createDefaultState(localConfig = {}) {
     activeAskSessionKey: '',
     spaceSnapshots: {},
     shortcuts: mergeShortcuts(),
+    theme: {
+      color: 'indigo',
+    },
     ai: {
       provider: ai.provider || 'openai-compatible',
       baseUrl: normalizeUrl(ai.baseUrl || 'https://api.z.ai/api/coding/paas/v4'),
@@ -69,7 +73,16 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts),
+    theme: normalizeTheme(stored.theme, defaults.theme),
     ai: { ...defaults.ai, ...(stored.ai || {}) },
+  };
+}
+
+function normalizeTheme(theme, fallback) {
+  const color = typeof theme?.color === 'string' ? theme.color : fallback.color;
+  return {
+    ...fallback,
+    color: THEME_COLORS.has(color) ? color : fallback.color,
   };
 }
 
