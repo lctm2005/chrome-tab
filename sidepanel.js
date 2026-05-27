@@ -1655,7 +1655,7 @@ async function closeTabsOutsideActiveSpace() {
 async function ensureActiveSpaceHasOpenTab() {
   if (!state.activeSpaceId) return;
   const activeSpaceTabs = tabs.filter((tab) => (
-    !isEphemeralTab(tab) && tabBelongsToSpace(tab, state.activeSpaceId)
+    isEphemeralTab(tab) || tabBelongsToSpace(tab, state.activeSpaceId)
   ));
   if (activeSpaceTabs.length > 0) return;
   await ensureSpaceHasOpenTab(state.activeSpaceId, { active: true });

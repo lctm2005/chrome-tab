@@ -177,6 +177,50 @@ test('trims snapshot URLs, fills default metadata, and counts remaining tabs', (
   assert.equal(isRestorableSnapshotTab({ url: ' file:///tmp/demo.html ' }), true);
 });
 
+test('deduplicates stored snapshot URL variants within a group', () => {
+  const snapshot = sanitizeSpaceSnapshot({
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Argos',
+        color: 'blue',
+        tabs: [
+          { title: 'Latest query', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
+          { title: 'Old query', url: 'https://cloud-boe.bytedance.net/logs?keyword=old' },
+          { title: 'Release', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(snapshot.groups[0].tabs, [
+    { title: 'Latest query', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
+    { title: 'Release', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+  ]);
+});
+
+test('keeps the same normalized URL in different snapshot groups', () => {
+  const snapshot = sanitizeSpaceSnapshot({
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Primary',
+        color: 'blue',
+        tabs: [{ title: 'Spec A', url: 'https://example.com/spec?view=a' }],
+      },
+      {
+        title: 'Reference',
+        color: 'green',
+        tabs: [{ title: 'Spec B', url: 'https://example.com/spec?view=b' }],
+      },
+    ],
+  });
+
+  assert.equal(snapshotTabCount(snapshot), 2);
+});
+
 test('removes one opened dormant tab from its snapshot group', () => {
   const snapshot = {
     version: 1,

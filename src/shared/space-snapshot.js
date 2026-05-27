@@ -137,13 +137,13 @@ export function sanitizeSpaceSnapshot(snapshot) {
         ...group,
         title,
         color: group.color || (title === 'Ungrouped' ? 'grey' : 'blue'),
-        tabs: (group.tabs || [])
+        tabs: dedupeSnapshotTabs((group.tabs || [])
           .filter(isRestorableSnapshotTab)
           .map((tab) => ({
             ...tab,
             title: tab.title || tab.url || 'Untitled',
             url: String(tab.url || '').trim(),
-          })),
+          }))),
       };
     })
     .filter((group) => group.tabs.length > 0);
@@ -152,6 +152,20 @@ export function sanitizeSpaceSnapshot(snapshot) {
 
 function snapshotTabs(snapshot = {}) {
   return (snapshot.groups || []).flatMap((group) => group.tabs || []);
+}
+
+function dedupeSnapshotTabs(tabs = []) {
+  const firstUrlByKey = new Map();
+  const deduped = [];
+  for (const tab of tabs) {
+    const url = String(tab.url || '');
+    const key = comparableSnapshotUrl(tab.url) || String(tab.url || '');
+    const firstUrl = firstUrlByKey.get(key);
+    if (key && firstUrl !== undefined && firstUrl !== url) continue;
+    if (key && firstUrl === undefined) firstUrlByKey.set(key, url);
+    deduped.push(tab);
+  }
+  return deduped;
 }
 
 function snapshotGroupKey(group = {}) {
