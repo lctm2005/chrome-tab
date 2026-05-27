@@ -505,12 +505,11 @@ async function main() {
     };
   })()`);
   record(
-    'switching away from a brand-new Space closes its fallback tab after opening the target fallback',
+    'switching away from a brand-new Space reuses its fallback tab for the target Space',
     emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
-      emptySpaceSwitchState.carrierMutations.some((command) => command.type === 'tabs:create') &&
-      emptySpaceSwitchState.carrierMutations.some((command) => command.type === 'tabs:close') &&
+      emptySpaceSwitchState.carrierMutations.length === 0 &&
       !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab/i.test(text)),
     JSON.stringify(emptySpaceSwitchState)
   );

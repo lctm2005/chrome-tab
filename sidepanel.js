@@ -1587,7 +1587,7 @@ async function switchSpace(spaceId) {
 
   activeView = 'space';
 
-  const keepAliveTab = await ensureSpaceHasOpenTab(spaceId, { active: true });
+  const keepAliveTab = await ensureSwitchKeepAliveTab(spaceId, previousSpaceId);
 
   state.activeSpaceId = spaceId;
   await loadDormantSpaceView(spaceId, { force: true });
@@ -1608,6 +1608,38 @@ async function switchSpace(spaceId) {
   await discardInactiveTabsInSpace(spaceId);
   await saveState();
   await refreshTabs();
+}
+
+async function ensureSwitchKeepAliveTab(spaceId, previousSpaceId) {
+  await loadTabs({ adopt: false });
+  const existing = preferredFocusableTab(tabs.filter((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId)));
+  if (existing) return existing;
+
+  const reusable = reusableFallbackTab(previousSpaceId);
+  if (reusable) {
+    if (hasDormantContent(spaceId)) {
+      delete state.tabSpaces[reusable.id];
+      delete state.tabGroups?.[reusable.id];
+      rememberEphemeralTab(reusable.id);
+    } else {
+      forgetEphemeralTab(reusable.id);
+      state.tabSpaces[reusable.id] = spaceId;
+      delete state.tabGroups?.[reusable.id];
+    }
+    await send('tabs:focus', { tabId: reusable.id });
+    await loadTabs({ adopt: false });
+    return tabs.find((tab) => Number(tab.id) === Number(reusable.id)) || reusable;
+  }
+
+  return ensureSpaceHasOpenTab(spaceId, { active: true });
+}
+
+function reusableFallbackTab(previousSpaceId) {
+  return preferredFocusableTab(tabs.filter((tab) => (
+    !tab.pinned &&
+    tab.url === 'chrome://newtab' &&
+    (isEphemeralTab(tab) || tabBelongsToSpace(tab, previousSpaceId))
+  )));
 }
 
 async function closeTabsOutsideActiveSpace() {
