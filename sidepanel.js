@@ -3087,7 +3087,9 @@ function renderSettings() {
   els.languageInput.value = state.ai.language || 'zh-CN';
   els.apiKeyInput.value = state.ai.apiKey;
   els.apiKeyInput.placeholder = state.ai.apiKey ? 'API key configured' : 'Paste API key';
-  els.apiKeyStatus.textContent = apiKeyStatusText();
+  const statusText = apiKeyStatusText();
+  els.apiKeyStatus.textContent = statusText;
+  els.apiKeyStatus.hidden = !statusText;
   els.clearApiKeyButton.hidden = !state.ai.apiKey || Boolean(localConfig.ai?.apiKey);
   els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
@@ -3102,7 +3104,7 @@ function renderSettings() {
 }
 
 function apiKeyStatusText() {
-  if (localConfig.ai?.apiKey) return 'API key is configured by config.local.js.';
+  if (localConfig.ai?.apiKey) return '';
   if (state.ai.apiKey) return 'API key is configured for this Chrome session.';
   return 'No API key configured.';
 }
