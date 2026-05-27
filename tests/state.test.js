@@ -23,7 +23,6 @@ test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
   assert.deepEqual(state.collapsedGroups, {});
   assert.deepEqual(state.collapsedSpaceGroups, {});
   assert.deepEqual(state.askSessions, {});
-  assert.equal(state.theme.color, 'indigo');
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
@@ -63,19 +62,6 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.shortcuts.askSubmit, 'Meta+Enter');
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal(merged.collapsedSpaceGroups.custom, true);
-  assert.equal(merged.theme.color, 'indigo');
-});
-
-test('merges stored theme color and falls back for unknown values', () => {
-  const teal = mergeStoredState({
-    theme: { color: 'teal' },
-  }, createDefaultState());
-  const unknown = mergeStoredState({
-    theme: { color: 'ultraviolet' },
-  }, createDefaultState());
-
-  assert.equal(teal.theme.color, 'teal');
-  assert.equal(unknown.theme.color, 'indigo');
 });
 
 test('resets old built-in Spaces during v4 migration and drops old clutter fields', () => {

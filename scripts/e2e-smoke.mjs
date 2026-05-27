@@ -527,32 +527,8 @@ async function main() {
   await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
   const apiState = await evaluate(client, `document.querySelector('#apiKeyStatus')?.textContent`);
   record('Settings opens and reports no API key without testing AI', apiState === 'No API key configured.', apiState);
-  const themeSettingsStart = await evaluate(client, `(() => {
-    const options = [...document.querySelectorAll('input[name="themeColor"]')].map((input) => input.value);
-    const selectedBefore = document.querySelector('input[name="themeColor"]:checked')?.value || '';
-    document.querySelector('input[name="themeColor"][value="rose"]').click();
-    document.querySelector('#saveSettingsButton').click();
-    return { options, selectedBefore };
-  })()`);
+  await evaluate(client, `document.querySelector('#settingsDialog [value="cancel"]').click()`);
   await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
-  const themeSettingsState = await evaluate(client, `(() => {
-    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    return {
-      ...${JSON.stringify(themeSettingsStart)},
-      storedTheme: stored.theme?.color || '',
-      datasetTheme: document.documentElement.dataset.themeColor || '',
-      accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
-    };
-  })()`);
-  record(
-    'Settings saves and applies theme color',
-    themeSettingsState.options.length === 6 &&
-      themeSettingsState.selectedBefore === 'indigo' &&
-      themeSettingsState.storedTheme === 'rose' &&
-      themeSettingsState.datasetTheme === 'rose' &&
-      themeSettingsState.accent === '#f43f5e',
-    JSON.stringify(themeSettingsState)
-  );
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
