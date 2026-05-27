@@ -717,7 +717,9 @@ function createFolderSection(folder) {
     header.addEventListener('drop', (event) => dropFolder(event, folder));
   }
 
-  const folderSvg = folderIconSvg('folder-svg-icon');
+  const folderSvg = collapsed
+    ? folderIconSvg('folder-svg-icon')
+    : folderOpenIconSvg('folder-svg-icon');
 
   header.innerHTML = `
     <span class="folder-caret" aria-hidden="true"></span>
@@ -763,7 +765,7 @@ function createGroupCard(group) {
   }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
-    ${groupFolderIcon(group.color)}
+    ${groupFolderIcon(group.color, group.collapsed)}
     <h2>${escapeHtml(group.displayTitle || group.title)}</h2>
   `;
   const actions = document.createElement('div');
@@ -807,7 +809,7 @@ function createFolderTabs(group) {
   }
   header.innerHTML = `
     <span class="group-grip" title="Drag group"><svg draggable="false" viewBox="0 0 24 24" width="10" height="10" fill="currentColor" style="vertical-align: middle;"><circle cx="9" cy="5" r="2.2"></circle><circle cx="9" cy="12" r="2.2"></circle><circle cx="9" cy="19" r="2.2"></circle><circle cx="15" cy="5" r="2.2"></circle><circle cx="15" cy="12" r="2.2"></circle><circle cx="15" cy="19" r="2.2"></circle></svg></span>
-    ${groupFolderIcon(group.color)}
+    ${groupFolderIcon(group.color, group.collapsed)}
     <h2>${escapeHtml(group.displayTitle || 'Tabs')}</h2>
   `;
   const actions = document.createElement('div');
@@ -860,12 +862,19 @@ function createUngroupedSection(group) {
   return section;
 }
 
-function groupFolderIcon(color) {
-  return `<span class="group-icon" style="color:${groupColor(color)}">${folderIconSvg('group-folder-icon')}</span>`;
+function groupFolderIcon(color, collapsed = false) {
+  const svg = collapsed
+    ? folderIconSvg('group-folder-icon')
+    : folderOpenIconSvg('group-folder-icon');
+  return `<span class="group-icon" style="color:${groupColor(color)}">${svg}</span>`;
 }
 
 function folderIconSvg(className) {
   return `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+}
+
+function folderOpenIconSvg(className) {
+  return `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2A2 2 0 0 0 12 6h8a2 2 0 0 1 2 2v2"></path></svg>`;
 }
 
 function createTabRow(tab, groupKey) {
