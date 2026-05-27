@@ -1247,13 +1247,37 @@ async function closeTab(tab, groupKey = '') {
 }
 
 async function moveTabToSpace(tab, spaceId) {
+  const sourceGroup = groupForTab(tab);
+  const targetGroupKey = ensureMovedTabTargetGroup(tab, sourceGroup, spaceId);
   state.tabSpaces[tab.id] = spaceId;
-  delete state.tabGroups?.[tab.id];
-  delete state.renamedTabs[tab.id];
+  state.tabGroups[tab.id] = targetGroupKey;
+  removeTabFromSavedOrder(tab.id);
+  const targetOrder = ensureTabOrderForSpace(spaceId);
+  targetOrder[targetGroupKey] = uniqueKeys([...(targetOrder[targetGroupKey] || []), tab.id]);
   await saveState();
   await closeTabsOutsideActiveSpace();
   await refreshTabs();
   setStatus(`Moved tab to ${spaceName(spaceId)}.`);
+}
+
+function groupForTab(tab) {
+  const tabId = Number(tab?.id);
+  if (!Number.isFinite(tabId)) return null;
+  return spaceView.find((group) => (
+    !group.dormant &&
+    (group.tabs || []).some((item) => Number(item.id) === tabId)
+  )) || null;
+}
+
+function ensureMovedTabTargetGroup(tab, sourceGroup, spaceId) {
+  const sourceTitle = sourceGroup?.key && sourceGroup.key !== 'ungrouped'
+    ? sourceGroup.displayTitle || sourceGroup.title
+    : '';
+  const title = sourceTitle || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.displayTitle || tab.title);
+  const color = sourceGroup?.key && sourceGroup.key !== 'ungrouped'
+    ? sourceGroup.color || nextGroupColor()
+    : nextGroupColor();
+  return ensureVirtualGroupForTitle(title || 'Tabs', color, spaceId);
 }
 
 async function moveGroupToSpace(group, spaceId) {
@@ -1309,32 +1333,17 @@ async function deleteGroup(group) {
     setStatus(`Deleted saved group "${group.displayTitle || group.title}".`);
     return;
   }
-  const tabIds = group.tabs.map((tab) => Number(tab.id)).filter(Number.isFinite);
-  if (tabIds.length === 0) return;
-
-  for (const tabId of tabIds) {
-    state.tabSpaces[tabId] = state.activeSpaceId;
-    delete state.tabGroups?.[tabId];
-  }
-  if (isVirtualGroupKey(group.key)) delete state.virtualGroups?.[group.key];
-  else delete state.groupSpaces[group.id];
-  delete state.collapsedGroups[group.key];
-  delete state.tabOrder[state.activeSpaceId]?.[group.key];
-  state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
-    .filter((key) => key !== group.key);
-
-  await saveState();
-  await refreshTabs();
-  setStatus(`Deleted group "${group.displayTitle || group.title}". Tabs were kept in Ungrouped.`);
+  const deletedTabs = await deleteGroupsAndTabs([group]);
+  await refreshTabs({ reloadDormant: true });
+  setStatus(`Deleted group "${group.displayTitle || group.title}" and ${deletedTabs} tags.`);
 }
 
 async function deleteFolderGroup(folderContext) {
   const groups = groupsForFolderContext(folderContext);
   if (groups.length === 0) return;
-  deleteGroupsWithoutSaving(groups);
-  await saveState();
-  await refreshTabs();
-  setStatus(`Deleted group "${folderContext.path?.at(-1) || 'Group'}". Tabs were kept in Ungrouped.`);
+  const deletedTabs = await deleteGroupsAndTabs(groups);
+  await refreshTabs({ reloadDormant: true });
+  setStatus(`Deleted group "${folderContext.path?.at(-1) || 'Group'}" and ${deletedTabs} tags.`);
 }
 
 function groupsForFolderContext(folderContext) {
@@ -1439,25 +1448,64 @@ function moveDormantSnapshotGroupsToSpace(groups, spaceId) {
   state.spaceSnapshots[spaceId] = targetSnapshot;
 }
 
-function deleteGroupsWithoutSaving(groups) {
+async function deleteGroupsAndTabs(groups) {
+  const dormantTabCount = groups.reduce((count, group) => (
+    count + (group?.tabs || []).filter((tab) => tab.dormant).length
+  ), 0);
+  const liveTabIds = uniqueKeys(groups
+    .flatMap((group) => group?.tabs || [])
+    .filter((tab) => !tab.dormant)
+    .map((tab) => Number(tab.id))
+    .filter(Number.isFinite));
+
   deleteDormantSnapshotGroups(groups.filter((group) => group.dormant));
+  for (const group of groups.filter((item) => !item.dormant)) {
+    deleteDormantSnapshotGroup(group);
+  }
+
+  if (liveTabIds.length > 0) await ensureActiveSpaceHasOpenTabAfterClosing(liveTabIds);
+
   const removedKeys = new Set();
   for (const group of groups.filter((item) => !item.dormant)) {
     if (!group || group.id === 'ungrouped') continue;
     removedKeys.add(group.key);
-    for (const tab of group.tabs || []) {
-      const tabId = Number(tab.id);
-      if (!Number.isFinite(tabId)) continue;
-      state.tabSpaces[tabId] = state.activeSpaceId;
-      delete state.tabGroups?.[tabId];
-    }
     if (isVirtualGroupKey(group.key)) delete state.virtualGroups?.[group.key];
     else delete state.groupSpaces[group.id];
     delete state.collapsedGroups[group.key];
     delete state.tabOrder[state.activeSpaceId]?.[group.key];
   }
+  for (const tabId of liveTabIds) {
+    removeTabFromSavedOrder(tabId);
+    delete state.tabSpaces[tabId];
+    delete state.renamedTabs[tabId];
+    delete state.tabGroups?.[tabId];
+    forgetEphemeralTab(tabId);
+  }
   state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
     .filter((key) => !removedKeys.has(key));
+
+  await saveState();
+  for (const tabId of liveTabIds) {
+    await send('tabs:close', { tabId });
+  }
+  return liveTabIds.length + dormantTabCount;
+}
+
+async function ensureActiveSpaceHasOpenTabAfterClosing(tabIds = []) {
+  const closingIds = new Set(tabIds.map(Number).filter(Number.isFinite));
+  if (closingIds.size === 0 || !state.activeSpaceId) return;
+  await loadTabs({ adopt: false });
+  const remainingTabs = tabs.filter((tab) => (
+    !closingIds.has(Number(tab.id)) &&
+    !isEphemeralTab(tab) &&
+    tabBelongsToSpace(tab, state.activeSpaceId)
+  ));
+  if (remainingTabs.length > 0) return;
+
+  const created = await send('tabs:create', { url: 'chrome://newtab', active: true });
+  const tabId = created.tab?.id;
+  if (tabId) state.tabSpaces[tabId] = state.activeSpaceId;
+  await loadTabs({ adopt: false });
 }
 
 function deleteDormantSnapshotGroups(groups) {
@@ -1545,6 +1593,7 @@ function shouldUseLocalOnlySwitch(spaceId) {
 
 async function closeTabsOutsideActiveSpace() {
   await loadTabs({ adopt: false });
+  await ensureActiveSpaceHasOpenTab();
 
   for (const space of state.spaces) {
     if (space.id === state.activeSpaceId) continue;
@@ -1570,6 +1619,16 @@ async function closeTabsOutsideActiveSpace() {
   }
 
   await saveState();
+}
+
+async function ensureActiveSpaceHasOpenTab() {
+  if (!state.activeSpaceId) return;
+  const activeSpaceTabs = tabs.filter((tab) => (
+    !isEphemeralTab(tab) && tabBelongsToSpace(tab, state.activeSpaceId)
+  ));
+  if (activeSpaceTabs.length > 0) return;
+  await ensureSpaceHasOpenTab(state.activeSpaceId, { active: true });
+  await loadTabs({ adopt: false });
 }
 
 async function closeSpaceTabs(spaceId, shouldClose, options = {}) {
