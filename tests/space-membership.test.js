@@ -58,7 +58,7 @@ test('can explicitly adopt new Chrome groups into the active Space', () => {
   assert.equal(state.groupSpaces[8], 'focus');
 });
 
-test('lets local tab ownership override Chrome tab group id 0', () => {
+test('uses Chrome tab group ownership over stale local tab ownership', () => {
   const state = {
     groupSpaces: { 0: 'work' },
     tabSpaces: { 1: 'stale' },
@@ -73,10 +73,31 @@ test('lets local tab ownership override Chrome tab group id 0', () => {
   ], 'focus');
 
   assert.equal(state.groupSpaces[0], 'work');
-  assert.equal(state.tabSpaces[1], 'stale');
+  assert.equal(state.tabSpaces[1], undefined);
   assert.deepEqual(closableTabsForSpace([
     { id: 1, groupId: 0 },
-  ], state, 'stale', () => true).map((tab) => tab.id), [1]);
+  ], state, 'work', () => true).map((tab) => tab.id), [1]);
+});
+
+test('adopts a new Chrome group when it contains an owned local tab', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: { 1: 'focus' },
+    renamedTabs: {},
+    collapsedGroups: {},
+    groupOrder: { focus: [] },
+  };
+
+  adoptUnassignedEntities(state, [
+    { id: 1, groupId: 9 },
+    { id: 2, groupId: 9 },
+  ], [
+    { id: 9 },
+  ], 'default');
+
+  assert.deepEqual(state.groupSpaces, { 9: 'focus' });
+  assert.deepEqual(state.tabSpaces, {});
+  assert.deepEqual(state.groupOrder.focus, ['group:9']);
 });
 
 test('syncs Chrome tab group collapsed state into Space state', () => {
@@ -131,6 +152,28 @@ test('cleans local virtual group mappings for closed tabs', () => {
     'vgroup:docs': { title: 'Docs', color: 'blue', spaceId: 'work' },
   });
   assert.deepEqual(state.renamedTabs, {});
+});
+
+test('cleans stale virtual mappings from grouped live tabs', () => {
+  const state = {
+    groupSpaces: { 8: 'work' },
+    tabSpaces: { 4: 'work' },
+    tabGroups: { 4: 'vgroup:old' },
+    virtualGroups: {
+      'vgroup:old': { title: 'Old', color: 'blue', spaceId: 'work' },
+    },
+    renamedTabs: {},
+  };
+
+  cleanupMissingEntities(state, [
+    { id: 4, groupId: 8 },
+  ], [
+    { id: 8 },
+  ]);
+
+  assert.deepEqual(state.tabSpaces, { 4: 'work' });
+  assert.deepEqual(state.tabGroups, {});
+  assert.deepEqual(state.virtualGroups, {});
 });
 
 test('restores Space ownership for Chrome-restored groups and tabs from snapshots', () => {

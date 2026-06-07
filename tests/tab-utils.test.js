@@ -180,7 +180,7 @@ test('builds Space view using saved group order, tab order, and collapsed state'
   assert.deepEqual(view[1].tabs.map((tab) => tab.id), [2, 1]);
 });
 
-test('builds Space view from local virtual groups before Chrome groups', () => {
+test('builds legacy virtual groups only for ungrouped local tabs', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',
     tabSpaces: { 1: 'default', 2: 'default' },
@@ -190,11 +190,8 @@ test('builds Space view from local virtual groups before Chrome groups', () => {
     },
     groupOrder: { default: ['vgroup:docs', 'ungrouped'] },
     tabs: [
-      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: 8 },
-      { id: 2, title: 'Loose', url: 'https://loose.example.com', groupId: 8 },
-    ],
-    groups: [
-      { id: 8, title: 'Chrome Group', color: 'blue' },
+      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: -1 },
+      { id: 2, title: 'Loose', url: 'https://loose.example.com', groupId: -1 },
     ],
     includeUngrouped: true,
   });
@@ -205,7 +202,7 @@ test('builds Space view from local virtual groups before Chrome groups', () => {
   assert.deepEqual(view[1].tabs.map((tab) => tab.id), [2]);
 });
 
-test('uses local tab ownership ahead of Chrome group ownership in Space view', () => {
+test('uses Chrome group ownership ahead of stale local tab ownership in Space view', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',
     groupSpaces: { 8: 'other' },
@@ -222,7 +219,28 @@ test('uses local tab ownership ahead of Chrome group ownership in Space view', (
   });
 
   assert.deepEqual(view.map((group) => group.key), ['ungrouped']);
-  assert.deepEqual(view[0].tabs.map((tab) => tab.id), [1]);
+  assert.deepEqual(view[0].tabs.map((tab) => tab.id), []);
+});
+
+test('renders Chrome groups before stale virtual mappings for grouped tabs', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'default',
+    groupSpaces: { 8: 'default' },
+    tabSpaces: { 1: 'default' },
+    tabGroups: { 1: 'vgroup:docs' },
+    virtualGroups: {
+      'vgroup:docs': { title: 'Local Docs', color: 'green', spaceId: 'default' },
+    },
+    tabs: [
+      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: 8 },
+    ],
+    groups: [
+      { id: 8, title: 'Chrome Docs', color: 'blue' },
+    ],
+  });
+
+  assert.deepEqual(view.map((group) => group.key), ['group:8']);
+  assert.equal(view[0].title, 'Chrome Docs');
 });
 
 test('uses local collapsed state over Chrome tab group state', () => {

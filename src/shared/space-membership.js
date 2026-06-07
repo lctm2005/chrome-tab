@@ -10,8 +10,11 @@ export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpa
   }
 
   for (const tab of tabs) {
-    if (state.tabSpaces[tab.id] !== undefined) continue;
     if (isGroupedTab(tab)) {
+      if (state.groupSpaces[tab.groupId] === undefined && state.tabSpaces[tab.id] !== undefined) {
+        state.groupSpaces[tab.groupId] = state.tabSpaces[tab.id];
+        rememberGroupOrderKey(state, state.tabSpaces[tab.id], `group:${tab.groupId}`);
+      }
       delete state.tabSpaces[tab.id];
       continue;
     }
@@ -39,6 +42,7 @@ export function restoreSnapshotOwnership(state, tabs = [], groups = []) {
 export function cleanupMissingEntities(state, tabs = [], groups = []) {
   const liveTabIds = new Set(tabs.map((tab) => Number(tab.id)));
   const liveGroupIds = new Set(groups.map((group) => Number(group.id)));
+  const groupedTabIds = new Set(tabs.filter(isGroupedTab).map((tab) => Number(tab.id)));
 
   for (const tabId of Object.keys(state.tabSpaces || {})) {
     if (!liveTabIds.has(Number(tabId))) delete state.tabSpaces[tabId];
@@ -50,7 +54,7 @@ export function cleanupMissingEntities(state, tabs = [], groups = []) {
     if (!liveGroupIds.has(Number(groupId))) delete state.groupSpaces[groupId];
   }
   for (const tabId of Object.keys(state.tabGroups || {})) {
-    if (!liveTabIds.has(Number(tabId))) delete state.tabGroups[tabId];
+    if (!liveTabIds.has(Number(tabId)) || groupedTabIds.has(Number(tabId))) delete state.tabGroups[tabId];
   }
   const usedVirtualGroups = new Set(Object.values(state.tabGroups || {}));
   for (const groupKey of Object.keys(state.virtualGroups || {})) {
@@ -65,7 +69,6 @@ export function syncCollapsedGroupsFromChrome(state, groups = []) {
 }
 
 export function tabBelongsToSpace(tab, state, spaceId) {
-  if (state.tabSpaces?.[tab.id] !== undefined) return state.tabSpaces[tab.id] === spaceId;
   if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] === spaceId;
   return state.tabSpaces[tab.id] === spaceId;
 }
@@ -79,7 +82,6 @@ export function closableTabsForSpace(tabs = [], state, spaceId, shouldClose) {
 }
 
 export function tabHasSpaceOwner(tab, state) {
-  if (state.tabSpaces?.[tab.id] !== undefined) return true;
   if (isGroupedTab(tab)) return state.groupSpaces[tab.groupId] !== undefined;
   return state.tabSpaces[tab.id] !== undefined;
 }

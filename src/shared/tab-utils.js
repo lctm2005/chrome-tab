@@ -131,16 +131,15 @@ export function buildSpaceView({
 }) {
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const visibleTabs = tabs.filter((tab) => {
-    if (tabSpaces[tab.id] !== undefined) return tabSpaces[tab.id] === activeSpaceId;
     if (isGroupedTab(tab)) return groupSpaces[tab.groupId] === activeSpaceId;
     return tabSpaces[tab.id] === activeSpaceId;
   });
   const buckets = new Map();
 
   for (const tab of visibleTabs) {
-    const virtualGroupKey = tabGroups[tab.id];
+    const virtualGroupKey = isGroupedTab(tab) ? null : tabGroups[tab.id];
     const virtualGroup = virtualGroupKey ? virtualGroups[virtualGroupKey] : null;
-    const grouped = Boolean(virtualGroup) || (tabSpaces[tab.id] === undefined && isGroupedTab(tab));
+    const grouped = Boolean(virtualGroup) || isGroupedTab(tab);
     const key = virtualGroup
       ? virtualGroupKey
       : grouped

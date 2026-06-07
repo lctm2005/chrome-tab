@@ -101,6 +101,8 @@ let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
 let lastRenderedGroupsSignature = '';
+let lastRenderedAskSignature = '';
+let lastRenderedSpacesSignature = '';
 let recentlyOpenedDormantTabs = [];
 
 const els = {
@@ -383,6 +385,9 @@ function togglePanel() {
 
 async function refreshTabs(options = {}) {
   await loadTabs({ adopt: Boolean(options.adopt), adoptGroups: Boolean(options.adoptGroups) });
+  if (await materializeLegacyVirtualGroups(state.activeSpaceId)) {
+    await loadTabs({ adopt: false });
+  }
   snapshotOpenSpace(state.activeSpaceId);
   await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
@@ -399,6 +404,44 @@ async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
   if (adopt) adoptUnassignedEntities(state, contentTabs, groups, state.activeSpaceId, { adoptGroups });
   else cleanupMissingEntities(state, contentTabs, groups);
   syncCollapsedGroupsFromChrome(state, groups);
+}
+
+async function materializeLegacyVirtualGroups(spaceId = state.activeSpaceId) {
+  const virtualEntries = Object.entries(state.virtualGroups || {})
+    .filter(([, group]) => group?.spaceId === spaceId);
+  if (virtualEntries.length === 0) return false;
+
+  let changed = false;
+  for (const [groupKey, group] of virtualEntries) {
+    const tabIds = tabs
+      .filter((tab) => (
+        !tab.pinned &&
+        !isEphemeralTab(tab) &&
+        !isGroupedTab(tab) &&
+        state.tabSpaces[tab.id] === spaceId &&
+        state.tabGroups?.[tab.id] === groupKey
+      ))
+      .map((tab) => tab.id);
+    if (tabIds.length === 0) continue;
+
+    const existing = chromeGroupForTitle(group.title, spaceId);
+    const groupId = existing
+      ? await addTabsToChromeGroup(existing.id, tabIds, spaceId)
+      : await createChromeGroup(tabIds, {
+        title: group.title,
+        color: group.color,
+        collapsed: Boolean(group.collapsed ?? state.collapsedGroups[groupKey]),
+        spaceId,
+        sourceKey: groupKey,
+      });
+    if (groupId === null) continue;
+
+    if (existing) bindChromeGroup(groupId, spaceId, { sourceKey: groupKey });
+    changed = true;
+  }
+
+  cleanupUnusedVirtualGroups();
+  return changed;
 }
 
 async function loadDormantSpaceView(spaceId, options = {}) {
@@ -944,6 +987,10 @@ function createFavicon(tab) {
 }
 
 function renderSpaces() {
+  const signature = spacesRenderSignature();
+  if (signature === lastRenderedSpacesSignature) return;
+  lastRenderedSpacesSignature = signature;
+
   const spaceButtons = state.spaces.map((space) => {
     const button = document.createElement('button');
     button.className = `space${activeView === 'space' && space.id === state.activeSpaceId ? ' active' : ''}`;
@@ -983,6 +1030,14 @@ function renderSpaces() {
   askGroup.replaceChildren(askButton);
 
   els.spacesList.replaceChildren(spacesGroup, askGroup);
+}
+
+function spacesRenderSignature() {
+  return JSON.stringify([
+    activeView,
+    state.activeSpaceId,
+    (state.spaces || []).map((space) => [space.id, space.name, space.icon || '']),
+  ]);
 }
 
 async function addSpace() {
@@ -1173,13 +1228,9 @@ async function renameGroup(group) {
   if (group.dormant) {
     renameDormantSnapshotGroup(group, clean);
   } else if (group.id === 'ungrouped') {
-    const tabIds = group.tabs.map((tab) => tab.id);
+    const tabIds = group.tabs.filter((tab) => !tab.pinned).map((tab) => tab.id);
     if (tabIds.length === 0) return;
-    const groupKey = createVirtualGroup({ title: clean, color: nextGroupColor() });
-    for (const tabId of tabIds) {
-      state.tabSpaces[tabId] = state.activeSpaceId;
-      state.tabGroups[tabId] = groupKey;
-    }
+    await createChromeGroup(tabIds, { title: clean, color: nextGroupColor() });
   } else if (isVirtualGroupKey(group.key)) {
     state.virtualGroups[group.key] = {
       ...(state.virtualGroups[group.key] || {}),
@@ -1189,11 +1240,8 @@ async function renameGroup(group) {
       spaceId: state.activeSpaceId,
     };
   } else {
-    const groupKey = createVirtualGroup({ title: clean, color: group.color || nextGroupColor() });
-    for (const tab of group.tabs) {
-      state.tabSpaces[tab.id] = state.activeSpaceId;
-      state.tabGroups[tab.id] = groupKey;
-    }
+    await send('groups:update', { groupId: group.id, update: { title: clean } });
+    bindChromeGroup(group.id, state.activeSpaceId);
   }
 
   await saveState();
@@ -1220,7 +1268,7 @@ async function renameFolderGroup(folderContext) {
   const visibleKeys = spaceView.map((group) => group.key);
   for (const group of groups) {
     const title = renamedFolderGroupTitle(group, sourcePath, clean);
-    const nextKey = retitleGroupWithoutSaving(group, title);
+    const nextKey = await retitleGroupWithoutSaving(group, title);
     if (nextKey) replacements.set(group.key, nextKey);
   }
   replaceGroupOrderKeys(replacements, visibleKeys);
@@ -1247,14 +1295,11 @@ async function groupSelectedTabs(tabIds) {
     return;
   }
 
-  const groupKey = createVirtualGroup({
+  const groupId = await createChromeGroup(selectedTabs.map((tab) => tab.id), {
     title: selectedGroupTitle(selectedTabs),
     color: nextGroupColor(),
   });
-  for (const tab of selectedTabs) {
-    state.tabSpaces[tab.id] = state.activeSpaceId;
-    state.tabGroups[tab.id] = groupKey;
-  }
+  if (groupId === null) return;
   selectedTabIds = new Set(selectedTabs.map((tab) => tab.id));
   selectionAnchorTabId = selectedTabs.at(-1)?.id ?? null;
   await saveState();
@@ -1280,6 +1325,9 @@ async function closeTab(tab, groupKey = '') {
 async function moveTabToSpace(tab, spaceId) {
   const sourceGroup = groupForTab(tab);
   const targetGroupKey = ensureMovedTabTargetGroup(tab, sourceGroup, spaceId);
+  if (isGroupedTab(tab)) {
+    await send('tabs:ungroup', { tabIds: [tab.id] });
+  }
   state.tabSpaces[tab.id] = spaceId;
   state.tabGroups[tab.id] = targetGroupKey;
   removeTabFromSavedOrder(tab.id);
@@ -1315,7 +1363,10 @@ async function moveGroupToSpace(group, spaceId) {
   if (group.dormant) {
     moveDormantSnapshotGroup(group, spaceId);
   } else if (group.id === 'ungrouped') {
-    for (const tab of group.tabs) state.tabSpaces[tab.id] = spaceId;
+    for (const tab of group.tabs) {
+      state.tabSpaces[tab.id] = spaceId;
+      delete state.tabGroups?.[tab.id];
+    }
   } else if (isVirtualGroupKey(group.key)) {
     state.virtualGroups[group.key] = {
       ...(state.virtualGroups[group.key] || {}),
@@ -1329,14 +1380,11 @@ async function moveGroupToSpace(group, spaceId) {
       .filter((key) => key !== group.key);
     addGroupOrderKey(spaceId, group.key);
   } else {
-    const groupKey = createVirtualGroup({
-      title: group.displayTitle || group.title,
-      color: group.color || nextGroupColor(),
-      spaceId,
-    });
+    state.groupSpaces[group.id] = spaceId;
+    addGroupOrderKey(spaceId, group.key);
     for (const tab of group.tabs) {
-      state.tabSpaces[tab.id] = spaceId;
-      state.tabGroups[tab.id] = groupKey;
+      delete state.tabSpaces[tab.id];
+      delete state.tabGroups?.[tab.id];
     }
   }
   await saveState();
@@ -1403,7 +1451,7 @@ function pathStartsWith(path, prefix) {
   return prefix.every((part, index) => path[index] === part);
 }
 
-function retitleGroupWithoutSaving(group, title) {
+async function retitleGroupWithoutSaving(group, title) {
   if (!group || group.id === 'ungrouped') return '';
   if (group.dormant) {
     renameDormantSnapshotGroup(group, title);
@@ -1429,7 +1477,10 @@ function moveGroupsWithoutSaving(groups, spaceId) {
   for (const group of groups.filter((item) => !item.dormant)) {
     removedKeys.add(group.key);
     if (group.id === 'ungrouped') {
-      for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
+      for (const tab of group.tabs || []) {
+        state.tabSpaces[tab.id] = spaceId;
+        delete state.tabGroups?.[tab.id];
+      }
     } else if (isVirtualGroupKey(group.key)) {
       state.virtualGroups[group.key] = {
         ...(state.virtualGroups[group.key] || {}),
@@ -1441,14 +1492,11 @@ function moveGroupsWithoutSaving(groups, spaceId) {
       for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
       addGroupOrderKey(spaceId, group.key);
     } else {
-      const groupKey = createVirtualGroup({
-        title: group.displayTitle || group.title,
-        color: group.color || nextGroupColor(),
-        spaceId,
-      });
+      state.groupSpaces[group.id] = spaceId;
+      addGroupOrderKey(spaceId, group.key);
       for (const tab of group.tabs || []) {
-        state.tabSpaces[tab.id] = spaceId;
-        state.tabGroups[tab.id] = groupKey;
+        delete state.tabSpaces[tab.id];
+        delete state.tabGroups?.[tab.id];
       }
     }
   }
@@ -1568,9 +1616,16 @@ async function openDormantTab(tab, groupKey) {
   if (!dormantGroup || isUngroupedSnapshotGroup(dormantGroup)) {
     state.tabSpaces[tabId] = state.activeSpaceId;
   } else {
-    const groupKey = ensureVirtualGroupForTitle(dormantGroup.title, dormantGroup.color);
-    state.tabSpaces[tabId] = state.activeSpaceId;
-    state.tabGroups[tabId] = groupKey;
+    const existing = chromeGroupForTitle(dormantGroup.title, state.activeSpaceId);
+    if (existing) {
+      await addTabsToChromeGroup(existing.id, [tabId], state.activeSpaceId);
+    } else {
+      await createChromeGroup([tabId], {
+        title: dormantGroup.title,
+        color: dormantGroup.color,
+        collapsed: false,
+      });
+    }
   }
 
   removeOpenedDormantTabFromSnapshot(tab, dormantGroup);
@@ -1599,6 +1654,7 @@ async function switchSpace(spaceId) {
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
   await closeEphemeralTabsExcept(keepAliveTab?.id);
   await closeTabsOutsideActiveSpace();
+  await closeExtraFallbackTabs(keepAliveTab?.id);
   await focusFirstTabInSpace(spaceId, {
     force: true,
     allowEphemeral: true,
@@ -1640,6 +1696,28 @@ function reusableFallbackTab(previousSpaceId) {
     tab.url === 'chrome://newtab' &&
     (isEphemeralTab(tab) || tabBelongsToSpace(tab, previousSpaceId))
   )));
+}
+
+async function closeExtraFallbackTabs(keepTabId) {
+  await loadTabs({ adopt: false });
+  const fallbackTabs = tabs.filter((tab) => !tab.pinned && tab.url === 'chrome://newtab');
+  if (fallbackTabs.length <= 1) return;
+
+  const keepId = Number(keepTabId);
+  const keepTab = Number.isFinite(keepId)
+    ? fallbackTabs.find((tab) => Number(tab.id) === keepId)
+    : null;
+  const keep = keepTab || preferredFocusableTab(fallbackTabs) || fallbackTabs[0];
+
+  for (const tab of fallbackTabs) {
+    if (Number(tab.id) === Number(keep.id)) continue;
+    delete state.tabSpaces[tab.id];
+    delete state.renamedTabs[tab.id];
+    delete state.tabGroups?.[tab.id];
+    forgetEphemeralTab(tab.id);
+    await send('tabs:close', { tabId: tab.id });
+  }
+  await loadTabs({ adopt: false });
 }
 
 async function closeTabsOutsideActiveSpace() {
@@ -1888,7 +1966,13 @@ async function ensureSpaceOpenFromSnapshot(spaceId, options = {}) {
 async function collapseGroupsInSpace(spaceId) {
   await loadTabs({ adopt: false });
   const view = buildSpaceViewForSpace(spaceId).filter((group) => group.key !== 'ungrouped');
-  for (const group of view) state.collapsedGroups[group.key] = true;
+  for (const group of view) {
+    state.collapsedGroups[group.key] = true;
+    const groupId = groupIdFromKey(group.key);
+    if (!group.dormant && groupId !== null) {
+      await send('groups:update', { groupId, update: { collapsed: true } });
+    }
+  }
 }
 
 async function discardRestoredTabs(tabIds = []) {
@@ -1930,6 +2014,11 @@ async function toggleGroup(group) {
   state.collapsedGroups[group.key] = nextCollapsed;
   if (isVirtualGroupKey(group.key) && state.virtualGroups?.[group.key]) {
     state.virtualGroups[group.key].collapsed = nextCollapsed;
+  } else {
+    const groupId = groupIdFromKey(group.key);
+    if (!group.dormant && groupId !== null) {
+      await send('groups:update', { groupId, update: { collapsed: nextCollapsed } });
+    }
   }
   await saveState();
   await refreshTabs();
@@ -2069,6 +2158,15 @@ async function reorderGroupBlock(sourceKeys, targetKeys, placement = 'before') {
   state.groupOrder[state.activeSpaceId] = order;
   reorderDormantSnapshotGroups(order);
 
+  const sourceGroupId = sourceBlock.length === 1 ? groupIdFromKey(sourceBlock[0]) : null;
+  const targetGroup = spaceView.find((group) => group.key === targetKey);
+  const targetIndex = placement === 'after'
+    ? tabInsertionIndexAtEndOfGroup(targetGroup)
+    : firstTabIndexForGroupKey(targetKey);
+  if (sourceGroupId !== null && Number.isFinite(targetIndex)) {
+    await send('groups:move', { groupId: sourceGroupId, index: targetIndex });
+  }
+
   await saveState();
   await refreshTabs();
 }
@@ -2093,7 +2191,7 @@ async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
       dormantMoves.push({ key: group.key, title: nextTitle });
       nextKeys.push(group.key);
     } else {
-      nextKeys.push(retitleGroupForNestedMove(group, nextTitle));
+      nextKeys.push(await retitleGroupForNestedMove(group, nextTitle));
     }
   }
   if (nextKeys.length === 0) return;
@@ -2120,7 +2218,7 @@ function uniqueAdjacentPathParts(parts) {
   return compact.filter((part, index) => index === 0 || part !== compact[index - 1]);
 }
 
-function retitleGroupForNestedMove(group, title) {
+async function retitleGroupForNestedMove(group, title) {
   if (isVirtualGroupKey(group.key)) {
     state.virtualGroups[group.key] = {
       ...(state.virtualGroups[group.key] || {}),
@@ -2130,6 +2228,13 @@ function retitleGroupForNestedMove(group, title) {
       spaceId: state.activeSpaceId,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
     };
+    return group.key;
+  }
+
+  const groupId = groupIdFromKey(group.key);
+  if (groupId !== null) {
+    await send('groups:update', { groupId, update: { title } });
+    bindChromeGroup(groupId, state.activeSpaceId);
     return group.key;
   }
 
@@ -2270,14 +2375,21 @@ async function reorderTab(tabId, targetGroupKey, beforeTabId, options = {}) {
   const targetGroup = options.targetGroup || spaceView.find((group) => group.key === targetGroupKey);
   if (!tab || !sourceGroup || !targetGroup) return;
 
-  state.tabSpaces[tab.id] = state.activeSpaceId;
   let targetOrderKey = targetGroupKey;
   if (targetGroupKey === 'ungrouped') {
+    if (isGroupedTab(tab)) await send('tabs:ungroup', { tabIds: [tab.id] });
+    state.tabSpaces[tab.id] = state.activeSpaceId;
     delete state.tabGroups?.[tab.id];
   } else {
-    const groupKey = ensureTabDropGroupKey(targetGroup);
-    state.tabGroups[tab.id] = groupKey;
-    targetOrderKey = groupKey;
+    const groupId = await ensureTabDropChromeGroup(targetGroup, tab.id);
+    if (groupId === null) return;
+    if (Number(tab.groupId) !== Number(groupId)) {
+      await addTabsToChromeGroup(groupId, [tab.id], state.activeSpaceId);
+    } else {
+      bindChromeGroup(groupId, state.activeSpaceId);
+      clearLocalTabGrouping([tab.id]);
+    }
+    targetOrderKey = `group:${groupId}`;
   }
   removeDormantSnapshotTabsForOpenTabs([tab]);
 
@@ -2305,19 +2417,25 @@ async function reorderTab(tabId, targetGroupKey, beforeTabId, options = {}) {
   await refreshTabs({ reloadDormant: true });
 }
 
-function ensureTabDropGroupKey(targetGroup) {
-  if (targetGroup.key === 'ungrouped') return 'ungrouped';
-  if (isVirtualGroupKey(targetGroup.key)) return targetGroup.key;
+async function ensureTabDropChromeGroup(targetGroup, tabId) {
+  if (targetGroup.key === 'ungrouped') return null;
 
-  const groupKey = createVirtualGroup({
+  const existingGroupId = groupIdFromKey(targetGroup.key);
+  if (existingGroupId !== null) {
+    bindChromeGroup(existingGroupId, state.activeSpaceId);
+    return existingGroupId;
+  }
+
+  const tabIds = uniqueNumberIds([
+    ...liveTabsForOrdering(targetGroup).map((item) => item.id),
+    tabId,
+  ]);
+  return createChromeGroup(tabIds, {
     title: targetGroup.title || targetGroup.displayTitle || 'Group',
     color: targetGroup.color || nextGroupColor(),
+    collapsed: Boolean(targetGroup.collapsed),
+    sourceKey: targetGroup.key,
   });
-  for (const item of liveTabsForOrdering(targetGroup)) {
-    state.tabSpaces[item.id] = state.activeSpaceId;
-    state.tabGroups[item.id] = groupKey;
-  }
-  return groupKey;
 }
 
 function groupForFolderTabDrop(folder) {
@@ -2599,7 +2717,7 @@ async function autoGroupTabs() {
   await loadTabs({ adopt: true });
   const candidates = tabs.filter((tab) => (
     state.tabSpaces[tab.id] === state.activeSpaceId &&
-    !state.tabGroups?.[tab.id] &&
+    !isGroupedTab(tab) &&
     !tab.url.startsWith('chrome://')
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
@@ -2612,6 +2730,7 @@ async function autoGroupTabs() {
   let plannedGroups = [];
   try {
     let mergedGroups = await mergeDuplicateGroupsInActiveSpace();
+    if (mergedGroups) await loadTabs({ adopt: false });
 
     if (state.ai.apiKey) {
       try {
@@ -2627,26 +2746,25 @@ async function autoGroupTabs() {
     }
 
     if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
-    const existingGroupsByTitle = activeVirtualGroupsByTitle();
+    const existingGroupsByTitle = activeChromeGroupsByTitle();
     let createdGroups = 0;
     for (const group of plannedGroups) {
       const titleKey = groupTitleKey(group.title);
-      let groupKey = existingGroupsByTitle.get(titleKey)?.key;
-      if (!groupKey) {
-        groupKey = createVirtualGroup({
+      let groupId = existingGroupsByTitle.get(titleKey)?.id;
+      if (Number.isFinite(Number(groupId))) {
+        await addTabsToChromeGroup(groupId, group.tabIds, state.activeSpaceId);
+      } else {
+        groupId = await createChromeGroup(group.tabIds, {
           title: group.title,
           color: group.color || nextGroupColor(),
         });
+        if (groupId === null) continue;
         existingGroupsByTitle.set(titleKey, {
-          key: groupKey,
+          id: groupId,
           title: group.title,
           color: group.color,
         });
         createdGroups += 1;
-      }
-      for (const tabId of group.tabIds) {
-        state.tabSpaces[tabId] = state.activeSpaceId;
-        state.tabGroups[tabId] = groupKey;
       }
     }
 
@@ -2664,13 +2782,13 @@ async function autoGroupTabs() {
   }
 }
 
-function activeVirtualGroupsByTitle() {
+function activeChromeGroupsByTitle() {
   const byTitle = new Map();
-  for (const [key, group] of Object.entries(state.virtualGroups || {})) {
-    if (group?.spaceId !== state.activeSpaceId) continue;
+  for (const group of groups) {
+    if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
     const titleKey = groupTitleKey(group.title);
     if (!titleKey || byTitle.has(titleKey)) continue;
-    byTitle.set(titleKey, { ...group, key });
+    byTitle.set(titleKey, group);
   }
   return byTitle;
 }
@@ -2681,12 +2799,12 @@ function countDuplicateActiveGroups() {
 
 function duplicateActiveGroupBuckets() {
   const buckets = new Map();
-  for (const [key, group] of Object.entries(state.virtualGroups || {})) {
-    if (group?.spaceId !== state.activeSpaceId) continue;
+  for (const group of groups) {
+    if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
     const titleKey = groupTitleKey(group.title);
     if (!titleKey) continue;
     if (!buckets.has(titleKey)) buckets.set(titleKey, []);
-    buckets.get(titleKey).push({ ...group, key });
+    buckets.get(titleKey).push({ ...group, key: `group:${group.id}` });
   }
   return [...buckets.values()].filter((bucket) => bucket.length > 1);
 }
@@ -2696,10 +2814,11 @@ async function mergeDuplicateGroupsInActiveSpace() {
   for (const bucket of duplicateActiveGroupBuckets()) {
     const [keep, ...duplicates] = bucket;
     for (const duplicate of duplicates) {
-      for (const [tabId, groupKey] of Object.entries(state.tabGroups || {})) {
-        if (groupKey === duplicate.key) state.tabGroups[tabId] = keep.key;
-      }
-      delete state.virtualGroups?.[duplicate.key];
+      const tabIds = tabs
+        .filter((tab) => Number(tab.groupId) === Number(duplicate.id))
+        .map((tab) => tab.id);
+      if (tabIds.length) await addTabsToChromeGroup(keep.id, tabIds, state.activeSpaceId);
+      delete state.groupSpaces[duplicate.id];
       delete state.collapsedGroups[duplicate.key];
       delete state.tabOrder[state.activeSpaceId]?.[duplicate.key];
       state.groupOrder[state.activeSpaceId] = (state.groupOrder[state.activeSpaceId] || [])
@@ -3511,6 +3630,94 @@ function removeTabFromSavedOrder(tabId, spaceId = state.activeSpaceId) {
   }
 }
 
+async function createChromeGroup(tabIds, options = {}) {
+  const ids = uniqueNumberIds(tabIds);
+  if (ids.length === 0) return null;
+  const result = await send('tabs:group', {
+    tabIds: ids,
+    title: options.title || 'Tabs',
+    color: options.color || nextGroupColor(),
+    collapsed: Boolean(options.collapsed),
+  });
+  const groupId = Number(result.groupId);
+  if (!Number.isFinite(groupId)) return null;
+  bindChromeGroup(groupId, options.spaceId || state.activeSpaceId, {
+    sourceKey: options.sourceKey,
+    collapsed: Boolean(options.collapsed),
+  });
+  clearLocalTabGrouping(ids);
+  return groupId;
+}
+
+async function addTabsToChromeGroup(groupId, tabIds, spaceId = state.activeSpaceId) {
+  const ids = uniqueNumberIds(tabIds);
+  const numericGroupId = Number(groupId);
+  if (!Number.isFinite(numericGroupId) || ids.length === 0) return null;
+  const result = await send('tabs:groupExisting', { groupId: numericGroupId, tabIds: ids });
+  const nextGroupId = Number(result.groupId);
+  if (!Number.isFinite(nextGroupId)) return null;
+  bindChromeGroup(nextGroupId, spaceId);
+  clearLocalTabGrouping(ids);
+  return nextGroupId;
+}
+
+function bindChromeGroup(groupId, spaceId = state.activeSpaceId, options = {}) {
+  const numericGroupId = Number(groupId);
+  if (!Number.isFinite(numericGroupId)) return '';
+  const key = `group:${numericGroupId}`;
+  state.groupSpaces[numericGroupId] = spaceId;
+  if (options.sourceKey && options.sourceKey !== key) transferGroupLocalState(options.sourceKey, key, spaceId);
+  if ('collapsed' in options) state.collapsedGroups[key] = Boolean(options.collapsed);
+  addGroupOrderKey(spaceId, key);
+  return key;
+}
+
+function transferGroupLocalState(sourceKey, targetKey, spaceId = state.activeSpaceId) {
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+  if (state.collapsedGroups[sourceKey] !== undefined && state.collapsedGroups[targetKey] === undefined) {
+    state.collapsedGroups[targetKey] = state.collapsedGroups[sourceKey];
+  }
+  delete state.collapsedGroups[sourceKey];
+
+  const order = state.tabOrder?.[spaceId];
+  if (order?.[sourceKey]) {
+    order[targetKey] = uniqueKeys([...(order[targetKey] || []), ...order[sourceKey]]);
+    delete order[sourceKey];
+  }
+
+  const groupOrder = state.groupOrder[spaceId] || [];
+  if (groupOrder.includes(sourceKey)) {
+    state.groupOrder[spaceId] = uniqueKeys(groupOrder.map((key) => key === sourceKey ? targetKey : key));
+  }
+}
+
+function clearLocalTabGrouping(tabIds) {
+  for (const tabId of uniqueNumberIds(tabIds)) {
+    delete state.tabSpaces[tabId];
+    delete state.tabGroups?.[tabId];
+  }
+}
+
+function chromeGroupForTitle(title, spaceId = state.activeSpaceId) {
+  const titleKey = groupTitleKey(title);
+  if (!titleKey) return null;
+  return groups.find((group) => (
+    state.groupSpaces[group.id] === spaceId &&
+    groupTitleKey(group.title) === titleKey
+  )) || null;
+}
+
+function cleanupUnusedVirtualGroups() {
+  const used = new Set(Object.values(state.tabGroups || {}));
+  for (const groupKey of Object.keys(state.virtualGroups || {})) {
+    if (!used.has(groupKey)) delete state.virtualGroups[groupKey];
+  }
+}
+
+function uniqueNumberIds(values = []) {
+  return [...new Set((values || []).map(Number).filter(Number.isFinite))];
+}
+
 function reorderKeyBlock(keys, sourceKeys, targetKey, placement = 'before') {
   const sourceKeySet = new Set(sourceKeys);
   const block = sourceKeys.filter((key) => keys.includes(key));
@@ -3627,8 +3834,25 @@ function formatArcImportSummary(summary, prefix = 'Arc import') {
 
 function renderAskMessages() {
   const session = ensureCurrentAskSession();
+  const signature = askMessagesSignature(session);
+  if (signature === lastRenderedAskSignature) return;
+
+  const shouldStickToBottom = els.askMessages.scrollHeight - els.askMessages.scrollTop - els.askMessages.clientHeight < 24;
   els.askMessages.replaceChildren(...(session.messages || []).map(createAskMessageElement));
-  els.askMessages.scrollTop = els.askMessages.scrollHeight;
+  if (shouldStickToBottom) els.askMessages.scrollTop = els.askMessages.scrollHeight;
+  lastRenderedAskSignature = signature;
+}
+
+function askMessagesSignature(session) {
+  return JSON.stringify([
+    session?.key || '',
+    (session?.messages || []).map((message) => [
+      message.id,
+      message.role,
+      message.updatedAt || message.createdAt || 0,
+      message.text,
+    ]),
+  ]);
 }
 
 function createAskMessageElement(message) {
