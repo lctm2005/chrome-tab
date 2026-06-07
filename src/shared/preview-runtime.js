@@ -80,11 +80,27 @@ export function createPreviewGroups() {
   ];
 }
 
+const PREVIEW_RUNTIME_STORAGE_KEY = 'spaceTabsPreviewRuntime';
+
 export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), initialGroups = createPreviewGroups()) {
-  let tabs = initialTabs.map((tab, index) => ({ ...tab, index }));
-  let groups = initialGroups.map((group) => ({ ...group }));
-  let nextId = Math.max(...tabs.map((tab) => tab.id), 0) + 1;
-  let nextGroupId = Math.max(...groups.map((group) => group.id), 0) + 1;
+  const stored = readPreviewRuntimeState();
+  let tabs = Array.isArray(stored?.tabs)
+    ? stored.tabs.map((tab, index) => ({ ...tab, index }))
+    : initialTabs.map((tab, index) => ({ ...tab, index }));
+  let groups = Array.isArray(stored?.groups)
+    ? stored.groups.map((group) => ({ ...group }))
+    : initialGroups.map((group) => ({ ...group }));
+  let nextId = Number.isFinite(Number(stored?.nextId))
+    ? Number(stored.nextId)
+    : Math.max(...tabs.map((tab) => tab.id), 0) + 1;
+  let nextGroupId = Number.isFinite(Number(stored?.nextGroupId))
+    ? Number(stored.nextGroupId)
+    : Math.max(...groups.map((group) => group.id), 0) + 1;
+
+  const persistAndReturn = (value) => {
+    writePreviewRuntimeState({ tabs, groups, nextId, nextGroupId });
+    return value;
+  };
 
   return async function send(type, payload = {}) {
     recordPreviewCommand(type, payload);
@@ -106,24 +122,24 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           audible: false,
         };
         tabs = (payload.active === false ? tabs : tabs.map((item) => ({ ...item, active: false }))).concat(tab);
-        return { tab: { ...tab } };
+        return persistAndReturn({ tab: { ...tab } });
       }
       case 'tabs:focus': {
         const id = Number(payload.tabId);
         tabs = tabs.map((tab) => ({ ...tab, active: tab.id === id }));
-        return { tab: { ...tabs.find((tab) => tab.id === id) } };
+        return persistAndReturn({ tab: { ...tabs.find((tab) => tab.id === id) } });
       }
       case 'tabs:discard': {
         const id = Number(payload.tabId);
         tabs = tabs.map((tab) => tab.id === id ? { ...tab, discarded: true } : tab);
-        return { tab: { ...tabs.find((tab) => tab.id === id) } };
+        return persistAndReturn({ tab: { ...tabs.find((tab) => tab.id === id) } });
       }
       case 'tabs:close': {
         const id = Number(payload.tabId);
         const closingWasActive = tabs.some((tab) => tab.id === id && tab.active);
         tabs = tabs.filter((tab) => tab.id !== id);
         if (closingWasActive && tabs.length) tabs[0].active = true;
-        return {};
+        return persistAndReturn({});
       }
       case 'tabs:group': {
         const groupId = nextGroupId++;
@@ -135,7 +151,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           color: payload.color || 'blue',
           collapsed: Boolean(payload.collapsed),
         });
-        return { groupId };
+        return persistAndReturn({ groupId });
       }
       case 'tabs:ungroup': {
         const ids = new Set((payload.tabIds || []).map(Number));
@@ -144,13 +160,13 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           .map((tab) => tab.groupId)
           .filter((id) => Number.isFinite(Number(id)) && Number(id) !== -1));
         groups = groups.filter((group) => usedGroupIds.has(group.id));
-        return {};
+        return persistAndReturn({});
       }
       case 'tabs:groupExisting': {
         const ids = new Set((payload.tabIds || []).map(Number));
         const groupId = Number(payload.groupId);
         tabs = tabs.map((tab) => ids.has(tab.id) ? { ...tab, groupId } : tab);
-        return { groupId };
+        return persistAndReturn({ groupId });
       }
       case 'tabs:move': {
         const tabId = Number(payload.tabId);
@@ -160,7 +176,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         const index = Math.max(0, Math.min(Number(payload.index ?? without.length), without.length));
         without.splice(index, 0, moving);
         tabs = reindexTabs(without);
-        return {};
+        return persistAndReturn({});
       }
       case 'groups:move': {
         const groupId = Number(payload.groupId);
@@ -170,7 +186,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         const index = Math.max(0, Math.min(Number(payload.index ?? remaining.length), remaining.length));
         remaining.splice(index, 0, ...movingTabs);
         tabs = reindexTabs(remaining);
-        return {};
+        return persistAndReturn({});
       }
       case 'groups:update': {
         const groupId = Number(payload.groupId);
@@ -178,7 +194,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           if (group.id !== groupId) return group;
           return { ...group, ...(payload.update || {}) };
         });
-        return { group: { ...groups.find((group) => group.id === groupId) } };
+        return persistAndReturn({ group: { ...groups.find((group) => group.id === groupId) } });
       }
       case 'page:extract': {
         const active = tabs.find((tab) => tab.active) || tabs[0];
@@ -201,6 +217,22 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         throw new Error(`Preview mode does not support command: ${type}`);
     }
   };
+}
+
+function readPreviewRuntimeState() {
+  try {
+    return JSON.parse(globalThis.sessionStorage?.getItem(PREVIEW_RUNTIME_STORAGE_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function writePreviewRuntimeState(state) {
+  try {
+    globalThis.sessionStorage?.setItem(PREVIEW_RUNTIME_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Preview persistence is best-effort; non-browser tests do not provide sessionStorage.
+  }
 }
 
 function recordPreviewCommand(type, payload) {

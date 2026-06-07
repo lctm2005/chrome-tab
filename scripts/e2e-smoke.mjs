@@ -84,7 +84,11 @@ async function startChromeForCdp() {
     ...(preview ? ['--headless=new', '--disable-gpu'] : []),
     'about:blank',
   ];
-  const child = spawn(executable, args, { stdio: 'ignore' });
+  const child = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-4000);
+  });
   let exited = false;
   child.once('exit', () => {
     exited = true;
@@ -96,7 +100,7 @@ async function startChromeForCdp() {
   } catch (error) {
     child.kill('SIGTERM');
     await rm(userDataDir, { recursive: true, force: true });
-    throw error;
+    throw new Error(`${error.message}${stderr ? `\nChrome stderr:\n${stderr}` : ''}`);
   }
 
   return {
@@ -127,7 +131,7 @@ async function canReachCdp() {
   }
 }
 
-async function waitForCdp(timeoutMs = 8000) {
+async function waitForCdp(timeoutMs = 20000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (await canReachCdp()) return true;
@@ -246,6 +250,8 @@ async function main() {
     await client.ready;
     await client.send('Runtime.enable');
     await client.send('Page.enable');
+    await client.send('Page.navigate', { url: sidepanelUrl });
+    await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)}`);
 
     const results = [];
     const bugs = [];
@@ -261,7 +267,7 @@ async function main() {
     const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
     if (${JSON.stringify(preview)}) {
       localStorage.clear();
-      sessionStorage.removeItem(SECRET_STORAGE_KEY);
+      sessionStorage.clear();
     } else {
       await chrome.storage.local.clear();
       if (chrome.storage.session) await chrome.storage.session.remove(SECRET_STORAGE_KEY);
@@ -873,10 +879,12 @@ async function main() {
       state.spaces.push({ id: 'drop-demo', name: 'Drop Demo', icon: 'P', color: 'cyan' });
     }
     state.activeSpaceId = 'drop-demo';
+    state.groupSpaces = state.groupSpaces || {};
     state.tabSpaces = state.tabSpaces || {};
     state.tabGroups = state.tabGroups || {};
     state.virtualGroups = state.virtualGroups || {};
     state.spaceSnapshots = state.spaceSnapshots || {};
+    state.groupSpaces[1] = 'drop-demo';
     state.tabSpaces[2] = 'drop-demo';
     delete state.tabGroups[2];
     state.spaceSnapshots['drop-demo'] = {
@@ -893,19 +901,37 @@ async function main() {
       }],
     };
     localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
+      tabs: [{
+        id: 2,
+        title: 'Browser Spaces Guide',
+        url: 'https://example.com/spaces-guide',
+        favIconUrl: '',
+        pinned: false,
+        muted: false,
+        active: true,
+        groupId: 1,
+        index: 0,
+        windowId: 1,
+        audible: false,
+      }],
+      groups: [{ id: 1, title: 'Research', color: 'blue', collapsed: false }],
+      nextId: 6,
+      nextGroupId: 4,
+    }));
     return true;
   })()`);
   await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
   await waitFor(client, `(() => {
-    const source = [...document.querySelectorAll('.ungrouped-section .tab-row')]
+    const source = [...document.querySelectorAll('.tab-row:not(.dormant)')]
       .some((row) => row.textContent.includes('Browser Spaces Guide'));
     const target = [...document.querySelectorAll('.group-header h2')]
       .some((node) => node.textContent === 'Drop Target');
     return source && target;
   })()`);
   const dormantTabDropDispatchState = await evaluate(client, `(() => {
-    const source = [...document.querySelectorAll('.ungrouped-section .tab-row')]
+    const source = [...document.querySelectorAll('.tab-row:not(.dormant)')]
       .find((row) => row.textContent.includes('Browser Spaces Guide'));
     const target = [...document.querySelectorAll('.group-card')]
       .find((card) => card.querySelector('.group-header h2')?.textContent === 'Drop Target');
@@ -953,11 +979,14 @@ async function main() {
   })()`);
   const dormantTabDropState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    const virtualEntry = Object.entries(stored.virtualGroups || {})
-      .find(([, group]) => group?.spaceId === 'drop-demo' && group?.title === 'Drop Target');
-    const groupKey = virtualEntry?.[0] || '';
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    if (card?.classList.contains('collapsed')) {
+      card.querySelector('.group-header')?.click();
+      return null;
+    }
+    const groupKey = card?.dataset.groupKey || '';
+    const groupId = groupKey.match(/^group:(\\d+)$/)?.[1] || '';
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
@@ -969,7 +998,7 @@ async function main() {
       ...Object.keys(stored.tabSpaces || {}),
       ...Object.keys(stored.tabGroups || {}),
     ].filter((key) => key.startsWith('snapshot:'));
-    return groupKey && stored.tabGroups?.['2'] === groupKey ? {
+    return groupId && stored.groupSpaces?.[groupId] === 'drop-demo' && rows.length ? {
       groupKey,
       rows,
       snapshotUrls,
@@ -1006,6 +1035,10 @@ async function main() {
   const activatedTagResidueState = await waitFor(client, `(() => {
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+    if (card?.classList.contains('collapsed')) {
+      card.querySelector('.group-header')?.click();
+      return null;
+    }
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
@@ -1160,17 +1193,21 @@ async function main() {
       allRowText,
       virtualGroups: Object.values(stored.virtualGroups || {}).map((group) => group.title),
       tabGroupCount: Object.keys(stored.tabGroups || {}).length,
+      groupSpaces: stored.groupSpaces || {},
+      groupHeaders: [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
       ephemeralTabIds: stored.ephemeralTabIds || [],
     };
   })()`);
   record(
-    'opening one dormant grouped tab uses local virtual grouping without leaked new tabs',
+    'opening one dormant grouped tab uses Chrome grouping without leaked new tabs',
     firstDormantOpenState.snapshotUrls.length === 2 &&
       new Set(firstDormantOpenState.snapshotUrls).size === 2 &&
       firstDormantOpenState.searchRows.length === 2 &&
       firstDormantOpenState.dormantRows === 1 &&
-      firstDormantOpenState.virtualGroups.includes('Search') &&
-      firstDormantOpenState.tabGroupCount >= 1 &&
+      firstDormantOpenState.groupHeaders.includes('Search') &&
+      Object.values(firstDormantOpenState.groupSpaces).includes('dormant-demo') &&
+      firstDormantOpenState.virtualGroups.length === 0 &&
+      firstDormantOpenState.tabGroupCount === 0 &&
       firstDormantOpenState.ephemeralTabIds.length === 0 &&
       !firstDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text)),
     JSON.stringify(firstDormantOpenState)
@@ -1202,6 +1239,8 @@ async function main() {
       allRowText,
       virtualGroups: Object.values(stored.virtualGroups || {}).map((group) => group.title),
       tabGroupCount: Object.keys(stored.tabGroups || {}).length,
+      groupSpaces: stored.groupSpaces || {},
+      groupHeaders: [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
       ephemeralTabIds: stored.ephemeralTabIds || [],
     };
   })()`);
@@ -1211,8 +1250,10 @@ async function main() {
       new Set(allDormantOpenState.snapshotUrls).size === 2 &&
       allDormantOpenState.searchRows.length === 2 &&
       allDormantOpenState.dormantRows === 0 &&
-      allDormantOpenState.virtualGroups.includes('Search') &&
-      allDormantOpenState.tabGroupCount >= 2 &&
+      allDormantOpenState.groupHeaders.includes('Search') &&
+      Object.values(allDormantOpenState.groupSpaces).includes('dormant-demo') &&
+      allDormantOpenState.virtualGroups.length === 0 &&
+      allDormantOpenState.tabGroupCount === 0 &&
       allDormantOpenState.ephemeralTabIds.length === 0 &&
       !allDormantOpenState.allRowText.some((text) => /Untitled|New Tab|chrome/i.test(text)),
     JSON.stringify(allDormantOpenState)
