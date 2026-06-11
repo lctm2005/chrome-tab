@@ -46,7 +46,11 @@ const KEY_ALIASES = new Map([
 export function mergeShortcuts(stored = {}, defaults = DEFAULT_SHORTCUTS) {
   const next = {};
   for (const action of SHORTCUT_ACTIONS) {
-    next[action.id] = normalizeShortcut(stored[action.id] || defaults[action.id] || action.defaultShortcut);
+    const hasStoredShortcut = Object.prototype.hasOwnProperty.call(stored || {}, action.id);
+    const shortcut = hasStoredShortcut
+      ? stored[action.id]
+      : defaults[action.id] || action.defaultShortcut;
+    next[action.id] = normalizeShortcut(shortcut);
   }
   return next;
 }

@@ -85,14 +85,17 @@ function pageShortcutActionFromEvent(event) {
 function mergeContentShortcuts(stored = {}, storedVersion = 4) {
   const next = {};
   for (const action of PAGE_SHORTCUT_ACTIONS) {
-    const storedShortcut = normalizeContentShortcut(stored[action] || '');
+    const hasStoredShortcut = Object.prototype.hasOwnProperty.call(stored || {}, action);
+    const storedShortcut = hasStoredShortcut ? normalizeContentShortcut(stored[action] || '') : '';
     next[action] = (
       action === 'togglePanel' &&
       Number(storedVersion) < 4 &&
       storedShortcut === LEGACY_TOGGLE_PANEL_SHORTCUT
     )
       ? DEFAULT_SHORTCUTS[action]
-      : normalizeContentShortcut(storedShortcut || DEFAULT_SHORTCUTS[action]);
+      : hasStoredShortcut
+        ? storedShortcut
+        : normalizeContentShortcut(DEFAULT_SHORTCUTS[action]);
   }
   return next;
 }

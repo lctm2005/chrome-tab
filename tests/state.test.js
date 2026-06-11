@@ -59,6 +59,20 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
+test('preserves empty current shortcuts as disabled actions', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    shortcuts: {
+      openAsk: '',
+      askSubmit: 'Control+Enter',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.shortcuts.openAsk, '');
+  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
+  assert.equal(merged.shortcuts.askAbort, 'Control+C');
+});
+
 test('merges stored state without dropping new defaults', () => {
   const merged = mergeStoredState({
     spaces: [{ id: 'custom', name: 'Custom', icon: 'C', color: 'blue' }],

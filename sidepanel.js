@@ -251,7 +251,10 @@ function bindEvents() {
   els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
-  els.saveSettingsButton.addEventListener('click', (event) => runTask(() => saveSettings(event)));
+  els.saveSettingsButton.addEventListener('click', (event) => {
+    event.preventDefault();
+    runTask(() => saveSettings());
+  });
 
   els.themeOptions.addEventListener('click', (event) => {
     const btn = event.target.closest('.theme-option');
@@ -3318,8 +3321,7 @@ function renderShortcutSettings() {
   els.shortcutsList.replaceChildren(...rows);
 }
 
-async function saveSettings(event) {
-  event.preventDefault();
+async function saveSettings() {
   const shortcuts = currentShortcutsFromForm();
   const conflict = shortcutConflict(shortcuts);
   if (conflict) {

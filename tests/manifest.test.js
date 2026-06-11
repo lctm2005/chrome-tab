@@ -30,3 +30,12 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
     await access(new URL(`../icons/icon${size}.png`, import.meta.url));
   }
 });
+
+test('settings Save click prevents dialog submit before async work starts', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(
+    source,
+    /saveSettingsButton\.addEventListener\('click',\s*\(event\)\s*=>\s*\{\s*event\.preventDefault\(\);[\s\S]*?runTask\(\(\)\s*=>\s*saveSettings\(\)\)/,
+  );
+});

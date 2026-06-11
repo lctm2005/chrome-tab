@@ -64,6 +64,17 @@ test('merges stored shortcut overrides with defaults and drops unknown actions',
   assert.equal(shortcuts.unknownAction, undefined);
 });
 
+test('preserves empty stored shortcuts as disabled actions', () => {
+  const shortcuts = mergeShortcuts({
+    openAsk: '',
+    nextSpace: 'Control+Alt+J',
+  });
+
+  assert.equal(shortcuts.openAsk, '');
+  assert.equal(shortcuts.nextSpace, 'Control+Alt+J');
+  assert.equal(shortcuts.askAbort, DEFAULT_SHORTCUTS.askAbort);
+});
+
 test('detects duplicate shortcut assignments in settings', () => {
   const shortcuts = mergeShortcuts({ askSubmit: 'Meta+Enter' });
 

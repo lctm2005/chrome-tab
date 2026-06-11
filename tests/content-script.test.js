@@ -123,6 +123,14 @@ test('content script preserves current customized Cmd+S toggle shortcut', async 
   assert.deepEqual(asPlainMessages(messages), [{ type: 'panel:toggle' }]);
 });
 
+test('content script treats empty current shortcuts as disabled actions', async () => {
+  const { listeners, messages } = await loadContentScript({ nextSpace: '' });
+
+  listeners.get('keydown')(keyEvent({ key: 'ArrowRight', code: 'ArrowRight', ctrlKey: true, altKey: true }));
+
+  assert.deepEqual(asPlainMessages(messages), []);
+});
+
 test('content script does not steal plain web page typing shortcuts', async () => {
   const { listeners, messages } = await loadContentScript();
   const event = keyEvent({ key: '/', code: 'Slash' });
