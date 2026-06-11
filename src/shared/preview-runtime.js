@@ -129,6 +129,22 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         tabs = tabs.map((tab) => ({ ...tab, active: tab.id === id }));
         return persistAndReturn({ tab: { ...tabs.find((tab) => tab.id === id) } });
       }
+      case 'tabs:duplicate': {
+        const id = Number(payload.tabId);
+        const sourceIndex = tabs.findIndex((tab) => tab.id === id);
+        if (sourceIndex < 0) return { tab: null, missing: true };
+        const source = tabs[sourceIndex];
+        const tab = {
+          ...source,
+          id: nextId++,
+          active: true,
+          discarded: false,
+        };
+        const nextTabs = tabs.map((item) => ({ ...item, active: false }));
+        nextTabs.splice(sourceIndex + 1, 0, tab);
+        tabs = reindexTabs(nextTabs);
+        return persistAndReturn({ tab: { ...tabs[sourceIndex + 1] } });
+      }
       case 'tabs:discard': {
         const id = Number(payload.tabId);
         tabs = tabs.map((tab) => tab.id === id ? { ...tab, discarded: true } : tab);

@@ -43,6 +43,8 @@ async function handleMessage(message, sender = {}) {
       return createTab(message.url, message.active);
     case 'tabs:focus':
       return focusTab(message.tabId);
+    case 'tabs:duplicate':
+      return duplicateTab(message.tabId);
     case 'tabs:discard':
       return discardTab(message.tabId);
     case 'tabs:close':
@@ -157,6 +159,16 @@ async function focusTab(tabId) {
   try {
     const tab = await chrome.tabs.update(Number(tabId), { active: true });
     if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
+    return { tab: serializeTab(tab) };
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) return { tab: null, missing: true };
+    throw error;
+  }
+}
+
+async function duplicateTab(tabId) {
+  try {
+    const tab = await chrome.tabs.duplicate(Number(tabId));
     return { tab: serializeTab(tab) };
   } catch (error) {
     if (isMissingChromeEntityError(error)) return { tab: null, missing: true };

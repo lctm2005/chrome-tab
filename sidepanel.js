@@ -1214,6 +1214,41 @@ async function renameTab(tab) {
   await refreshTabs();
 }
 
+async function duplicateTab(tab) {
+  const sourceGroup = groupForTab(tab);
+  const result = await send('tabs:duplicate', { tabId: tab.id });
+  const duplicated = result.tab;
+  if (!duplicated?.id) {
+    setStatus('Could not duplicate tab.');
+    return;
+  }
+
+  if (isGroupedTab(tab)) {
+    if (Number(duplicated.groupId) !== Number(tab.groupId)) {
+      await addTabsToChromeGroup(tab.groupId, [duplicated.id], state.activeSpaceId);
+    } else {
+      bindChromeGroup(duplicated.groupId, state.activeSpaceId);
+      clearLocalTabGrouping([duplicated.id]);
+    }
+  } else {
+    state.tabSpaces[duplicated.id] = state.activeSpaceId;
+    const localGroupKey = state.tabGroups?.[tab.id] || (
+      sourceGroup && isVirtualGroupKey(sourceGroup.key) ? sourceGroup.key : ''
+    );
+    if (localGroupKey) state.tabGroups[duplicated.id] = localGroupKey;
+    else delete state.tabGroups?.[duplicated.id];
+  }
+
+  if (state.renamedTabs?.[tab.id]) {
+    state.renamedTabs[duplicated.id] = state.renamedTabs[tab.id];
+  }
+  rememberDuplicatedTabOrder(tab, duplicated.id, sourceGroup);
+
+  await saveState();
+  await refreshTabs();
+  setStatus('Duplicated tab.');
+}
+
 async function renameGroup(group) {
   const nextName = await askText({
     title: 'Rename Group',
@@ -3067,6 +3102,7 @@ function showTabContextMenu(event, tab) {
   }
   items.push(
     menuAction('Rename', () => renameTab(tab)),
+    menuAction('Duplicate', () => duplicateTab(tab)),
     menuSeparator(),
     menuLabel('Move to'),
     ...state.spaces
@@ -3628,6 +3664,26 @@ function removeTabFromSavedOrder(tabId, spaceId = state.activeSpaceId) {
     order[key] = (order[key] || []).filter((item) => Number(item) !== id);
     if (order[key].length === 0) delete order[key];
   }
+}
+
+function rememberDuplicatedTabOrder(sourceTab, duplicatedTabId, sourceGroup, spaceId = state.activeSpaceId) {
+  const sourceId = Number(sourceTab?.id);
+  const duplicateId = Number(duplicatedTabId);
+  if (!Number.isFinite(sourceId) || !Number.isFinite(duplicateId)) return;
+  const groupKey = sourceGroup?.key || tabOrderKeyForTab(sourceTab);
+  const order = ensureTabOrderForSpace(spaceId);
+  const fallbackIds = sourceGroup ? liveTabsForOrdering(sourceGroup).map((tab) => Number(tab.id)) : [sourceId];
+  const ids = (order[groupKey]?.length ? order[groupKey] : fallbackIds)
+    .map(Number)
+    .filter((id) => Number.isFinite(id) && id !== duplicateId);
+  const sourceIndex = ids.indexOf(sourceId);
+  ids.splice(sourceIndex >= 0 ? sourceIndex + 1 : ids.length, 0, duplicateId);
+  order[groupKey] = uniqueKeys(ids);
+}
+
+function tabOrderKeyForTab(tab) {
+  if (isGroupedTab(tab)) return `group:${tab.groupId}`;
+  return state.tabGroups?.[tab?.id] || 'ungrouped';
 }
 
 async function createChromeGroup(tabIds, options = {}) {

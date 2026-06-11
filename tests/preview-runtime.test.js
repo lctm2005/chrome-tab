@@ -67,6 +67,22 @@ test('preview command handler supports tab creation, focus, and close', async ()
   assert.equal(listed.tabs.some((tab) => tab.id === 2), false);
 });
 
+test('preview command handler supports duplicating a tab beside the source', async () => {
+  const send = createPreviewCommandHandler();
+
+  const duplicated = await send('tabs:duplicate', { tabId: 2 });
+  const listed = await send('tabs:list');
+  const sourceIndex = listed.tabs.findIndex((tab) => tab.id === 2);
+  const duplicateIndex = listed.tabs.findIndex((tab) => tab.id === duplicated.tab.id);
+
+  assert.equal(duplicated.tab.url, 'https://example.com/spaces-guide');
+  assert.equal(duplicated.tab.title, 'Browser Spaces Guide');
+  assert.equal(duplicated.tab.groupId, 1);
+  assert.equal(duplicateIndex, sourceIndex + 1);
+  assert.equal(listed.tabs.filter((tab) => tab.active).length, 1);
+  assert.equal(listed.tabs[duplicateIndex].active, true);
+});
+
 test('preview command handler supports discarding background tabs', async () => {
   const send = createPreviewCommandHandler();
 
