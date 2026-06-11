@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-async function loadContentScript(initialShortcuts = {}) {
+async function loadContentScript(initial = {}) {
+  const initialState = initial.shortcuts
+    ? initial
+    : { version: 4, shortcuts: initial };
   const listeners = new Map();
   const storageListeners = [];
   const messages = [];
@@ -41,7 +44,7 @@ async function loadContentScript(initialShortcuts = {}) {
       storage: {
         local: {
           get(_key, callback) {
-            callback({ spaceTabsState: { shortcuts: initialShortcuts } });
+            callback({ spaceTabsState: initialState });
           },
         },
         onChanged: {
@@ -98,10 +101,24 @@ test('content script honors customized Space shortcuts', async () => {
 });
 
 test('content script migrates legacy Cmd+S toggle shortcut to Alt+S', async () => {
-  const { listeners, messages } = await loadContentScript({ togglePanel: 'Meta+S' });
+  const { listeners, messages } = await loadContentScript({
+    version: 3,
+    shortcuts: { togglePanel: 'Meta+S' },
+  });
 
   listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', metaKey: true }));
   listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', altKey: true }));
+
+  assert.deepEqual(asPlainMessages(messages), [{ type: 'panel:toggle' }]);
+});
+
+test('content script preserves current customized Cmd+S toggle shortcut', async () => {
+  const { listeners, messages } = await loadContentScript({ togglePanel: 'Meta+S' });
+
+  listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', altKey: true }));
+  assert.deepEqual(asPlainMessages(messages), []);
+
+  listeners.get('keydown')(keyEvent({ key: 's', code: 'KeyS', metaKey: true }));
 
   assert.deepEqual(asPlainMessages(messages), [{ type: 'panel:toggle' }]);
 });

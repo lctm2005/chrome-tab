@@ -35,7 +35,7 @@ test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
 
 test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {
   const merged = mergeStoredState({
-    version: 4,
+    version: 3,
     shortcuts: {
       togglePanel: 'Meta+S',
       askSubmit: 'Control+Enter',
@@ -43,6 +43,19 @@ test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {
   }, createDefaultState());
 
   assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
+  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
+});
+
+test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    shortcuts: {
+      togglePanel: 'Meta+S',
+      askSubmit: 'Control+Enter',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 

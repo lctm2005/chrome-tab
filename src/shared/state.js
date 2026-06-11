@@ -70,14 +70,17 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
-    shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts),
+    shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
     ai: { ...defaults.ai, ...(stored.ai || {}) },
   };
 }
 
-function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}) {
+function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVersion = 0, currentVersion = 0) {
   const shortcuts = mergeShortcuts(storedShortcuts, defaultShortcuts);
-  if (normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT) {
+  if (
+    Number(storedVersion) < Number(currentVersion) &&
+    normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT
+  ) {
     shortcuts.togglePanel = defaultShortcuts.togglePanel;
   }
   return shortcuts;

@@ -24,7 +24,8 @@ let activeShortcuts = mergeContentShortcuts();
 refreshContentShortcuts();
 chrome.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes[STORAGE_KEY]) return;
-  activeShortcuts = mergeContentShortcuts(changes[STORAGE_KEY].newValue?.shortcuts || {});
+  const nextState = changes[STORAGE_KEY].newValue || {};
+  activeShortcuts = mergeContentShortcuts(nextState.shortcuts || {}, nextState.version);
 });
 
 document.addEventListener('keydown', (event) => {
@@ -57,7 +58,8 @@ function refreshContentShortcuts() {
   try {
     chrome.storage?.local?.get(STORAGE_KEY, (result) => {
       if (chrome.runtime.lastError) return;
-      activeShortcuts = mergeContentShortcuts(result?.[STORAGE_KEY]?.shortcuts || {});
+      const storedState = result?.[STORAGE_KEY] || {};
+      activeShortcuts = mergeContentShortcuts(storedState.shortcuts || {}, storedState.version);
     });
   } catch {
     activeShortcuts = mergeContentShortcuts();
@@ -80,11 +82,15 @@ function pageShortcutActionFromEvent(event) {
   return '';
 }
 
-function mergeContentShortcuts(stored = {}) {
+function mergeContentShortcuts(stored = {}, storedVersion = 4) {
   const next = {};
   for (const action of PAGE_SHORTCUT_ACTIONS) {
     const storedShortcut = normalizeContentShortcut(stored[action] || '');
-    next[action] = action === 'togglePanel' && storedShortcut === LEGACY_TOGGLE_PANEL_SHORTCUT
+    next[action] = (
+      action === 'togglePanel' &&
+      Number(storedVersion) < 4 &&
+      storedShortcut === LEGACY_TOGGLE_PANEL_SHORTCUT
+    )
       ? DEFAULT_SHORTCUTS[action]
       : normalizeContentShortcut(storedShortcut || DEFAULT_SHORTCUTS[action]);
   }
