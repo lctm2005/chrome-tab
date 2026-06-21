@@ -82,6 +82,38 @@ export function removeSnapshotTab(snapshot, target = {}) {
   return { ...snapshot, groups };
 }
 
+export function removeSnapshotTabs(snapshot, targets = []) {
+  snapshot = sanitizeSpaceSnapshot(snapshot);
+  if (!snapshot) return null;
+
+  const remainingUrlMatches = new Map();
+  for (const target of targets || []) {
+    const key = comparableSnapshotUrl(target?.url);
+    if (!key) continue;
+    remainingUrlMatches.set(key, (remainingUrlMatches.get(key) || 0) + 1);
+  }
+  if (remainingUrlMatches.size === 0) return snapshot;
+
+  let changed = false;
+  const groups = [];
+  for (const group of snapshot.groups || []) {
+    const tabs = [];
+    for (const tab of group.tabs || []) {
+      const key = comparableSnapshotUrl(tab.url);
+      const remaining = remainingUrlMatches.get(key) || 0;
+      if (key && remaining > 0) {
+        remainingUrlMatches.set(key, remaining - 1);
+        changed = true;
+        continue;
+      }
+      tabs.push(tab);
+    }
+    if (tabs.length > 0) groups.push({ ...group, tabs });
+  }
+
+  return changed ? { ...snapshot, groups } : snapshot;
+}
+
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   liveSnapshot = sanitizeSpaceSnapshot(liveSnapshot);
   storedSnapshot = sanitizeSpaceSnapshot(storedSnapshot);

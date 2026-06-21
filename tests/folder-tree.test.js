@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createFolderTree } from '../src/shared/folder-tree.js';
+import {
+  createFolderTree,
+  movedGroupTitleForFolderDrop,
+} from '../src/shared/folder-tree.js';
 
 test('keeps a standalone group as a group node', () => {
   const tree = createFolderTree([
@@ -59,6 +62,37 @@ test('folds direct tabs into nested folders too', () => {
   assert.equal(tree[0].children[0].type, 'folder');
   assert.equal(tree[0].children[0].title, 'Specs');
   assert.deepEqual(tree[0].children[0].children.map((node) => node.type), ['folder-tabs', 'group']);
+});
+
+test('retitles folder descendants when dragging a subfolder out to root', () => {
+  assert.equal(
+    movedGroupTitleForFolderDrop(
+      '归档 / 强类型存储 / 历史文档 / 设计',
+      { type: 'folder', path: ['归档', '强类型存储', '历史文档'] },
+      []
+    ),
+    '历史文档 / 设计'
+  );
+
+  assert.equal(
+    movedGroupTitleForFolderDrop(
+      '归档 / 强类型存储 / 历史文档',
+      { type: 'folder', path: ['归档', '强类型存储'] },
+      []
+    ),
+    '强类型存储 / 历史文档'
+  );
+});
+
+test('retitles a dragged group beside root folders without keeping its old parent path', () => {
+  assert.equal(
+    movedGroupTitleForFolderDrop(
+      '归档 / POC',
+      { type: 'group', path: ['归档', 'POC'] },
+      []
+    ),
+    'POC'
+  );
 });
 
 function group(title, urls) {

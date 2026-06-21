@@ -49,6 +49,7 @@
   },
   "permissions": [
     "activeTab",
+    "favicon",
     "scripting",
     "sidePanel",
     "storage",

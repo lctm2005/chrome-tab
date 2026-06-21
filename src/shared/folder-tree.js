@@ -66,10 +66,29 @@ export function folderTitleParts(title) {
     .filter(Boolean);
 }
 
+export function movedGroupTitleForFolderDrop(groupTitle, sourceContext = {}, targetPath = []) {
+  const groupPath = folderTitleParts(groupTitle);
+  const sourcePath = Array.isArray(sourceContext?.path) ? sourceContext.path : [];
+  const leafTitle = groupPath.at(-1) || 'Group';
+  const relativePath = sourceContext?.type === 'folder'
+    ? groupPath.slice(Math.max(0, sourcePath.length - 1))
+    : [leafTitle];
+  const nestedPath = [
+    ...targetPath,
+    ...(relativePath.length ? relativePath : [leafTitle]),
+  ];
+  return uniqueAdjacentPathParts(nestedPath).join(' / ');
+}
+
 function folderKey(parts, activeSpaceId) {
   return `folder:${activeSpaceId}:${parts.join('/')}`;
 }
 
 function folderPathId(parts) {
   return parts.join('/');
+}
+
+function uniqueAdjacentPathParts(parts) {
+  const compact = parts.map((part) => String(part || '').trim()).filter(Boolean);
+  return compact.filter((part, index) => index === 0 || part !== compact[index - 1]);
 }

@@ -1203,7 +1203,7 @@ menu button:disabled,
   position: fixed;
   z-index: 100;
   width: 194px;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   background: rgba(17, 15, 28, 0.94);
@@ -1238,6 +1238,58 @@ menu button:disabled,
 .context-menu button:hover {
   background: var(--accent);
   color: white;
+}
+
+.context-submenu {
+  position: relative;
+}
+
+.context-submenu-trigger {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.context-submenu-arrow {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.context-submenu-trigger:hover .context-submenu-arrow,
+.context-submenu.open .context-submenu-arrow,
+.context-submenu:focus-within .context-submenu-arrow {
+  color: currentColor;
+}
+
+.context-submenu-panel {
+  position: absolute;
+  top: -5px;
+  left: calc(100% + 6px);
+  display: none;
+  width: 194px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: rgba(17, 15, 28, 0.96);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-lg);
+  padding: 5px;
+}
+
+.context-submenu:hover > .context-submenu-panel,
+.context-submenu.open > .context-submenu-panel,
+.context-submenu:focus-within > .context-submenu-panel {
+  display: block;
+}
+
+@media (prefers-color-scheme: light) {
+  .context-submenu-panel {
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  }
 }
 
 .context-label {

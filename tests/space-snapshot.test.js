@@ -7,6 +7,7 @@ import {
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
   mergeSpaceSnapshot,
+  removeSnapshotTabs,
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
@@ -291,6 +292,47 @@ test('removes only the first matching dormant duplicate from a snapshot group', 
   assert.deepEqual(result.groups[0].tabs, [
     { title: 'Spec B', url: 'https://example.com/spec' },
   ]);
+});
+
+test('removes disappeared live tabs from stored dormant snapshots', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Async Extend',
+        color: 'blue',
+        tabs: [
+          { title: '执行日志', url: 'https://tesla.bytedance.net/runs/42?tab=logs' },
+          { title: '总览', url: 'https://tesla.bytedance.net/runs/42/overview' },
+        ],
+      },
+      {
+        title: 'Argos',
+        color: 'green',
+        tabs: [
+          { title: '链路日志 | Argos-BOE', url: 'https://cloud-boe.bytedance.net/trace?id=old#span' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(removeSnapshotTabs(snapshot, [
+    { title: '执行日志', url: 'https://tesla.bytedance.net/runs/42?tab=logs#tail' },
+    { title: '链路日志 | Argos-BOE', url: 'https://cloud-boe.bytedance.net/trace?id=new' },
+  ]), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Async Extend',
+        color: 'blue',
+        tabs: [
+          { title: '总览', url: 'https://tesla.bytedance.net/runs/42/overview' },
+        ],
+      },
+    ],
+  });
 });
 
 test('merges live tabs without dropping dormant snapshot content', () => {

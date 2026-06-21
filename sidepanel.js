@@ -10,7 +10,7 @@ import {
   appendArcImportPlan,
   createArcImportPlan,
 } from './src/shared/arc-import.js';
-import { createFolderTree, folderTitleParts } from './src/shared/folder-tree.js';
+import { createFolderTree, folderTitleParts, movedGroupTitleForFolderDrop } from './src/shared/folder-tree.js';
 import { renderMarkdown } from './src/shared/markdown.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
@@ -40,6 +40,7 @@ import {
   dropTemporarySnapshotGroups,
   isUngroupedSnapshotGroup,
   mergeSpaceSnapshot,
+  removeSnapshotTabs,
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
@@ -398,15 +399,36 @@ async function refreshTabs(options = {}) {
 }
 
 async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
+  const previousTabs = tabs;
   const response = await send('tabs:list');
   tabs = decorateTabs(response.tabs || [], state);
   groups = response.groups || [];
-  cleanupEphemeralTabIds();
   const contentTabs = tabs.filter((tab) => !isEphemeralTab(tab));
+  removeStaleActiveSpaceTabsFromSnapshot(previousTabs, contentTabs);
+  cleanupEphemeralTabIds();
   restoreSnapshotOwnership(state, contentTabs, groups);
   if (adopt) adoptUnassignedEntities(state, contentTabs, groups, state.activeSpaceId, { adoptGroups });
   else cleanupMissingEntities(state, contentTabs, groups);
   syncCollapsedGroupsFromChrome(state, groups);
+}
+
+function removeStaleActiveSpaceTabsFromSnapshot(previousTabs = [], currentTabs = []) {
+  if (!previousTabs.length || !state.activeSpaceId) return;
+  const currentById = new Map(currentTabs.map((tab) => [Number(tab.id), tab]));
+  const currentUrlKeys = new Set(currentTabs
+    .map((tab) => comparableSnapshotUrl(tab.url))
+    .filter(Boolean));
+  const staleTabs = previousTabs.filter((tab) => {
+    if (isEphemeralTab(tab) || !tabBelongsToSpace(tab, state.activeSpaceId)) return false;
+    const oldUrlKey = comparableSnapshotUrl(tab.url);
+    if (!oldUrlKey) return false;
+    const nextTab = currentById.get(Number(tab.id));
+    if (!nextTab) return true;
+    const nextUrlKey = comparableSnapshotUrl(nextTab.url);
+    return oldUrlKey && oldUrlKey !== nextUrlKey && !currentUrlKeys.has(oldUrlKey);
+  });
+  if (staleTabs.length === 0) return;
+  removeTabsFromSpaceSnapshot(state.activeSpaceId, staleTabs);
 }
 
 async function materializeLegacyVirtualGroups(spaceId = state.activeSpaceId) {
@@ -950,7 +972,10 @@ function createTabRow(tab, groupKey) {
   const actions = document.createElement('div');
   actions.className = 'row-actions';
   if (tab.dormant) {
-    actions.append(actionButton('↗', 'Open', () => openDormantTab(tab, groupKey)));
+    actions.append(
+      actionButton('↗', 'Open', () => openDormantTab(tab, groupKey)),
+      actionButton('×', 'Remove saved tab', () => removeDormantTab(tab, groupKey)),
+    );
   } else {
     actions.append(
       actionButton('✎', 'Rename in panel', () => renameTab(tab)),
@@ -977,16 +1002,42 @@ function createTabRow(tab, groupKey) {
 function createFavicon(tab) {
   const favicon = document.createElement('span');
   favicon.className = 'favicon';
-  if (tab.favIconUrl) {
+  const iconUrl = faviconUrlForTab(tab);
+  if (iconUrl) {
     const img = document.createElement('img');
-    img.src = tab.favIconUrl;
+    img.src = iconUrl;
     img.alt = '';
     img.draggable = false;
+    img.addEventListener('error', () => {
+      img.remove();
+      favicon.textContent = faviconFallbackText(tab);
+    }, { once: true });
     favicon.append(img);
   } else {
-    favicon.textContent = (tab.displayTitle || tab.title || tab.domain || '?').slice(0, 1).toUpperCase();
+    favicon.textContent = faviconFallbackText(tab);
   }
   return favicon;
+}
+
+function faviconUrlForTab(tab) {
+  const pageUrl = String(tab?.url || '').trim();
+  if (extensionRuntime && pageUrl && chrome?.runtime?.getURL) {
+    const url = new URL(chrome.runtime.getURL('/_favicon/'));
+    url.searchParams.set('pageUrl', pageUrl);
+    url.searchParams.set('size', '32');
+    return url.toString();
+  }
+  return safeImageUrl(tab?.favIconUrl);
+}
+
+function safeImageUrl(value) {
+  const url = String(value || '').trim();
+  if (/^(data:image\/|blob:|https?:|chrome-extension:)/.test(url)) return url;
+  return '';
+}
+
+function faviconFallbackText(tab) {
+  return (tab.displayTitle || tab.title || tab.domain || '?').slice(0, 1).toUpperCase();
 }
 
 function renderSpaces() {
@@ -1318,8 +1369,8 @@ async function renameFolderGroup(folderContext) {
 
 async function groupSelectedTabs(tabIds) {
   const ids = tabIds.map(Number).filter(Number.isFinite);
-  if (ids.length < 2) {
-    setStatus('Select at least two tabs to group.');
+  if (ids.length === 0) {
+    setStatus('Select a tab to group.');
     return;
   }
 
@@ -1328,8 +1379,8 @@ async function groupSelectedTabs(tabIds) {
     .map((id) => tabs.find((tab) => tab.id === id))
     .filter((tab) => tab && tabBelongsToSpace(tab, state.activeSpaceId) && !tab.pinned);
 
-  if (selectedTabs.length < 2) {
-    setStatus('Select at least two tabs in this Space to group.');
+  if (selectedTabs.length === 0) {
+    setStatus('Select a tab in this Space to group.');
     return;
   }
 
@@ -1342,7 +1393,7 @@ async function groupSelectedTabs(tabIds) {
   selectionAnchorTabId = selectedTabs.at(-1)?.id ?? null;
   await saveState();
   await refreshTabs();
-  setStatus(`Grouped ${selectedTabs.length} selected tabs.`);
+  setStatus(`Grouped ${selectedTabs.length === 1 ? '1 tab' : `${selectedTabs.length} selected tabs`}.`);
 }
 
 async function closeTab(tab, groupKey = '') {
@@ -1358,6 +1409,16 @@ async function closeTab(tab, groupKey = '') {
   await saveState();
   await send('tabs:close', { tabId: tab.id });
   await refreshTabs({ reloadDormant: true });
+}
+
+async function removeDormantTab(tab, groupKey = '') {
+  const dormantGroup = dormantSpaceView.find((group) => (
+    group.key === groupKey || group.key === tab.dormantGroupKey
+  ));
+  removeOpenedDormantTabFromSnapshot(tab, dormantGroup);
+  await saveState();
+  await refreshTabs({ reloadDormant: true });
+  setStatus('Removed saved tab.');
 }
 
 async function moveTabToSpace(tab, spaceId) {
@@ -1973,6 +2034,19 @@ function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
   if (state.activeSpaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
 }
 
+function removeTabsFromSpaceSnapshot(spaceId, snapshotTabs) {
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
+  const snapshot = removeSnapshotTabs(state.spaceSnapshots[spaceId], snapshotTabs);
+  if (!snapshot) return;
+  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
+  else state.spaceSnapshots[spaceId] = {
+    ...snapshot,
+    updatedAt: Date.now(),
+  };
+  if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+}
+
 function sameSnapshotGroups(left, right) {
   return JSON.stringify(left?.groups || []) === JSON.stringify(right?.groups || []);
 }
@@ -2125,7 +2199,6 @@ function dropGroup(event, target) {
   const targetContext = dragContextForTarget(target);
   if (!canDropGroupContext(targetContext)) return;
   const sourceKeys = [...dragState.groupKeys];
-  const targetKeys = [...targetContext.groupKeys];
   const intent = groupDropIntent(event);
   event.preventDefault();
   event.stopPropagation();
@@ -2133,7 +2206,7 @@ function dropGroup(event, target) {
   runTask(() => (
     intent === 'inside'
       ? moveGroupBlockIntoContext(sourceKeys, targetContext)
-      : reorderGroupBlock(sourceKeys, targetKeys, intent)
+      : moveGroupBlockBesideContext(sourceKeys, targetContext, intent)
   ));
 }
 
@@ -2181,34 +2254,6 @@ function isInteractiveDragTarget(target) {
   return Boolean(element?.closest?.('.tab-row, button:not(.folder-header), .group-actions'));
 }
 
-async function reorderGroupBlock(sourceKeys, targetKeys, placement = 'before') {
-  const sourceKeySet = new Set(sourceKeys);
-  if (!sourceKeySet.size) return;
-
-  const visibleKeys = spaceView.map((group) => group.key);
-  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
-  const targetBlock = targetKeys.filter((key) => visibleKeys.includes(key) && !sourceKeySet.has(key));
-  const targetKey = placement === 'after' ? targetBlock.at(-1) : targetBlock[0];
-  if (sourceBlock.length === 0) return;
-  if (!targetKey) return;
-
-  const order = reorderKeyBlock(visibleKeys, sourceBlock, targetKey, placement);
-  state.groupOrder[state.activeSpaceId] = order;
-  reorderDormantSnapshotGroups(order);
-
-  const sourceGroupId = sourceBlock.length === 1 ? groupIdFromKey(sourceBlock[0]) : null;
-  const targetGroup = spaceView.find((group) => group.key === targetKey);
-  const targetIndex = placement === 'after'
-    ? tabInsertionIndexAtEndOfGroup(targetGroup)
-    : firstTabIndexForGroupKey(targetKey);
-  if (sourceGroupId !== null && Number.isFinite(targetIndex)) {
-    await send('groups:move', { groupId: sourceGroupId, index: targetIndex });
-  }
-
-  await saveState();
-  await refreshTabs();
-}
-
 async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
   const targetPath = targetContext?.path || [];
   if (!targetPath.length) return;
@@ -2235,25 +2280,60 @@ async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
   if (nextKeys.length === 0) return;
 
   state.groupOrder[state.activeSpaceId] = groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys);
-  if (dormantMoves.length) moveDormantSnapshotGroupsIntoContext(dormantMoves, targetContext);
+  if (dormantMoves.length) moveDormantSnapshotGroupsToOrder(dormantMoves, state.groupOrder[state.activeSpaceId]);
+  else reorderDormantSnapshotGroups(state.groupOrder[state.activeSpaceId]);
 
   await saveState();
   await refreshTabs();
 }
 
-function groupTitleForNestedMove(group, sourceContext, targetPath) {
-  const groupPath = folderTitleParts(group.title);
-  const leafTitle = groupPath.at(-1) || group.displayTitle || group.title || 'Group';
-  const relativePath = sourceContext?.type === 'folder'
-    ? groupPath.slice(Math.max(0, (sourceContext.path || []).length - 1))
-    : [leafTitle];
-  const nestedPath = [...targetPath, ...(relativePath.length ? relativePath : [leafTitle])];
-  return uniqueAdjacentPathParts(nestedPath).join(' / ');
+async function moveGroupBlockBesideContext(sourceKeys, targetContext, placement = 'before') {
+  const targetPath = targetPathForSiblingMove(targetContext);
+  const sourceContext = dragState?.sourceContext || dragContextForTarget(dragState?.key);
+  const visibleKeys = spaceView.map((group) => group.key);
+  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
+  if (sourceBlock.length === 0) return;
+
+  const nextKeys = [];
+  const dormantMoves = [];
+  for (const sourceKey of sourceBlock) {
+    const group = spaceView.find((item) => item.key === sourceKey);
+    if (!group) continue;
+    const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
+    if (!nextTitle) continue;
+    if (group.dormant) {
+      dormantMoves.push({ key: group.key, title: nextTitle });
+      nextKeys.push(group.key);
+    } else {
+      nextKeys.push(await retitleGroupForNestedMove(group, nextTitle));
+    }
+  }
+  if (nextKeys.length === 0) return;
+
+  state.groupOrder[state.activeSpaceId] = groupOrderAfterSiblingMove(
+    visibleKeys,
+    sourceKeys,
+    targetContext,
+    nextKeys,
+    placement,
+  );
+  if (dormantMoves.length) moveDormantSnapshotGroupsToOrder(dormantMoves, state.groupOrder[state.activeSpaceId]);
+  else reorderDormantSnapshotGroups(state.groupOrder[state.activeSpaceId]);
+
+  await saveState();
+  await refreshTabs();
 }
 
-function uniqueAdjacentPathParts(parts) {
-  const compact = parts.map((part) => String(part || '').trim()).filter(Boolean);
-  return compact.filter((part, index) => index === 0 || part !== compact[index - 1]);
+function targetPathForSiblingMove(targetContext) {
+  return Array.isArray(targetContext?.path) ? targetContext.path.slice(0, -1) : [];
+}
+
+function groupTitleForNestedMove(group, sourceContext, targetPath) {
+  return movedGroupTitleForFolderDrop(
+    group.title || group.displayTitle || 'Group',
+    sourceContext,
+    targetPath,
+  );
 }
 
 async function retitleGroupForNestedMove(group, title) {
@@ -2307,7 +2387,7 @@ function reorderDormantSnapshotGroups(orderedKeys) {
   replaceActiveSpaceSnapshotGroups(groups);
 }
 
-function moveDormantSnapshotGroupsIntoContext(moves, targetContext) {
+function moveDormantSnapshotGroupsToOrder(moves, orderedKeys) {
   const snapshot = activeSpaceSnapshot();
   if (!snapshot) return;
   const records = snapshotGroupRecords(snapshot);
@@ -2318,21 +2398,30 @@ function moveDormantSnapshotGroupsIntoContext(moves, targetContext) {
   }
   if (moveByIndex.size === 0) return;
 
-  const targetKeySet = new Set(targetContext?.groupKeys || []);
-  const base = records.filter((record) => !moveByIndex.has(record.index));
-  const moving = records
-    .filter((record) => moveByIndex.has(record.index))
-    .map((record) => ({
+  const updated = records.map((record) => {
+    const move = moveByIndex.get(record.index);
+    if (!move) return record;
+    return {
       ...record,
       group: {
         ...record.group,
-        title: moveByIndex.get(record.index).title,
+        title: move.title,
       },
-    }));
-  const targetIndex = base.findLastIndex((record) => targetKeySet.has(record.key));
-  const insertAt = targetIndex < 0 ? base.length : targetIndex + 1;
-  const groups = base.map((record) => record.group);
-  groups.splice(insertAt, 0, ...moving.map((record) => record.group));
+    };
+  });
+  const recordByKey = new Map(updated.map((record) => [record.key, record]));
+  const seen = new Set();
+  const groups = [];
+  for (const key of orderedKeys || []) {
+    const record = recordByKey.get(key);
+    if (!record || seen.has(record.index)) continue;
+    groups.push(record.group);
+    seen.add(record.index);
+  }
+  for (const record of updated) {
+    if (seen.has(record.index)) continue;
+    groups.push(record.group);
+  }
   replaceActiveSpaceSnapshotGroups(groups);
 }
 
@@ -2373,6 +2462,20 @@ function groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextK
   const targetKeys = (targetContext.groupKeys || []).filter((key) => !sourceKeySet.has(key) && base.includes(key));
   const targetIndex = targetKeys.length ? base.indexOf(targetKeys.at(-1)) + 1 : base.length;
   base.splice(targetIndex, 0, ...uniqueKeys(nextKeys));
+  return base;
+}
+
+function groupOrderAfterSiblingMove(visibleKeys, sourceKeys, targetContext, nextKeys, placement = 'before') {
+  const sourceKeySet = new Set(sourceKeys);
+  const nextKeySet = new Set(nextKeys);
+  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
+  const targetKeys = (targetContext?.groupKeys || [])
+    .filter((key) => !sourceKeySet.has(key) && base.includes(key));
+  const targetKey = placement === 'after' ? targetKeys.at(-1) : targetKeys[0];
+  if (!targetKey) return visibleKeys;
+  const targetIndex = base.indexOf(targetKey);
+  const insertAt = placement === 'after' ? targetIndex + 1 : targetIndex;
+  base.splice(insertAt, 0, ...uniqueKeys(nextKeys));
   return base;
 }
 
@@ -3096,22 +3199,13 @@ function showTabContextMenu(event, tab) {
   selectionAnchorTabId = tab.id;
   render();
 
-  const items = [];
-  if (contextTabIds.length > 1) {
-    items.push(
-      menuAction(`Group ${contextTabIds.length} selected tabs`, () => groupSelectedTabs(contextTabIds)),
-      menuSeparator(),
-    );
-  }
-  items.push(
+  const items = [
+    menuAction(contextTabIds.length === 1 ? 'Group tab' : `Group ${contextTabIds.length} selected tabs`, () => groupSelectedTabs(contextTabIds)),
+    menuSeparator(),
     menuAction('Rename', () => renameTab(tab)),
     menuAction('Duplicate', () => duplicateTab(tab)),
-    menuSeparator(),
-    menuLabel('Move to'),
-    ...state.spaces
-      .filter((space) => space.id !== state.activeSpaceId)
-      .map((space) => menuAction(space.name, () => moveTabToSpace(tab, space.id))),
-  );
+    ...menuSection(moveToSpaceSubmenu((space) => moveTabToSpace(tab, space.id))),
+  ];
 
   showContextMenu(event, items);
 }
@@ -3122,11 +3216,7 @@ function showGroupContextMenu(event, group) {
   showContextMenu(event, [
     menuAction('Rename', () => renameGroup(group)),
     menuAction('Delete Group', () => deleteGroup(group)),
-    menuSeparator(),
-    menuLabel('Move to'),
-    ...state.spaces
-      .filter((space) => space.id !== state.activeSpaceId)
-      .map((space) => menuAction(space.name, () => moveGroupToSpace(group, space.id))),
+    ...menuSection(moveToSpaceSubmenu((space) => moveGroupToSpace(group, space.id))),
   ]);
 }
 
@@ -3136,11 +3226,7 @@ function showFolderContextMenu(event, folderContext) {
   showContextMenu(event, [
     menuAction('Rename', () => renameFolderGroup(folderContext)),
     menuAction('Delete Group', () => deleteFolderGroup(folderContext)),
-    menuSeparator(),
-    menuLabel('Move to'),
-    ...state.spaces
-      .filter((space) => space.id !== state.activeSpaceId)
-      .map((space) => menuAction(space.name, () => moveFolderGroupToSpace(folderContext, space.id))),
+    ...menuSection(moveToSpaceSubmenu((space) => moveFolderGroupToSpace(folderContext, space.id))),
   ]);
 }
 
@@ -3154,12 +3240,13 @@ function showSpaceContextMenu(event, space) {
 }
 
 function showContextMenu(event, items) {
-  els.contextMenu.replaceChildren(...items);
+  els.contextMenu.replaceChildren(...items.filter(Boolean));
   els.contextMenu.hidden = false;
   els.contextMenu.style.left = '0px';
   els.contextMenu.style.top = '0px';
   const rect = els.contextMenu.getBoundingClientRect();
-  const x = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+  const submenuReserve = els.contextMenu.querySelector('.context-submenu') ? 202 : 0;
+  const x = Math.min(event.clientX, window.innerWidth - rect.width - submenuReserve - 8);
   const y = Math.min(event.clientY, window.innerHeight - rect.height - 8);
   els.contextMenu.style.left = `${Math.max(8, x)}px`;
   els.contextMenu.style.top = `${Math.max(8, y)}px`;
@@ -3181,11 +3268,53 @@ function menuAction(label, handler) {
   return button;
 }
 
-function menuLabel(label) {
-  const item = document.createElement('div');
-  item.className = 'context-label';
-  item.textContent = label;
-  return item;
+function moveToSpaceSubmenu(actionForSpace) {
+  const spaces = state.spaces.filter((space) => space.id !== state.activeSpaceId);
+  if (spaces.length === 0) return null;
+  return menuSubmenu(
+    'Move to',
+    spaces.map((space) => menuAction(space.name, () => actionForSpace(space))),
+  );
+}
+
+function menuSubmenu(label, items) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'context-submenu';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'context-submenu-trigger';
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.innerHTML = `<span>${escapeHtml(label)}</span><span class="context-submenu-arrow" aria-hidden="true">›</span>`;
+
+  const panel = document.createElement('div');
+  panel.className = 'context-submenu-panel';
+  panel.setAttribute('role', 'menu');
+  panel.replaceChildren(...items.filter(Boolean));
+
+  const setOpen = (open) => {
+    wrapper.classList.toggle('open', open);
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+
+  wrapper.addEventListener('mouseenter', () => setOpen(true));
+  wrapper.addEventListener('mouseleave', () => setOpen(false));
+  wrapper.addEventListener('focusin', () => setOpen(true));
+  wrapper.addEventListener('focusout', (event) => {
+    if (!wrapper.contains(event.relatedTarget)) setOpen(false);
+  });
+  trigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setOpen(true);
+  });
+
+  wrapper.append(trigger, panel);
+  return wrapper;
+}
+
+function menuSection(item) {
+  return item ? [menuSeparator(), item] : [];
 }
 
 function menuSeparator() {
@@ -3774,18 +3903,6 @@ function cleanupUnusedVirtualGroups() {
 
 function uniqueNumberIds(values = []) {
   return [...new Set((values || []).map(Number).filter(Number.isFinite))];
-}
-
-function reorderKeyBlock(keys, sourceKeys, targetKey, placement = 'before') {
-  const sourceKeySet = new Set(sourceKeys);
-  const block = sourceKeys.filter((key) => keys.includes(key));
-  const next = keys.filter((key) => !sourceKeySet.has(key));
-  const targetIndex = next.indexOf(targetKey);
-  const insertAt = targetIndex < 0
-    ? next.length
-    : targetIndex + (placement === 'after' ? 1 : 0);
-  next.splice(insertAt, 0, ...block);
-  return next;
 }
 
 function groupIdFromKey(key) {
