@@ -114,6 +114,59 @@ export function removeSnapshotTabs(snapshot, targets = []) {
   return changed ? { ...snapshot, groups } : snapshot;
 }
 
+export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
+  snapshot = sanitizeSpaceSnapshot(snapshot);
+  const replacementTab = sanitizeReplacementTab(replacement);
+  if (!snapshot || !replacementTab) return snapshot;
+
+  const targetUrl = String(target.url || '');
+  const targetGroupTitle = String(target.groupTitle || '');
+  const targetGroupColor = String(target.groupColor || '');
+  let changed = false;
+  let matchedGroup = false;
+  const groups = [];
+
+  for (const group of snapshot.groups || []) {
+    const groupMatches = (
+      (!targetGroupTitle || String(group.title || 'Ungrouped') === targetGroupTitle) &&
+      (!targetGroupColor || String(group.color || 'grey') === targetGroupColor)
+    );
+    if (!groupMatches) {
+      groups.push(group);
+      continue;
+    }
+
+    matchedGroup = true;
+    let replaced = false;
+    const tabs = [];
+    for (const tab of group.tabs || []) {
+      if (!replaced && targetUrl && tab.url === targetUrl) {
+        tabs.push(replacementTab);
+        replaced = true;
+        changed = true;
+        continue;
+      }
+      tabs.push(tab);
+    }
+    if (!replaced) {
+      tabs.push(replacementTab);
+      changed = true;
+    }
+    groups.push({ ...group, tabs });
+  }
+
+  if (!matchedGroup) {
+    groups.push({
+      title: targetGroupTitle || 'Ungrouped',
+      color: targetGroupColor || (targetGroupTitle === 'Ungrouped' ? 'grey' : 'blue'),
+      tabs: [replacementTab],
+    });
+    changed = true;
+  }
+
+  return changed ? sanitizeSpaceSnapshot({ ...snapshot, groups }) : snapshot;
+}
+
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   liveSnapshot = sanitizeSpaceSnapshot(liveSnapshot);
   storedSnapshot = sanitizeSpaceSnapshot(storedSnapshot);
@@ -184,6 +237,15 @@ export function sanitizeSpaceSnapshot(snapshot) {
 
 function snapshotTabs(snapshot = {}) {
   return (snapshot.groups || []).flatMap((group) => group.tabs || []);
+}
+
+function sanitizeReplacementTab(tab = {}) {
+  const url = String(tab.url || '').trim();
+  if (!isRestorableSnapshotTab({ url })) return null;
+  return {
+    title: tab.title || url || 'Untitled',
+    url,
+  };
 }
 
 function dedupeSnapshotTabs(tabs = []) {

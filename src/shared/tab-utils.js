@@ -1,4 +1,5 @@
 const GROUP_COLORS = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
+const TITLE_PLACEHOLDER_MARKS = '.\u2026\u22ef\u3002';
 
 export function domainFromUrl(value) {
   try {
@@ -13,12 +14,22 @@ export function domainFromUrl(value) {
 export function decorateTabs(tabs, state = {}) {
   return tabs.map((tab) => {
     const domain = domainFromUrl(tab.url);
+    const title = cleanTitle(tab.title);
+    const renamedTitle = cleanTitle(state.renamedTabs?.[tab.id]);
     return {
       ...tab,
       domain,
-      displayTitle: state.renamedTabs?.[tab.id] || tab.title || domain,
+      displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title) || domain,
     };
   });
+}
+
+export function isPlaceholderTabTitle(value) {
+  const compact = cleanTitle(value).replace(/\s+/g, '');
+  if (!compact) return true;
+  const marks = escapeRegExp(TITLE_PLACEHOLDER_MARKS);
+  return new RegExp(`^[${marks}]+$`).test(compact) ||
+    new RegExp(`^loading[${marks}]*$`, 'i').test(compact);
 }
 
 export function searchTabs(tabs, query) {
@@ -224,10 +235,10 @@ function preferredDuplicateUrlTab(tabs) {
 
 export function tidyPanelName(tab) {
   const domain = domainFromUrl(tab.url);
-  let title = String(tab.title || '').replace(/\s+/g, ' ').trim();
+  let title = cleanTitle(tab.title);
   const path = safePath(tab.url);
 
-  if (/^(\.+|loading\.*)$/i.test(title)) {
+  if (isPlaceholderTabTitle(title)) {
     const heading = bestContentHeading(tab.outlineHeadings);
     title = heading || '';
   }
@@ -391,7 +402,7 @@ function readablePathTail(path) {
 }
 
 function stripKnownSuffixes(title, suffixes) {
-  let clean = String(title || '').trim();
+  let clean = cleanTitle(title);
   for (const suffix of suffixes) {
     const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     clean = clean
@@ -403,7 +414,7 @@ function stripKnownSuffixes(title, suffixes) {
 }
 
 function compactName(prefix, value) {
-  const clean = String(value || '').trim();
+  const clean = cleanTitle(value);
   if (!clean) return prefix;
   const normalized = clean
     .replace(/\s+/g, ' ')
@@ -414,8 +425,19 @@ function compactName(prefix, value) {
 }
 
 function compactText(value, maxLength = 48) {
-  const text = String(value || '').trim();
+  const text = cleanTitle(value);
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function cleanTitle(value) {
+  return String(value || '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function sortBySavedOrder(items, savedOrder, getKey) {

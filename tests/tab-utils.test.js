@@ -31,6 +31,22 @@ test('decorates tabs with display metadata without inventing primary sections', 
   assert.equal(tabs[1].domain, 'news.ycombinator.com');
 });
 
+test('decorates tabs by ignoring transient placeholder titles', () => {
+  const tabs = decorateTabs([
+    { id: 1, title: '...', url: 'https://bytedance.larkoffice.com/docx/123' },
+    { id: 2, title: '…', url: 'https://bytedance.larkoffice.com/docx/456' },
+    { id: 3, title: '...', url: 'https://example.com/renamed' },
+  ], {
+    renamedTabs: {
+      3: 'Renamed page',
+    },
+  });
+
+  assert.equal(tabs[0].displayTitle, 'bytedance.larkoffice.com');
+  assert.equal(tabs[1].displayTitle, 'bytedance.larkoffice.com');
+  assert.equal(tabs[2].displayTitle, 'Renamed page');
+});
+
 test('plans tidy groups from tab domains and titles', () => {
   const groups = planTidyGroups([
     { id: 1, title: 'GitHub issue', url: 'https://github.com/a/b/issues/1' },
@@ -348,8 +364,12 @@ test('tidies names with loading/placeholder titles like dots using heading or do
   const names = planTidyTabNames([
     { id: 1, title: '...', url: 'https://bytedance.larkoffice.com/docx/123', outlineHeadings: ['Mail Harness 架构详情介绍', 'README'] },
     { id: 2, title: 'loading...', url: 'https://bytedance.larkoffice.com/docx/456', outlineHeadings: [] },
+    { id: 3, title: '…', url: 'https://bytedance.larkoffice.com/docx/789', outlineHeadings: [] },
+    { id: 4, title: 'loading…', url: 'https://bytedance.larkoffice.com/docx/000', outlineHeadings: [] },
   ]);
 
   assert.equal(names[1], 'Mail Harness 架构详情介绍');
   assert.equal(names[2], 'bytedance.larkoffice.com');
+  assert.equal(names[3], 'bytedance.larkoffice.com');
+  assert.equal(names[4], 'bytedance.larkoffice.com');
 });

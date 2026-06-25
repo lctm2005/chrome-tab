@@ -100,6 +100,28 @@ test('adopts a new Chrome group when it contains an owned local tab', () => {
   assert.deepEqual(state.groupOrder.focus, ['group:9']);
 });
 
+test('adopts the active Chrome group when local group ownership was lost', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    collapsedGroups: {},
+    groupOrder: { default: [] },
+  };
+
+  adoptUnassignedEntities(state, [
+    { id: 1, groupId: 9, active: true },
+    { id: 2, groupId: 9, active: false },
+    { id: 3, groupId: -1, active: false },
+  ], [
+    { id: 9 },
+  ], 'default');
+
+  assert.deepEqual(state.groupSpaces, { 9: 'default' });
+  assert.deepEqual(state.tabSpaces, { 3: 'default' });
+  assert.deepEqual(state.groupOrder.default, ['group:9']);
+});
+
 test('syncs Chrome tab group collapsed state into Space state', () => {
   const state = { collapsedGroups: { 'group:7': false } };
 
@@ -128,6 +150,20 @@ test('can clean closed tabs and groups without adopting new entities', () => {
   assert.deepEqual(state.groupSpaces, { 7: 'work' });
   assert.deepEqual(state.tabSpaces, { 4: 'work' });
   assert.deepEqual(state.renamedTabs, {});
+});
+
+test('keeps Chrome group ownership when live tabs still reference the group', () => {
+  const state = {
+    groupSpaces: { 7: 'work' },
+    tabSpaces: {},
+    renamedTabs: {},
+  };
+
+  cleanupMissingEntities(state, [
+    { id: 4, groupId: 7 },
+  ], []);
+
+  assert.deepEqual(state.groupSpaces, { 7: 'work' });
 });
 
 test('cleans local virtual group mappings for closed tabs', () => {

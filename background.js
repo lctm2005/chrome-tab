@@ -38,7 +38,7 @@ async function handleMessage(message, sender = {}) {
     case 'shortcut:action':
       return forwardShortcutAction(message.action, sender);
     case 'tabs:list':
-      return listTabs();
+      return listTabs(message.windowId);
     case 'tabs:create':
       return createTab(message.url, message.active);
     case 'tabs:focus':
@@ -140,10 +140,12 @@ async function openSidePanel(windowId) {
   return true;
 }
 
-async function listTabs() {
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  const windowId = tabs[0]?.windowId;
-  const groups = windowId ? await chrome.tabGroups.query({ windowId }) : [];
+async function listTabs(windowId) {
+  const numericWindowId = Number(windowId);
+  const query = Number.isFinite(numericWindowId) ? { windowId: numericWindowId } : { currentWindow: true };
+  const tabs = await chrome.tabs.query(query);
+  const targetWindowId = Number.isFinite(numericWindowId) ? numericWindowId : tabs[0]?.windowId;
+  const groups = Number.isFinite(targetWindowId) ? await chrome.tabGroups.query({ windowId: targetWindowId }) : [];
   return {
     tabs: tabs.sort((a, b) => a.index - b.index).map(serializeTab),
     groups: groups.map(serializeGroup),

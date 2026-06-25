@@ -62,6 +62,23 @@ test('sidepanel prunes saved snapshot entries for closed or navigated live tabs'
   assert.match(source, /!currentUrlKeys\.has\(oldUrlKey\)/);
 });
 
+test('tabs list requests are scoped to the side panel window when possible', async () => {
+  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+
+  assert.match(sidepanel, /panelWindowId\s*=\s*await currentPanelWindowId\(\)/);
+  assert.match(sidepanel, /type === 'tabs:list'[\s\S]*windowId: panelWindowId/);
+  assert.match(background, /case 'tabs:list':\s*return listTabs\(message\.windowId\)/);
+  assert.match(background, /chrome\.tabs\.query\(query\)/);
+});
+
+test('sidepanel refresh adopts orphan Chrome groups with orphan tabs', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /adoptGroups:\s*Boolean\(options\.adoptGroups\s*\?\?\s*options\.adopt\)/);
+  assert.match(source, /setInterval\(\(\) => refreshTabs\(\{ adopt: true \}\), 2500\)/);
+});
+
 test('folder drag before or after reparents groups beside the target', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
@@ -78,6 +95,14 @@ test('single tab context menu can create a tab group', async () => {
   assert.match(source, /if \(ids\.length === 0\)/);
   assert.match(source, /if \(selectedTabs\.length === 0\)/);
   assert.doesNotMatch(source, /Select at least two tabs/);
+});
+
+test('single tab context menu can update the saved URL for a persistent tab', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /menuAction\('Update Saved URL', \(\) => updateSavedTabUrl\(tab\)\)/);
+  assert.match(source, /function updateSavedTabUrl\(tab\)/);
+  assert.match(source, /updateSnapshotTab\(/);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {
