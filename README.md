@@ -18,19 +18,35 @@ It is built for an Arc-like workflow in Chrome: each Space keeps its own working
 - Arc import: append Arc `StorableSidebar.json` Spaces and folders as saved Space content.
 - Shortcuts: built-in keyboard actions with user-editable bindings in Settings.
 
+## Package for Chrome Web Store
+
+Run the release packager:
+
+```bash
+npm run package
+```
+
+The script writes a clean Chrome Web Store zip to `dist/space-tabs-<version>.zip`.
+It stages only runtime files, generates a safe empty `config.local.js` stub, and
+keeps local secrets, Git metadata, raw artwork, backup icons, and test files out
+of the upload package.
+
+Store preparation docs:
+
+- `PRIVACY.md`: privacy policy copy for the store listing or product site.
+- `docs/store-listing.md`: Chrome Web Store listing copy, permission
+  justifications, reviewer notes, and screenshot plan.
+- `docs/commercialization.md`: free-to-Pro packaging and launch plan.
+
 ## Install From Package
 
-1. Download the zip file from `dist/`.
+1. Run `npm run package`, or download a release zip from `dist/`.
 2. Unzip it to a local folder.
 3. Open `chrome://extensions`.
 4. Enable `Developer mode`.
 5. Click `Load unpacked`.
 6. Select the unzipped extension folder.
 7. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
-
-Available package:
-
-- `dist/space-tabs-0.4.2-space-switch-fix.zip`: latest package with stable Space switching, local saved tabs, nested folder UI, and the redesigned side panel.
 
 ## Install From Source
 

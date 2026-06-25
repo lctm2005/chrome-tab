@@ -10,7 +10,12 @@ import {
   appendArcImportPlan,
   createArcImportPlan,
 } from './src/shared/arc-import.js';
-import { createFolderTree, folderTitleParts, movedGroupTitleForFolderDrop } from './src/shared/folder-tree.js';
+import {
+  createFolderTree,
+  folderTitleParts,
+  movedGroupTitleForFolderDrop,
+  renamedFolderGroupTitle,
+} from './src/shared/folder-tree.js';
 import { renderMarkdown } from './src/shared/markdown.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
@@ -1595,21 +1600,6 @@ function groupsForFolderContext(folderContext) {
       seen.add(group.key);
       return true;
     });
-}
-
-function renamedFolderGroupTitle(group, sourcePath, nextLeafTitle) {
-  const currentPath = folderTitleParts(group.title);
-  const source = sourcePath || [];
-  const targetPath = [...source.slice(0, -1), nextLeafTitle];
-  const suffix = pathStartsWith(currentPath, source)
-    ? currentPath.slice(source.length)
-    : currentPath.slice(-1);
-  return uniqueAdjacentPathParts([...targetPath, ...suffix]).join(' / ');
-}
-
-function pathStartsWith(path, prefix) {
-  if (!prefix?.length || path.length < prefix.length) return false;
-  return prefix.every((part, index) => path[index] === part);
 }
 
 async function retitleGroupWithoutSaving(group, title) {

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   createFolderTree,
   movedGroupTitleForFolderDrop,
+  renamedFolderGroupTitle,
 } from '../src/shared/folder-tree.js';
 
 test('keeps a standalone group as a group node', () => {
@@ -92,6 +93,26 @@ test('retitles a dragged group beside root folders without keeping its old paren
       []
     ),
     'POC'
+  );
+});
+
+test('retitles groups when renaming a folder without duplicate adjacent path parts', () => {
+  assert.equal(
+    renamedFolderGroupTitle(
+      { title: 'Research / Drafts / Spec' },
+      ['Research', 'Drafts'],
+      'Research'
+    ),
+    'Research / Spec'
+  );
+
+  assert.equal(
+    renamedFolderGroupTitle(
+      { title: 'Work / Drafts / Spec' },
+      ['Work', 'Drafts'],
+      'Archive'
+    ),
+    'Work / Archive / Spec'
   );
 });
 

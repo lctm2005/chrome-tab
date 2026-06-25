@@ -80,6 +80,16 @@ export function movedGroupTitleForFolderDrop(groupTitle, sourceContext = {}, tar
   return uniqueAdjacentPathParts(nestedPath).join(' / ');
 }
 
+export function renamedFolderGroupTitle(group, sourcePath = [], nextLeafTitle = '') {
+  const currentPath = folderTitleParts(group?.title || group?.displayTitle || 'Group');
+  const source = Array.isArray(sourcePath) ? sourcePath : [];
+  const targetPath = [...source.slice(0, -1), nextLeafTitle];
+  const suffix = pathStartsWith(currentPath, source)
+    ? currentPath.slice(source.length)
+    : currentPath.slice(-1);
+  return uniqueAdjacentPathParts([...targetPath, ...suffix]).join(' / ');
+}
+
 function folderKey(parts, activeSpaceId) {
   return `folder:${activeSpaceId}:${parts.join('/')}`;
 }
@@ -91,4 +101,9 @@ function folderPathId(parts) {
 function uniqueAdjacentPathParts(parts) {
   const compact = parts.map((part) => String(part || '').trim()).filter(Boolean);
   return compact.filter((part, index) => index === 0 || part !== compact[index - 1]);
+}
+
+function pathStartsWith(path, prefix) {
+  if (!prefix?.length || path.length < prefix.length) return false;
+  return prefix.every((part, index) => path[index] === part);
 }
