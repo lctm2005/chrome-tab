@@ -38,11 +38,11 @@ test('falls back from general Z.AI endpoint to coding endpoint for coding-plan k
   assert.equal(getZaiFallbackBaseUrl('https://api.z.ai/api/coding/paas/v4'), '');
 });
 
-test('builds a GLM-5.1 OpenAI-compatible chat request', () => {
+test('builds a GLM-5.2 OpenAI-compatible chat request', () => {
   const request = buildChatCompletionRequest({
     provider: 'openai-compatible',
     baseUrl: 'https://api.z.ai/api/paas/v4/',
-    model: 'glm-5.1',
+    model: 'glm-5.2',
     apiKey: 'secret',
     thinking: 'disabled',
     temperature: 0.4,
@@ -54,7 +54,7 @@ test('builds a GLM-5.1 OpenAI-compatible chat request', () => {
 
   assert.equal(request.url, 'https://api.z.ai/api/paas/v4/chat/completions');
   assert.equal(request.headers.Authorization, 'Bearer secret');
-  assert.equal(request.body.model, 'glm-5.1');
+  assert.equal(request.body.model, 'glm-5.2');
   assert.equal(request.body.thinking.type, 'disabled');
   assert.equal(request.body.max_tokens, 2048);
   assert.equal(request.body.stream, false);

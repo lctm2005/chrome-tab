@@ -1307,6 +1307,164 @@ menu button:disabled,
   background: var(--line);
 }
 
+/* --- GROUP HOVER PREVIEW --- */
+.group-preview-popover {
+  position: fixed;
+  z-index: 95;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: rgba(17, 15, 28, 0.96);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  padding: 6px;
+  animation: popupOpen 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  .group-preview-popover {
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.group-preview-search {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.group-preview-search svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.6;
+}
+
+.group-preview-search-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.group-preview-search-input::placeholder {
+  color: var(--muted);
+}
+
+.group-preview-list {
+  display: flex;
+  min-height: 0;
+  max-height: min(390px, calc(100vh - 72px));
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+
+.group-preview-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.group-preview-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--faint);
+}
+
+.group-preview-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-soft);
+  padding: 6px 8px;
+  text-align: left;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.group-preview-item:hover,
+.group-preview-item:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.group-preview-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.group-preview-item.dormant {
+  opacity: 0.78;
+}
+
+.group-preview-item .favicon {
+  width: 22px;
+  height: 22px;
+}
+
+.group-preview-label {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.group-preview-title,
+.group-preview-subtitle {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-preview-title {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.group-preview-subtitle {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.group-preview-state {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.group-preview-empty {
+  padding: 18px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
 /* --- DIALOGS (FLOATING SHEETS) --- */
 dialog {
   width: min(92vw, 360px);
@@ -1431,6 +1589,11 @@ dialog::backdrop {
   min-height: 36px;
   padding: 0 12px;
   font-size: 12px;
+}
+
+.settings input.readonly {
+  color: var(--muted);
+  background: var(--surface-strong);
 }
 
 .settings select option {

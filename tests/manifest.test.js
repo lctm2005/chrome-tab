@@ -31,10 +31,15 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   }
 });
 
-test('store build does not prefill a provider-specific AI model', async () => {
+test('settings expose provider and model selectors without prefilled free text model fallback', async () => {
+  const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /model:\s*els\.modelInput\.value\.trim\(\)/);
+  assert.match(html, /<select id="providerInput"/);
+  assert.match(html, /<select id="modelInput"/);
+  assert.match(html, /id="customModelInput"/);
+  assert.match(source, /AI_PROVIDER_CATALOG/);
+  assert.match(source, /selectedModelFromForm\(/);
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 

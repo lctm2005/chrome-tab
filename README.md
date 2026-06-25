@@ -65,9 +65,11 @@ AI features are optional and use your own API key.
 
 Open `Settings` in the side panel and configure:
 
-- `Base URL`: OpenAI-compatible chat completions endpoint root. Store builds
-  leave this blank until you choose a provider.
-- `Model`: for example `glm-5.1`.
+- `Provider`: choose `Z.ai / GLM`, `OpenAI`, or `Custom OpenAI-compatible`.
+- `Base URL`: built-in providers fill this automatically; custom providers can
+  edit it.
+- `Model`: choose a provider model, or pick `Custom model...` for compatible
+  endpoints.
 - `API Key`: stored locally by Chrome for the current extension session.
 - `Language`: controls Ask and Summary output language.
 

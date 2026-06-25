@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildGroupPreviewItems,
   buildSpaceView,
   decorateTabs,
   domainFromUrl,
@@ -16,7 +17,7 @@ import {
 } from '../src/shared/tab-utils.js';
 
 test('extracts readable domains from URLs', () => {
-  assert.equal(domainFromUrl('https://docs.z.ai/guides/llm/glm-5.1'), 'docs.z.ai');
+  assert.equal(domainFromUrl('https://docs.z.ai/guides/llm/glm-5.2'), 'docs.z.ai');
   assert.equal(domainFromUrl('chrome://extensions'), 'chrome');
   assert.equal(domainFromUrl('not a url'), 'unknown');
 });
@@ -85,6 +86,40 @@ test('searches tabs by title, URL, and domain', () => {
 
   assert.equal(results.length, 1);
   assert.equal(results[0].title, 'GLM docs');
+});
+
+test('builds searchable group preview rows from panel tab metadata', () => {
+  const items = buildGroupPreviewItems({
+    title: 'AI',
+    tabs: [
+      {
+        id: 1,
+        title: '...',
+        displayTitle: 'ZHIPU AI OPEN PLATFORM',
+        url: 'https://bigmodel.cn/dev',
+        domain: 'bigmodel.cn',
+        favIconUrl: 'https://example.com/zhipu.png',
+        active: true,
+      },
+      {
+        id: 2,
+        title: 'NotebookLM: personalized notes',
+        url: 'https://notebooklm.google.com',
+        domain: 'notebooklm.google.com',
+        dormant: true,
+      },
+    ],
+  }, 'note');
+
+  assert.deepEqual(items, [{
+    id: 2,
+    title: 'NotebookLM: personalized notes',
+    subtitle: 'notebooklm.google.com',
+    url: 'https://notebooklm.google.com',
+    favIconUrl: '',
+    active: false,
+    dormant: true,
+  }]);
 });
 
 test('prefers web pages when choosing a tab to keep shortcuts usable', () => {

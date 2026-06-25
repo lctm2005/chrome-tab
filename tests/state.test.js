@@ -33,14 +33,45 @@ test('keeps explicitly configured BYOK AI settings', () => {
   const state = createDefaultState({
     ai: {
       baseUrl: 'https://api.z.ai/api/coding/paas/v4/',
-      model: 'glm-5.1',
+      model: 'glm-5.2',
       apiKey: 'secret',
     },
   });
 
+  assert.equal(state.ai.provider, 'z-ai');
   assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(state.ai.model, 'glm-5.1');
+  assert.equal(state.ai.model, 'glm-5.2');
   assert.equal(state.ai.apiKey, 'secret');
+});
+
+test('recognizes stored built-in provider settings without losing explicit choice', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    ai: {
+      provider: 'z-ai',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      model: 'glm-5.2',
+      apiKey: '',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.ai.provider, 'z-ai');
+  assert.equal(merged.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(merged.ai.model, 'glm-5.2');
+});
+
+test('preserves unknown stored BYOK endpoints as custom providers', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    ai: {
+      baseUrl: 'https://llm.example.com/v1/',
+      model: 'example-model',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.ai.provider, 'openai-compatible');
+  assert.equal(merged.ai.baseUrl, 'https://llm.example.com/v1');
+  assert.equal(merged.ai.model, 'example-model');
 });
 
 test('drops legacy built-in BYOK defaults from stored state', () => {

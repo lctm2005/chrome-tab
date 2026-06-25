@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=17">
+    <link rel="stylesheet" href="sidepanel.css?v=18">
   </head>
   <body>
     <div class="shell">
@@ -89,12 +89,20 @@
           </div>
         </label>
         <label>
+          Provider
+          <select id="providerInput"></select>
+        </label>
+        <label>
           Base URL
           <input id="baseUrlInput" type="url" spellcheck="false">
         </label>
         <label>
           Model
-          <input id="modelInput" type="text" spellcheck="false">
+          <select id="modelInput"></select>
+        </label>
+        <label id="customModelLabel" hidden>
+          Custom Model
+          <input id="customModelInput" type="text" spellcheck="false">
         </label>
         <label>
           Language
@@ -148,6 +156,6 @@
     </dialog>
 
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=17"></script>
+    <script type="module" src="sidepanel.js?v=18"></script>
   </body>
 </html>

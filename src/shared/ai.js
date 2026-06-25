@@ -30,7 +30,7 @@ export function buildChatCompletionRequest(settings, messages) {
     max_tokens: Number(settings.maxTokens ?? 2048),
   };
 
-  if (settings.model === 'glm-5.1' || String(settings.model || '').startsWith('glm-5')) {
+  if (String(settings.model || '').startsWith('glm-5')) {
     body.thinking = {
       type: settings.thinking === 'enabled' ? 'enabled' : 'disabled',
     };

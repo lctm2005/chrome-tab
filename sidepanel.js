@@ -1,5 +1,11 @@
 import { createPrompt, formatAIError, getOriginPattern, parseTidyGroups, parseTidyNames } from './src/shared/ai.js';
 import {
+  AI_PROVIDER_CATALOG,
+  CUSTOM_AI_PROVIDER_ID,
+  normalizeAIProviderSettings,
+  providerById,
+} from './src/shared/ai-providers.js';
+import {
   appendAskSessionMessage,
   createAskSession,
   pruneAskSessions,
@@ -64,6 +70,7 @@ import {
   tabBelongsToSpace as entityBelongsToSpace,
 } from './src/shared/space-membership.js';
 import {
+  buildGroupPreviewItems,
   buildSpaceView,
   compactTabForAI,
   decorateTabs,
@@ -82,6 +89,9 @@ const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
 const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
 const previewSend = createPreviewCommandHandler();
+const CUSTOM_MODEL_VALUE = '__custom__';
+const GROUP_PREVIEW_OPEN_DELAY_MS = 160;
+const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
     <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
@@ -113,6 +123,12 @@ let lastRenderedGroupsSignature = '';
 let lastRenderedAskSignature = '';
 let lastRenderedSpacesSignature = '';
 let recentlyOpenedDormantTabs = [];
+let groupPreviewPopover = null;
+let groupPreviewAnchor = null;
+let groupPreviewGroup = null;
+let groupPreviewQuery = '';
+let groupPreviewOpenTimer = 0;
+let groupPreviewCloseTimer = 0;
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -143,8 +159,11 @@ const els = {
   actionDialogCancel: document.querySelector('#actionDialogCancel'),
   actionDialogConfirm: document.querySelector('#actionDialogConfirm'),
   settingsDialog: document.querySelector('#settingsDialog'),
+  providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
+  customModelLabel: document.querySelector('#customModelLabel'),
+  customModelInput: document.querySelector('#customModelInput'),
   languageInput: document.querySelector('#languageInput'),
   apiKeyInput: document.querySelector('#apiKeyInput'),
   apiKeyStatus: document.querySelector('#apiKeyStatus'),
@@ -264,6 +283,8 @@ function bindEvents() {
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
   els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
+  els.providerInput.addEventListener('change', () => renderAIProviderFields(settingsFromProviderSelection()));
+  els.modelInput.addEventListener('change', () => updateCustomModelVisibility());
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.saveSettingsButton.addEventListener('click', (event) => {
@@ -290,7 +311,12 @@ function bindEvents() {
 
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
-  document.addEventListener('click', hideContextMenu);
+  els.groupsList.addEventListener('scroll', () => positionGroupPreview(), { passive: true });
+  window.addEventListener('resize', hideGroupPreview);
+  document.addEventListener('click', () => {
+    hideContextMenu();
+    hideGroupPreview();
+  });
   document.addEventListener('keydown', handleDocumentKeydown);
 }
 
@@ -301,7 +327,10 @@ function handleDocumentKeydown(event) {
     return;
   }
 
-  if (event.key === 'Escape') hideContextMenu();
+  if (event.key === 'Escape') {
+    hideContextMenu();
+    hideGroupPreview();
+  }
 
   const shortcuts = mergeShortcuts(state.shortcuts);
   if (shortcutMatchesEvent(shortcuts.askAbort, event) && activeAIRequestId) {
@@ -522,6 +551,7 @@ function render() {
     : '';
   els.groupsList.hidden = isAskView;
   els.askPageView.hidden = !isAskView;
+  if (isAskView) hideGroupPreview();
   els.tidyNamesButton.hidden = isAskView;
   els.autoGroupButton.hidden = isAskView;
   els.collapseGroupsButton.hidden = isAskView;
@@ -632,6 +662,7 @@ function renderGroups() {
   const signature = groupsRenderSignature(tabGroups, ungrouped);
   if (signature === lastRenderedGroupsSignature) return;
   lastRenderedGroupsSignature = signature;
+  hideGroupPreview();
   renderedGroupContexts = new Map();
   renderedGroupDragContexts = new Map();
 
@@ -817,6 +848,7 @@ function createFolderSection(folder) {
     <strong>${escapeHtml(folder.title)}</strong>
   `;
   header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
+  bindGroupPreview(header, groupPreviewGroupForFolder(folder));
 
   const children = document.createElement('div');
   children.className = 'folder-children';
@@ -863,6 +895,7 @@ function createGroupCard(group) {
   actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
   header.append(actions);
   header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
+  bindGroupPreview(header, group);
 
   const list = document.createElement('div');
   list.className = 'tab-list';
@@ -907,6 +940,7 @@ function createFolderTabs(group) {
   actions.append(actionButton('×', 'Delete group', () => deleteGroup(group)));
   header.append(actions);
   header.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
+  bindGroupPreview(header, group);
 
   const list = document.createElement('div');
   list.className = 'tab-list folder-direct-list';
@@ -918,6 +952,223 @@ function createFolderTabs(group) {
   if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
   section.append(header, list);
   return section;
+}
+
+function groupPreviewGroupForFolder(folder) {
+  const tabs = tabsForFolderPreview(folder.children || []);
+  return {
+    key: folder.key,
+    title: folder.title,
+    displayTitle: folder.title,
+    color: 'grey',
+    tabs,
+  };
+}
+
+function tabsForFolderPreview(nodes = []) {
+  const previewTabs = [];
+  for (const node of nodes) {
+    if (node.type === 'folder') {
+      previewTabs.push(...tabsForFolderPreview(node.children || []));
+      continue;
+    }
+    const group = node.group;
+    for (const tab of group?.tabs || []) {
+      previewTabs.push({ ...tab, previewGroupKey: group.key });
+    }
+  }
+  return previewTabs;
+}
+
+function bindGroupPreview(anchor, group) {
+  if (!group?.tabs?.length) return;
+  const show = (event) => {
+    if (event?.pointerType === 'touch') return;
+    scheduleShowGroupPreview(anchor, group);
+  };
+  anchor.addEventListener('mouseenter', show);
+  anchor.addEventListener('pointerenter', show);
+  anchor.addEventListener('mouseleave', scheduleHideGroupPreview);
+  anchor.addEventListener('pointerleave', scheduleHideGroupPreview);
+  anchor.addEventListener('focusin', () => showGroupPreview(anchor, group));
+  anchor.addEventListener('focusout', (event) => {
+    if (!groupPreviewPopover?.contains(event.relatedTarget)) scheduleHideGroupPreview();
+  });
+}
+
+function scheduleShowGroupPreview(anchor, group) {
+  if (dragState) return;
+  clearTimeout(groupPreviewCloseTimer);
+  clearTimeout(groupPreviewOpenTimer);
+  groupPreviewOpenTimer = setTimeout(() => showGroupPreview(anchor, group), GROUP_PREVIEW_OPEN_DELAY_MS);
+}
+
+function scheduleHideGroupPreview() {
+  clearTimeout(groupPreviewOpenTimer);
+  clearTimeout(groupPreviewCloseTimer);
+  groupPreviewCloseTimer = setTimeout(hideGroupPreview, GROUP_PREVIEW_CLOSE_DELAY_MS);
+}
+
+function showGroupPreview(anchor, group) {
+  if (!group?.tabs?.length || dragState) return;
+  const sameGroup = groupPreviewGroup?.key === group.key;
+  groupPreviewAnchor = anchor;
+  groupPreviewGroup = group;
+  groupPreviewQuery = sameGroup ? groupPreviewQuery : '';
+  hideContextMenu();
+  const popover = ensureGroupPreviewPopover();
+  renderGroupPreviewContents();
+  popover.hidden = false;
+  positionGroupPreview();
+}
+
+function hideGroupPreview() {
+  clearTimeout(groupPreviewOpenTimer);
+  clearTimeout(groupPreviewCloseTimer);
+  if (groupPreviewPopover) groupPreviewPopover.hidden = true;
+  groupPreviewAnchor = null;
+  groupPreviewGroup = null;
+  groupPreviewQuery = '';
+}
+
+function ensureGroupPreviewPopover() {
+  if (groupPreviewPopover) return groupPreviewPopover;
+  const popover = document.createElement('div');
+  popover.className = 'group-preview-popover';
+  popover.hidden = true;
+  popover.addEventListener('mouseenter', () => {
+    clearTimeout(groupPreviewCloseTimer);
+  });
+  popover.addEventListener('mouseleave', scheduleHideGroupPreview);
+  popover.addEventListener('mousedown', (event) => event.stopPropagation());
+  popover.addEventListener('click', (event) => event.stopPropagation());
+  document.body.append(popover);
+  groupPreviewPopover = popover;
+  return popover;
+}
+
+function renderGroupPreviewContents() {
+  const popover = ensureGroupPreviewPopover();
+  const search = document.createElement('label');
+  search.className = 'group-preview-search';
+  search.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+  `;
+
+  const input = document.createElement('input');
+  input.className = 'group-preview-search-input';
+  input.type = 'search';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.placeholder = `Search ${groupPreviewGroup?.displayTitle || groupPreviewGroup?.title || 'tabs'}...`;
+  input.value = groupPreviewQuery;
+
+  const list = document.createElement('div');
+  list.className = 'group-preview-list';
+
+  input.addEventListener('input', () => {
+    groupPreviewQuery = input.value;
+    renderGroupPreviewList(list);
+    positionGroupPreview();
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideGroupPreview();
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      list.querySelector('.group-preview-item')?.focus();
+      return;
+    }
+    if (event.key === 'Enter') {
+      const first = list.querySelector('.group-preview-item');
+      if (first) {
+        event.preventDefault();
+        first.click();
+      }
+    }
+  });
+
+  search.append(input);
+  popover.replaceChildren(search, list);
+  renderGroupPreviewList(list);
+}
+
+function renderGroupPreviewList(list) {
+  const items = buildGroupPreviewItems(groupPreviewGroup, groupPreviewQuery, { limit: 12 });
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'group-preview-empty';
+    empty.textContent = 'No matching tabs';
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...items.map(createGroupPreviewItem));
+}
+
+function createGroupPreviewItem(item) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = [
+    'group-preview-item',
+    item.active ? 'active' : '',
+    item.dormant ? 'dormant' : '',
+  ].filter(Boolean).join(' ');
+
+  const favicon = createFavicon({
+    ...item,
+    displayTitle: item.title,
+    domain: item.subtitle,
+  });
+  const label = document.createElement('span');
+  label.className = 'group-preview-label';
+  label.innerHTML = `
+    <span class="group-preview-title">${escapeHtml(item.title)}</span>
+    <span class="group-preview-subtitle">${escapeHtml(item.subtitle || item.url || '')}</span>
+  `;
+  const stateLabel = document.createElement('span');
+  stateLabel.className = 'group-preview-state';
+  stateLabel.textContent = item.active ? 'Active' : item.dormant ? 'Saved' : '';
+
+  button.append(favicon, label, stateLabel);
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    runTask(() => openGroupPreviewTab(item));
+  });
+  return button;
+}
+
+async function openGroupPreviewTab(item) {
+  const tab = (groupPreviewGroup?.tabs || [])
+    .find((candidate) => String(candidate.id) === String(item.id));
+  if (!tab) return;
+  const groupKey = tab.previewGroupKey || groupPreviewGroup.key;
+  hideGroupPreview();
+  if (tab.dormant) await openDormantTab(tab, groupKey);
+  else await focusTab(tab);
+}
+
+function positionGroupPreview() {
+  const popover = groupPreviewPopover;
+  if (!popover || popover.hidden || !groupPreviewAnchor?.isConnected) return;
+  const anchorRect = groupPreviewAnchor.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 320;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 600;
+  const width = Math.min(360, Math.max(252, viewportWidth - 16));
+  popover.style.width = `${width}px`;
+  popover.style.maxHeight = `${Math.max(180, viewportHeight - 16)}px`;
+
+  const panelHeight = popover.offsetHeight || 280;
+  let x = anchorRect.right + 8;
+  if (x + width > viewportWidth - 8) {
+    x = Math.min(Math.max(8, anchorRect.left), viewportWidth - width - 8);
+  }
+  let y = anchorRect.top - 6;
+  if (y + panelHeight > viewportHeight - 8) y = viewportHeight - panelHeight - 8;
+  popover.style.left = `${Math.max(8, x)}px`;
+  popover.style.top = `${Math.max(8, y)}px`;
 }
 
 function createUngroupedSection(group) {
@@ -3346,6 +3597,7 @@ function showSpaceContextMenu(event, space) {
 }
 
 function showContextMenu(event, items) {
+  hideGroupPreview();
   els.contextMenu.replaceChildren(...items.filter(Boolean));
   els.contextMenu.hidden = false;
   els.contextMenu.style.left = '0px';
@@ -3504,8 +3756,8 @@ function openActionDialog({
 }
 
 function renderSettings() {
-  els.baseUrlInput.value = state.ai.baseUrl;
-  els.modelInput.value = state.ai.model;
+  renderProviderOptions();
+  renderAIProviderFields(normalizeAIProviderSettings(state.ai));
   els.languageInput.value = state.ai.language || 'zh-CN';
   els.apiKeyInput.value = state.ai.apiKey;
   els.apiKeyInput.placeholder = state.ai.apiKey ? 'API key configured' : 'Paste API key';
@@ -3523,6 +3775,63 @@ function renderSettings() {
   }
 
   renderShortcutSettings();
+}
+
+function renderProviderOptions() {
+  if (els.providerInput.options.length === AI_PROVIDER_CATALOG.length) return;
+  const options = AI_PROVIDER_CATALOG.map((provider) => {
+    const option = document.createElement('option');
+    option.value = provider.id;
+    option.textContent = provider.label;
+    return option;
+  });
+  els.providerInput.replaceChildren(...options);
+}
+
+function renderAIProviderFields(settings) {
+  const normalized = normalizeAIProviderSettings(settings);
+  els.providerInput.value = normalized.provider;
+  const provider = providerById(normalized.provider);
+  els.baseUrlInput.value = normalized.provider === CUSTOM_AI_PROVIDER_ID ? normalized.baseUrl : provider.baseUrl;
+  els.baseUrlInput.readOnly = !provider.editableBaseUrl;
+  els.baseUrlInput.classList.toggle('readonly', els.baseUrlInput.readOnly);
+  renderModelOptions(provider, normalized.model);
+}
+
+function renderModelOptions(provider, selectedModel = '') {
+  const customOption = document.createElement('option');
+  customOption.value = CUSTOM_MODEL_VALUE;
+  customOption.textContent = 'Custom model...';
+  const options = provider.models.map((model) => {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.textContent = model.label;
+    return option;
+  });
+  options.push(customOption);
+  els.modelInput.replaceChildren(...options);
+
+  const hasBuiltInModel = provider.models.some((model) => model.id === selectedModel);
+  els.modelInput.value = hasBuiltInModel ? selectedModel : CUSTOM_MODEL_VALUE;
+  els.customModelInput.value = hasBuiltInModel ? '' : selectedModel;
+  updateCustomModelVisibility();
+}
+
+function updateCustomModelVisibility() {
+  const custom = els.modelInput.value === CUSTOM_MODEL_VALUE;
+  els.customModelLabel.hidden = !custom;
+  els.customModelInput.required = custom;
+}
+
+function settingsFromProviderSelection() {
+  const provider = providerById(els.providerInput.value);
+  const isCurrentCustom = state.ai.provider === CUSTOM_AI_PROVIDER_ID;
+  return {
+    ...state.ai,
+    provider: provider.id,
+    baseUrl: provider.editableBaseUrl && isCurrentCustom ? state.ai.baseUrl : provider.baseUrl,
+    model: provider.editableBaseUrl && isCurrentCustom ? state.ai.model : provider.models[0]?.id || '',
+  };
 }
 
 function apiKeyStatusText() {
@@ -3593,15 +3902,24 @@ async function clearApiKey() {
 }
 
 function currentAISettingsFromForm() {
+  const provider = providerById(els.providerInput.value);
   return {
-    ...state.ai,
-    baseUrl: els.baseUrlInput.value.trim().replace(/\/+$/, ''),
-    model: els.modelInput.value.trim(),
+    ...normalizeAIProviderSettings({
+      ...state.ai,
+      provider: provider.id,
+      baseUrl: provider.editableBaseUrl ? els.baseUrlInput.value.trim().replace(/\/+$/, '') : provider.baseUrl,
+      model: selectedModelFromForm(),
+    }),
     language: els.languageInput.value || 'zh-CN',
     apiKey: els.apiKeyInput.value.trim(),
     thinking: els.thinkingInput.value,
     maxTokens: Number(els.maxTokensInput.value || 2048),
   };
+}
+
+function selectedModelFromForm() {
+  if (els.modelInput.value === CUSTOM_MODEL_VALUE) return els.customModelInput.value.trim();
+  return els.modelInput.value;
 }
 
 function currentShortcutsFromForm() {

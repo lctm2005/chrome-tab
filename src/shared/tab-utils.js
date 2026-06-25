@@ -47,6 +47,27 @@ export function searchTabs(tabs, query) {
   });
 }
 
+export function buildGroupPreviewItems(group, query = '', options = {}) {
+  const limit = Number.isFinite(Number(options.limit)) ? Math.max(0, Number(options.limit)) : 8;
+  return searchTabs(group?.tabs || [], query)
+    .slice(0, limit)
+    .map(groupPreviewItemForTab);
+}
+
+function groupPreviewItemForTab(tab) {
+  const domain = cleanTitle(tab?.domain) || domainFromUrl(tab?.url);
+  const subtitle = domain && domain !== 'unknown' ? domain : cleanTitle(tab?.url);
+  return {
+    id: tab?.id,
+    title: cleanTitle(tab?.displayTitle || tab?.panelTitle || tab?.title || tab?.url) || 'Untitled',
+    subtitle,
+    url: cleanTitle(tab?.url),
+    favIconUrl: cleanTitle(tab?.favIconUrl),
+    active: Boolean(tab?.active),
+    dormant: Boolean(tab?.dormant),
+  };
+}
+
 export function isPageShortcutCapableUrl(value) {
   try {
     const url = new URL(value);

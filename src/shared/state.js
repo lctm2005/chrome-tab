@@ -1,3 +1,4 @@
+import { normalizeAIProviderSettings } from './ai-providers.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
@@ -8,6 +9,12 @@ const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
+  const aiProviderInput = {
+    baseUrl: normalizeUrl(ai.baseUrl || ''),
+    model: ai.model || '',
+  };
+  if (ai.provider) aiProviderInput.provider = ai.provider;
+  const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
     version: 4,
     theme: 'purple',
@@ -30,9 +37,9 @@ export function createDefaultState(localConfig = {}) {
     spaceSnapshots: {},
     shortcuts: mergeShortcuts(),
     ai: {
-      provider: ai.provider || 'openai-compatible',
-      baseUrl: normalizeUrl(ai.baseUrl || ''),
-      model: ai.model || '',
+      provider: normalizedAI.provider,
+      baseUrl: normalizedAI.baseUrl,
+      model: normalizedAI.model,
       apiKey: ai.apiKey || '',
       thinking: ai.thinking || 'disabled',
       language: ai.language || 'zh-CN',
@@ -78,16 +85,21 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
 }
 
 function migrateAISettings(storedAI = {}, defaultAI = {}) {
-  const ai = { ...defaultAI, ...(storedAI || {}) };
+  let ai = { ...defaultAI, ...(storedAI || {}) };
   if (isLegacyBuiltInAISettings(storedAI)) {
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';
   }
-  return ai;
+  return normalizeAIProviderSettings({
+    ...ai,
+    baseUrl: normalizeUrl(ai.baseUrl || ''),
+    model: String(ai.model || '').trim(),
+  });
 }
 
 function isLegacyBuiltInAISettings(ai = {}) {
   return (
+    !ai?.provider &&
     !ai?.apiKey &&
     normalizeUrl(ai?.baseUrl) === LEGACY_DEFAULT_AI_BASE_URL &&
     String(ai?.model || '') === LEGACY_DEFAULT_AI_MODEL
