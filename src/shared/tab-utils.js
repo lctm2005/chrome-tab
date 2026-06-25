@@ -16,11 +16,16 @@ export function decorateTabs(tabs, state = {}) {
     const domain = domainFromUrl(tab.url);
     const title = cleanTitle(tab.title);
     const renamedTitle = cleanTitle(state.renamedTabs?.[tab.id]);
-    return {
-      ...tab,
+    const tabWithoutPanelTitle = { ...tab };
+    delete tabWithoutPanelTitle.panelTitle;
+    const decorated = {
+      ...tabWithoutPanelTitle,
       domain,
       displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title) || domain,
     };
+    if (renamedTitle) decorated.panelTitle = renamedTitle;
+    else delete decorated.panelTitle;
+    return decorated;
   });
 }
 

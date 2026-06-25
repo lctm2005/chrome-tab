@@ -63,6 +63,34 @@ test('snapshots a Space as TabGroup -> Tab restore data', () => {
   ]);
 });
 
+test('snapshots panel-only tab names as restorable metadata', () => {
+  const snapshot = buildSpaceSnapshot({
+    view: [
+      {
+        title: 'Servers',
+        color: 'blue',
+        tabs: [
+          {
+            id: 1,
+            title: '67.216.201.49 - 入站',
+            displayTitle: '3X-UI',
+            panelTitle: '3X-UI',
+            url: 'https://67.216.201.49:44374/secret/panel/inbounds',
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(snapshot.groups[0].tabs, [
+    {
+      title: '3X-UI',
+      panelTitle: '3X-UI',
+      url: 'https://67.216.201.49:44374/secret/panel/inbounds',
+    },
+  ]);
+});
+
 test('auto closes any unpinned tab owned by a Space', () => {
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'http://example.com', pinned: false }), true);
@@ -221,6 +249,50 @@ test('keeps the same normalized URL in different snapshot groups', () => {
   });
 
   assert.equal(snapshotTabCount(snapshot), 2);
+});
+
+test('keeps dormant tabs with a live group after the group is renamed', () => {
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'Deep Work',
+        color: 'blue',
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+    ],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Research',
+        color: 'blue',
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+          { title: 'Archive', url: 'https://example.com/archive' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(liveSnapshot, storedSnapshot).groups, [
+    {
+      title: 'Deep Work',
+      color: 'blue',
+      tabs: [
+        { title: 'Spec', url: 'https://example.com/spec' },
+        { title: 'Plan', url: 'https://example.com/plan' },
+        { title: 'Archive', url: 'https://example.com/archive' },
+      ],
+    },
+  ]);
 });
 
 test('removes one opened dormant tab from its snapshot group', () => {

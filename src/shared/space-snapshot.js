@@ -19,10 +19,7 @@ export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {
         tabs: (group.tabs || [])
           .filter(shouldAutoCloseTab)
           .filter(isRestorableSnapshotTab)
-          .map((tab) => ({
-            title: tab.displayTitle || tab.title || tab.url || 'Untitled',
-            url: String(tab.url || '').trim(),
-          })),
+          .map(snapshotTabRecord),
       }))
       .filter((group) => group.tabs.length > 0),
   };
@@ -181,7 +178,13 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
 
   for (const storedGroup of storedSnapshot.groups || []) {
     const key = snapshotGroupKey(storedGroup);
-    const liveGroup = liveGroupsByKey.get(key);
+    let liveGroup = liveGroupsByKey.get(key);
+    let liveKey = key;
+    if (!liveGroup) {
+      const overlapMatch = liveGroupMatchByUrlOverlap(storedGroup, liveGroupsByKey);
+      liveGroup = overlapMatch?.group;
+      liveKey = overlapMatch?.key || key;
+    }
     const dormantTabs = (storedGroup.tabs || [])
       .filter((tab) => !liveUrls.has(comparableSnapshotUrl(tab.url)));
     if (liveGroup) {
@@ -189,7 +192,7 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
         ...liveGroup,
         tabs: [...(liveGroup.tabs || []), ...dormantTabs],
       });
-      liveGroupsByKey.delete(key);
+      liveGroupsByKey.delete(liveKey);
     } else if (dormantTabs.length > 0) {
       mergedGroups.push({
         ...storedGroup,
@@ -224,19 +227,75 @@ export function sanitizeSpaceSnapshot(snapshot) {
         color: group.color || (title === 'Ungrouped' ? 'grey' : 'blue'),
         tabs: dedupeSnapshotTabs((group.tabs || [])
           .filter(isRestorableSnapshotTab)
-          .map((tab) => ({
-            ...tab,
-            title: tab.title || tab.url || 'Untitled',
-            url: String(tab.url || '').trim(),
-          }))),
+          .map(sanitizeSnapshotTab)),
       };
     })
     .filter((group) => group.tabs.length > 0);
   return { ...snapshot, groups };
 }
 
+function snapshotTabRecord(tab = {}) {
+  const record = {
+    title: tab.displayTitle || tab.title || tab.url || 'Untitled',
+    url: String(tab.url || '').trim(),
+  };
+  const panelTitle = cleanPanelTitle(tab.panelTitle);
+  if (panelTitle) record.panelTitle = panelTitle;
+  return record;
+}
+
+function sanitizeSnapshotTab(tab = {}) {
+  const sanitized = {
+    ...tab,
+    title: tab.title || tab.url || 'Untitled',
+    url: String(tab.url || '').trim(),
+  };
+  const panelTitle = cleanPanelTitle(tab.panelTitle);
+  if (panelTitle) sanitized.panelTitle = panelTitle;
+  else delete sanitized.panelTitle;
+  return sanitized;
+}
+
+function cleanPanelTitle(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 function snapshotTabs(snapshot = {}) {
   return (snapshot.groups || []).flatMap((group) => group.tabs || []);
+}
+
+function liveGroupMatchByUrlOverlap(storedGroup = {}, liveGroupsByKey = new Map()) {
+  const storedUrls = new Set((storedGroup.tabs || [])
+    .map((tab) => comparableSnapshotUrl(tab.url))
+    .filter(Boolean));
+  if (storedUrls.size === 0) return null;
+
+  let best = null;
+  let bestOverlap = 0;
+  let tied = false;
+  for (const [key, group] of liveGroupsByKey) {
+    const overlap = countUrlOverlap(storedUrls, group.tabs || []);
+    if (overlap > bestOverlap) {
+      best = { key, group };
+      bestOverlap = overlap;
+      tied = false;
+    } else if (overlap > 0 && overlap === bestOverlap) {
+      tied = true;
+    }
+  }
+  return bestOverlap > 0 && !tied ? best : null;
+}
+
+function countUrlOverlap(urls, tabs = []) {
+  const seen = new Set();
+  let count = 0;
+  for (const tab of tabs) {
+    const key = comparableSnapshotUrl(tab.url);
+    if (!key || seen.has(key) || !urls.has(key)) continue;
+    seen.add(key);
+    count += 1;
+  }
+  return count;
 }
 
 function sanitizeReplacementTab(tab = {}) {

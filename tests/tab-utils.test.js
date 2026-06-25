@@ -45,6 +45,7 @@ test('decorates tabs by ignoring transient placeholder titles', () => {
   assert.equal(tabs[0].displayTitle, 'bytedance.larkoffice.com');
   assert.equal(tabs[1].displayTitle, 'bytedance.larkoffice.com');
   assert.equal(tabs[2].displayTitle, 'Renamed page');
+  assert.equal(tabs[2].panelTitle, 'Renamed page');
 });
 
 test('plans tidy groups from tab domains and titles', () => {

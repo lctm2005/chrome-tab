@@ -54,6 +54,13 @@ test('dormant tab rows can remove the saved snapshot entry', async () => {
   assert.match(source, /actionButton\('×', 'Remove saved tab', \(\) => removeDormantTab\(tab, groupKey\)\)/);
 });
 
+test('opening a dormant tab preserves its panel-only name on the new live tab', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /preserveDormantPanelName\(tab,\s*tabId\)/);
+  assert.match(source, /state\.renamedTabs\[tabId\]\s*=\s*name/);
+});
+
 test('sidepanel prunes saved snapshot entries for closed or navigated live tabs', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
@@ -103,6 +110,16 @@ test('single tab context menu can update the saved URL for a persistent tab', as
   assert.match(source, /menuAction\('Update Saved URL', \(\) => updateSavedTabUrl\(tab\)\)/);
   assert.match(source, /function updateSavedTabUrl\(tab\)/);
   assert.match(source, /updateSnapshotTab\(/);
+});
+
+test('tidy names uses AI when configured without overwriting manual names', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /parseTidyNames/);
+  assert.match(source, /createPrompt\('tidy-names'/);
+  assert.match(source, /state\.ai\.apiKey/);
+  assert.match(source, /existingNames:\s*state\.renamedTabs/);
+  assert.match(source, /preserveExisting:\s*true/);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {

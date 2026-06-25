@@ -11,6 +11,7 @@ import {
   languageInstruction,
   normalizeBaseUrl,
   parseTidyGroups,
+  parseTidyNames,
 } from '../src/shared/ai.js';
 
 test('normalizes OpenAI-compatible base URLs without duplicating chat/completions', () => {
@@ -112,6 +113,21 @@ test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
   assert.match(prompt[0].content, /mix different domains/);
 });
 
+test('asks tidy-names AI to rename only the supplied tabs', () => {
+  const prompt = createPrompt('tidy-names', {
+    tabs: [
+      { id: 1, title: '67.216.201.49 - 入站', url: 'https://67.216.201.49:44374/secret/panel/inbounds' },
+      { id: 2, title: 'GitHub - openai/codex/pull/123', url: 'https://github.com/openai/codex/pull/123' },
+    ],
+    language: 'zh-CN',
+  });
+
+  assert.match(prompt[0].content, /Rename browser tabs/);
+  assert.match(prompt[0].content, /only the tabs supplied/);
+  assert.match(prompt[0].content, /Return only JSON/);
+  assert.match(prompt[0].content, /Respond in Simplified Chinese/);
+});
+
 test('parses tidy-tabs JSON even when the model wraps it in markdown', () => {
   const groups = parseTidyGroups([
     'Here is the grouping:',
@@ -125,4 +141,26 @@ test('parses tidy-tabs JSON even when the model wraps it in markdown', () => {
     tabIds: [1, 2],
     color: 'cyan',
   }]);
+});
+
+test('parses tidy-names JSON and ignores unknown or empty entries', () => {
+  const names = parseTidyNames([
+    '```json',
+    '[',
+    '{"id":1,"title":"3X-UI 入站"},',
+    '{"tabId":2,"name":"Codex PR"},',
+    '{"id":3,"title":""},',
+    '{"id":99,"title":"Outside input"}',
+    ']',
+    '```',
+  ].join('\n'), [
+    { id: 1 },
+    { id: 2 },
+    { id: 3 },
+  ]);
+
+  assert.deepEqual(names, {
+    1: '3X-UI 入站',
+    2: 'Codex PR',
+  });
 });

@@ -1,4 +1,4 @@
-import { createPrompt, formatAIError, getOriginPattern, parseTidyGroups } from './src/shared/ai.js';
+import { createPrompt, formatAIError, getOriginPattern, parseTidyGroups, parseTidyNames } from './src/shared/ai.js';
 import {
   appendAskSessionMessage,
   createAskSession,
@@ -593,22 +593,27 @@ function dormantGroupsFromSnapshot(snapshot = {}) {
         color: group.color || (title === 'Ungrouped' ? 'grey' : 'blue'),
         collapsed: Boolean(state.collapsedGroups[key] ?? true),
         dormant: true,
-        tabs: (group.tabs || []).map((tab, tabIndex) => ({
-          id: `${key}:${tabIndex}`,
-          title: tab.title || tab.url || 'Untitled',
-          displayTitle: tab.title || tab.url || 'Untitled',
-          url: tab.url,
-          domain: domainFromUrl(tab.url),
-          favIconUrl: '',
-          active: false,
-          pinned: false,
-          muted: false,
-          groupId: -1,
-          index: tabIndex,
-          audible: false,
-          dormant: true,
-          dormantGroupKey: key,
-        })),
+        tabs: (group.tabs || []).map((tab, tabIndex) => {
+          const title = tab.title || tab.url || 'Untitled';
+          const panelTitle = cleanPanelName(tab.panelTitle);
+          return {
+            id: `${key}:${tabIndex}`,
+            title,
+            displayTitle: panelTitle || title,
+            ...(panelTitle ? { panelTitle } : {}),
+            url: tab.url,
+            domain: domainFromUrl(tab.url),
+            favIconUrl: '',
+            active: false,
+            pinned: false,
+            muted: false,
+            groupId: -1,
+            index: tabIndex,
+            audible: false,
+            dormant: true,
+            dormantGroupKey: key,
+          };
+        }),
       };
     })
     .filter((group) => group.tabs.length > 0);
@@ -1784,11 +1789,19 @@ async function openDormantTab(tab, groupKey) {
     }
   }
 
+  preserveDormantPanelName(tab, tabId);
   removeOpenedDormantTabFromSnapshot(tab, dormantGroup);
   rememberOpenedDormantTab(tab, dormantGroup, tabId);
   await closeEphemeralTabs();
   await saveState();
   await refreshTabs();
+}
+
+function preserveDormantPanelName(tab, tabId) {
+  const name = cleanPanelName(tab?.panelTitle || tab?.displayTitle || tab?.title);
+  if (!name || !Number.isFinite(Number(tabId))) return;
+  if (!state.renamedTabs || typeof state.renamedTabs !== 'object') state.renamedTabs = {};
+  state.renamedTabs[tabId] = name;
 }
 
 async function switchSpace(spaceId) {
@@ -2909,10 +2922,12 @@ async function tidyTabNames() {
 
     const remainingTabs = visibleTabs.filter((tab) => !duplicateTabIdSet.has(Number(tab.id)));
     const tabsWithContext = await addTidyContext(remainingTabs);
-    Object.assign(state.renamedTabs, planTidyTabNames(tabsWithContext, {
+    const localNames = planTidyTabNames(tabsWithContext, {
       existingNames: state.renamedTabs,
       preserveExisting: true,
-    }));
+    });
+    const aiNames = await tidyTabNamesWithAI(tabsWithContext);
+    Object.assign(state.renamedTabs, localNames, aiNames);
     await saveState();
     await refreshTabs();
     const duplicateText = duplicateTabIds.length ? ` Removed ${duplicateTabIds.length} duplicate tabs.` : '';
@@ -2920,6 +2935,37 @@ async function tidyTabNames() {
   } finally {
     endPanelAction();
   }
+}
+
+async function tidyTabNamesWithAI(tabsWithContext) {
+  const candidates = tabsWithContext.filter((tab) => !hasManualPanelName(tab.id));
+  if (!state.ai.apiKey || candidates.length === 0) return {};
+
+  try {
+    await ensureAIHostPermission();
+    const response = await send('ai:chat', {
+      settings: state.ai,
+      messages: createPrompt('tidy-names', {
+        tabs: candidates.map(compactTabForTidyNameAI),
+        language: state.ai.language,
+      }),
+    });
+    return parseTidyNames(response.text, candidates);
+  } catch (error) {
+    setStatus(`${formatAIError(error)} Using local naming instead.`);
+    return {};
+  }
+}
+
+function compactTabForTidyNameAI(tab) {
+  return {
+    ...compactTabForAI(tab),
+    headings: (tab.outlineHeadings || []).slice(0, 6),
+  };
+}
+
+function hasManualPanelName(tabId) {
+  return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
 }
 
 async function autoGroupTabs() {
@@ -4130,6 +4176,13 @@ function updateAskMessage(ref, text) {
 
 function setStatus(text) {
   els.syncStatus.textContent = text;
+}
+
+function cleanPanelName(value) {
+  return String(value || '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function uniqueSpaceId(name) {

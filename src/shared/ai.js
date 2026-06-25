@@ -103,6 +103,26 @@ export function createPrompt(kind, context = {}) {
     ];
   }
 
+  if (kind === 'tidy-names') {
+    return [
+      {
+        role: 'system',
+        content: [
+          'Rename browser tabs for a compact sidebar using page titles and headings first, then URLs only as supporting context.',
+          'Rename only the tabs supplied in the input; do not invent ids or include tabs that are not present.',
+          'Prefer short recognizable app/project/task names over raw domains, IP addresses, tracking tokens, or generic page chrome.',
+          'Keep names concise, usually 2-6 words, and preserve important product names, repo names, issue/PR numbers, and non-English labels.',
+          'Return only JSON: [{"id":1,"title":"Concise Name"}].',
+          instruction,
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify(context.tabs || []),
+      },
+    ];
+  }
+
   return [
     {
       role: 'system',
@@ -130,6 +150,26 @@ export function parseTidyGroups(text) {
       .filter((group) => group.tabIds.length > 0);
   } catch {
     return [];
+  }
+}
+
+export function parseTidyNames(text, tabs = []) {
+  try {
+    const allowedIds = new Set((tabs || []).map((tab) => Number(tab.id)).filter(Number.isFinite));
+    const parsed = parseJsonArray(text);
+    if (!Array.isArray(parsed)) return {};
+    const names = {};
+    for (const item of parsed) {
+      const id = Number(item?.id ?? item?.tabId);
+      if (!Number.isFinite(id)) continue;
+      if (allowedIds.size > 0 && !allowedIds.has(id)) continue;
+      const title = cleanTidyName(item?.title ?? item?.name ?? item?.displayTitle);
+      if (!title || Object.hasOwn(names, id)) continue;
+      names[id] = title;
+    }
+    return names;
+  } catch {
+    return {};
   }
 }
 
@@ -191,4 +231,12 @@ function bracketedJsonArray(value) {
 function normalizeGroupColor(color) {
   const allowed = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
   return allowed.has(color) ? color : 'blue';
+}
+
+function cleanTidyName(value) {
+  const text = String(value || '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > 64 ? `${text.slice(0, 61)}...` : text;
 }
