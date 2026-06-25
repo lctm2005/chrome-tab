@@ -9,6 +9,16 @@ export function adoptUnassignedEntities(state, tabs = [], groups = [], activeSpa
     }
   }
 
+  const activeGroupedTab = tabs.find((tab) => (
+    isGroupedTab(tab) &&
+    tab.active &&
+    state.groupSpaces[tab.groupId] === undefined
+  ));
+  if (activeGroupedTab && activeSpaceId) {
+    state.groupSpaces[activeGroupedTab.groupId] = activeSpaceId;
+    rememberGroupOrderKey(state, activeSpaceId, `group:${activeGroupedTab.groupId}`);
+  }
+
   for (const tab of tabs) {
     if (isGroupedTab(tab)) {
       if (state.groupSpaces[tab.groupId] === undefined && state.tabSpaces[tab.id] !== undefined) {
@@ -43,6 +53,9 @@ export function cleanupMissingEntities(state, tabs = [], groups = []) {
   const liveTabIds = new Set(tabs.map((tab) => Number(tab.id)));
   const liveGroupIds = new Set(groups.map((group) => Number(group.id)));
   const groupedTabIds = new Set(tabs.filter(isGroupedTab).map((tab) => Number(tab.id)));
+  for (const tab of tabs) {
+    if (isGroupedTab(tab)) liveGroupIds.add(Number(tab.groupId));
+  }
 
   for (const tabId of Object.keys(state.tabSpaces || {})) {
     if (!liveTabIds.has(Number(tabId))) delete state.tabSpaces[tabId];

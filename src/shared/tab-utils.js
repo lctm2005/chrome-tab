@@ -1,4 +1,5 @@
 const GROUP_COLORS = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
+const TITLE_PLACEHOLDER_MARKS = '.\u2026\u22ef\u3002';
 
 export function domainFromUrl(value) {
   try {
@@ -13,12 +14,22 @@ export function domainFromUrl(value) {
 export function decorateTabs(tabs, state = {}) {
   return tabs.map((tab) => {
     const domain = domainFromUrl(tab.url);
+    const title = cleanTitle(tab.title);
+    const renamedTitle = cleanTitle(state.renamedTabs?.[tab.id]);
     return {
       ...tab,
       domain,
-      displayTitle: state.renamedTabs?.[tab.id] || tab.title || domain,
+      displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title) || domain,
     };
   });
+}
+
+export function isPlaceholderTabTitle(value) {
+  const compact = cleanTitle(value).replace(/\s+/g, '');
+  if (!compact) return true;
+  const marks = escapeRegExp(TITLE_PLACEHOLDER_MARKS);
+  return new RegExp(`^[${marks}]+$`).test(compact) ||
+    new RegExp(`^loading[${marks}]*$`, 'i').test(compact);
 }
 
 export function searchTabs(tabs, query) {
@@ -191,8 +202,16 @@ function isGroupedTab(tab) {
   return Number.isFinite(Number(tab?.groupId)) && Number(tab.groupId) !== -1;
 }
 
-export function planTidyTabNames(tabs) {
-  return Object.fromEntries(tabs.map((tab) => [tab.id, tidyPanelName(tab)]));
+export function planTidyTabNames(tabs, options = {}) {
+  const existingNames = options.existingNames || {};
+  const preserveExisting = Boolean(options.preserveExisting);
+  return Object.fromEntries((tabs || []).map((tab) => {
+    const existingName = cleanTitle(existingNames?.[tab.id]);
+    return [
+      tab.id,
+      preserveExisting && existingName ? existingName : tidyPanelName(tab),
+    ];
+  }));
 }
 
 export function planDuplicateUrlClosures(tabs = []) {
@@ -224,10 +243,10 @@ function preferredDuplicateUrlTab(tabs) {
 
 export function tidyPanelName(tab) {
   const domain = domainFromUrl(tab.url);
-  let title = String(tab.title || '').replace(/\s+/g, ' ').trim();
+  let title = cleanTitle(tab.title);
   const path = safePath(tab.url);
 
-  if (/^(\.+|loading\.*)$/i.test(title)) {
+  if (isPlaceholderTabTitle(title)) {
     const heading = bestContentHeading(tab.outlineHeadings);
     title = heading || '';
   }
@@ -271,6 +290,8 @@ export function tidyPanelName(tab) {
     const clean = stripKnownSuffixes(title, ['ZHIPU AI OPEN PLATFORM', 'Zhipu AI']);
     return compactName('Zhipu AI', clean || 'Open Platform');
   }
+  const xuiName = threeXUiPanelName(domain, path, title);
+  if (xuiName) return xuiName;
   if (domain.includes('developer.chrome.com')) {
     const tail = title.split(/[:|-]/).map((part) => part.trim()).filter(Boolean).pop();
     return `Chrome Extensions - ${tail || 'Docs'}`;
@@ -390,8 +411,44 @@ function readablePathTail(path) {
     .join(' ');
 }
 
+function threeXUiPanelName(domain, path, title) {
+  if (!looksLikeThreeXUiPanel(domain, path, title)) return '';
+  const route = panelRoute(path);
+  const routeLabel = threeXUiRouteLabel(route);
+  return routeLabel ? compactName('3X-UI', routeLabel) : '3X-UI';
+}
+
+function looksLikeThreeXUiPanel(domain, path, title) {
+  if (!/(?:^|\/)panel(?:\/|$)/i.test(path)) return false;
+  if (isIpHost(domain) && /\/[^/]+\/panel(?:\/|$)/i.test(path)) return true;
+  return /(?:^|\s)(?:3x-ui|x-ui)(?:\s|$)|入站|出站|xray|面板/i.test(cleanTitle(title));
+}
+
+function panelRoute(path) {
+  const match = String(path || '').match(/(?:^|\/)panel(?:\/([^/?#]+))?/i);
+  return match?.[1] || '';
+}
+
+function threeXUiRouteLabel(route) {
+  const normalized = String(route || '').toLowerCase();
+  const labels = {
+    inbounds: '入站',
+    outbounds: '出站',
+    settings: '设置',
+    xray: 'Xray',
+    clients: '客户端',
+    users: '用户',
+    logs: '日志',
+  };
+  return labels[normalized] || readablePathTail(`/${route}`);
+}
+
+function isIpHost(domain) {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(String(domain || ''));
+}
+
 function stripKnownSuffixes(title, suffixes) {
-  let clean = String(title || '').trim();
+  let clean = cleanTitle(title);
   for (const suffix of suffixes) {
     const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     clean = clean
@@ -403,7 +460,7 @@ function stripKnownSuffixes(title, suffixes) {
 }
 
 function compactName(prefix, value) {
-  const clean = String(value || '').trim();
+  const clean = cleanTitle(value);
   if (!clean) return prefix;
   const normalized = clean
     .replace(/\s+/g, ' ')
@@ -414,8 +471,19 @@ function compactName(prefix, value) {
 }
 
 function compactText(value, maxLength = 48) {
-  const text = String(value || '').trim();
+  const text = cleanTitle(value);
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function cleanTitle(value) {
+  return String(value || '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function sortBySavedOrder(items, savedOrder, getKey) {

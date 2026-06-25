@@ -45,6 +45,7 @@ import {
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
+  updateSnapshotTab,
 } from './src/shared/space-snapshot.js';
 import {
   adoptUnassignedEntities,
@@ -63,6 +64,7 @@ import {
   decorateTabs,
   domainFromUrl,
   groupTitleKey,
+  isPlaceholderTabTitle,
   planTidyGroups,
   planTidyTabNames,
   planDuplicateUrlClosures,
@@ -95,6 +97,7 @@ let dragState = null;
 let activeAIRequestId = '';
 let activePanelAction = '';
 let panelPort = null;
+let panelWindowId = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
 let pendingArcImportText = '';
@@ -152,11 +155,12 @@ init();
 
 async function init() {
   try {
+    panelWindowId = await currentPanelWindowId();
     connectPanelPort();
     await loadState();
     bindEvents();
     renderSettings();
-    await refreshTabs({ adopt: true, adoptGroups: !hasKnownSpaceOwnership() });
+    await refreshTabs({ adopt: true });
     if (extensionRuntime) setInterval(() => refreshTabs({ adopt: true }), 2500);
   } catch (error) {
     els.syncStatus.textContent = 'Failed to initialize';
@@ -164,9 +168,14 @@ async function init() {
   }
 }
 
-function hasKnownSpaceOwnership() {
-  return Object.keys(state.groupSpaces || {}).length > 0 ||
-    Object.keys(state.tabSpaces || {}).length > 0;
+async function currentPanelWindowId() {
+  if (!extensionRuntime || !chrome.windows?.getCurrent) return null;
+  try {
+    const currentWindow = await chrome.windows.getCurrent();
+    return Number.isFinite(currentWindow?.id) ? currentWindow.id : null;
+  } catch {
+    return null;
+  }
 }
 
 function connectPanelPort() {
@@ -388,7 +397,10 @@ function togglePanel() {
 }
 
 async function refreshTabs(options = {}) {
-  await loadTabs({ adopt: Boolean(options.adopt), adoptGroups: Boolean(options.adoptGroups) });
+  await loadTabs({
+    adopt: Boolean(options.adopt),
+    adoptGroups: Boolean(options.adoptGroups ?? options.adopt),
+  });
   if (await materializeLegacyVirtualGroups(state.activeSpaceId)) {
     await loadTabs({ adopt: false });
   }
@@ -1419,6 +1431,51 @@ async function removeDormantTab(tab, groupKey = '') {
   await saveState();
   await refreshTabs({ reloadDormant: true });
   setStatus('Removed saved tab.');
+}
+
+async function updateSavedTabUrl(tab) {
+  if (tab?.dormant) return;
+  const sourceGroup = groupForTab(tab);
+  if (!sourceGroup || sourceGroup.key === 'ungrouped') {
+    setStatus('Move this tab into a group before saving its URL.');
+    return;
+  }
+
+  const url = String(tab?.url || '').trim();
+  if (!url || url === 'chrome://newtab') {
+    setStatus('This tab does not have a saved URL target.');
+    return;
+  }
+
+  const opened = recentlyOpenedDormantRecordForLiveTab(tab);
+  const groupTitle = opened?.groupTitle || sourceGroup.title || sourceGroup.displayTitle || 'Group';
+  const groupColor = opened?.groupColor || sourceGroup.color || 'blue';
+  const snapshot = activeSpaceSnapshot() || {
+    version: 1,
+    updatedAt: Date.now(),
+    groups: [],
+  };
+  const nextSnapshot = updateSnapshotTab(snapshot, {
+    groupTitle,
+    groupColor,
+    url: opened?.url || url,
+  }, {
+    title: tab.displayTitle || tab.title || url,
+    url,
+  });
+
+  if (!nextSnapshot || snapshotTabCount(nextSnapshot) === 0) return;
+  if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
+  state.spaceSnapshots[state.activeSpaceId] = {
+    ...nextSnapshot,
+    updatedAt: Date.now(),
+  };
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+  forgetRecentlyOpenedDormantTab(tab.id);
+  await saveState();
+  await refreshTabs({ reloadDormant: true });
+  setStatus('Updated saved URL.');
 }
 
 async function moveTabToSpace(tab, spaceId) {
@@ -2756,10 +2813,13 @@ function rememberOpenedDormantTab(tab, dormantGroup, tabId) {
   if (!urlKey || !groupKey) return;
   pruneRecentlyOpenedDormantTabs();
   recentlyOpenedDormantTabs.push({
+    url: tab?.url || '',
     urlKey,
     titleKey: tabTitleMatchKey(tab),
     domain: domainFromUrl(tab?.url),
     groupKey,
+    groupTitle: dormantGroup?.title || '',
+    groupColor: dormantGroup?.color || 'grey',
     tabId: Number.isFinite(Number(tabId)) ? Number(tabId) : null,
     openedAt: Date.now(),
   });
@@ -2799,6 +2859,11 @@ function liveTabMatchesOpenedDormantRecord(tab, opened) {
     tabTitleMatchKey(tab) === opened.titleKey &&
     domainFromUrl(tab?.url) === opened.domain
   );
+}
+
+function recentlyOpenedDormantRecordForLiveTab(tab) {
+  pruneRecentlyOpenedDormantTabs();
+  return recentlyOpenedDormantTabs.find((opened) => liveTabMatchesOpenedDormantRecord(tab, opened)) || null;
 }
 
 function pruneRecentlyOpenedDormantTabs() {
@@ -2844,7 +2909,10 @@ async function tidyTabNames() {
 
     const remainingTabs = visibleTabs.filter((tab) => !duplicateTabIdSet.has(Number(tab.id)));
     const tabsWithContext = await addTidyContext(remainingTabs);
-    Object.assign(state.renamedTabs, planTidyTabNames(tabsWithContext));
+    Object.assign(state.renamedTabs, planTidyTabNames(tabsWithContext, {
+      existingNames: state.renamedTabs,
+      preserveExisting: true,
+    }));
     await saveState();
     await refreshTabs();
     const duplicateText = duplicateTabIds.length ? ` Removed ${duplicateTabIds.length} duplicate tabs.` : '';
@@ -2975,9 +3043,10 @@ async function addTidyContext(visibleTabs) {
   return Promise.all(visibleTabs.map(async (tab) => {
     if (!/^https?:/.test(tab.url || '')) return tab;
     const outline = await send('page:outline', { tabId: tab.id }).catch(() => null);
+    const outlineTitle = outline?.title;
     return {
       ...tab,
-      title: outline?.title || tab.title,
+      title: outlineTitle && !isPlaceholderTabTitle(outlineTitle) ? outlineTitle : tab.title,
       outlineHeadings: outline?.headings || [],
     };
   }));
@@ -3204,6 +3273,7 @@ function showTabContextMenu(event, tab) {
     menuSeparator(),
     menuAction('Rename', () => renameTab(tab)),
     menuAction('Duplicate', () => duplicateTab(tab)),
+    menuAction('Update Saved URL', () => updateSavedTabUrl(tab)),
     ...menuSection(moveToSpaceSubmenu((space) => moveTabToSpace(tab, space.id))),
   ];
 
@@ -3545,7 +3615,10 @@ async function ensureActivePagePermission() {
 
 async function send(type, payload = {}) {
   if (!extensionRuntime) return previewSend(type, payload);
-  const response = await chrome.runtime.sendMessage({ type, ...payload });
+  const message = type === 'tabs:list' && Number.isFinite(panelWindowId) && payload.windowId === undefined
+    ? { type, ...payload, windowId: panelWindowId }
+    : { type, ...payload };
+  const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || `Command failed: ${type}`);
   return response;
 }

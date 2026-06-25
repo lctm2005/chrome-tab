@@ -12,6 +12,7 @@ import {
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotTabCount,
+  updateSnapshotTab,
 } from '../src/shared/space-snapshot.js';
 
 test('snapshots a Space as TabGroup -> Tab restore data', () => {
@@ -292,6 +293,91 @@ test('removes only the first matching dormant duplicate from a snapshot group', 
   assert.deepEqual(result.groups[0].tabs, [
     { title: 'Spec B', url: 'https://example.com/spec' },
   ]);
+});
+
+test('updates a saved snapshot tab URL inside the matching group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Old Spec', url: 'https://example.com/old' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        tabs: [{ title: 'Old Spec copy', url: 'https://example.com/old' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://example.com/old',
+  }, {
+    title: 'Better Spec',
+    url: 'https://example.com/better',
+  }), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Better Spec', url: 'https://example.com/better' },
+          { title: 'Plan', url: 'https://example.com/plan' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'green',
+        tabs: [{ title: 'Old Spec copy', url: 'https://example.com/old' }],
+      },
+    ],
+  });
+});
+
+test('adds a saved snapshot tab when the old URL is not present in the matching group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [{ title: 'Plan', url: 'https://example.com/plan' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://example.com/missing',
+  }, {
+    title: 'Better Spec',
+    url: 'https://example.com/better',
+  }), {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Plan', url: 'https://example.com/plan' },
+          { title: 'Better Spec', url: 'https://example.com/better' },
+        ],
+      },
+    ],
+  });
 });
 
 test('removes disappeared live tabs from stored dormant snapshots', () => {
