@@ -54,6 +54,60 @@ export function buildGroupPreviewItems(group, query = '', options = {}) {
     .map(groupPreviewItemForTab);
 }
 
+export function planGroupPreviewPlacement({
+  anchorRect = {},
+  viewportWidth,
+  viewportHeight,
+  panelHeight = 280,
+  preferredWidth = 360,
+  minWidth = 252,
+  gap = 8,
+  margin = 8,
+  topOffset = 6,
+} = {}) {
+  const viewport = {
+    width: positiveNumber(viewportWidth, 320),
+    height: positiveNumber(viewportHeight, 600),
+  };
+  const anchor = {
+    left: numberOr(anchorRect.left, 0),
+    right: numberOr(anchorRect.right, numberOr(anchorRect.left, 0) + numberOr(anchorRect.width, 0)),
+    top: numberOr(anchorRect.top, 0),
+    width: Math.max(0, numberOr(anchorRect.width, 0)),
+  };
+  const maxWidth = Math.max(1, viewport.width - (margin * 2));
+  const desiredWidth = Math.min(positiveNumber(preferredWidth, 360), maxWidth);
+  const minimumWidth = Math.min(positiveNumber(minWidth, 252), desiredWidth);
+  const rightSpace = viewport.width - margin - anchor.right - gap;
+  let width = desiredWidth;
+  let left = anchor.right + gap;
+  let placement = 'right';
+
+  if (rightSpace < desiredWidth) {
+    if (rightSpace >= minimumWidth) {
+      width = Math.min(desiredWidth, rightSpace);
+      placement = 'right-compact';
+    } else {
+      width = Math.min(desiredWidth, Math.max(minimumWidth, Math.floor(viewport.width * 0.46)));
+      left = viewport.width - width - margin;
+      placement = 'right-edge';
+    }
+  }
+
+  const maxHeight = Math.max(180, viewport.height - (margin * 2));
+  const height = positiveNumber(panelHeight, 280);
+  let top = anchor.top - topOffset;
+  if (top + height > viewport.height - margin) top = viewport.height - height - margin;
+
+  return {
+    width,
+    maxHeight,
+    left: Math.max(margin, left),
+    top: Math.max(margin, top),
+    placement,
+  };
+}
+
 function groupPreviewItemForTab(tab) {
   const domain = cleanTitle(tab?.domain) || domainFromUrl(tab?.url);
   const subtitle = domain && domain !== 'unknown' ? domain : cleanTitle(tab?.url);
@@ -66,6 +120,16 @@ function groupPreviewItemForTab(tab) {
     active: Boolean(tab?.active),
     dormant: Boolean(tab?.dormant),
   };
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function numberOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 export function isPageShortcutCapableUrl(value) {

@@ -77,6 +77,7 @@ import {
   domainFromUrl,
   groupTitleKey,
   isPlaceholderTabTitle,
+  planGroupPreviewPlacement,
   planTidyGroups,
   planTidyTabNames,
   planDuplicateUrlClosures,
@@ -1156,19 +1157,18 @@ function positionGroupPreview() {
   const anchorRect = groupPreviewAnchor.getBoundingClientRect();
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 320;
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 600;
-  const width = Math.min(360, Math.max(252, viewportWidth - 16));
-  popover.style.width = `${width}px`;
-  popover.style.maxHeight = `${Math.max(180, viewportHeight - 16)}px`;
-
   const panelHeight = popover.offsetHeight || 280;
-  let x = anchorRect.right + 8;
-  if (x + width > viewportWidth - 8) {
-    x = Math.min(Math.max(8, anchorRect.left), viewportWidth - width - 8);
-  }
-  let y = anchorRect.top - 6;
-  if (y + panelHeight > viewportHeight - 8) y = viewportHeight - panelHeight - 8;
-  popover.style.left = `${Math.max(8, x)}px`;
-  popover.style.top = `${Math.max(8, y)}px`;
+  const placement = planGroupPreviewPlacement({
+    anchorRect,
+    viewportWidth,
+    viewportHeight,
+    panelHeight,
+  });
+  popover.dataset.placement = placement.placement;
+  popover.style.width = `${placement.width}px`;
+  popover.style.maxHeight = `${placement.maxHeight}px`;
+  popover.style.left = `${placement.left}px`;
+  popover.style.top = `${placement.top}px`;
 }
 
 function createUngroupedSection(group) {

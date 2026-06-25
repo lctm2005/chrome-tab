@@ -10,6 +10,7 @@ import {
   planDuplicateUrlClosures,
   planTidyGroups,
   planTidyTabNames,
+  planGroupPreviewPlacement,
   preferredFocusableTab,
   sanitizeTidyGroups,
   spaceGroupPlan,
@@ -120,6 +121,33 @@ test('builds searchable group preview rows from panel tab metadata', () => {
     active: false,
     dormant: true,
   }]);
+});
+
+test('places group hover preview to the right instead of covering the group from the left', () => {
+  assert.deepEqual(planGroupPreviewPlacement({
+    anchorRect: { left: 24, right: 260, top: 120, width: 236 },
+    viewportWidth: 900,
+    viewportHeight: 720,
+    panelHeight: 280,
+  }), {
+    width: 360,
+    maxHeight: 704,
+    left: 268,
+    top: 114,
+    placement: 'right',
+  });
+
+  const compact = planGroupPreviewPlacement({
+    anchorRect: { left: 28, right: 730, top: 180, width: 702 },
+    viewportWidth: 758,
+    viewportHeight: 768,
+    panelHeight: 480,
+  });
+
+  assert.equal(compact.placement, 'right-edge');
+  assert.equal(compact.width, 348);
+  assert.equal(compact.left, 402);
+  assert.ok(compact.left > 360, 'compact preview should stay on the right side of the panel');
 });
 
 test('prefers web pages when choosing a tab to keep shortcuts usable', () => {
