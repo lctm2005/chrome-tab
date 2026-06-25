@@ -3,6 +3,8 @@ import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
+const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -29,8 +31,8 @@ export function createDefaultState(localConfig = {}) {
     shortcuts: mergeShortcuts(),
     ai: {
       provider: ai.provider || 'openai-compatible',
-      baseUrl: normalizeUrl(ai.baseUrl || 'https://api.z.ai/api/coding/paas/v4'),
-      model: ai.model || 'glm-5.1',
+      baseUrl: normalizeUrl(ai.baseUrl || ''),
+      model: ai.model || '',
       apiKey: ai.apiKey || '',
       thinking: ai.thinking || 'disabled',
       language: ai.language || 'zh-CN',
@@ -71,8 +73,25 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
-    ai: { ...defaults.ai, ...(stored.ai || {}) },
+    ai: migrateAISettings(stored.ai, defaults.ai),
   };
+}
+
+function migrateAISettings(storedAI = {}, defaultAI = {}) {
+  const ai = { ...defaultAI, ...(storedAI || {}) };
+  if (isLegacyBuiltInAISettings(storedAI)) {
+    ai.baseUrl = defaultAI.baseUrl || '';
+    ai.model = defaultAI.model || '';
+  }
+  return ai;
+}
+
+function isLegacyBuiltInAISettings(ai = {}) {
+  return (
+    !ai?.apiKey &&
+    normalizeUrl(ai?.baseUrl) === LEGACY_DEFAULT_AI_BASE_URL &&
+    String(ai?.model || '') === LEGACY_DEFAULT_AI_MODEL
+  );
 }
 
 function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVersion = 0, currentVersion = 0) {

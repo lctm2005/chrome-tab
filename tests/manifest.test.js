@@ -21,7 +21,7 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   }
   assert.equal(manifest.permissions.includes('bookmarks'), false);
   assert.equal(manifest.permissions.includes('downloads'), false);
-  assert.ok(manifest.host_permissions.includes('https://api.z.ai/*'));
+  assert.deepEqual(manifest.host_permissions || [], []);
   assert.ok(manifest.optional_host_permissions.includes('https://*/*'));
   assert.ok(manifest.optional_host_permissions.includes('http://*/*'));
   for (const size of ['16', '32', '48', '128']) {
@@ -29,6 +29,13 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
     assert.equal(manifest.action.default_icon[size], `icons/icon${size}.png`);
     await access(new URL(`../icons/icon${size}.png`, import.meta.url));
   }
+});
+
+test('store build does not prefill a provider-specific AI model', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /model:\s*els\.modelInput\.value\.trim\(\)/);
+  assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 
 test('settings Save click prevents dialog submit before async work starts', async () => {

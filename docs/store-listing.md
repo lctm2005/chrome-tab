@@ -83,13 +83,10 @@ Extracts current page content only after the user starts Ask Page or summary.
 `favicon`:
 Shows page icons in the side panel.
 
-AI host permissions:
-Allow user-initiated BYOK AI requests to configured providers such as OpenAI,
-Anthropic, Gemini, or Z.ai compatible endpoints.
-
 Optional host permissions:
 Requested at the moment of need for Ask Page on the active website or for a
-custom AI base URL configured by the user.
+custom AI base URL configured by the user. AI provider access is requested only
+after the user configures a provider and starts an AI action.
 
 ## Privacy Practices Copy
 

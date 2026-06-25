@@ -3,12 +3,8 @@ import assert from 'node:assert/strict';
 
 import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared/state.js';
 
-test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
-  const state = createDefaultState({
-    ai: {
-      apiKey: 'secret',
-    },
-  });
+test('creates a single fallback Space with blank BYOK AI settings', () => {
+  const state = createDefaultState();
 
   assert.equal(state.version, 4);
   assert.equal(state.spaces.length, 1);
@@ -26,11 +22,39 @@ test('creates a single fallback Space preconfigured for GLM-5.1 BYOK', () => {
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
-  assert.equal(state.ai.model, 'glm-5.1');
-  assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(state.ai.apiKey, 'secret');
+  assert.equal(state.ai.model, '');
+  assert.equal(state.ai.baseUrl, '');
+  assert.equal(state.ai.apiKey, '');
   assert.equal(state.ai.language, 'zh-CN');
   assert.equal(STORAGE_KEY, 'spaceTabsState');
+});
+
+test('keeps explicitly configured BYOK AI settings', () => {
+  const state = createDefaultState({
+    ai: {
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4/',
+      model: 'glm-5.1',
+      apiKey: 'secret',
+    },
+  });
+
+  assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(state.ai.model, 'glm-5.1');
+  assert.equal(state.ai.apiKey, 'secret');
+});
+
+test('drops legacy built-in BYOK defaults from stored state', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    ai: {
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      model: 'glm-5.1',
+      apiKey: '',
+    },
+  }, createDefaultState());
+
+  assert.equal(merged.ai.baseUrl, '');
+  assert.equal(merged.ai.model, '');
 });
 
 test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {

@@ -3596,7 +3596,7 @@ function currentAISettingsFromForm() {
   return {
     ...state.ai,
     baseUrl: els.baseUrlInput.value.trim().replace(/\/+$/, ''),
-    model: els.modelInput.value.trim() || 'glm-5.1',
+    model: els.modelInput.value.trim(),
     language: els.languageInput.value || 'zh-CN',
     apiKey: els.apiKeyInput.value.trim(),
     thinking: els.thinkingInput.value,

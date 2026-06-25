@@ -56,12 +56,7 @@
     "tabGroups",
     "tabs"
   ],
-  "host_permissions": [
-    "https://api.z.ai/*",
-    "https://api.openai.com/*",
-    "https://api.anthropic.com/*",
-    "https://generativelanguage.googleapis.com/*"
-  ],
+  "host_permissions": [],
   "optional_host_permissions": [
     "https://*/*",
     "http://*/*",
