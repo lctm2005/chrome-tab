@@ -91,7 +91,7 @@ const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
 const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
-const GROUP_PREVIEW_OPEN_DELAY_MS = 160;
+const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -992,7 +992,7 @@ function bindGroupPreview(anchor, group) {
   anchor.addEventListener('pointerenter', show);
   anchor.addEventListener('mouseleave', scheduleHideGroupPreview);
   anchor.addEventListener('pointerleave', scheduleHideGroupPreview);
-  anchor.addEventListener('focusin', () => showGroupPreview(anchor, group));
+  anchor.addEventListener('focusin', () => scheduleShowGroupPreview(anchor, group));
   anchor.addEventListener('focusout', (event) => {
     if (!groupPreviewPopover?.contains(event.relatedTarget)) scheduleHideGroupPreview();
   });

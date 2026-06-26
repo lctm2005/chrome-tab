@@ -155,3 +155,11 @@ test('group hover preview only binds for collapsed tag groups', async () => {
   assert.match(source, /bindGroupPreview\(header,\s*groupPreviewGroupForFolder\(folder,\s*collapsed\)\)/);
   assert.match(source, /if \(!group\?\.collapsed \|\| !group\?\.tabs\?\.length\) return;/);
 });
+
+test('group hover preview waits two seconds before opening', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;/);
+  assert.match(source, /setTimeout\(\(\) => showGroupPreview\(anchor, group\), GROUP_PREVIEW_OPEN_DELAY_MS\)/);
+  assert.match(source, /anchor\.addEventListener\('focusin', \(\) => scheduleShowGroupPreview\(anchor, group\)\)/);
+});
