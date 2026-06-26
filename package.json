@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "e2e:smoke": "node scripts/e2e-smoke.mjs",
-    "check": "node --check background.js && node --check content-script.js && node --check sidepanel.js && node --check scripts/e2e-smoke.mjs && node --check scripts/package-release.mjs && node --check src/shared/ai.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/folder-tree.js && node --check src/shared/markdown.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/state.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
+    "screenshots:store": "node scripts/store-screenshots.mjs",
+    "check": "node --check background.js && node --check content-script.js && node --check sidepanel.js && node --check scripts/e2e-smoke.mjs && node --check scripts/package-release.mjs && node --check scripts/store-screenshots.mjs && node --check src/shared/ai.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/folder-tree.js && node --check src/shared/markdown.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/state.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
     "package": "node scripts/package-release.mjs"
   }
 }
