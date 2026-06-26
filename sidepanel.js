@@ -849,7 +849,7 @@ function createFolderSection(folder) {
     <strong>${escapeHtml(folder.title)}</strong>
   `;
   header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
-  bindGroupPreview(header, groupPreviewGroupForFolder(folder));
+  bindGroupPreview(header, groupPreviewGroupForFolder(folder, collapsed));
 
   const children = document.createElement('div');
   children.className = 'folder-children';
@@ -955,12 +955,13 @@ function createFolderTabs(group) {
   return section;
 }
 
-function groupPreviewGroupForFolder(folder) {
+function groupPreviewGroupForFolder(folder, collapsed = false) {
   const tabs = tabsForFolderPreview(folder.children || []);
   return {
     key: folder.key,
     title: folder.title,
     displayTitle: folder.title,
+    collapsed: Boolean(collapsed),
     color: 'grey',
     tabs,
   };
@@ -982,7 +983,7 @@ function tabsForFolderPreview(nodes = []) {
 }
 
 function bindGroupPreview(anchor, group) {
-  if (!group?.tabs?.length) return;
+  if (!group?.collapsed || !group?.tabs?.length) return;
   const show = (event) => {
     if (event?.pointerType === 'touch') return;
     scheduleShowGroupPreview(anchor, group);

@@ -148,3 +148,10 @@ test('Move to context actions render as a right-side submenu', async () => {
   assert.match(styles, /left: calc\(100% \+ 6px\)/);
   assert.doesNotMatch(styles, /submenu-left/);
 });
+
+test('group hover preview only binds for collapsed tag groups', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /bindGroupPreview\(header,\s*groupPreviewGroupForFolder\(folder,\s*collapsed\)\)/);
+  assert.match(source, /if \(!group\?\.collapsed \|\| !group\?\.tabs\?\.length\) return;/);
+});
