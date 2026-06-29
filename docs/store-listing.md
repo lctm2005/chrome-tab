@@ -125,13 +125,20 @@ local tab organization features.
 
 ## Screenshot Plan
 
-1. Main side panel with multiple Spaces and saved tab groups.
-2. Nested folders and dormant saved tabs.
-3. Tab context menu showing Duplicate, Rename, Move to, and Close.
-4. Settings with shortcuts, Arc import, and optional AI configuration.
-5. Ask Page view with a short page summary response.
+Generate 1280x800 Chrome Web Store screenshots with:
 
-Use 1280x800 screenshots for Chrome Web Store upload.
+```sh
+npm run screenshots:store
+```
+
+Upload the generated PNG files from `docs/store-assets/screenshots/` in this
+order:
+
+1. `01-spaces-overview.png`: Spaces overview with live Chrome tab groups.
+2. `02-nested-folders-dormant-tabs.png`: nested folders and dormant saved tabs.
+3. `03-tab-context-menu.png`: tab context menu with Move to Space actions.
+4. `04-settings-arc-import-shortcuts.png`: Settings, Arc import, and shortcuts.
+5. `05-ask-page-byok-ai.png`: Ask Page with optional BYOK AI.
 
 ## Launch Checklist
 
