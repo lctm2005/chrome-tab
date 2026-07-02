@@ -891,7 +891,7 @@ async function main() {
       version: 1,
       updatedAt: Date.now(),
       groups: [{
-        title: 'Drop Target',
+        title: 'Research',
         color: 'blue',
         collapsed: false,
         tabs: [
@@ -923,18 +923,24 @@ async function main() {
   })()`);
   await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
+  await evaluate(client, `(() => {
+    for (const header of document.querySelectorAll('.group-card.collapsed .group-header')) {
+      header.click();
+    }
+    return true;
+  })()`);
   await waitFor(client, `(() => {
     const source = [...document.querySelectorAll('.tab-row:not(.dormant)')]
       .some((row) => row.textContent.includes('Browser Spaces Guide'));
     const target = [...document.querySelectorAll('.group-header h2')]
-      .some((node) => node.textContent === 'Drop Target');
+      .some((node) => node.textContent === 'Research');
     return source && target;
   })()`);
   const dormantTabDropDispatchState = await evaluate(client, `(() => {
     const source = [...document.querySelectorAll('.tab-row:not(.dormant)')]
       .find((row) => row.textContent.includes('Browser Spaces Guide'));
     const target = [...document.querySelectorAll('.group-card')]
-      .find((card) => card.querySelector('.group-header h2')?.textContent === 'Drop Target');
+      .find((card) => card.querySelector('.group-header h2')?.textContent === 'Research');
     const header = target?.querySelector('.group-header');
     if (!source || !header) return { ok: false };
     const dataTransfer = new DataTransfer();
@@ -980,7 +986,7 @@ async function main() {
   const dormantTabDropState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const card = [...document.querySelectorAll('.group-card')]
-      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
     if (card?.classList.contains('collapsed')) {
       card.querySelector('.group-header')?.click();
       return null;
@@ -1022,7 +1028,7 @@ async function main() {
   await evaluate(client, `(() => {
     const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
     const state = raw.spaceTabsState || {};
-    const group = state.spaceSnapshots?.['drop-demo']?.groups?.find((item) => item.title === 'Drop Target');
+    const group = state.spaceSnapshots?.['drop-demo']?.groups?.find((item) => item.title === 'Research');
     group.tabs.push({
       title: 'Browser Spaces Guide',
       url: 'https://example.com/spaces-guide#stale-dormant-row',
@@ -1034,7 +1040,7 @@ async function main() {
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
   const activatedTagResidueState = await waitFor(client, `(() => {
     const card = [...document.querySelectorAll('.group-card')]
-      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
     if (card?.classList.contains('collapsed')) {
       card.querySelector('.group-header')?.click();
       return null;
@@ -1053,7 +1059,7 @@ async function main() {
   );
   const closeGroupTagDispatchState = await evaluate(client, `(() => {
     const card = [...document.querySelectorAll('.group-card')]
-      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
     const row = [...(card?.querySelectorAll('.tab-row') || [])]
       .find((node) => !node.classList.contains('dormant') && node.textContent.includes('Browser Spaces Guide'));
     const closeButton = row?.querySelector('button[aria-label="Close"]');
@@ -1066,7 +1072,7 @@ async function main() {
   const closeGroupTagResidueState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const card = [...document.querySelectorAll('.group-card')]
-      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Drop Target');
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
@@ -1393,6 +1399,160 @@ async function main() {
   );
   if (!brutalStressStable) {
     bugs.push('Brutal repeated Space switching duplicated saved grouped rows or resurrected temporary rows.');
+  }
+
+  if (preview) {
+    await evaluate(client, `(() => {
+      const STORAGE_KEY = 'spaceTabsState';
+      const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')[STORAGE_KEY] || {};
+      state.version = 4;
+      state.activeSpaceId = 'default';
+      state.spaces = [
+        { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
+        { id: 'move-target', name: 'Move Target', icon: 'M', color: 'cyan' },
+      ];
+      state.groupSpaces = { 20: 'default' };
+      state.tabSpaces = {};
+      state.virtualGroups = {};
+      state.tabGroups = {};
+      state.ephemeralTabIds = [];
+      state.renamedTabs = {};
+      state.groupOrder = { default: ['group:20'], 'move-target': [] };
+      state.tabOrder = {};
+      state.collapsedGroups = { 'group:20': false };
+      state.collapsedSpaceGroups = {};
+      state.spaceSnapshots = {};
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
+        tabs: [
+          {
+            id: 201,
+            title: 'Move Alpha',
+            url: 'https://example.com/move-alpha',
+            favIconUrl: '',
+            pinned: false,
+            muted: false,
+            active: true,
+            groupId: 20,
+            index: 0,
+            windowId: 1,
+            audible: false,
+          },
+          {
+            id: 202,
+            title: 'Move Beta',
+            url: 'https://example.com/move-beta',
+            favIconUrl: '',
+            pinned: false,
+            muted: false,
+            active: false,
+            groupId: 20,
+            index: 1,
+            windowId: 1,
+            audible: false,
+          },
+        ],
+        groups: [{ id: 20, title: 'Move Source', color: 'blue', collapsed: false }],
+        nextId: 203,
+        nextGroupId: 21,
+      }));
+      location.reload();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelectorAll('.tab-row').length === 2`);
+    await evaluate(client, `(() => {
+      const row = document.querySelectorAll('.tab-row')[0];
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelectorAll('.tab-row.selected').length === 1`);
+    await evaluate(client, `(() => {
+      const row = document.querySelectorAll('.tab-row')[1];
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, shiftKey: true }));
+      return true;
+    })()`);
+    const moveShiftSelectionState = await waitFor(client, `(() => {
+      const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
+        title: row.querySelector('.tab-title')?.textContent || '',
+        selected: row.classList.contains('selected'),
+        ariaSelected: row.getAttribute('aria-selected'),
+      }));
+      return rows.filter((row) => row.selected).length === 2 ? rows : null;
+    })()`);
+    record(
+      'Shift multi-select updates visible tab rows',
+      moveShiftSelectionState.length === 2 &&
+        moveShiftSelectionState.every((row) => row.selected && row.ariaSelected === 'true'),
+      JSON.stringify(moveShiftSelectionState)
+    );
+
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `(() => {
+      const row = document.querySelectorAll('.tab-row')[1];
+      row.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 120,
+        clientY: 120,
+      }));
+      return true;
+    })()`);
+    await waitFor(client, `!document.querySelector('#contextMenu')?.hidden && [...document.querySelectorAll('#contextMenu button')].some((button) => button.textContent === 'Move Target')`);
+    await evaluate(client, `(() => {
+      const button = [...document.querySelectorAll('#contextMenu button')]
+        .find((node) => node.textContent === 'Move Target');
+      button.click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target'`);
+    await evaluate(client, `(() => {
+      const header = [...document.querySelectorAll('.group-header')]
+        .find((node) => node.querySelector('h2')?.textContent === 'Move Source');
+      if (header?.closest('.collapsed')) header.click();
+      return Boolean(header);
+    })()`);
+    const moveToState = await waitFor(client, `(() => {
+      if (document.querySelector('#activeSpaceName')?.textContent !== 'Move Target') return null;
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
+        title: row.querySelector('.tab-title')?.textContent || '',
+        selected: row.classList.contains('selected'),
+        dormant: row.classList.contains('dormant'),
+      }));
+      if (rows.length < 2) return null;
+      const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
+      return {
+        activeSpaceId: stored.activeSpaceId,
+        rows,
+        headers: [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
+        groupSpaces: stored.groupSpaces || {},
+        tabSpaces: stored.tabSpaces || {},
+        tabGroups: stored.tabGroups || {},
+        closedMovedTabIds: commands
+          .filter((command) => command.type === 'tabs:close')
+          .map((command) => command.payload?.tabId)
+          .filter((tabId) => tabId === 201 || tabId === 202),
+        ungroupedTabIds: commands
+          .filter((command) => command.type === 'tabs:ungroup')
+          .flatMap((command) => command.payload?.tabIds || []),
+      };
+    })()`, 7000);
+    const movedTitles = moveToState.rows.map((row) => row.title);
+    const moveToWorked = moveToState.activeSpaceId === 'move-target' &&
+      moveToState.headers.includes('Move Source') &&
+      ['Move Alpha', 'Move Beta'].every((title) => movedTitles.includes(title)) &&
+      moveToState.rows.filter((row) => row.selected).length === 2 &&
+      Object.values(moveToState.groupSpaces).includes('move-target') &&
+      moveToState.closedMovedTabIds.length === 0 &&
+      [201, 202].every((tabId) => moveToState.ungroupedTabIds.includes(tabId));
+    record(
+      'Move to moves selected tabs, switches Space, and keeps grouping',
+      moveToWorked,
+      JSON.stringify(moveToState)
+    );
+    if (!moveToWorked) {
+      bugs.push('Move to failed to move selected tabs into the target Space with grouping intact.');
+    }
   }
 
     console.log(JSON.stringify({ results, bugs }, null, 2));

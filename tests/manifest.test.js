@@ -138,7 +138,9 @@ test('Move to context actions render as a right-side submenu', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
-  assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveTabToSpace\(tab, space\.id\)\)/);
+  assert.match(source, /moveToSpaceSubmenu\(\(space\) => \(/);
+  assert.match(source, /moveSelectedTabsToSpace\(contextTabIds, space\.id\)/);
+  assert.match(source, /moveTabToSpace\(tab, space\.id\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveGroupToSpace\(group, space\.id\)\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveFolderGroupToSpace\(folderContext, space\.id\)\)/);
   assert.match(source, /function menuSubmenu\(label, items\)/);
