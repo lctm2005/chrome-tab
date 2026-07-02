@@ -736,6 +736,7 @@ function groupsRenderSignature(tabGroups, ungrouped) {
   return JSON.stringify({
     activeSpaceId: state.activeSpaceId,
     collapsed: isSpaceGroupsCollapsed(),
+    selectedTabIds: [...selectedTabIds].map(Number).sort((a, b) => a - b),
     groups: [...tabGroups, ungrouped].filter(Boolean).map((group) => ({
       key: group.key,
       id: group.id,
@@ -1740,21 +1741,51 @@ async function updateSavedTabUrl(tab) {
   setStatus('Updated saved URL.');
 }
 
-async function moveTabToSpace(tab, spaceId) {
-  const sourceGroup = groupForTab(tab);
-  const targetGroupKey = ensureMovedTabTargetGroup(tab, sourceGroup, spaceId);
-  if (isGroupedTab(tab)) {
-    await send('tabs:ungroup', { tabIds: [tab.id] });
+async function moveTabsToSpace(tabIds, spaceId) {
+  const ids = uniqueNumberIds(tabIds);
+  if (ids.length === 0 || !state.spaces.some((space) => space.id === spaceId)) {
+    setStatus('Select a tab to move.');
+    return;
   }
-  state.tabSpaces[tab.id] = spaceId;
-  state.tabGroups[tab.id] = targetGroupKey;
-  removeTabFromSavedOrder(tab.id);
+
+  await loadTabs({ adopt: true });
+  const sourceView = buildSpaceViewForSpace(state.activeSpaceId);
+  const sourceGroupsByTabId = new Map();
+  for (const group of sourceView) {
+    for (const tab of group.tabs || []) sourceGroupsByTabId.set(Number(tab.id), group);
+  }
+  const selectedTabs = ids
+    .map((id) => tabs.find((tab) => Number(tab.id) === Number(id)))
+    .filter((tab) => tab && sourceGroupsByTabId.has(Number(tab.id)));
+
+  if (selectedTabs.length === 0) {
+    setStatus('Select a tab in this Space to move.');
+    return;
+  }
+
+  const moves = selectedTabs.map((tab) => ({
+    tab,
+    targetGroupKey: ensureMovedTabTargetGroup(tab, sourceGroupsByTabId.get(Number(tab.id)), spaceId),
+  }));
+  const groupedTabIds = moves
+    .filter(({ tab }) => isGroupedTab(tab))
+    .map(({ tab }) => tab.id);
+  if (groupedTabIds.length > 0) {
+    await send('tabs:ungroup', { tabIds: groupedTabIds });
+  }
+
   const targetOrder = ensureTabOrderForSpace(spaceId);
-  targetOrder[targetGroupKey] = uniqueKeys([...(targetOrder[targetGroupKey] || []), tab.id]);
+  for (const { tab, targetGroupKey } of moves) {
+    state.tabSpaces[tab.id] = spaceId;
+    state.tabGroups[tab.id] = targetGroupKey;
+    removeTabFromSavedOrder(tab.id);
+    targetOrder[targetGroupKey] = uniqueKeys([...(targetOrder[targetGroupKey] || []), tab.id]);
+  }
+  selectedTabIds = new Set(selectedTabs.map((tab) => tab.id));
+  selectionAnchorTabId = selectedTabs.at(-1)?.id ?? null;
   await saveState();
-  await closeTabsOutsideActiveSpace();
-  await refreshTabs();
-  setStatus(`Moved tab to ${spaceName(spaceId)}.`);
+  await activateSpace(spaceId);
+  setStatus(`Moved ${selectedTabs.length === 1 ? 'tab' : `${selectedTabs.length} tabs`} to ${spaceName(spaceId)}.`);
 }
 
 function groupForTab(tab) {
@@ -1806,8 +1837,7 @@ async function moveGroupToSpace(group, spaceId) {
     }
   }
   await saveState();
-  await closeTabsOutsideActiveSpace();
-  await refreshTabs();
+  await activateSpace(spaceId);
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
@@ -1816,8 +1846,7 @@ async function moveFolderGroupToSpace(folderContext, spaceId) {
   if (groups.length === 0) return;
   moveGroupsWithoutSaving(groups, spaceId);
   await saveState();
-  await closeTabsOutsideActiveSpace();
-  await refreshTabs();
+  await activateSpace(spaceId);
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
@@ -3562,7 +3591,7 @@ function showTabContextMenu(event, tab) {
     menuAction('Rename', () => renameTab(tab)),
     menuAction('Duplicate', () => duplicateTab(tab)),
     menuAction('Update Saved URL', () => updateSavedTabUrl(tab)),
-    ...menuSection(moveToSpaceSubmenu((space) => moveTabToSpace(tab, space.id))),
+    ...menuSection(moveToSpaceSubmenu((space) => moveTabsToSpace(contextTabIds, space.id))),
   ];
 
   showContextMenu(event, items);

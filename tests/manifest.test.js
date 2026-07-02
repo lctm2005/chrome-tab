@@ -138,7 +138,7 @@ test('Move to context actions render as a right-side submenu', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
-  assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveTabToSpace\(tab, space\.id\)\)/);
+  assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveTabsToSpace\(contextTabIds, space\.id\)\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveGroupToSpace\(group, space\.id\)\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space\) => moveFolderGroupToSpace\(folderContext, space\.id\)\)/);
   assert.match(source, /function menuSubmenu\(label, items\)/);
@@ -147,6 +147,20 @@ test('Move to context actions render as a right-side submenu', async () => {
   assert.match(styles, /\.context-submenu-panel/);
   assert.match(styles, /left: calc\(100% \+ 6px\)/);
   assert.doesNotMatch(styles, /submenu-left/);
+});
+
+test('tab selection participates in the groups render signature', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function groupsRenderSignature\(tabGroups, ungrouped\)[\s\S]*selectedTabIds:\s*\[\.\.\.selectedTabIds\]/);
+});
+
+test('moving tabs to another Space activates the target Space', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved \$\{selectedTabs\.length/);
+  assert.match(source, /async function moveGroupToSpace\(group, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved group/);
+  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved group/);
 });
 
 test('group hover preview only binds for collapsed tag groups', async () => {
