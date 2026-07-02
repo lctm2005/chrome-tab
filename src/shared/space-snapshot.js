@@ -12,15 +12,7 @@ export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {
     version: 1,
     updatedAt: now,
     groups: view
-      .map((group) => ({
-        title: group.title || 'Ungrouped',
-        color: group.color || 'grey',
-        collapsed: Boolean(group.collapsed),
-        tabs: (group.tabs || [])
-          .filter(shouldAutoCloseTab)
-          .filter(isRestorableSnapshotTab)
-          .map(snapshotTabRecord),
-      }))
+      .map(snapshotGroupRecord)
       .filter((group) => group.tabs.length > 0),
   };
 }
@@ -47,7 +39,7 @@ export function dropTemporarySnapshotGroups(snapshot) {
   if (!snapshot) return null;
   return {
     ...snapshot,
-    groups: (snapshot.groups || []).filter((group) => !isUngroupedSnapshotGroup(group)),
+    groups: (snapshot.groups || []).filter((group) => !isTemporaryUngroupedSnapshotGroup(group)),
   };
 }
 
@@ -212,6 +204,12 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   };
 }
 
+export function mergeOpenSpaceSnapshot(view = [], storedSnapshot = null) {
+  const liveSnapshot = buildSpaceSnapshot({ view });
+  const storedWithoutTemporaryUngrouped = dropTemporarySnapshotGroups(storedSnapshot);
+  return mergeSpaceSnapshot(liveSnapshot, storedWithoutTemporaryUngrouped);
+}
+
 export function isUngroupedSnapshotGroup(group = {}) {
   return group.title === 'Ungrouped' && (group.color || 'grey') === 'grey';
 }
@@ -241,6 +239,20 @@ function snapshotTabRecord(tab = {}) {
   };
   const panelTitle = cleanPanelTitle(tab.panelTitle);
   if (panelTitle) record.panelTitle = panelTitle;
+  return record;
+}
+
+function snapshotGroupRecord(group = {}) {
+  const record = {
+    title: group.title || 'Ungrouped',
+    color: group.color || 'grey',
+    collapsed: Boolean(group.collapsed),
+    tabs: (group.tabs || [])
+      .filter(shouldAutoCloseTab)
+      .filter(isRestorableSnapshotTab)
+      .map(snapshotTabRecord),
+  };
+  if (isUngroupedSnapshotGroup(record)) record.restorable = true;
   return record;
 }
 
@@ -323,4 +335,8 @@ function dedupeSnapshotTabs(tabs = []) {
 
 function snapshotGroupKey(group = {}) {
   return `${group.title || 'Ungrouped'}\n${group.color || 'grey'}`;
+}
+
+function isTemporaryUngroupedSnapshotGroup(group = {}) {
+  return isUngroupedSnapshotGroup(group) && group.restorable !== true;
 }

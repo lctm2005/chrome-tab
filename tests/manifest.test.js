@@ -158,9 +158,16 @@ test('tab selection participates in the groups render signature', async () => {
 test('moving tabs to another Space activates the target Space', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*removeTabsFromSpaceSnapshot\(state\.activeSpaceId, selectedTabs\)/);
   assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved \$\{selectedTabs\.length/);
   assert.match(source, /async function moveGroupToSpace\(group, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved group/);
   assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId\)[\s\S]*await saveState\(\);\s*await activateSpace\(spaceId\);\s*setStatus\(`Moved group/);
+});
+
+test('open Space snapshots are merged from the full live view including ungrouped tabs', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function snapshotOpenSpace\(spaceId\)[\s\S]*const view = buildSpaceViewForSpace\(spaceId\);\s*const snapshot = mergeOpenSpaceSnapshot\(view, state\.spaceSnapshots\[spaceId\]\)/);
 });
 
 test('group hover preview only binds for collapsed tag groups', async () => {

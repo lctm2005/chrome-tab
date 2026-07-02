@@ -46,11 +46,10 @@ import {
   tabSelectionFromClick,
 } from './src/shared/tab-selection.js';
 import {
-  buildSpaceSnapshot,
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isUngroupedSnapshotGroup,
-  mergeSpaceSnapshot,
+  mergeOpenSpaceSnapshot,
   removeSnapshotTabs,
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
@@ -1781,6 +1780,7 @@ async function moveTabsToSpace(tabIds, spaceId) {
     removeTabFromSavedOrder(tab.id);
     targetOrder[targetGroupKey] = uniqueKeys([...(targetOrder[targetGroupKey] || []), tab.id]);
   }
+  removeTabsFromSpaceSnapshot(state.activeSpaceId, selectedTabs);
   selectedTabIds = new Set(selectedTabs.map((tab) => tab.id));
   selectionAnchorTabId = selectedTabs.at(-1)?.id ?? null;
   await saveState();
@@ -2239,10 +2239,8 @@ async function closeEphemeralTabsExcept(keepTabId) {
 function snapshotOpenSpace(spaceId) {
   if (!spaceId) return;
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
-  const view = buildSpaceViewForSpace(spaceId).filter((group) => group.key !== 'ungrouped');
-  const liveSnapshot = buildSpaceSnapshot({ view });
-  const storedSnapshot = dropTemporarySnapshotGroups(state.spaceSnapshots[spaceId]);
-  const snapshot = mergeSpaceSnapshot(liveSnapshot, storedSnapshot);
+  const view = buildSpaceViewForSpace(spaceId);
+  const snapshot = mergeOpenSpaceSnapshot(view, state.spaceSnapshots[spaceId]);
   const previousSnapshot = state.spaceSnapshots[spaceId];
   if (snapshotTabCount(snapshot) === 0) {
     delete state.spaceSnapshots[spaceId];
@@ -2279,7 +2277,11 @@ function sanitizeStoredSpaceSnapshot(spaceId) {
 
 function removeTemporarySnapshotTabs(spaceId) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
-  const snapshot = dropTemporarySnapshotGroups(state.spaceSnapshots?.[spaceId]);
+  const storedSnapshot = sanitizeSpaceSnapshot(state.spaceSnapshots?.[spaceId]);
+  const snapshot = storedSnapshot ? {
+    ...storedSnapshot,
+    groups: (storedSnapshot.groups || []).filter((group) => !isUngroupedSnapshotGroup(group)),
+  } : null;
   if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
   else state.spaceSnapshots[spaceId] = snapshot;
   if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';

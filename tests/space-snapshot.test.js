@@ -6,6 +6,7 @@ import {
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
+  mergeOpenSpaceSnapshot,
   mergeSpaceSnapshot,
   removeSnapshotTabs,
   removeSnapshotTab,
@@ -56,6 +57,7 @@ test('snapshots a Space as TabGroup -> Tab restore data', () => {
       title: 'Ungrouped',
       color: 'grey',
       collapsed: false,
+      restorable: true,
       tabs: [
         { title: 'Chrome', url: 'chrome://extensions' },
       ],
@@ -128,6 +130,82 @@ test('drops temporary ungrouped tabs from a stored snapshot', () => {
       },
     ],
   });
+});
+
+test('keeps restorable ungrouped tabs from a stored snapshot', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        restorable: true,
+        tabs: [{ title: 'Loose', url: 'https://example.com/loose' }],
+      },
+    ],
+  };
+
+  assert.deepEqual(dropTemporarySnapshotGroups(snapshot), snapshot);
+  assert.deepEqual(mergeOpenSpaceSnapshot([], snapshot), snapshot);
+});
+
+test('open Space snapshots preserve live ungrouped tabs while dropping stored-only ungrouped rows', () => {
+  const snapshot = mergeOpenSpaceSnapshot([
+    {
+      title: 'Docs',
+      color: 'blue',
+      collapsed: true,
+      key: 'group:4',
+      tabs: [{ id: 1, title: 'Spec', url: 'https://example.com/spec', pinned: false }],
+    },
+    {
+      title: 'Ungrouped',
+      color: 'grey',
+      collapsed: false,
+      key: 'ungrouped',
+      tabs: [
+        { id: 2, title: 'Loose', url: 'https://example.com/loose', pinned: false },
+        { id: 3, title: 'New Tab', url: 'chrome://newtab', pinned: false },
+      ],
+    },
+  ], {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        tabs: [{ title: 'Legacy temporary', url: 'https://example.com/legacy' }],
+      },
+      {
+        title: 'Saved',
+        color: 'green',
+        tabs: [{ title: 'Saved dormant', url: 'https://example.com/saved' }],
+      },
+    ],
+  });
+
+  assert.deepEqual(snapshot.groups, [
+    {
+      title: 'Saved',
+      color: 'green',
+      tabs: [{ title: 'Saved dormant', url: 'https://example.com/saved' }],
+    },
+    {
+      title: 'Docs',
+      color: 'blue',
+      collapsed: true,
+      tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+    },
+    {
+      title: 'Ungrouped',
+      color: 'grey',
+      collapsed: false,
+      restorable: true,
+      tabs: [{ title: 'Loose', url: 'https://example.com/loose' }],
+    },
+  ]);
 });
 
 test('sanitizes invalid and new-tab placeholder rows from stored grouped snapshots', () => {
