@@ -45,6 +45,11 @@ async function startPreviewServer() {
     try {
       const url = new URL(request.url || '/', `http://127.0.0.1:${previewPort}`);
       const pathname = decodeURIComponent(url.pathname === '/' ? '/sidepanel.html' : url.pathname);
+      if (pathname === '/config.local.js') {
+        response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+        response.end('window.SPACE_TABS_CONFIG = {};');
+        return;
+      }
       const filePath = normalize(join(repoRoot, pathname));
       if (relative(repoRoot, filePath).startsWith('..')) {
         response.writeHead(403).end('Forbidden');
@@ -533,10 +538,59 @@ async function main() {
 
   await evaluate(client, `document.querySelector('#settingsButton').click()`);
   await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
-  const apiState = await evaluate(client, `document.querySelector('#apiKeyStatus')?.textContent`);
-  record('Settings opens and reports no API key without testing AI', apiState === 'No API key configured.', apiState);
+  const settingsState = await evaluate(client, `(() => ({
+    api: document.querySelector('#apiKeyStatus')?.textContent,
+    exportBackup: Boolean(document.querySelector('#exportSpaceDataButton')),
+    restoreBackup: Boolean(document.querySelector('#restoreSpaceDataButton')),
+  }))()`);
+  record(
+    'Settings opens with local backup controls and no configured API key',
+    settingsState.api === 'No API key configured.' && settingsState.exportBackup && settingsState.restoreBackup,
+    JSON.stringify(settingsState),
+  );
   await evaluate(client, `document.querySelector('#settingsDialog [value="cancel"]').click()`);
   await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
+
+  await evaluate(client, `document.querySelector('.context-space').click()`);
+  await waitFor(client, `!document.querySelector('#contextView')?.hidden`);
+  await evaluate(client, `(() => {
+    const input = document.querySelector('#spaceContextInput');
+    input.value = '# E2E Context\\nOne thing per Space.';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  const savedContext = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    return stored.spaceContexts?.default || null;
+  })()`);
+  record(
+    'Context editor saves a local document for the active Space',
+    savedContext === '# E2E Context\nOne thing per Space.',
+    savedContext,
+  );
+
+  await evaluate(client, `document.querySelector('.ask-space').click()`);
+  await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
+  const askSpaceState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    if (stored.activeAskSessionKey !== 'space:default') return null;
+    return {
+      key: stored.activeAskSessionKey,
+      scope: document.querySelector('#askScope')?.textContent || '',
+      spaceId: stored.askSessions?.['space:default']?.spaceId || '',
+    };
+  })()`);
+  record(
+    'Ask Space uses one conversation session for the active Space',
+    askSpaceState.key === 'space:default' && askSpaceState.spaceId === 'default' && askSpaceState.scope.startsWith('Context + '),
+    JSON.stringify(askSpaceState),
+  );
+
+  await evaluate(client, `(() => {
+    [...document.querySelectorAll('.space')].find((button) => button.title === 'Space')?.click();
+    return true;
+  })()`);
+  await waitFor(client, `!document.querySelector('#groupsList')?.hidden`);
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];

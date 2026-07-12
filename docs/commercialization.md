@@ -1,21 +1,20 @@
-# Space Tabs Commercialization Plan
+# Space Commercialization Plan
 
-Last updated: 2026-06-25
+Last updated: 2026-07-12
 
 ## Positioning
 
-Space Tabs should be positioned as a productivity side panel that brings
-workspace-style tab organization to Chrome:
+Space should be positioned as an Arc-like context workspace for Chrome:
 
-> Keep Chrome. Get Spaces.
+> One thing. One Space. All its context.
 
-The strongest promise is not generic tab management. It is a focused browser
-workspace model with Spaces, folders, dormant saved tabs, Chrome tab groups,
-Arc import, and optional BYOK AI.
+The strongest promise is not generic vertical tabs. It is a focused unit of
+work: related pages as sources, a local Context document, and AI that can help
+inside that boundary.
 
-Avoid using another browser or product name in the Chrome Web Store title or
-short summary. Use migration-oriented language in external articles, docs, or
-landing pages where there is more room for nuance.
+Use `Arc-like` and `Arc import` deliberately in store discovery copy so people
+looking for an Arc workflow in Chrome can recognize the product quickly. Keep
+`Space` as the durable brand beyond browser migration.
 
 ## Target Users
 
@@ -23,7 +22,8 @@ landing pages where there is more room for nuance.
 - Users moving from workspace-oriented browsers back to Chrome.
 - Developers, product managers, researchers, consultants, founders, and
   students who switch between projects throughout the day.
-- BYOK AI users who prefer local-first tools over hosted productivity suites.
+- People managing projects or decisions across many web sources.
+- BYOK AI users who prefer local-first context over hosted productivity suites.
 
 ## Recommended Model
 
@@ -32,19 +32,20 @@ a paid tier.
 
 Free release:
 
-- Spaces, folders, tab groups, dormant saved tabs, panel-only names.
+- Spaces, local Context documents, folders, tab groups, and dormant saved tabs.
 - Arc import.
-- Basic shortcuts.
+- Portable local backup and restore.
+- Panel shortcuts.
 - Local Auto Group fallback.
-- BYOK AI setup and basic Ask Page.
+- BYOK Ask Space grounded in Context and the current page.
 
 Future Pro tier:
 
-- Cloud backup and restore.
 - Cross-device sync.
 - Space templates.
-- Advanced AI grouping, naming, and workspace cleanup.
-- Export packs for research sessions.
+- Multi-source Context indexing and document attachments.
+- Advanced AI synthesis, planning, and workspace cleanup.
+- Shareable export packs for research sessions.
 - Team-shared Space templates and onboarding packs.
 
 ## Pricing Hypotheses
@@ -73,8 +74,8 @@ The first store release should not require sign-in.
 
 - Keep the core local-first and usable without AI.
 - Request optional host permissions at the moment of need, not during install.
-- Treat AI as an accelerator for organization, not as the reason the extension
-  exists.
-- Charge for durable value such as sync, backup, templates, and team reuse.
+- Let AI operate inside an explicit Space Context instead of across unrelated
+  browsing history.
+- Charge for durable value such as sync, richer context, templates, and team reuse.
 - Avoid ads and affiliate links. Trust is a more important asset for this
   category than short-term revenue.

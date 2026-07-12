@@ -1,19 +1,19 @@
-# Space Tabs Chrome Web Store Listing Draft
+# Space Chrome Web Store Listing
 
-Last updated: 2026-06-25
+Last updated: 2026-07-12
 
 ## Listing Fields
 
 Name:
 
 ```text
-Space Tabs
+Space: Arc-like Context Workspaces for Chrome
 ```
 
 Short description:
 
 ```text
-Organize Chrome tabs into Spaces, folders, groups, and dormant saved tabs from a focused side panel.
+Arc-like Spaces for Chrome with Arc import, local Context, dormant tabs, private BYOK AI, and portable backups.
 ```
 
 Category:
@@ -31,77 +31,86 @@ English (United States)
 ## Detailed Description
 
 ```text
-Space Tabs is a Chrome side panel for organizing browser work into Spaces,
-folders, Chrome tab groups, and dormant saved tabs.
+Space brings an Arc-like workspace model to Chrome: one thing per Space, the
+pages around it kept as sources, and a local Context document that preserves
+what matters.
 
-Use it to keep separate work contexts without keeping every saved tab loaded.
-Create Spaces for projects, clients, classes, trips, or research threads. Store
-tabs locally, reopen them when needed, and keep temporary tabs separate from
-saved work.
+Create a Space for a project, decision, trip, research thread, client, or any
+other focused piece of work. Organize its pages with folders and Chrome tab
+groups, keep saved tabs dormant until needed, and switch contexts without
+keeping every page loaded.
+
+Each Space has a local Context document for outcomes, notes, decisions, and
+next actions. Ask Space can combine that Context with the current page, so AI
+answers are grounded in the work you are actually doing instead of an isolated
+browser tab.
 
 Features:
 
-- Spaces for separate browser work contexts.
-- Folders with nested saved tab organization.
-- Chrome tab group integration.
+- Arc-like Spaces for separate browser work contexts.
+- Arc StorableSidebar.json import for moving existing Spaces into Chrome.
+- Nested folders and Chrome tab group integration.
 - Dormant saved tabs that stay unloaded until opened.
-- Panel-only tab names for cleaner workspace labels.
-- Drag sorting for groups and tabs.
-- Multi-select grouping with Cmd/Ctrl and Shift.
-- Duplicate, close, discard, rename, and move tab actions.
-- Arc StorableSidebar.json import.
-- User-editable keyboard shortcuts.
-- Optional BYOK AI for Ask Page, page summaries, and tab grouping.
+- One local Context document per Space.
+- Ask Space and page summaries grounded in Context plus the current page.
+- Optional BYOK AI with built-in and OpenAI-compatible providers.
+- Panel-only tab names, AI-assisted tidy names, and auto grouping.
+- Drag sorting, multi-select grouping, duplicate, discard, rename, and move.
+- Portable export and restore for Spaces, Context, saved tabs, and Ask history.
+- User-editable panel shortcuts.
 
-AI features are optional. Space Tabs works without an AI API key. When AI is
-configured, requests are sent to the AI endpoint selected by the user.
+Space is local-first. Core organization works without an account or AI key.
+There is no Space sync server in this release, and no persistent content script
+runs on every website. AI requests happen only after you start an AI action and
+go directly to the provider you configure. API keys are kept in Chrome session
+storage and are excluded from Space backups.
 ```
 
 ## Permission Justifications
 
 `sidePanel`:
-Shows Space Tabs as a Chrome side panel.
+Shows Space in Chrome's side panel.
 
 `tabs`:
-Lists, focuses, creates, duplicates, discards, closes, and moves tabs as part
-of the user's workspace actions.
+Lists, focuses, creates, duplicates, discards, closes, and moves tabs for
+user-initiated Space actions.
 
 `tabGroups`:
-Creates, renames, recolors, collapses, moves, and updates Chrome tab groups for
-Space organization.
+Creates, renames, recolors, collapses, moves, and updates Chrome tab groups.
 
 `storage`:
-Stores local Spaces, folders, dormant saved tabs, shortcut preferences, panel
-state, and AI preferences.
+Stores local Spaces, Context documents, folders, dormant tabs, Ask history,
+shortcuts, and preferences.
 
 `activeTab`:
-Supports user-initiated actions on the currently active tab.
+Limits page access to the active tab following a user action.
 
 `scripting`:
-Extracts current page content only after the user starts Ask Page or summary.
+Extracts current page content only after the user starts Ask Space or a page
+summary. Space does not declare a persistent content script.
 
 `favicon`:
 Shows page icons in the side panel.
 
 Optional host permissions:
-Requested at the moment of need for Ask Page on the active website or for a
-custom AI base URL configured by the user. AI provider access is requested only
-after the user configures a provider and starts an AI action.
+Requested only when needed for the current website or the user-selected AI
+provider endpoint. Space requests the specific origin at the moment of use.
 
 ## Privacy Practices Copy
 
 ```text
-Space Tabs stores workspace data locally in Chrome extension storage. This can
-include tab titles, URLs, Space and folder names, Chrome tab group metadata,
-panel-only tab names, shortcut preferences, and extension settings.
+Space stores workspace data locally in Chrome extension storage. This can
+include Space and folder names, Context documents, tab titles and URLs, Chrome
+tab group metadata, panel-only names, Ask history, shortcuts, and preferences.
 
-Space Tabs does not sell user data and does not run a hosted sync service in
-this release.
+Space does not sell user data, require an account, or operate a hosted sync
+service in this release. It does not run a persistent content script on every
+website.
 
-AI features are optional. If the user configures an AI API key and starts an AI
-action, Space Tabs sends the relevant prompt and page or tab context to the AI
-endpoint selected by the user. The API key is used only for that configured AI
-request.
+AI is optional. When the user starts an AI action, Space sends the relevant
+Space Context, prompt, and current page or tab metadata directly to the AI
+endpoint selected by the user. The API key is kept in Chrome session storage
+and is not included in normal workspace state or exported Space backups.
 ```
 
 ## Reviewer Notes
@@ -111,16 +120,16 @@ Core features do not require an account or AI API key.
 
 Suggested review flow:
 
-1. Install Space Tabs and click the toolbar action to open the side panel.
-2. Create a new Space.
-3. Open several normal web pages.
-4. Use Auto Group without an API key to test local grouping fallback.
-5. Right-click a tab row to test Duplicate, Rename, Move to, and Close actions.
-6. Open Settings to edit shortcuts and review optional AI settings.
-7. Use Ask Page only if an AI API key is configured by the reviewer.
+1. Install Space and click the toolbar action to open the side panel.
+2. Create a Space and open its Context document from the document icon.
+3. Add notes, switch Spaces, and return to verify that Context is local and
+   Space-specific.
+4. Open several pages and use folders, tab groups, dormant tabs, and sorting.
+5. Open Settings to review Arc import, Space backup, BYOK AI, and shortcuts.
+6. Use Ask Space only if an AI API key is configured by the reviewer.
 
-AI is BYOK and optional. Without an API key, the extension still provides its
-local tab organization features.
+Space has no persistent content script. Current page text is extracted only
+after a user starts Ask Space or Summary and grants access when Chrome asks.
 ```
 
 ## Screenshot Plan
@@ -134,18 +143,17 @@ npm run screenshots:store
 Upload the generated PNG files from `docs/store-assets/screenshots/` in this
 order:
 
-1. `01-spaces-overview.png`: Spaces overview with live Chrome tab groups.
+1. `01-spaces-overview.png`: Arc-like Spaces with live Chrome tab groups.
 2. `02-nested-folders-dormant-tabs.png`: nested folders and dormant saved tabs.
-3. `03-tab-context-menu.png`: tab context menu with Move to Space actions.
-4. `04-settings-arc-import-shortcuts.png`: Settings, Arc import, and shortcuts.
-5. `05-ask-page-byok-ai.png`: Ask Page with optional BYOK AI.
+3. `03-tab-context-menu.png`: tab context menu and Move to Space actions.
+4. `04-settings-arc-import-shortcuts.png`: Arc import, portable backup, BYOK, and shortcuts.
+5. `05-ask-page-byok-ai.png`: Ask Space grounded in local Context and the current page.
 
 ## Launch Checklist
 
 - Build the release zip with `npm run package`.
-- Upload `dist/space-tabs-<version>.zip` in the Chrome Web Store Developer
-  Dashboard.
+- Upload `dist/space-<version>.zip` in the Chrome Web Store Developer Dashboard.
 - Use `PRIVACY.md` as the source for the public privacy policy page.
 - Add the permission justifications above in the privacy and permissions form.
-- Provide reviewer notes so AI is understood as optional.
-- Publish beta as Unlisted or Private before switching to Public.
+- Provide reviewer notes so optional AI and on-demand page access are clear.
+- Update the five screenshots before uploading version 0.5.0.

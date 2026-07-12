@@ -16,7 +16,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 4,
+    version: 5,
     theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
@@ -34,6 +34,7 @@ export function createDefaultState(localConfig = {}) {
     collapsedSpaceGroups: {},
     askSessions: {},
     activeAskSessionKey: '',
+    spaceContexts: {},
     spaceSnapshots: {},
     shortcuts: mergeShortcuts(),
     ai: {
@@ -51,7 +52,7 @@ export function createDefaultState(localConfig = {}) {
 
 export function mergeStoredState(stored, defaults = createDefaultState()) {
   if (!stored || typeof stored !== 'object') return defaults;
-  const compatibleSpaceModel = stored.version === defaults.version;
+  const compatibleSpaceModel = Number(stored.version) >= 4 && Number(stored.version) <= Number(defaults.version);
   const spaces = compatibleSpaceModel
     ? validSpaces(stored.spaces, defaults.spaces)
     : migrateSpaces(stored.spaces, defaults.spaces);
@@ -78,6 +79,7 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     collapsedSpaceGroups: { ...defaults.collapsedSpaceGroups, ...(stored.collapsedSpaceGroups || {}) },
     askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
+    spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
     ai: migrateAISettings(stored.ai, defaults.ai),
@@ -109,7 +111,7 @@ function isLegacyBuiltInAISettings(ai = {}) {
 function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVersion = 0, currentVersion = 0) {
   const shortcuts = mergeShortcuts(storedShortcuts, defaultShortcuts);
   if (
-    Number(storedVersion) < Number(currentVersion) &&
+    Number(storedVersion) < 4 &&
     normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT
   ) {
     shortcuts.togglePanel = defaultShortcuts.togglePanel;

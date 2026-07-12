@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Space Tabs",
-  "description": "A Chrome side panel for Spaces, tab groups, panel-only tab renaming, auto grouping, and BYOK AI.",
-  "version": "0.4.2",
+  "name": "Space: Arc-like Context Workspaces for Chrome",
+  "short_name": "Space",
+  "description": "Arc-like workspaces for Chrome: organize one thing per Space, import Arc, write local Context, and use private BYOK AI.",
+  "version": "0.5.0",
   "minimum_chrome_version": "116",
   "action": {
-    "default_title": "Open Space Tabs",
+    "default_title": "Open Space",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -23,25 +24,13 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "content-script.js"
-      ],
-      "run_at": "document_start"
-    }
-  ],
   "commands": {
     "_execute_action": {
       "suggested_key": {
         "default": "Alt+S",
         "mac": "Alt+S"
       },
-      "description": "Toggle Space Tabs"
+      "description": "Toggle Space"
     }
   },
   "side_panel": {
@@ -59,8 +48,6 @@
   "host_permissions": [],
   "optional_host_permissions": [
     "https://*/*",
-    "http://*/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://*/*"
   ]
 }

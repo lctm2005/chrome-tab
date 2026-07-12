@@ -5,9 +5,11 @@ import {
   ASK_SESSION_LIMITS,
   appendAskSessionMessage,
   createAskSession,
+  createSpaceAskSession,
   normalizeSessionUrl,
   pruneAskSessions,
   sessionKeyForTab,
+  sessionKeyForSpace,
 } from '../src/shared/ask-session.js';
 
 test('normalizes Ask session URLs without fragment-only churn', () => {
@@ -38,6 +40,16 @@ test('creates an empty Ask session for a page', () => {
   assert.equal(session.key, 'tab:2:https://example.com/a');
   assert.equal(session.title, 'Example');
   assert.equal(session.url, 'https://example.com/a');
+  assert.deepEqual(session.messages, []);
+});
+
+test('creates one Ask session for an entire Space', () => {
+  const session = createSpaceAskSession({ id: 'launch', name: 'Launch' }, 100);
+
+  assert.equal(sessionKeyForSpace('launch'), 'space:launch');
+  assert.equal(session.key, 'space:launch');
+  assert.equal(session.spaceId, 'launch');
+  assert.equal(session.title, 'Launch');
   assert.deepEqual(session.messages, []);
 });
 
@@ -87,4 +99,18 @@ test('prunes Ask sessions for closed tabs and caps retained sessions', () => {
     'tab:3:https://example.com/c',
   ]);
   assert.equal(ASK_SESSION_LIMITS.maxMessageChars <= 6000, true);
+});
+
+test('keeps Ask sessions for existing Spaces and removes deleted Spaces', () => {
+  const sessions = {
+    'space:launch': createSpaceAskSession({ id: 'launch', name: 'Launch' }, 1),
+    'space:deleted': createSpaceAskSession({ id: 'deleted', name: 'Deleted' }, 2),
+  };
+
+  const pruned = pruneAskSessions(sessions, {
+    spaceIds: ['launch'],
+    activeKey: 'space:launch',
+  });
+
+  assert.deepEqual(Object.keys(pruned), ['space:launch']);
 });

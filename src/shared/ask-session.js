@@ -20,6 +20,10 @@ export function sessionKeyForTab(tab = {}) {
   return `tab:${tabId}:${normalizeSessionUrl(tab.url)}`;
 }
 
+export function sessionKeyForSpace(spaceId) {
+  return `space:${String(spaceId || 'default')}`;
+}
+
 export function createAskSession(tab = {}, now = Date.now()) {
   const key = sessionKeyForTab(tab);
   return {
@@ -27,6 +31,19 @@ export function createAskSession(tab = {}, now = Date.now()) {
     tabId: Number.isFinite(Number(tab.id)) ? Number(tab.id) : null,
     title: tab.title || 'Current page',
     url: normalizeSessionUrl(tab.url),
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+}
+
+export function createSpaceAskSession(space = {}, now = Date.now()) {
+  const spaceId = String(space.id || 'default');
+  return {
+    key: sessionKeyForSpace(spaceId),
+    spaceId,
+    title: space.name || 'Space',
+    url: '',
     createdAt: now,
     updatedAt: now,
     messages: [],
@@ -66,8 +83,13 @@ export function updateAskSessionMessage(session, messageId, text, limits = ASK_S
 export function pruneAskSessions(sessions = {}, options = {}) {
   const maxSessions = Number(options.maxSessions || ASK_SESSION_LIMITS.maxSessions);
   const openTabIds = new Set((options.openTabIds || []).map(Number).filter(Number.isFinite));
+  const spaceIds = new Set((options.spaceIds || []).map(String).filter(Boolean));
   const entries = Object.entries(sessions)
     .filter(([key, session]) => {
+      if (key.startsWith('space:')) {
+        const spaceId = String(session?.spaceId || key.slice('space:'.length));
+        return spaceIds.size === 0 || spaceIds.has(spaceId) || key === options.activeKey;
+      }
       const tabId = Number(session?.tabId ?? tabIdFromSessionKey(key));
       return openTabIds.size === 0 || openTabIds.has(tabId) || key === options.activeKey;
     })

@@ -126,6 +126,10 @@ export function removeSpaceReferences(state, spaceId) {
   delete state.groupOrder[spaceId];
   delete state.tabOrder[spaceId];
   delete state.spaceSnapshots[spaceId];
+  delete state.spaceContexts?.[spaceId];
+  const askSessionKey = `space:${spaceId}`;
+  delete state.askSessions?.[askSessionKey];
+  if (state.activeAskSessionKey === askSessionKey) state.activeAskSessionKey = '';
   for (const [groupKey, group] of Object.entries(state.virtualGroups || {})) {
     if (group?.spaceId === spaceId) delete state.virtualGroups[groupKey];
   }

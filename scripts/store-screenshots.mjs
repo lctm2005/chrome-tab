@@ -25,9 +25,9 @@ const shots = [
   {
     id: 'overview',
     file: '01-spaces-overview.png',
-    title: 'Spaces Overview',
-    kicker: 'Focused browser workspaces',
-    description: 'Project Spaces, live Chrome tab groups, saved tab names, and quick actions in one side panel.',
+    title: 'Arc-like Spaces',
+    kicker: 'One thing. One Space.',
+    description: 'Keep each project, decision, or research thread in its own focused Chrome workspace.',
     activeSpaceId: 'launch',
     notes: ['Live groups', 'Panel names', 'Space dock'],
   },
@@ -53,19 +53,19 @@ const shots = [
     id: 'settings',
     file: '04-settings-arc-import-shortcuts.png',
     title: 'Settings',
-    kicker: 'Import and shortcuts',
-    description: 'Bring in Arc StorableSidebar.json, edit shortcuts, and configure optional AI providers.',
+    kicker: 'Import, backup, and shortcuts',
+    description: 'Move from Arc, keep portable backups, and connect only the AI provider you choose.',
     activeSpaceId: 'launch',
-    notes: ['Arc import', 'Shortcuts', 'BYOK settings'],
+    notes: ['Arc import', 'Portable backup', 'BYOK settings'],
   },
   {
     id: 'ask',
     file: '05-ask-page-byok-ai.png',
-    title: 'Ask Page',
-    kicker: 'Optional BYOK AI',
-    description: 'Ask questions or summarize the active page using the provider and API key you choose.',
+    title: 'Ask Space',
+    kicker: 'AI grounded in your Context',
+    description: 'Combine the Space document with the current page using your own AI provider and key.',
     activeSpaceId: 'launch',
-    notes: ['Page context', 'API key', 'No account required'],
+    notes: ['Local Context', 'Your API key', 'No account required'],
   },
 ];
 
@@ -172,7 +172,7 @@ function storeShotHtml(shot) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(shot.title)} - Space Tabs Store Screenshot</title>
+    <title>${escapeHtml(shot.title)} - Space Store Screenshot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -350,7 +350,7 @@ function storeShotHtml(shot) {
       <section class="story">
         <div class="brand">
           <img src="/icons/icon128.png" alt="">
-          <span>Space Tabs for Chrome</span>
+          <span>Space for Chrome</span>
         </div>
         <div class="kicker">${escapeHtml(shot.kicker)}</div>
         <h1>${escapeHtml(shot.title)}</h1>
@@ -374,12 +374,12 @@ function storeShotHtml(shot) {
           <div class="notes">${shot.notes.map((note) => `<span>${escapeHtml(note)}</span>`).join('')}</div>
         </div>
       </section>
-      <section class="panel-wrap" aria-label="Space Tabs side panel preview">
+      <section class="panel-wrap" aria-label="Space side panel preview">
         <div class="panel-titlebar">
           <span>Side panel</span>
           <span>Chrome</span>
         </div>
-        <iframe id="panel" title="Space Tabs"></iframe>
+        <iframe id="panel" title="Space"></iframe>
       </section>
     </main>
     <script>
@@ -437,23 +437,36 @@ function storeShotHtml(shot) {
         const form = doc.querySelector('.settings');
         const arcStatus = doc.querySelector('#arcImportStatus');
         const settingsStatus = doc.querySelector('#settingsStatus');
-        const filePicker = doc.querySelector('.file-picker');
+        const backupStatus = doc.querySelector('#spaceBackupStatus');
+        const backupInput = doc.querySelector('#spaceBackupInput');
+        const backupPicker = backupInput?.closest('.file-picker');
+        const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
         const arcInput = doc.querySelector('#arcImportInput');
+        const filePicker = arcInput?.closest('.file-picker');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
         doc.head.append(style);
-        if (filePicker && arcInput && !doc.querySelector('.store-file-row')) {
+        if (filePicker && arcInput && !filePicker.querySelector('.store-file-row')) {
           arcInput.hidden = true;
           const fakePicker = doc.createElement('div');
           fakePicker.className = 'store-file-row';
           fakePicker.innerHTML = '<span class="store-file-button">Choose File</span><span>StorableSidebar.json</span>';
           filePicker.append(fakePicker);
         }
+        if (backupPicker && backupInput && !backupPicker.querySelector('.store-file-row')) {
+          backupInput.hidden = true;
+          const fakeBackupPicker = doc.createElement('div');
+          fakeBackupPicker.className = 'store-file-row';
+          fakeBackupPicker.innerHTML = '<span class="store-file-button">Choose File</span><span>space-backup-2026-07-12.json</span>';
+          backupPicker.append(fakeBackupPicker);
+        }
+        if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces, 2 Context documents, and 8 saved tabs.';
+        if (restoreBackup) restoreBackup.disabled = false;
         if (arcStatus) arcStatus.textContent = 'Ready to append: 3 Spaces, 9 folders, 42 tabs from Arc.';
-        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Add your own provider key only when you use Ask Page.';
+        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
         if (dialog?.open && form) {
-          const arc = doc.querySelector('.arc-import-settings');
-          form.scrollTop = Math.max(0, (arc?.offsetTop || 0) - 64);
+          const spaceData = doc.querySelector('.space-data-settings');
+          form.scrollTop = Math.max(0, (spaceData?.offsetTop || 0) - 16);
         }
       }
 
@@ -461,14 +474,14 @@ function storeShotHtml(shot) {
         doc.querySelector('.ask-space')?.click();
         await waitFor(() => !doc.querySelector('#askPageView')?.hidden);
         const input = doc.querySelector('#askPagePrompt');
-        input.value = 'Summarize the active page and list the next actions.';
+        input.value = 'Using this Space Context, what should I do next?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
           .some((node) => /Preview AI response/i.test(node.textContent)), 5000);
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
-          assistant.innerHTML = '<p><strong>Summary</strong></p><p>The launch brief is ready for review. Next actions: finalize store copy, check reviewer notes, and ship the packaged build.</p>';
+          assistant.innerHTML = '<p><strong>Next actions</strong></p><p>Based on the Launch Context and current brief: finalize the Arc-like store copy, verify privacy notes, and package version 0.5.0.</p>';
         }
       }
 
@@ -515,7 +528,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 4,
+    version: 5,
     theme: 'ocean',
     activeSpaceId,
     spaces,
@@ -553,6 +566,10 @@ function baseState(activeSpaceId) {
     collapsedSpaceGroups: {},
     askSessions: {},
     activeAskSessionKey: '',
+    spaceContexts: {
+      launch: '# Outcome\nPublish Space 0.5.0.\n\n## Decisions\n- Lead with Arc-like migration.\n- Keep Context local and AI BYOK.\n\n## Next actions\n- Finalize store copy.\n- Verify privacy notes.\n- Package the release.',
+      research: '# Research\nCompare workspace models and collect launch evidence.',
+    },
     spaceSnapshots: {
       research: {
         version: 1,

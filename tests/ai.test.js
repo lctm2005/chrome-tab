@@ -100,6 +100,27 @@ test('adds language instructions to Ask and Summary prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
+test('grounds Ask Space in local Context and the current page', () => {
+  const prompt = createPrompt('ask-space', {
+    spaceName: 'Store launch',
+    spaceContext: '# Decision\nLead with Arc-like migration.',
+    page: {
+      title: 'Competitor listing',
+      url: 'https://example.com/competitor',
+      text: 'Vertical tabs and workspaces.',
+    },
+    question: 'What should we emphasize?',
+    language: 'en',
+  });
+
+  assert.match(prompt[0].content, /focused work Space/);
+  assert.match(prompt[0].content, /reference data/);
+  assert.match(prompt[1].content, /Store launch/);
+  assert.match(prompt[1].content, /Lead with Arc-like migration/);
+  assert.match(prompt[1].content, /Competitor listing/);
+  assert.match(prompt[1].content, /What should we emphasize/);
+});
+
 test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
   const prompt = createPrompt('tidy-tabs', {
     tabs: [

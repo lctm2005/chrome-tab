@@ -7,9 +7,9 @@ import {
 } from './src/shared/ai-providers.js';
 import {
   appendAskSessionMessage,
-  createAskSession,
+  createSpaceAskSession,
   pruneAskSessions,
-  sessionKeyForTab,
+  sessionKeyForSpace,
   updateAskSessionMessage,
 } from './src/shared/ask-session.js';
 import {
@@ -69,6 +69,11 @@ import {
   tabBelongsToSpace as entityBelongsToSpace,
 } from './src/shared/space-membership.js';
 import {
+  createSpaceBackup,
+  parseSpaceBackup,
+  restoreSpaceBackup,
+} from './src/shared/space-transfer.js';
+import {
   buildGroupPreviewItems,
   buildSpaceView,
   compactTabForAI,
@@ -92,6 +97,13 @@ const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
+const CONTEXT_SAVE_DELAY_MS = 350;
+const AI_CONTEXT_CHAR_LIMIT = 12000;
+const TIDY_NAMES_ICON = `
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+  </svg>
+`;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
     <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
@@ -116,6 +128,8 @@ let panelWindowId = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
 let pendingArcImportText = '';
+let pendingSpaceBackup = null;
+let contextSaveTimer = 0;
 let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
@@ -138,7 +152,12 @@ const els = {
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   autoGroupButton: document.querySelector('#autoGroupButton'),
   groupsList: document.querySelector('#groupsList'),
+  contextView: document.querySelector('#contextView'),
+  contextStatus: document.querySelector('#contextStatus'),
+  spaceContextInput: document.querySelector('#spaceContextInput'),
+  clearContextButton: document.querySelector('#clearContextButton'),
   askPageView: document.querySelector('#askPageView'),
+  askScope: document.querySelector('#askScope'),
   askMessages: document.querySelector('#askMessages'),
   askPagePrompt: document.querySelector('#askPagePrompt'),
   askAIButton: document.querySelector('#askAIButton'),
@@ -148,6 +167,10 @@ const els = {
   arcImportInput: document.querySelector('#arcImportInput'),
   importArcButton: document.querySelector('#importArcButton'),
   arcImportStatus: document.querySelector('#arcImportStatus'),
+  exportSpaceDataButton: document.querySelector('#exportSpaceDataButton'),
+  spaceBackupInput: document.querySelector('#spaceBackupInput'),
+  restoreSpaceDataButton: document.querySelector('#restoreSpaceDataButton'),
+  spaceBackupStatus: document.querySelector('#spaceBackupStatus'),
   spacesList: document.querySelector('#spacesList'),
   contextMenu: document.querySelector('#contextMenu'),
   actionDialog: document.querySelector('#actionDialog'),
@@ -279,6 +302,8 @@ function bindEvents() {
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
   els.autoGroupButton.addEventListener('click', () => runTask(autoGroupTabs));
   els.collapseGroupsButton.addEventListener('click', () => runTask(toggleSpaceGroups));
+  els.spaceContextInput.addEventListener('input', handleSpaceContextInput);
+  els.clearContextButton.addEventListener('click', () => runTask(clearSpaceContext));
   els.askAIButton.addEventListener('click', () => runTask(askCustomPrompt));
   els.summarizePageButton.addEventListener('click', () => runTask(summarizeCurrentPage));
   els.testAIButton.addEventListener('click', () => runTask(testAI));
@@ -287,6 +312,9 @@ function bindEvents() {
   els.modelInput.addEventListener('change', () => updateCustomModelVisibility());
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
+  els.exportSpaceDataButton.addEventListener('click', () => runTask(exportSpaceData));
+  els.spaceBackupInput.addEventListener('change', () => runTask(previewSpaceBackupFile));
+  els.restoreSpaceDataButton.addEventListener('click', () => runTask(restoreSpaceData));
   els.saveSettingsButton.addEventListener('click', (event) => {
     event.preventDefault();
     runTask(() => saveSettings());
@@ -388,7 +416,7 @@ function isEditableTarget(target) {
 
 async function runShortcutAction(action) {
   if (action === 'openAsk') {
-    openAskPage();
+    await openAskPage();
     return;
   }
   if (action === 'tidyNames') {
@@ -422,12 +450,12 @@ async function activateAdjacentSpace(direction) {
 
 function togglePanel() {
   if (!extensionRuntime) {
-    activeView = activeView === 'ask' ? 'space' : 'ask';
+    activeView = activeView === 'space' ? 'context' : activeView === 'context' ? 'ask' : 'space';
     render();
     return;
   }
   window.close();
-  setTimeout(() => setStatus('Use the Chrome shortcut again to open Space Tabs.'), 120);
+  setTimeout(() => setStatus('Use the Chrome shortcut again to open Space.'), 120);
 }
 
 async function refreshTabs(options = {}) {
@@ -540,21 +568,26 @@ function render() {
   spaceView = mergeDormantSpaceView(liveSpaceView, dormantSpaceView);
   syncSelectedTabsToVisibleSpace();
 
+  const isSpaceView = activeView === 'space';
+  const isContextView = activeView === 'context';
   const isAskView = activeView === 'ask';
-  const groupsCollapsed = !isAskView && isSpaceGroupsCollapsed();
+  const groupsCollapsed = isSpaceView && isSpaceGroupsCollapsed();
   if (isAskView) ensureCurrentAskSession();
-  els.activeSpaceName.textContent = isAskView ? 'Ask Page' : activeSpace.name;
+  els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
     ? panelActionStatus(activePanelAction)
+    : isContextView
+    ? 'Local Context'
     : isAskView
-    ? activePageStatus()
+    ? 'Ask Space'
     : '';
-  els.groupsList.hidden = isAskView;
+  els.groupsList.hidden = !isSpaceView;
+  els.contextView.hidden = !isContextView;
   els.askPageView.hidden = !isAskView;
-  if (isAskView) hideGroupPreview();
-  els.tidyNamesButton.hidden = isAskView;
-  els.autoGroupButton.hidden = isAskView;
-  els.collapseGroupsButton.hidden = isAskView;
+  if (!isSpaceView) hideGroupPreview();
+  els.tidyNamesButton.hidden = !isSpaceView;
+  els.autoGroupButton.hidden = !isSpaceView;
+  els.collapseGroupsButton.hidden = !isSpaceView;
   els.collapseGroupsButton.innerHTML = groupsCollapsed
     ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
     : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
@@ -564,7 +597,11 @@ function render() {
   els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
-  if (isAskView) renderAskMessages();
+  if (isContextView) renderSpaceContext();
+  if (isAskView) {
+    els.askScope.textContent = `Context + ${activePageStatus()}`;
+    renderAskMessages();
+  }
   renderSpaces();
   updateAIRequestUI();
   updatePanelActionUI();
@@ -1335,10 +1372,18 @@ function renderSpaces() {
   const askButton = document.createElement('button');
   askButton.className = `space ask-space${activeView === 'ask' ? ' active' : ''}`;
   askButton.type = 'button';
-  askButton.title = 'Ask Page';
-  askButton.setAttribute('aria-label', 'Ask Page');
+  askButton.title = 'Ask Space';
+  askButton.setAttribute('aria-label', 'Ask Space');
   askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v14"/><path d="M12 12h6"/><path d="M12 12H6"/></svg>`;
   askButton.addEventListener('click', () => runTask(openAskPage));
+
+  const contextButton = document.createElement('button');
+  contextButton.className = `space context-space${activeView === 'context' ? ' active' : ''}`;
+  contextButton.type = 'button';
+  contextButton.title = 'Context';
+  contextButton.setAttribute('aria-label', 'Context');
+  contextButton.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>`;
+  contextButton.addEventListener('click', () => runTask(openSpaceContext));
 
   const addButton = document.createElement('button');
   addButton.className = 'space add-space';
@@ -1353,12 +1398,12 @@ function renderSpaces() {
   spacesGroup.setAttribute('aria-label', 'Spaces');
   spacesGroup.replaceChildren(...spaceButtons, addButton);
 
-  const askGroup = document.createElement('div');
-  askGroup.className = 'dock-group dock-ask';
-  askGroup.setAttribute('aria-label', 'Ask');
-  askGroup.replaceChildren(askButton);
+  const toolsGroup = document.createElement('div');
+  toolsGroup.className = 'dock-group dock-tools';
+  toolsGroup.setAttribute('aria-label', 'Space tools');
+  toolsGroup.replaceChildren(contextButton, askButton);
 
-  els.spacesList.replaceChildren(spacesGroup, askGroup);
+  els.spacesList.replaceChildren(spacesGroup, toolsGroup);
 }
 
 function spacesRenderSignature() {
@@ -3368,14 +3413,18 @@ function updatePanelActionUI() {
   els.tidyNamesButton.disabled = busy;
   els.autoGroupButton.disabled = busy;
   els.collapseGroupsButton.disabled = busy;
-  els.tidyNamesButton.textContent = tidyBusy ? '...' : '🧹';
+  els.tidyNamesButton.innerHTML = tidyBusy ? '...' : TIDY_NAMES_ICON;
   els.autoGroupButton.innerHTML = groupBusy ? '...' : AUTO_GROUP_ICON;
   els.tidyNamesButton.classList.toggle('busy', tidyBusy);
   els.autoGroupButton.classList.toggle('busy', groupBusy);
 }
 
 function focusPanelForShortcuts() {
-  const target = activeView === 'ask' ? els.askPagePrompt : els.groupsList;
+  const target = activeView === 'ask'
+    ? els.askPagePrompt
+    : activeView === 'context'
+    ? els.spaceContextInput
+    : els.groupsList;
   if (!target || target.hidden) return;
   if (target === els.groupsList) target.tabIndex = -1;
   if (extensionRuntime) {
@@ -3389,9 +3438,73 @@ function focusPanelForShortcuts() {
   }
 }
 
-function openAskPage() {
+function openSpaceContext() {
+  activeView = 'context';
+  render();
+  els.spaceContextInput.focus();
+}
+
+function renderSpaceContext() {
+  const spaceId = state.activeSpaceId;
+  if (!state.spaceContexts || typeof state.spaceContexts !== 'object') state.spaceContexts = {};
+  const changedSpace = els.spaceContextInput.dataset.spaceId !== spaceId;
+  const storedContext = String(state.spaceContexts[spaceId] || '');
+  if (changedSpace || (document.activeElement !== els.spaceContextInput && els.spaceContextInput.value !== storedContext)) {
+    els.spaceContextInput.value = storedContext;
+    els.spaceContextInput.dataset.spaceId = spaceId;
+    els.contextStatus.textContent = 'Saved locally';
+  }
+}
+
+function handleSpaceContextInput() {
+  const spaceId = state.activeSpaceId;
+  if (!spaceId) return;
+  if (!state.spaceContexts || typeof state.spaceContexts !== 'object') state.spaceContexts = {};
+  state.spaceContexts[spaceId] = els.spaceContextInput.value;
+  els.contextStatus.textContent = 'Saving...';
+  clearTimeout(contextSaveTimer);
+  contextSaveTimer = setTimeout(() => {
+    contextSaveTimer = 0;
+    void persistSpaceContext(spaceId);
+  }, CONTEXT_SAVE_DELAY_MS);
+}
+
+async function persistSpaceContext(spaceId) {
+  try {
+    await saveState();
+    if (activeView === 'context' && state.activeSpaceId === spaceId) {
+      els.contextStatus.textContent = 'Saved locally';
+    }
+  } catch (error) {
+    if (activeView === 'context' && state.activeSpaceId === spaceId) {
+      els.contextStatus.textContent = 'Save failed';
+    }
+    console.error(error);
+  }
+}
+
+async function clearSpaceContext() {
+  const spaceId = state.activeSpaceId;
+  if (!String(state.spaceContexts?.[spaceId] || '')) return;
+  const ok = await askConfirm({
+    title: 'Clear Context',
+    message: `Clear the local Context for "${currentSpace().name}"?`,
+    confirmText: 'Clear',
+    danger: true,
+  });
+  if (!ok) return;
+  clearTimeout(contextSaveTimer);
+  contextSaveTimer = 0;
+  state.spaceContexts[spaceId] = '';
+  els.spaceContextInput.value = '';
+  await saveState();
+  els.contextStatus.textContent = 'Saved locally';
+}
+
+async function openAskPage() {
   activeView = 'ask';
   ensureCurrentAskSession();
+  await saveState();
   render();
   els.askPagePrompt.focus();
 }
@@ -3404,16 +3517,20 @@ async function summarizeCurrentPage() {
   activeView = 'ask';
   render();
   const session = ensureCurrentAskSession();
-  const statusMessage = addAskMessage('assistant', 'Reading the active page...', session.key);
+  const statusMessage = addAskMessage('assistant', 'Reading the current page in this Space...', session.key);
   const requestId = beginAIRequest();
   try {
-    await ensureActivePagePermission();
     await ensureAIHostPermission();
-    const { page } = await send('page:extract');
+    const page = await extractCurrentPageForAI({ required: true });
     const { text } = await send('ai:chat', {
       settings: state.ai,
       requestId,
-      messages: createPrompt('summarize-page', { ...page, language: state.ai.language }),
+      messages: createPrompt('summarize-page', {
+        ...page,
+        spaceName: currentSpace().name,
+        spaceContext: currentSpaceContextForAI(),
+        language: state.ai.language,
+      }),
     });
     const answer = text || 'No AI text returned.';
     updateAskMessage(statusMessage, answer);
@@ -3437,16 +3554,20 @@ async function askCustomPrompt() {
   const session = ensureCurrentAskSession();
   addAskMessage('user', prompt, session.key);
   const statusMessage = addAskMessage('assistant', 'Thinking...', session.key);
+  const history = (session.messages || []).slice(0, -2).slice(-8);
   const requestId = beginAIRequest();
   try {
-    await ensureActivePagePermission();
     await ensureAIHostPermission();
-    const { page } = await send('page:extract');
+    const page = await extractCurrentPageForAI();
     const { text } = await send('ai:chat', {
       settings: state.ai,
       requestId,
-      messages: createPrompt('custom', {
-        prompt: `Question: ${prompt}\n\nCurrent page:\nTitle: ${page.title || 'Untitled'}\nURL: ${page.url || ''}\nText:\n${page.text || ''}`,
+      messages: createPrompt('ask-space', {
+        question: prompt,
+        spaceName: currentSpace().name,
+        spaceContext: currentSpaceContextForAI(),
+        page,
+        history,
         language: state.ai.language,
       }),
     });
@@ -3459,6 +3580,23 @@ async function askCustomPrompt() {
   } finally {
     endAIRequest(requestId);
   }
+}
+
+async function extractCurrentPageForAI(options = {}) {
+  const active = currentActiveTab();
+  if (!/^https?:/.test(active?.url || '')) {
+    if (options.required) {
+      throw new Error('Switch to an http or https page before summarizing it.');
+    }
+    return {
+      title: active?.title || 'No current web page',
+      url: active?.url || '',
+      text: '',
+    };
+  }
+  await ensureActivePagePermission();
+  const { page } = await send('page:extract');
+  return page;
 }
 
 async function testAI() {
@@ -3487,6 +3625,81 @@ async function testAI() {
   } finally {
     endAIRequest(requestId);
   }
+}
+
+async function exportSpaceData() {
+  snapshotOpenSpace(state.activeSpaceId);
+  await saveState();
+  const backup = createSpaceBackup(state);
+  const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `space-backup-${backup.exportedAt.slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const message = `Exported ${formatSpaceBackupSummary(backup)} API keys were excluded.`;
+  setSpaceBackupStatus(message);
+  setSettingsStatus(message);
+}
+
+async function previewSpaceBackupFile() {
+  const file = els.spaceBackupInput.files?.[0];
+  pendingSpaceBackup = null;
+  els.restoreSpaceDataButton.disabled = true;
+  if (!file) {
+    setSpaceBackupStatus('No backup selected.');
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    setSpaceBackupStatus('This backup is too large to restore safely.');
+    return;
+  }
+
+  try {
+    pendingSpaceBackup = parseSpaceBackup(await file.text());
+    els.restoreSpaceDataButton.disabled = false;
+    setSpaceBackupStatus(`Ready to restore ${formatSpaceBackupSummary(pendingSpaceBackup)}`);
+  } catch (error) {
+    setSpaceBackupStatus(`Cannot read backup: ${error.message || String(error)}`);
+  }
+}
+
+async function restoreSpaceData() {
+  if (!pendingSpaceBackup) {
+    setSpaceBackupStatus('Choose a Space backup first.');
+    return;
+  }
+  const ok = await askConfirm({
+    title: 'Restore Space Data',
+    message: `Replace current Spaces with ${pendingSpaceBackup.spaces.length} Spaces from this backup?`,
+    confirmText: 'Restore',
+    danger: true,
+  });
+  if (!ok) return;
+
+  const summary = restoreSpaceBackup(state, pendingSpaceBackup);
+  activeView = 'space';
+  dormantSpaceView = [];
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+  lastRenderedAskSignature = '';
+  lastRenderedSpacesSignature = '';
+  pendingSpaceBackup = null;
+  els.spaceBackupInput.value = '';
+  els.restoreSpaceDataButton.disabled = true;
+  await saveState();
+  els.settingsDialog.close();
+  await refreshTabs({ adopt: true, reloadDormant: true });
+  setStatus(`Restored ${summary.spaces} Spaces, ${summary.contexts} Context documents, and ${summary.savedTabs} saved tabs.`);
+}
+
+function formatSpaceBackupSummary(backup) {
+  const contexts = Object.values(backup.spaceContexts || {}).filter(Boolean).length;
+  const savedTabs = Object.values(backup.spaceSnapshots || {}).reduce((total, snapshot) => (
+    total + (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0)
+  ), 0);
+  return `${backup.spaces.length} Spaces, ${contexts} Context documents, and ${savedTabs} saved tabs.`;
 }
 
 async function previewArcImportFile() {
@@ -3953,13 +4166,13 @@ async function ensureActivePagePermission() {
   const active = tabs.find((tab) => tab.active);
   const url = active?.url || '';
   if (!/^https?:/.test(url)) {
-    throw new Error('Switch to an http or https page before using Ask Page.');
+    throw new Error('Switch to an http or https page before asking this Space.');
   }
   const origin = getOriginPattern(url);
   const hasPermission = await chrome.permissions.contains({ origins: [origin] });
   if (hasPermission) return true;
   const granted = await chrome.permissions.request({ origins: [origin] });
-  if (!granted) throw new Error(`Space Tabs needs permission to read ${new URL(url).hostname} for Ask Page.`);
+  if (!granted) throw new Error(`Space needs permission to read ${new URL(url).hostname} for Ask Space.`);
   return true;
 }
 
@@ -4081,29 +4294,40 @@ function currentSpace() {
   return state.spaces.find((space) => space.id === state.activeSpaceId) || state.spaces[0];
 }
 
+function currentSpaceContextForAI() {
+  const context = String(state.spaceContexts?.[state.activeSpaceId] || '').trim();
+  if (context.length <= AI_CONTEXT_CHAR_LIMIT) return context;
+  const half = Math.floor(AI_CONTEXT_CHAR_LIMIT / 2);
+  return `${context.slice(0, half)}\n\n[Context shortened for this request]\n\n${context.slice(-half)}`;
+}
+
 function currentActiveTab() {
   return tabs.find((tab) => tab.active) || tabs[0] || {};
 }
 
 function ensureCurrentAskSession() {
-  const tab = currentActiveTab();
-  const key = sessionKeyForTab(tab);
-  const session = ensureAskSessionByKey(key, tab);
+  const space = currentSpace();
+  const key = sessionKeyForSpace(space.id);
+  const session = ensureAskSessionByKey(key, space);
   state.activeAskSessionKey = key;
   state.askSessions = pruneAskSessions(state.askSessions, {
     activeKey: key,
     openTabIds: tabs.map((item) => item.id),
+    spaceIds: state.spaces.map((item) => item.id),
   });
   return session;
 }
 
-function ensureAskSessionByKey(key, tab = currentActiveTab()) {
-  const safeKey = key || sessionKeyForTab(tab);
-  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createAskSession(tab);
+function ensureAskSessionByKey(key, space = currentSpace()) {
+  const safeKey = String(key || '').startsWith('space:') ? key : sessionKeyForSpace(space.id);
+  const keySpaceId = safeKey.slice('space:'.length);
+  const sessionSpace = state.spaces.find((item) => item.id === keySpaceId) || space;
+  if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
+  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createSpaceAskSession(sessionSpace);
   const session = state.askSessions[safeKey];
-  if (tab?.id !== undefined) session.tabId = tab.id;
-  if (tab?.title) session.title = tab.title;
-  if (tab?.url) session.url = session.url || tab.url;
+  session.spaceId = sessionSpace.id;
+  session.title = sessionSpace.name || 'Space';
+  session.url = '';
   return session;
 }
 
@@ -4386,7 +4610,7 @@ function selectedGroupTitle(selectedTabs) {
 
 function activePageStatus() {
   const active = currentActiveTab();
-  return active?.title ? `Chat with ${active.title}` : 'Chat with the active page';
+  return active?.title || 'active page';
 }
 
 function spaceName(spaceId) {
@@ -4418,6 +4642,10 @@ function setSettingsStatus(text) {
 
 function setArcImportStatus(text) {
   els.arcImportStatus.textContent = text;
+}
+
+function setSpaceBackupStatus(text) {
+  els.spaceBackupStatus.textContent = text;
 }
 
 function formatArcImportSummary(summary, prefix = 'Arc import') {

@@ -6,16 +6,16 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.name, 'Space: Arc-like Context Workspaces for Chrome');
+  assert.equal(manifest.short_name, 'Space');
+  assert.equal(manifest.version, '0.5.0');
   assert.equal(manifest.name.includes('Arc Sidecar'), false);
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Alt+S');
-  assert.equal(manifest.commands._execute_action.description, 'Toggle Space Tabs');
-  assert.deepEqual(manifest.content_scripts[0].matches, ['http://*/*', 'https://*/*']);
-  assert.deepEqual(manifest.content_scripts[0].js, ['content-script.js']);
-  assert.equal(manifest.content_scripts[0].run_at, 'document_start');
-  await access(new URL('../content-script.js', import.meta.url));
+  assert.equal(manifest.commands._execute_action.description, 'Toggle Space');
+  assert.equal(manifest.content_scripts, undefined);
   for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'activeTab', 'favicon']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
@@ -41,6 +41,19 @@ test('settings expose provider and model selectors without prefilled free text m
   assert.match(source, /AI_PROVIDER_CATALOG/);
   assert.match(source, /selectedModelFromForm\(/);
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
+});
+
+test('sidepanel exposes Space Context, Ask Space, and portable backup controls', async () => {
+  const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  for (const id of ['contextView', 'spaceContextInput', 'askScope', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(source, /createPrompt\('ask-space'/);
+  assert.match(source, /currentSpaceContextForAI\(\)/);
+  assert.match(source, /createSpaceBackup\(state\)/);
+  assert.match(source, /restoreSpaceBackup\(state, pendingSpaceBackup\)/);
 });
 
 test('settings Save click prevents dialog submit before async work starts', async () => {

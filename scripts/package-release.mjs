@@ -10,7 +10,7 @@ const rootDir = path.resolve(path.dirname(scriptPath), '..');
 const distDir = path.join(rootDir, 'dist');
 const manifestPath = path.join(rootDir, 'manifest.json');
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-const slug = slugify(manifest.name || 'extension');
+const slug = slugify(manifest.short_name || manifest.name || 'extension');
 const version = String(manifest.version || '0.0.0');
 const stageDir = path.join(distDir, `${slug}-${version}`);
 const zipPath = path.join(distDir, `${slug}-${version}.zip`);
@@ -18,7 +18,6 @@ const zipPath = path.join(distDir, `${slug}-${version}.zip`);
 const runtimeEntries = [
   'manifest.json',
   'background.js',
-  'content-script.js',
   'sidepanel.html',
   'sidepanel.css',
   'sidepanel.js',

@@ -511,6 +511,12 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
     groupOrder: { default: ['group:7'], focus: ['group:8'] },
     tabOrder: { default: { ungrouped: [4] }, focus: { ungrouped: [5] } },
     spaceSnapshots: { default: { groups: [] }, focus: { groups: [] } },
+    spaceContexts: { default: '# Delete me', focus: '# Keep me' },
+    askSessions: {
+      'space:default': { key: 'space:default' },
+      'space:focus': { key: 'space:focus' },
+    },
+    activeAskSessionKey: 'space:default',
   };
 
   removeSpaceReferences(state, 'default');
@@ -520,6 +526,11 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
   assert.equal(state.groupOrder.default, undefined);
   assert.equal(state.tabOrder.default, undefined);
   assert.equal(state.spaceSnapshots.default, undefined);
+  assert.equal(state.spaceContexts.default, undefined);
+  assert.equal(state.spaceContexts.focus, '# Keep me');
+  assert.equal(state.askSessions['space:default'], undefined);
+  assert.deepEqual(state.askSessions['space:focus'], { key: 'space:focus' });
+  assert.equal(state.activeAskSessionKey, '');
   assert.deepEqual(state.virtualGroups, {
     'vgroup:live': { title: 'Live', spaceId: 'focus' },
   });

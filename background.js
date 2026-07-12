@@ -319,23 +319,11 @@ async function extractActivePage() {
 
 async function extractTabOutline(tabId) {
   const tab = await chrome.tabs.get(Number(tabId));
-  const fallback = {
+  return {
     title: tab?.title || '',
     url: tab?.url || '',
     headings: [],
   };
-  if (!tab?.id || !/^https?:/.test(tab.url || '')) return fallback;
-
-  try {
-    const response = await chrome.tabs.sendMessage(tab.id, { type: 'page:outline' });
-    return {
-      title: response?.title || fallback.title,
-      url: response?.url || fallback.url,
-      headings: Array.isArray(response?.headings) ? response.headings.slice(0, 10) : [],
-    };
-  } catch {
-    return fallback;
-  }
 }
 
 async function runChatCompletion(settings, messages, requestId = '') {

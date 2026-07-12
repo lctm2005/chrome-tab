@@ -6,7 +6,7 @@ import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 4);
+  assert.equal(state.version, 5);
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.name), ['Space']);
@@ -19,6 +19,7 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.collapsedGroups, {});
   assert.deepEqual(state.collapsedSpaceGroups, {});
   assert.deepEqual(state.askSessions, {});
+  assert.deepEqual(state.spaceContexts, {});
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
@@ -112,6 +113,25 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
 
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
+});
+
+test('migrates v4 Space ownership and Context into v5 without resetting shortcuts', () => {
+  const merged = mergeStoredState({
+    version: 4,
+    activeSpaceId: 'work',
+    spaces: [{ id: 'work', name: 'Work', icon: 'W', color: 'blue' }],
+    groupSpaces: { 7: 'work' },
+    tabSpaces: { 4: 'work' },
+    spaceContexts: { work: '# Launch\nShip the store update.' },
+    shortcuts: { togglePanel: 'Meta+S' },
+  }, createDefaultState());
+
+  assert.equal(merged.version, 5);
+  assert.equal(merged.activeSpaceId, 'work');
+  assert.deepEqual(merged.groupSpaces, { 7: 'work' });
+  assert.deepEqual(merged.tabSpaces, { 4: 'work' });
+  assert.equal(merged.spaceContexts.work, '# Launch\nShip the store update.');
+  assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
 });
 
 test('preserves empty current shortcuts as disabled actions', () => {

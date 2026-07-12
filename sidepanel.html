@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Space Tabs</title>
+    <title>Space</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=18">
+    <link rel="stylesheet" href="sidepanel.css?v=19">
   </head>
   <body>
     <div class="shell">
@@ -36,12 +36,23 @@
 
       <main class="space-view" id="groupsList"></main>
 
+      <main class="context-view" id="contextView" hidden>
+        <div class="context-toolbar">
+          <span id="contextStatus">Saved locally</span>
+          <button class="icon-button compact" type="button" id="clearContextButton" title="Clear Context" aria-label="Clear Context">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>
+          </button>
+        </div>
+        <textarea class="context-editor" id="spaceContextInput" spellcheck="true" placeholder="# Outcome&#10;&#10;## Notes&#10;&#10;## Decisions&#10;&#10;## Next actions"></textarea>
+      </main>
+
       <main class="ask-view" id="askPageView" hidden>
+        <div class="ask-scope" id="askScope"></div>
         <div class="ask-messages" id="askMessages"></div>
-        <textarea id="askPagePrompt" rows="4" placeholder="Ask about the current page"></textarea>
+        <textarea id="askPagePrompt" rows="4" placeholder="Ask this Space"></textarea>
         <div class="ai-actions">
           <button id="askAIButton">Ask</button>
-          <button id="summarizePageButton">Summary</button>
+          <button id="summarizePageButton">Summarize page</button>
         </div>
       </main>
 
@@ -135,6 +146,15 @@
         </div>
         <button type="button" id="testAIButton" class="secondary-button">Test AI</button>
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
+        <section class="space-data-settings">
+          <h3>Space Data</h3>
+          <button type="button" id="exportSpaceDataButton" class="secondary-button">Export Backup</button>
+          <label class="file-picker">
+            <input id="spaceBackupInput" type="file" accept=".json,application/json">
+          </label>
+          <button type="button" id="restoreSpaceDataButton" class="secondary-button" disabled>Restore Backup</button>
+          <div id="spaceBackupStatus" class="settings-status">No backup selected.</div>
+        </section>
         <section class="arc-import-settings">
           <h3>Arc Import</h3>
           <p>Select Arc's <code>StorableSidebar.json</code>.</p>
@@ -145,7 +165,7 @@
           <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
         </section>
         <section class="shortcut-settings">
-          <h3>Shortcuts</h3>
+          <h3>Panel Shortcuts</h3>
           <div id="shortcutsList" class="shortcuts-list"></div>
         </section>
         <menu>
@@ -156,6 +176,6 @@
     </dialog>
 
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=18"></script>
+    <script type="module" src="sidepanel.js?v=19"></script>
   </body>
 </html>

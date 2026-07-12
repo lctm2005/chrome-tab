@@ -1,65 +1,67 @@
-# Space Tabs Privacy Policy
+# Space Privacy Policy
 
-Last updated: 2026-06-25
+Last updated: 2026-07-12
 
-Space Tabs is a Chrome extension for organizing browser tabs into Spaces,
-folders, Chrome tab groups, dormant saved tabs, and optional AI-assisted page
-workflows.
+Space is a Chrome extension for Arc-like browser workspaces, local Context
+documents, dormant saved tabs, and optional BYOK AI.
 
-## Data Space Tabs Handles
+## Data Space Handles
 
-Space Tabs may handle:
+Space may handle:
 
-- Tab titles, URLs, favicons, Chrome tab IDs, and Chrome tab group metadata.
-- User-created Spaces, folders, tab ordering, panel-only tab names, collapsed
-  state, shortcut settings, and extension preferences.
-- Imported Arc `StorableSidebar.json` content when the user selects a file.
-- Current page title, URL, headings, and page text only when the user invokes
-  Ask Page, page summary, or AI-assisted grouping.
-- User-provided AI settings such as base URL, model, language, temperature,
-  and max token preferences.
-- A user-provided AI API key when the user chooses to configure one.
+- Tab titles, URLs, favicons, Chrome tab IDs, and tab group metadata.
+- User-created Spaces, folders, ordering, panel-only tab names, Context
+  documents, Ask history, collapsed state, shortcuts, and preferences.
+- Arc `StorableSidebar.json` content when the user selects a file.
+- Space backup files when the user explicitly exports or restores one.
+- Current page title, URL, selected text, and page text only when the user
+  starts Ask Space or a page summary.
+- User-provided AI provider settings and an optional AI API key.
 
-## Storage
+## Local Storage
 
-Space Tabs stores workspace data and preferences in Chrome extension storage on
-the user's device. Space Tabs stores the optional AI API key in Chrome session
-storage when available, and does not include the API key in the normal saved
-workspace state.
+Space stores workspace data and preferences in Chrome extension storage on the
+user's device. The optional AI API key is stored in Chrome session storage when
+available and is excluded from normal workspace state and exported backups.
 
-Space Tabs does not operate a hosted sync service for this release. Workspace
-data is not uploaded to a Space Tabs server.
+Space does not require an account or operate a hosted sync service in this
+release. Workspace data is not uploaded to a Space server. Space does not
+declare a persistent content script that runs on every website.
+
+Exported backups can contain Context text, Ask history, tab titles, and URLs.
+The user chooses where those files are stored and shared.
 
 ## Network Requests
 
-Core tab, Space, folder, shortcut, and import features work locally.
+Core Space, Context, folder, shortcut, import, export, and tab management
+features work locally.
 
-When the user enables AI features and starts an AI action, Space Tabs sends the
-AI request to the AI endpoint configured by the user in Settings. The request
-may include the current page title, URL, extracted page text, selected prompt,
-tab titles, tab URLs, and the user's AI API key as an authorization header.
+When the user starts an AI action, Space sends the relevant prompt, local Space
+Context, current page content, or tab metadata directly to the AI endpoint
+configured by the user. The API key is sent to that provider as an
+authorization credential. Space does not proxy AI requests through its own
+server.
 
-Space Tabs does not sell, rent, or share user data for advertising.
+Space does not sell, rent, or share user data for advertising.
 
 ## Permissions
 
-Space Tabs requests Chrome permissions to:
+Space requests Chrome permissions to:
 
-- Show the extension in the Chrome side panel.
+- Show the extension in Chrome's side panel.
 - Read and manage tabs and Chrome tab groups for the active browser window.
-- Store local Space, folder, shortcut, and panel state.
-- Read the current page only after user action for Ask Page or summary.
-- Request optional site or AI endpoint access only when a user-initiated
-  feature needs that access.
+- Store local Space data and preferences.
+- Read the active page only after a user starts Ask Space or Summary.
+- Request access to a specific website or AI provider origin at the moment a
+  user-initiated feature needs it.
 
 ## User Control
 
-Users can remove local extension data by uninstalling Space Tabs or clearing
-extension storage in Chrome. Users can clear the AI API key from Settings.
-Users can avoid AI network requests by leaving AI unconfigured or by not using
-AI actions.
+Users can edit or clear each Space Context, clear an AI API key in Settings,
+export their Space data, and restore a chosen backup. Users can remove all
+local extension data by uninstalling Space or clearing its Chrome extension
+storage. Leaving AI unconfigured prevents AI network requests.
 
 ## Contact
 
-Use the support email shown on the Chrome Web Store listing for privacy
-questions and data requests.
+Email privacy questions and data requests to lctm2005@gmail.com.
