@@ -162,11 +162,14 @@ async function createTab(url = 'chrome://newtab', active = true) {
 
 async function openUniqueTab(url, matchUrl = url) {
   const tabs = await chrome.tabs.query({});
-  const existing = tabs.find((tab) => String(tab.url || '').startsWith(String(matchUrl || url)));
+  const matches = tabs.filter((tab) => String(tab.url || '').startsWith(String(matchUrl || url)));
+  const existing = matches[0];
   if (!existing?.id) return { tab: serializeTab(await chrome.tabs.create({ url, active: true })), reused: false };
   const tab = await chrome.tabs.update(existing.id, { url, active: true });
+  const duplicateIds = matches.slice(1).map((match) => match.id).filter(Number.isFinite);
+  if (duplicateIds.length) await chrome.tabs.remove(duplicateIds);
   if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
-  return { tab: serializeTab(tab), reused: true };
+  return { tab: serializeTab(tab), reused: true, closedDuplicates: duplicateIds.length };
 }
 
 async function focusTab(tabId) {

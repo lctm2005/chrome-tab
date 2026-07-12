@@ -126,8 +126,9 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
       }
       case 'tabs:openUnique': {
         const matchUrl = String(payload.matchUrl || payload.url || '');
-        const existingIndex = tabs.findIndex((tab) => String(tab.url || '').startsWith(matchUrl));
-        if (existingIndex < 0) {
+        const matches = tabs.filter((tab) => String(tab.url || '').startsWith(matchUrl));
+        const existing = matches[0];
+        if (!existing) {
           const tab = {
             id: nextId++,
             title: titleFromUrl(payload.url || 'chrome://newtab'),
@@ -144,13 +145,18 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           tabs = tabs.map((item) => ({ ...item, active: false })).concat(tab);
           return persistAndReturn({ tab: { ...tab }, reused: false });
         }
-        tabs = tabs.map((tab, index) => ({
+        const duplicateIds = new Set(matches.slice(1).map((tab) => tab.id));
+        tabs = tabs.filter((tab) => !duplicateIds.has(tab.id)).map((tab) => ({
           ...tab,
-          active: index === existingIndex,
-          url: index === existingIndex ? payload.url : tab.url,
-          title: index === existingIndex ? titleFromUrl(payload.url) : tab.title,
+          active: tab.id === existing.id,
+          url: tab.id === existing.id ? payload.url : tab.url,
+          title: tab.id === existing.id ? titleFromUrl(payload.url) : tab.title,
         }));
-        return persistAndReturn({ tab: { ...tabs[existingIndex] }, reused: true });
+        return persistAndReturn({
+          tab: { ...tabs.find((tab) => tab.id === existing.id) },
+          reused: true,
+          closedDuplicates: duplicateIds.size,
+        });
       }
       case 'tabs:focus': {
         const id = Number(payload.tabId);

@@ -199,8 +199,6 @@ async function main() {
       url: 'about:blank',
       forTab: true,
     }, '');
-    progress(`triggering ${extensionId} toolbar action`);
-    await client.send('Extensions.triggerAction', { id: extensionId, targetId: actionTargetId });
     const workbenchUrl = `${sidepanelUrl}?layout=workbench`;
     const workbenchTargetId = await createLoadedTarget(client, workbenchUrl);
     const { sessionId: workbenchSessionId } = await client.send('Target.attachToTarget', {
@@ -225,12 +223,6 @@ async function main() {
 
     const results = [];
     const record = (name, ok, detail = '') => results.push({ name, ok, detail });
-    record(
-      'toolbar action runs on a real Chrome tab',
-      true,
-      JSON.stringify({ actionTargetId }),
-    );
-
     const initialOnboardingOpen = await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
     record('fresh Workbench opens setup', Boolean(initialOnboardingOpen));
     await evaluate(client, `document.querySelector('#onboardingDialog').dispatchEvent(new Event('cancel', { cancelable: true }))`);
@@ -309,20 +301,6 @@ async function main() {
       JSON.stringify(realGroup),
     );
 
-    await evaluate(client, `(async () => {
-      const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');
-      const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
-      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
-      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
-    })()`);
-    const workbenchCount = await waitFor(client, `(async () => (
-      await chrome.tabs.query({})
-    ).filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench')).length)()`);
-    record(
-      'Open Workbench reuses the existing tab',
-      workbenchCount === 1,
-      String(workbenchCount),
-    );
     await waitFor(client, `document.querySelector('.ask-space')`);
     const reducedAIUI = await evaluate(client, `({
       hasContext: Boolean(document.querySelector('#contextView, .context-space')),
@@ -331,6 +309,7 @@ async function main() {
     })`);
     record('Context and Summary are removed while Ask remains', !reducedAIUI.hasContext && !reducedAIUI.hasSummary && reducedAIUI.hasAsk, JSON.stringify(reducedAIUI));
 
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
     const defaultMaxTokens = await evaluate(client, `document.querySelector('#maxTokensInput').value`);
     record('fresh BYOK max tokens defaults to 1M', defaultMaxTokens === '1000000', defaultMaxTokens);
@@ -347,6 +326,26 @@ async function main() {
     await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'New Space'`);
     record('real Workbench Save shows feedback and applies shortcuts immediately', true);
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+
+    await evaluate(client, `(async () => {
+      const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');
+      const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
+      await chrome.tabs.create({ url: matchUrl, active: false });
+      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+    })()`);
+    const workbenchCount = await waitFor(client, `(async () => (
+      await chrome.tabs.query({})
+    ).filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench')).length)()`);
+    record(
+      'Open Workbench reuses one tab and closes old duplicates',
+      workbenchCount === 1,
+      String(workbenchCount),
+    );
+
+    progress(`triggering ${extensionId} toolbar action`);
+    await client.send('Extensions.triggerAction', { id: extensionId, targetId: actionTargetId }, '');
+    record('toolbar action runs on a real Chrome tab', true, JSON.stringify({ actionTargetId }));
 
     console.log(JSON.stringify({ mode: 'real-extension', extensionId, results }, null, 2));
     const failures = results.filter((result) => !result.ok);

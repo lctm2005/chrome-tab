@@ -71,11 +71,13 @@ test('preview command handler reuses a matching Workbench tab', async () => {
   const send = createPreviewCommandHandler();
   const matchUrl = 'http://localhost/sidepanel.html?layout=workbench';
   const first = await send('tabs:openUnique', { url: matchUrl, matchUrl });
+  await send('tabs:duplicate', { tabId: first.tab.id });
   const second = await send('tabs:openUnique', { url: `${matchUrl}&view=settings`, matchUrl });
   const listed = await send('tabs:list');
 
   assert.equal(first.reused, false);
   assert.equal(second.reused, true);
+  assert.equal(second.closedDuplicates, 1);
   assert.equal(listed.tabs.filter((tab) => tab.url.startsWith(matchUrl)).length, 1);
   assert.equal(second.tab.url, `${matchUrl}&view=settings`);
 });
