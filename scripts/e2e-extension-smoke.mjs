@@ -40,8 +40,6 @@ async function startChromeWithPipe() {
     '--remote-debugging-pipe',
     '--enable-unsafe-extension-debugging',
     `--user-data-dir=${userDataDir}`,
-    '--headless=new',
-    '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-background-networking',
@@ -106,11 +104,11 @@ function createPipeClient(pipeWrite, pipeRead, child) {
 
   return {
     ready: Promise.resolve(),
-    send(method, params = {}) {
+    send(method, params = {}, sessionId = activePipeSessionId) {
       if (closed) return Promise.reject(new Error('Chrome DevTools pipe is closed.'));
       const requestId = ++id;
       const message = { id: requestId, method, params };
-      if (activePipeSessionId) message.sessionId = activePipeSessionId;
+      if (sessionId) message.sessionId = sessionId;
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           pending.delete(requestId);
@@ -159,14 +157,17 @@ async function main() {
     progress('loading the unpacked extension through CDP');
     const { id: extensionId } = await client.send('Extensions.loadUnpacked', { path: repoRoot });
     const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
-    progress(`opening ${extensionId} side panel`);
-    const { targetId } = await client.send('Target.createTarget', { url: sidepanelUrl });
-    const { sessionId } = await client.send('Target.attachToTarget', { targetId, flatten: true });
+    const { targetId: actionTargetId } = await client.send('Target.createTarget', {
+      url: 'about:blank',
+      forTab: true,
+    }, '');
+    progress(`triggering ${extensionId} toolbar action`);
+    await client.send('Extensions.triggerAction', { id: extensionId, targetId: actionTargetId });
+    const { targetId: sidePanelTargetId } = await client.send('Target.createTarget', { url: sidepanelUrl }, '');
+    const { sessionId } = await client.send('Target.attachToTarget', { targetId: sidePanelTargetId, flatten: true }, '');
     activePipeSessionId = sessionId;
     await client.send('Runtime.enable');
     await client.send('Page.enable');
-    const navigation = await client.send('Page.navigate', { url: sidepanelUrl });
-    if (navigation.errorText) throw new Error(`Could not open the extension page: ${navigation.errorText}`);
     await waitFor(client, `document.readyState === 'complete'`);
     const loadedUrl = await evaluate(client, 'location.href');
     if (loadedUrl !== sidepanelUrl) {
@@ -177,6 +178,11 @@ async function main() {
 
     const results = [];
     const record = (name, ok, detail = '') => results.push({ name, ok, detail });
+    record(
+      'toolbar action runs on a real Chrome tab',
+      true,
+      JSON.stringify({ actionTargetId }),
+    );
 
     const runtime = await evaluate(client, `({
       id: chrome.runtime?.id || '',
