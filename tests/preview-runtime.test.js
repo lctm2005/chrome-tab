@@ -67,6 +67,19 @@ test('preview command handler supports tab creation, focus, and close', async ()
   assert.equal(listed.tabs.some((tab) => tab.id === 2), false);
 });
 
+test('preview command handler reuses a matching Workbench tab', async () => {
+  const send = createPreviewCommandHandler();
+  const matchUrl = 'http://localhost/sidepanel.html?layout=workbench';
+  const first = await send('tabs:openUnique', { url: matchUrl, matchUrl });
+  const second = await send('tabs:openUnique', { url: `${matchUrl}&view=settings`, matchUrl });
+  const listed = await send('tabs:list');
+
+  assert.equal(first.reused, false);
+  assert.equal(second.reused, true);
+  assert.equal(listed.tabs.filter((tab) => tab.url.startsWith(matchUrl)).length, 1);
+  assert.equal(second.tab.url, `${matchUrl}&view=settings`);
+});
+
 test('preview command handler supports duplicating a tab beside the source', async () => {
   const send = createPreviewCommandHandler();
 

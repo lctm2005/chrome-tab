@@ -4,17 +4,15 @@ Last updated: 2026-07-12
 
 ## Positioning
 
-Space should be positioned as an Arc-like context workspace for Chrome:
+Space should be positioned as an Arc-like workspace for Chrome:
 
-> One thing. One Space. All its context.
+> One thing. One Space.
 
 The strongest promise is not generic vertical tabs. It is a focused unit of
-work: related pages as sources, a local Context document, and AI that can help
-inside that boundary.
+work that keeps related pages together.
 
-Use `Arc-like` and `Arc import` deliberately in store discovery copy so people
-looking for an Arc workflow in Chrome can recognize the product quickly. Keep
-`Space` as the durable brand beyond browser migration.
+Use `Arc-like` deliberately in store discovery copy so people looking for an
+Arc workflow in Chrome can recognize the product quickly.
 
 ## Target Users
 
@@ -32,18 +30,16 @@ a paid tier.
 
 Free release:
 
-- Spaces, local Context documents, folders, tab groups, and dormant saved tabs.
-- Arc import.
+- Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
 - Local Auto Group fallback.
-- BYOK Ask Space grounded in Context and the current page.
+- BYOK Ask Space grounded in the active page.
 
 Future Pro tier:
 
 - Cross-device sync.
 - Space templates.
-- Multi-source Context indexing and document attachments.
 - Advanced AI synthesis, planning, and workspace cleanup.
 - Shareable export packs for research sessions.
 - Team-shared Space templates and onboarding packs.
@@ -74,8 +70,7 @@ The first store release should not require sign-in.
 
 - Keep the core local-first and usable without AI.
 - Request optional host permissions at the moment of need, not during install.
-- Let AI operate inside an explicit Space Context instead of across unrelated
-  browsing history.
-- Charge for durable value such as sync, richer context, templates, and team reuse.
+- Keep AI scoped to an explicit user action and the selected page.
+- Charge for durable value such as sync, templates, and team reuse.
 - Avoid ads and affiliate links. Trust is a more important asset for this
   category than short-term revenue.

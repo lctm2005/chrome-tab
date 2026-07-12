@@ -7,6 +7,7 @@ export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
+const LEGACY_DEFAULT_MAX_TOKENS = new Set([1024, 2048, 32768]);
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -17,11 +18,11 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 6,
+    version: 7,
     theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
-      { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
+      { id: 'default', name: 'Default', icon: 'D', color: 'blue' },
     ],
     groupSpaces: {},
     tabSpaces: {},
@@ -59,9 +60,9 @@ export function createDefaultState(localConfig = {}) {
 export function mergeStoredState(stored, defaults = createDefaultState()) {
   if (!stored || typeof stored !== 'object') return defaults;
   const compatibleSpaceModel = Number(stored.version) >= 4 && Number(stored.version) <= Number(defaults.version);
-  const spaces = compatibleSpaceModel
+  const spaces = normalizeDefaultSpace(compatibleSpaceModel
     ? validSpaces(stored.spaces, defaults.spaces)
-    : migrateSpaces(stored.spaces, defaults.spaces);
+    : migrateSpaces(stored.spaces, defaults.spaces), stored.version);
   const activeSpaceId = spaces.some((space) => space.id === stored.activeSpaceId)
     ? stored.activeSpaceId
     : spaces[0].id;
@@ -90,8 +91,15 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     onboarding: normalizeOnboarding(stored.onboarding, defaults.onboarding),
     lastArcImport: normalizeLastArcImport(stored.lastArcImport),
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
-    ai: migrateAISettings(stored.ai, defaults.ai),
+    ai: migrateAISettings(stored.ai, defaults.ai, stored.version),
   };
+}
+
+function normalizeDefaultSpace(spaces, storedVersion = 0) {
+  if (Number(storedVersion) >= 7) return spaces;
+  return spaces.map((space) => space.id === 'default'
+    ? { ...space, name: 'Default', icon: 'D' }
+    : space);
 }
 
 function normalizeOnboarding(value, fallback = { version: 1, completed: false }) {
@@ -114,8 +122,11 @@ function normalizeLastArcImport(value) {
   };
 }
 
-function migrateAISettings(storedAI = {}, defaultAI = {}) {
+function migrateAISettings(storedAI = {}, defaultAI = {}, storedVersion = 0) {
   let ai = { ...defaultAI, ...(storedAI || {}) };
+  if (Number(storedVersion) < 7 && LEGACY_DEFAULT_MAX_TOKENS.has(Number(storedAI?.maxTokens))) {
+    ai.maxTokens = defaultAI.maxTokens;
+  }
   if (isLegacyBuiltInAISettings(storedAI)) {
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';

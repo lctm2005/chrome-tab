@@ -6,10 +6,11 @@ import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 6);
+  assert.equal(state.version, 7);
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
-  assert.deepEqual(state.spaces.map((space) => space.name), ['Space']);
+  assert.deepEqual(state.spaces.map((space) => space.name), ['Default']);
+  assert.equal(state.ai.maxTokens, 1_000_000);
   assert.deepEqual(state.groupSpaces, {});
   assert.deepEqual(state.virtualGroups, {});
   assert.deepEqual(state.tabGroups, {});
@@ -117,7 +118,7 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
-test('migrates v4 Space ownership and Context into v6 without resetting shortcuts', () => {
+test('migrates v4 Space ownership into v7 without resetting shortcuts', () => {
   const merged = mergeStoredState({
     version: 4,
     activeSpaceId: 'work',
@@ -128,7 +129,7 @@ test('migrates v4 Space ownership and Context into v6 without resetting shortcut
     shortcuts: { togglePanel: 'Meta+S' },
   }, createDefaultState());
 
-  assert.equal(merged.version, 6);
+  assert.equal(merged.version, 7);
   assert.equal(merged.activeSpaceId, 'work');
   assert.deepEqual(merged.groupSpaces, { 7: 'work' });
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
@@ -139,7 +140,7 @@ test('migrates v4 Space ownership and Context into v6 without resetting shortcut
 
 test('preserves completed onboarding and a valid Arc import undo record', () => {
   const merged = mergeStoredState({
-    version: 6,
+    version: 7,
     onboarding: { version: 1, completed: true },
     lastArcImport: { spaceIds: ['arc-work', 'arc-work', 'arc-home'], importedAt: 123 },
   }, createDefaultState());
@@ -149,6 +150,18 @@ test('preserves completed onboarding and a valid Arc import undo record', () => 
     spaceIds: ['arc-work', 'arc-home'],
     importedAt: 123,
   });
+});
+
+test('migrates the legacy default Space and max token defaults', () => {
+  const merged = mergeStoredState({
+    version: 6,
+    activeSpaceId: 'default',
+    spaces: [{ id: 'default', name: 'Launch review', icon: 'L', color: 'blue' }],
+    ai: { maxTokens: 1024 },
+  }, createDefaultState());
+
+  assert.deepEqual(merged.spaces[0], { id: 'default', name: 'Default', icon: 'D', color: 'blue' });
+  assert.equal(merged.ai.maxTokens, 1_000_000);
 });
 
 test('preserves empty current shortcuts as disabled actions', () => {

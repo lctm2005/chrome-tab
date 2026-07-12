@@ -82,16 +82,9 @@ test('keeps missing API key errors distinct from provider rejection', () => {
   );
 });
 
-test('adds language instructions to Ask and Summary prompts', () => {
+test('adds language instructions to AI prompts', () => {
   assert.equal(languageInstruction('zh-CN'), 'Respond in Simplified Chinese.');
   assert.equal(languageInstruction('en'), 'Respond in English.');
-
-  const summary = createPrompt('summarize-page', {
-    title: 'Title',
-    text: 'Page text',
-    language: 'zh-CN',
-  });
-  assert.match(summary[0].content, /Respond in Simplified Chinese/);
 
   const custom = createPrompt('custom', {
     prompt: 'Question',
@@ -100,10 +93,9 @@ test('adds language instructions to Ask and Summary prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
-test('grounds Ask Space in local Context and the current page', () => {
+test('grounds Ask Space in the current page', () => {
   const prompt = createPrompt('ask-space', {
     spaceName: 'Store launch',
-    spaceContext: '# Decision\nLead with Arc-like migration.',
     page: {
       title: 'Competitor listing',
       url: 'https://example.com/competitor',
@@ -116,7 +108,6 @@ test('grounds Ask Space in local Context and the current page', () => {
   assert.match(prompt[0].content, /focused work Space/);
   assert.match(prompt[0].content, /reference data/);
   assert.match(prompt[1].content, /Store launch/);
-  assert.match(prompt[1].content, /Lead with Arc-like migration/);
   assert.match(prompt[1].content, /Competitor listing/);
   assert.match(prompt[1].content, /What should we emphasize/);
 });

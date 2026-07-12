@@ -304,7 +304,7 @@ async function main() {
       },
     };
     state.spaces = [
-      { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
+      { id: 'default', name: 'Default', icon: 'D', color: 'blue' },
       { id: 'folder-demo', name: 'Folder Demo', icon: 'F', color: 'green' },
       { id: 'dormant-demo', name: 'Dormant Demo', icon: 'D', color: 'purple' },
       { id: 'drag-demo', name: 'Drag Demo', icon: 'R', color: 'pink' },
@@ -381,7 +381,7 @@ async function main() {
     return true;
   })()`);
     await client.send('Page.reload', { ignoreCache: true });
-    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelector('.add-space')`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
 
     if (arcImportFile) {
@@ -401,7 +401,7 @@ async function main() {
         location.reload();
         return true;
       })()`);
-      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
       for (const space of arcPlan.spaces) {
         await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
         await evaluate(client, `(() => {
@@ -460,11 +460,11 @@ async function main() {
       }
       await evaluate(client, `(() => {
         const button = [...document.querySelectorAll('.space')]
-          .find((node) => node.title === 'Space');
+          .find((node) => node.title === 'Default');
         button.click();
         return true;
       })()`);
-      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
     }
 
   await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
@@ -498,11 +498,11 @@ async function main() {
   await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
-    buttons.find((button) => button.title === 'Space').click();
+    buttons.find((button) => button.title === 'Default').click();
     return true;
   })()`);
   const emptySpaceSwitchState = await waitFor(client, `(() => {
-    if (document.querySelector('#activeSpaceName')?.textContent !== 'Space') return null;
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'Default') return null;
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const rows = [...document.querySelectorAll('.tab-row')].map((row) => row.textContent);
     const carrierMutations = new Set(${JSON.stringify(carrierMutationCommands)});
@@ -559,26 +559,22 @@ async function main() {
       && settingsState.position === 'static',
     JSON.stringify(settingsState),
   );
-  await client.send('Page.navigate', { url: sidepanelUrl });
-  await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelector('.context-space')`);
-
-  await evaluate(client, `document.querySelector('.context-space').click()`);
-  await waitFor(client, `!document.querySelector('#contextView')?.hidden`);
   await evaluate(client, `(() => {
-    const input = document.querySelector('#spaceContextInput');
-    input.value = '# E2E Context\\nOne thing per Space.';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
+    input.dataset.shortcut = 'Control+Alt+K';
+    input.value = 'Ctrl + Alt + K';
+    document.querySelector('#saveSettingsButton').click();
     return true;
   })()`);
-  const savedContext = await waitFor(client, `(() => {
-    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    return stored.spaceContexts?.default || null;
-  })()`);
-  record(
-    'Context editor saves a local document for the active Space',
-    savedContext === '# E2E Context\nOne thing per Space.',
-    savedContext,
-  );
+  await waitFor(client, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.' && !document.querySelector('#workbenchToast')?.hidden`);
+  await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'k', code: 'KeyK', ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
+  }))`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'New Space'`);
+  record('saved Workbench shortcuts apply immediately and Save shows visible feedback', true);
+  await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+  await client.send('Page.navigate', { url: sidepanelUrl });
+  await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.ask-space')`);
 
   await evaluate(client, `document.querySelector('.ask-space').click()`);
   await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
@@ -593,12 +589,12 @@ async function main() {
   })()`);
   record(
     'Ask Space uses one conversation session for the active Space',
-    askSpaceState.key === 'space:default' && askSpaceState.spaceId === 'default' && askSpaceState.scope.startsWith('Context + '),
+    askSpaceState.key === 'space:default' && askSpaceState.spaceId === 'default' && !askSpaceState.scope.includes('Context'),
     JSON.stringify(askSpaceState),
   );
 
   await evaluate(client, `(() => {
-    [...document.querySelectorAll('.space')].find((button) => button.title === 'Space')?.click();
+    [...document.querySelectorAll('.space')].find((button) => button.title === 'Default')?.click();
     return true;
   })()`);
   await waitFor(client, `!document.querySelector('#groupsList')?.hidden`);
@@ -752,11 +748,11 @@ async function main() {
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
-    const space = buttons.find((button) => button.title === 'Space');
+    const space = buttons.find((button) => button.title === 'Default');
     space.click();
     return true;
   })()`);
-  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
   await waitFor(client, `(() => {
     const headers = [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent);
     return headers.includes('Research') && headers.includes('Build') && headers.includes('Inbox');
@@ -1166,11 +1162,11 @@ async function main() {
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Folder Demo'`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
-    const space = buttons.find((button) => button.title === 'Space');
+    const space = buttons.find((button) => button.title === 'Default');
     space.click();
     return true;
   })()`);
-  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
   const roundTripState = await waitFor(client, `(() => {
     const headers = [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent);
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
@@ -1205,10 +1201,10 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Folder Demo'`);
     await evaluate(client, `(() => {
       const buttons = [...document.querySelectorAll('.space')];
-      buttons.find((button) => button.title === 'Space').click();
+      buttons.find((button) => button.title === 'Default').click();
       return true;
     })()`);
-    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
   }
   const stressState = await evaluate(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
@@ -1411,10 +1407,10 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo'`);
     await evaluate(client, `(() => {
       const buttons = [...document.querySelectorAll('.space')];
-      buttons.find((button) => button.title === 'Space').click();
+      buttons.find((button) => button.title === 'Default').click();
       return true;
     })()`);
-    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
   }
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
@@ -1473,7 +1469,7 @@ async function main() {
       state.version = 4;
       state.activeSpaceId = 'default';
       state.spaces = [
-        { id: 'default', name: 'Space', icon: 'S', color: 'blue' },
+        { id: 'default', name: 'Default', icon: 'D', color: 'blue' },
         { id: 'move-target', name: 'Move Target', icon: 'M', color: 'cyan' },
       ];
       state.groupSpaces = { 20: 'default' };
@@ -1524,7 +1520,7 @@ async function main() {
       location.reload();
       return true;
     })()`);
-    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelectorAll('.tab-row').length === 2`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelectorAll('.tab-row').length === 2`);
     await evaluate(client, `(() => {
       const row = document.querySelectorAll('.tab-row')[0];
       row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));

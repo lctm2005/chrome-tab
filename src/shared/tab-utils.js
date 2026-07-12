@@ -200,6 +200,21 @@ export function groupTitleKey(title) {
     .toLowerCase();
 }
 
+export function countPlannedRegroups(plannedGroups = [], candidateTabs = [], liveGroups = []) {
+  const plannedTitleByTabId = new Map();
+  for (const group of plannedGroups) {
+    const titleKey = groupTitleKey(group.title);
+    for (const tabId of group.tabIds || []) plannedTitleByTabId.set(Number(tabId), titleKey);
+  }
+  const liveGroupsById = new Map(liveGroups.map((group) => [Number(group.id), group]));
+  return candidateTabs.filter((tab) => {
+    if (!isGroupedTab(tab)) return false;
+    const plannedTitle = plannedTitleByTabId.get(Number(tab.id));
+    if (!plannedTitle) return false;
+    return plannedTitle !== groupTitleKey(liveGroupsById.get(Number(tab.groupId))?.title || '');
+  }).length;
+}
+
 function uniqueNumbers(values = []) {
   const seen = new Set();
   const ids = [];

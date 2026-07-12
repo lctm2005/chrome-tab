@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildGroupPreviewItems,
   buildSpaceView,
+  countPlannedRegroups,
   decorateTabs,
   domainFromUrl,
   isPageShortcutCapableUrl,
@@ -16,6 +17,27 @@ import {
   spaceGroupPlan,
   searchTabs,
 } from '../src/shared/tab-utils.js';
+
+test('counts only grouped tabs that Auto Group would move to a different titled group', () => {
+  const tabs = [
+    { id: 1, groupId: -1 },
+    { id: 2, groupId: 10 },
+    { id: 3, groupId: 20 },
+    { id: 4, groupId: 20 },
+  ];
+  const groups = [
+    { id: 10, title: 'Research' },
+    { id: 20, title: 'Build' },
+  ];
+  const plan = [
+    { title: 'Research', tabIds: [1, 2, 3] },
+    { title: 'Build', tabIds: [4] },
+  ];
+
+  assert.equal(countPlannedRegroups(plan, tabs, groups), 1);
+  assert.equal(countPlannedRegroups([{ title: 'Research', tabIds: [1, 2] }], tabs, groups), 0);
+  assert.equal(countPlannedRegroups([], tabs, groups), 0);
+});
 
 test('extracts readable domains from URLs', () => {
   assert.equal(domainFromUrl('https://docs.z.ai/guides/llm/glm-5.2'), 'docs.z.ai');

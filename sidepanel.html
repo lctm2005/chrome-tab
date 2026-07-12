@@ -39,28 +39,18 @@
 
       <main class="space-view" id="groupsList"></main>
 
-      <main class="context-view" id="contextView" hidden>
-        <div class="context-toolbar">
-          <span id="contextStatus">Saved locally</span>
-          <button class="icon-button compact" type="button" id="clearContextButton" title="Clear Context" aria-label="Clear Context">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>
-          </button>
-        </div>
-        <textarea class="context-editor" id="spaceContextInput" spellcheck="true" placeholder="# Outcome&#10;&#10;## Notes&#10;&#10;## Decisions&#10;&#10;## Next actions"></textarea>
-      </main>
-
       <main class="ask-view" id="askPageView" hidden>
         <div class="ask-scope" id="askScope"></div>
         <div class="ask-messages" id="askMessages"></div>
         <textarea id="askPagePrompt" rows="4" placeholder="Ask this Space"></textarea>
         <div class="ai-actions">
           <button id="askAIButton">Ask</button>
-          <button id="summarizePageButton">Summarize page</button>
         </div>
       </main>
 
       <nav class="space-dock" id="spacesList" aria-label="Spaces"></nav>
       <div class="context-menu" id="contextMenu" hidden></div>
+      <div class="workbench-toast" id="workbenchToast" role="status" aria-live="polite" hidden></div>
     </div>
 
     <dialog id="actionDialog">
@@ -106,14 +96,14 @@
           <section class="onboarding-step" id="onboardingChooseStep">
             <div class="onboarding-copy">
               <h2>What are you bringing into focus?</h2>
-              <p>Start one thing here, or move your Arc Spaces without starting over.</p>
+              <p>Start with a clean Default Space.</p>
             </div>
             <div class="onboarding-choices">
               <button type="button" class="onboarding-choice" data-onboarding-path="fresh">
                 <span class="onboarding-choice-icon">+</span>
-                <span><strong>Start with one thing</strong><small>Create a Space and its local Context.</small></span>
+                <span><strong>Start with one thing</strong><small>Create a focused Space.</small></span>
               </button>
-              <button type="button" class="onboarding-choice" data-onboarding-path="arc">
+              <button type="button" class="onboarding-choice" data-onboarding-path="arc" hidden>
                 <span class="onboarding-choice-icon">A</span>
                 <span><strong>Move from Arc</strong><small>Preview and choose the Spaces to import.</small></span>
               </button>
@@ -122,23 +112,19 @@
 
           <section class="onboarding-step" id="onboardingFreshStep" hidden>
             <div class="onboarding-copy">
-              <h2>Name the thing, then give it Context.</h2>
-              <p>The Context document stays local and becomes the durable memory for this Space.</p>
+              <h2>Name the thing.</h2>
+              <p>Use one Space for one project, decision, or research thread.</p>
             </div>
             <label class="onboarding-field">
               Space name
               <input id="onboardingSpaceNameInput" type="text" maxlength="64" autocomplete="off" placeholder="Research launch">
-            </label>
-            <label class="onboarding-field onboarding-context-field">
-              Local Context
-              <textarea id="onboardingContextInput" rows="8" spellcheck="true" placeholder="# Outcome&#10;&#10;## Known facts&#10;&#10;## Decisions&#10;&#10;## Next actions"></textarea>
             </label>
           </section>
 
           <section class="onboarding-step" id="onboardingArcStep" hidden>
             <div class="onboarding-copy">
               <h2>Choose what comes over from Arc.</h2>
-              <p>Select Arc's <code>StorableSidebar.json</code>. Nothing is imported until you confirm.</p>
+              <p>Arc import is not available in this release.</p>
             </div>
             <label class="onboarding-file-picker">
               <input id="onboardingArcInput" type="file" accept=".json,application/json">
@@ -249,9 +235,9 @@
           <button type="button" id="restoreSpaceDataButton" class="secondary-button" disabled>Restore Backup</button>
           <div id="spaceBackupStatus" class="settings-status">No backup selected.</div>
         </section>
-        <section class="arc-import-settings">
+        <section class="arc-import-settings" hidden>
           <h3>Arc Import</h3>
-          <p>Select Arc's <code>StorableSidebar.json</code>.</p>
+          <p>Arc import is not available in this release.</p>
           <label class="file-picker">
             <input id="arcImportInput" type="file" accept=".json,application/json">
           </label>

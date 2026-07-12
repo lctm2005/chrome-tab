@@ -6,9 +6,9 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.name, 'Space: Arc-like Context Workspaces for Chrome');
+  assert.equal(manifest.name, 'Space: Arc-like Workspaces for Chrome');
   assert.equal(manifest.short_name, 'Space');
-  assert.equal(manifest.version, '0.5.0');
+  assert.equal(manifest.version, '0.5.1');
   assert.equal(manifest.name.includes('Arc Sidecar'), false);
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -43,17 +43,18 @@ test('settings expose provider and model selectors without prefilled free text m
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 
-test('sidepanel exposes Space Context, Ask Space, and portable backup controls', async () => {
+test('sidepanel exposes Ask Space and portable backup controls without Context or Summary UI', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  for (const id of ['contextView', 'spaceContextInput', 'askScope', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
+  for (const id of ['askScope', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(source, /createPrompt\('ask-space'/);
-  assert.match(source, /currentSpaceContextForAI\(\)/);
   assert.match(source, /createSpaceBackup\(state\)/);
   assert.match(source, /restoreSpaceBackup\(state, pendingSpaceBackup\)/);
+  assert.doesNotMatch(html, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"/);
+  assert.doesNotMatch(source, /currentSpaceContextForAI|summarizeCurrentPage/);
 });
 
 test('sidepanel exposes focused onboarding and full-page Workbench Settings', async () => {
@@ -68,7 +69,12 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);
   assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
+  assert.match(source, /send\('tabs:openUnique'/);
+  assert.match(source, /state\.onboarding\?\.completed === true/);
+  assert.match(source, /addEventListener\('keydown', handleDocumentKeydown, \{ capture: true \}\)/);
+  assert.match(html, /id="workbenchToast"/);
   assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
+  assert.match(html, /class="arc-import-settings" hidden/);
   assert.doesNotMatch(html, /Cross-Space Search/i);
   assert.doesNotMatch(source, /workspace-search/);
 });
@@ -162,6 +168,14 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /state\.ai\.apiKey/);
   assert.match(source, /existingNames:\s*state\.renamedTabs/);
   assert.match(source, /preserveExisting:\s*true/);
+});
+
+test('Auto Group includes grouped tabs and confirms only planned regroups', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /tabBelongsToSpace\(tab, state\.activeSpaceId\)/);
+  assert.match(source, /const regroupedCount = countPlannedRegroups\(plannedGroups, candidates, groups\)/);
+  assert.match(source, /if \(regroupedCount > 0\)[\s\S]*title: 'Regroup existing tabs\?'/);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {

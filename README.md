@@ -1,18 +1,14 @@
 # Space
 
-Space is an Arc-like context workspace for Chrome. Its working model is simple:
-one thing per Space, related pages as sources, and one local Context document
-that keeps the outcome, notes, decisions, and next actions together.
-
-`Ask Space` combines that local Context with the current page. AI is optional,
-BYOK, and sent only to the provider the user configures.
+Space is an Arc-like workspace for Chrome: one thing per Space, with the pages
+around it kept together. `Ask Space` can use the current page through an
+optional BYOK provider.
 
 ## Features
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
-- Context: keep one local Markdown document for each Space.
-- Ask Space: ask questions using the current Space Context and active page together.
-- Workbench: use a full-page view for the current Space's Sources, Context, Ask, and Settings.
+- Ask Space: ask questions using the active page.
+- Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
 - Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
@@ -20,8 +16,7 @@ BYOK, and sent only to the provider the user configures.
 - Auto Group: group ungrouped tabs locally, with optional BYOK AI support.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
-- Arc import: preview and choose Arc `StorableSidebar.json` Spaces, then undo the latest import if needed.
-- Portable backup: export and restore Spaces, Context documents, saved tabs, and Ask history without API keys.
+- Portable backup: export and restore Spaces, saved tabs, and Ask history without API keys.
 - Local-first privacy: no account, hosted sync service, or persistent script running on every website.
 - Panel shortcuts: built-in keyboard actions with user-editable bindings in Settings.
 
@@ -80,25 +75,16 @@ Click `Settings` in the side panel to open the full-page Workbench, then configu
   endpoints and local Ollama models.
 - `API Key`: stored locally by Chrome for the current extension session; Ollama
   runs locally and does not require one.
-- `Language`: controls Ask Space and summary output language.
+- `Language`: controls Ask Space output language.
 
 If no API key is configured, normal Space, folder, and tab management features continue to work.
-
-## Arc Import
-
-1. Open `Settings` from the side panel or Workbench.
-2. Choose Arc's `StorableSidebar.json`.
-3. Review the import summary.
-4. Click `Append Import`; use `Undo Last Import` if you need to remove that batch.
-
-The importer appends Spaces and keeps the current Space active. Arc folders become nested folder paths, leaf folders become Chrome tab groups when opened, and saved tabs remain dormant until selected.
 
 ## Space Backup
 
 Open `Settings` and use `Export Backup` to write a portable JSON file. Restore
 replaces the current Spaces while keeping local AI settings, shortcuts, and API
-keys unchanged. The exported file can contain Context text, saved page URLs, and
-Ask history, so treat it as personal workspace data.
+keys unchanged. The exported file can contain saved page URLs and Ask history,
+so treat it as personal workspace data.
 
 ## Shortcuts
 

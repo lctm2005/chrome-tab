@@ -42,6 +42,8 @@ async function handleMessage(message, sender = {}) {
       return listTabs(message.windowId);
     case 'tabs:create':
       return createTab(message.url, message.active);
+    case 'tabs:openUnique':
+      return openUniqueTab(message.url, message.matchUrl);
     case 'tabs:focus':
       return focusTab(message.tabId);
     case 'tabs:duplicate':
@@ -156,6 +158,15 @@ async function listTabs(windowId) {
 async function createTab(url = 'chrome://newtab', active = true) {
   const tab = await chrome.tabs.create({ url, active: active !== false });
   return { tab: serializeTab(tab) };
+}
+
+async function openUniqueTab(url, matchUrl = url) {
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find((tab) => String(tab.url || '').startsWith(String(matchUrl || url)));
+  if (!existing?.id) return { tab: serializeTab(await chrome.tabs.create({ url, active: true })), reused: false };
+  const tab = await chrome.tabs.update(existing.id, { url, active: true });
+  if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
+  return { tab: serializeTab(tab), reused: true };
 }
 
 async function focusTab(tabId) {

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Space: Arc-like Context Workspaces for Chrome",
+  "name": "Space: Arc-like Workspaces for Chrome",
   "short_name": "Space",
-  "description": "Arc-like workspaces for Chrome: organize one thing per Space, import Arc, write local Context, and use private BYOK AI.",
-  "version": "0.5.0",
+  "description": "Arc-like workspaces for Chrome: organize one thing per Space, keep tabs focused, and use private BYOK AI.",
+  "version": "0.5.1",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "Open Space",

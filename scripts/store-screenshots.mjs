@@ -53,19 +53,19 @@ const shots = [
     id: 'settings',
     file: '04-settings-arc-import-shortcuts.png',
     title: 'Settings',
-    kicker: 'Import, backup, and shortcuts',
-    description: 'Move from Arc, keep portable backups, and connect only the AI provider you choose.',
+    kicker: 'Backup, BYOK, and shortcuts',
+    description: 'Keep portable backups and connect only the AI provider you choose.',
     activeSpaceId: 'launch',
-    notes: ['Arc import', 'Portable backup', 'BYOK settings'],
+    notes: ['Portable backup', 'BYOK settings', 'Shortcuts'],
   },
   {
     id: 'ask',
     file: '05-ask-page-byok-ai.png',
     title: 'Ask Space',
-    kicker: 'AI grounded in your Context',
-    description: 'Combine the Space document with the current page using your own AI provider and key.',
+    kicker: 'AI grounded in the active page',
+    description: 'Ask about the page you are using with your own AI provider and key.',
     activeSpaceId: 'launch',
-    notes: ['Local Context', 'Your API key', 'No account required'],
+    notes: ['Active page', 'Your API key', 'No account required'],
   },
 ];
 
@@ -473,24 +473,14 @@ function storeShotHtml(shot) {
       function openSettings(doc) {
         const dialog = doc.querySelector('#settingsDialog');
         const form = doc.querySelector('.settings');
-        const arcStatus = doc.querySelector('#arcImportStatus');
         const settingsStatus = doc.querySelector('#settingsStatus');
         const backupStatus = doc.querySelector('#spaceBackupStatus');
         const backupInput = doc.querySelector('#spaceBackupInput');
         const backupPicker = backupInput?.closest('.file-picker');
         const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
-        const arcInput = doc.querySelector('#arcImportInput');
-        const filePicker = arcInput?.closest('.file-picker');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
         doc.head.append(style);
-        if (filePicker && arcInput && !filePicker.querySelector('.store-file-row')) {
-          arcInput.hidden = true;
-          const fakePicker = doc.createElement('div');
-          fakePicker.className = 'store-file-row';
-          fakePicker.innerHTML = '<span class="store-file-button">Choose File</span><span>StorableSidebar.json</span>';
-          filePicker.append(fakePicker);
-        }
         if (backupPicker && backupInput && !backupPicker.querySelector('.store-file-row')) {
           backupInput.hidden = true;
           const fakeBackupPicker = doc.createElement('div');
@@ -498,9 +488,8 @@ function storeShotHtml(shot) {
           fakeBackupPicker.innerHTML = '<span class="store-file-button">Choose File</span><span>space-backup-2026-07-12.json</span>';
           backupPicker.append(fakeBackupPicker);
         }
-        if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces, 2 Context documents, and 8 saved tabs.';
+        if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
         if (restoreBackup) restoreBackup.disabled = false;
-        if (arcStatus) arcStatus.textContent = 'Ready to append: 3 Spaces, 9 folders, 42 tabs from Arc.';
         if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
         if (dialog?.open && form) {
           const spaceData = doc.querySelector('.space-data-settings');
@@ -512,14 +501,14 @@ function storeShotHtml(shot) {
         doc.querySelector('.ask-space')?.click();
         await waitFor(() => !doc.querySelector('#askPageView')?.hidden);
         const input = doc.querySelector('#askPagePrompt');
-        input.value = 'Using this Space Context, what should I do next?';
+        input.value = 'What should I do next based on this page?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
           .some((node) => /Preview AI response/i.test(node.textContent)), 5000);
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
-          assistant.innerHTML = '<p><strong>Next actions</strong></p><p>Based on the Launch Context and current brief: finalize the Arc-like store copy, verify privacy notes, and package version 0.5.0.</p>';
+          assistant.innerHTML = '<p><strong>Next actions</strong></p><p>Based on the current launch brief: finalize the store copy, verify privacy notes, and package the release.</p>';
         }
       }
 
@@ -566,7 +555,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 5,
+    version: 7,
     theme: 'ocean',
     activeSpaceId,
     spaces,
@@ -604,10 +593,7 @@ function baseState(activeSpaceId) {
     collapsedSpaceGroups: {},
     askSessions: {},
     activeAskSessionKey: '',
-    spaceContexts: {
-      launch: '# Outcome\nPublish Space 0.5.0.\n\n## Decisions\n- Lead with Arc-like migration.\n- Keep Context local and AI BYOK.\n\n## Next actions\n- Finalize store copy.\n- Verify privacy notes.\n- Package the release.',
-      research: '# Research\nCompare workspace models and collect launch evidence.',
-    },
+    spaceContexts: {},
     spaceSnapshots: {
       research: {
         version: 1,
@@ -652,6 +638,7 @@ function baseState(activeSpaceId) {
         ],
       },
     },
+    onboarding: { version: 1, completed: true },
     shortcuts: {
       togglePanel: 'Alt+S',
       askSubmit: 'Meta+Enter',
@@ -671,7 +658,7 @@ function baseState(activeSpaceId) {
       thinking: 'disabled',
       language: 'en',
       temperature: 0.6,
-      maxTokens: 2048,
+      maxTokens: 1000000,
     },
   };
 }

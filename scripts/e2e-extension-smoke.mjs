@@ -113,7 +113,7 @@ function createPipeClient(pipeWrite, pipeRead, child) {
         const timeout = setTimeout(() => {
           pending.delete(requestId);
           reject(new Error(`Timed out waiting for Chrome CDP method: ${method}`));
-        }, 20000);
+        }, 45000);
         pending.set(requestId, { resolve, reject, timeout });
         pipeWrite.write(`${JSON.stringify(message)}\0`);
       });
@@ -146,6 +146,43 @@ async function waitFor(client, expression, timeoutMs = 6000) {
   throw new Error(`Timed out waiting for: ${expression}`);
 }
 
+async function waitForTarget(client, predicate, timeoutMs = 8000) {
+  const started = Date.now();
+  let lastTargetInfos = [];
+  while (Date.now() - started < timeoutMs) {
+    const { targetInfos = [] } = await client.send('Target.getTargets', {}, '');
+    lastTargetInfos = targetInfos;
+    const target = targetInfos.find(predicate);
+    if (target) return target;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const summary = lastTargetInfos
+    .filter((target) => target.type === 'page')
+    .map((target) => `${target.title || '(untitled)'} <${target.url || '(blank)'}>`)
+    .join(', ');
+  throw new Error(`Timed out waiting for a matching Chrome target. Pages: ${summary || '(none)'}`);
+}
+
+async function createLoadedTarget(client, url, attempts = 3) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const { targetId } = await client.send('Target.createTarget', { url }, '');
+    try {
+      await waitForTarget(
+        client,
+        (target) => target.targetId === targetId && String(target.url || '').startsWith(url),
+        5000,
+      );
+      return targetId;
+    } catch (error) {
+      lastError = error;
+      await client.send('Target.closeTarget', { targetId }, '').catch(() => null);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw new Error(`Could not load extension page ${url}: ${lastError?.message || 'unknown error'}`);
+}
+
 async function main() {
   const progress = (step) => process.stderr.write(`[e2e] ${step}\n`);
   progress('starting isolated Chrome with a DevTools pipe');
@@ -156,6 +193,7 @@ async function main() {
     await client.ready;
     progress('loading the unpacked extension through CDP');
     const { id: extensionId } = await client.send('Extensions.loadUnpacked', { path: repoRoot });
+    await new Promise((resolve) => setTimeout(resolve, 500));
     const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
     const { targetId: actionTargetId } = await client.send('Target.createTarget', {
       url: 'about:blank',
@@ -163,18 +201,27 @@ async function main() {
     }, '');
     progress(`triggering ${extensionId} toolbar action`);
     await client.send('Extensions.triggerAction', { id: extensionId, targetId: actionTargetId });
-    const { targetId: sidePanelTargetId } = await client.send('Target.createTarget', { url: sidepanelUrl }, '');
-    const { sessionId } = await client.send('Target.attachToTarget', { targetId: sidePanelTargetId, flatten: true }, '');
-    activePipeSessionId = sessionId;
+    const workbenchUrl = `${sidepanelUrl}?layout=workbench`;
+    const workbenchTargetId = await createLoadedTarget(client, workbenchUrl);
+    const { sessionId: workbenchSessionId } = await client.send('Target.attachToTarget', {
+      targetId: workbenchTargetId,
+      flatten: true,
+    }, '');
+    activePipeSessionId = workbenchSessionId;
     await client.send('Runtime.enable');
     await client.send('Page.enable');
-    await waitFor(client, `document.readyState === 'complete'`);
+    const attachedWorkbenchUrl = await evaluate(client, 'location.href');
+    progress(`attached Workbench URL: ${attachedWorkbenchUrl}`);
+    if (!String(attachedWorkbenchUrl).startsWith(workbenchUrl)) {
+      await client.send('Page.navigate', { url: workbenchUrl });
+    }
+    await waitFor(client, `location.href.startsWith(${JSON.stringify(workbenchUrl)})`);
     const loadedUrl = await evaluate(client, 'location.href');
-    if (loadedUrl !== sidepanelUrl) {
-      throw new Error(`Expected extension page ${sidepanelUrl}, got ${loadedUrl || '(blank)'}.`);
+    if (!loadedUrl.startsWith(workbenchUrl)) {
+      throw new Error(`Expected Workbench page ${workbenchUrl}, got ${loadedUrl || '(blank)'}.`);
     }
     progress('running extension and Chrome API assertions');
-    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Space'`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
 
     const results = [];
     const record = (name, ok, detail = '') => results.push({ name, ok, detail });
@@ -184,20 +231,31 @@ async function main() {
       JSON.stringify({ actionTargetId }),
     );
 
-    const onboardingOpen = await waitFor(
-      client,
-      `document.querySelector('#onboardingDialog')?.open === true`,
-      8000,
-    ).then(() => true).catch(() => false);
+    const initialOnboardingOpen = await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
+    record('fresh Workbench opens setup', Boolean(initialOnboardingOpen));
+    await evaluate(client, `document.querySelector('#onboardingDialog').dispatchEvent(new Event('cancel', { cancelable: true }))`);
+    await waitFor(client, `!document.querySelector('#onboardingDialog')?.open && document.querySelector('.setup-space')`);
+    record('unfinished setup remains available after dismissal', true);
+    await evaluate(client, `document.querySelector('.setup-space').click()`);
+    await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
+    await evaluate(client, `document.querySelector('#skipOnboardingButton').click()`);
+    const skippedSetup = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return stored.spaceTabsState?.onboarding?.completed === true
+        && !document.querySelector('#onboardingDialog')?.open
+        && !document.querySelector('.setup-space');
+    })()`);
+    record('explicit Skip setup completes onboarding and removes the reminder', Boolean(skippedSetup));
+
+    const openedWorkbench = await waitFor(client, `(async () => {
+      const tabs = await chrome.tabs.query({});
+      return tabs.find((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench')) || null;
+    })()`, 8000);
     record(
-      'fresh installs open the focused Space setup',
-      onboardingOpen,
-      JSON.stringify({ onboardingOpen }),
+      'fresh Workbench starts with Default',
+      Boolean(openedWorkbench),
+      JSON.stringify(openedWorkbench),
     );
-    if (onboardingOpen) {
-      await evaluate(client, `document.querySelector('#skipOnboardingButton').click()`);
-      await waitFor(client, `document.querySelector('#onboardingDialog')?.open === false`);
-    }
 
     const runtime = await evaluate(client, `({
       id: chrome.runtime?.id || '',
@@ -205,7 +263,7 @@ async function main() {
       url: location.protocol,
     })`);
     record(
-      'side panel runs as a loaded Chrome extension',
+      'Workbench runs as a loaded Chrome extension',
       Boolean(runtime.id) && runtime.storage && runtime.url === 'chrome-extension:',
       JSON.stringify(runtime),
     );
@@ -215,7 +273,7 @@ async function main() {
       return { ok: response?.ok, tabs: response?.tabs?.length || 0, groups: response?.groups?.length || 0 };
     })()`);
     record(
-      'side panel reaches the real background service worker',
+      'Workbench reaches the real background service worker',
       bridge.ok === true && bridge.tabs >= 1,
       JSON.stringify(bridge),
     );
@@ -251,22 +309,44 @@ async function main() {
       JSON.stringify(realGroup),
     );
 
-    await evaluate(client, `document.querySelector('.context-space').click()`);
-    await waitFor(client, `!document.querySelector('#contextView')?.hidden`);
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#spaceContextInput');
-      input.value = 'Real extension E2E context';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+    await evaluate(client, `(async () => {
+      const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');
+      const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
+      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
     })()`);
-    const storedContext = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return stored.spaceTabsState?.spaceContexts?.default || null;
-    })()`);
+    const workbenchCount = await waitFor(client, `(async () => (
+      await chrome.tabs.query({})
+    ).filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench')).length)()`);
     record(
-      'Context UI persists through chrome.storage.local',
-      storedContext === 'Real extension E2E context',
-      String(storedContext),
+      'Open Workbench reuses the existing tab',
+      workbenchCount === 1,
+      String(workbenchCount),
     );
+    await waitFor(client, `document.querySelector('.ask-space')`);
+    const reducedAIUI = await evaluate(client, `({
+      hasContext: Boolean(document.querySelector('#contextView, .context-space')),
+      hasSummary: Boolean(document.querySelector('#summarizePageButton')),
+      hasAsk: Boolean(document.querySelector('.ask-space')),
+    })`);
+    record('Context and Summary are removed while Ask remains', !reducedAIUI.hasContext && !reducedAIUI.hasSummary && reducedAIUI.hasAsk, JSON.stringify(reducedAIUI));
+
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
+    const defaultMaxTokens = await evaluate(client, `document.querySelector('#maxTokensInput').value`);
+    record('fresh BYOK max tokens defaults to 1M', defaultMaxTokens === '1000000', defaultMaxTokens);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
+      input.dataset.shortcut = 'Control+Alt+K';
+      input.value = 'Ctrl + Alt + K';
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    await waitFor(client, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.' && !document.querySelector('#workbenchToast')?.hidden`);
+    await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k', code: 'KeyK', ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
+    }))`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'New Space'`);
+    record('real Workbench Save shows feedback and applies shortcuts immediately', true);
+    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
 
     console.log(JSON.stringify({ mode: 'real-extension', extensionId, results }, null, 2));
     const failures = results.filter((result) => !result.ok);

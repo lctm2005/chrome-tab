@@ -124,6 +124,34 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         tabs = (payload.active === false ? tabs : tabs.map((item) => ({ ...item, active: false }))).concat(tab);
         return persistAndReturn({ tab: { ...tab } });
       }
+      case 'tabs:openUnique': {
+        const matchUrl = String(payload.matchUrl || payload.url || '');
+        const existingIndex = tabs.findIndex((tab) => String(tab.url || '').startsWith(matchUrl));
+        if (existingIndex < 0) {
+          const tab = {
+            id: nextId++,
+            title: titleFromUrl(payload.url || 'chrome://newtab'),
+            url: payload.url || 'chrome://newtab',
+            favIconUrl: '',
+            pinned: false,
+            muted: false,
+            active: true,
+            groupId: -1,
+            index: tabs.length,
+            windowId: 1,
+            audible: false,
+          };
+          tabs = tabs.map((item) => ({ ...item, active: false })).concat(tab);
+          return persistAndReturn({ tab: { ...tab }, reused: false });
+        }
+        tabs = tabs.map((tab, index) => ({
+          ...tab,
+          active: index === existingIndex,
+          url: index === existingIndex ? payload.url : tab.url,
+          title: index === existingIndex ? titleFromUrl(payload.url) : tab.title,
+        }));
+        return persistAndReturn({ tab: { ...tabs[existingIndex] }, reused: true });
+      }
       case 'tabs:focus': {
         const id = Number(payload.tabId);
         tabs = tabs.map((tab) => ({ ...tab, active: tab.id === id }));
