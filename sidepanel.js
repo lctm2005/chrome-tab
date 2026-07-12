@@ -46,11 +46,10 @@ import {
   tabSelectionFromClick,
 } from './src/shared/tab-selection.js';
 import {
-  buildSpaceSnapshot,
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isUngroupedSnapshotGroup,
-  mergeSpaceSnapshot,
+  mergeOpenSpaceSnapshot,
   removeSnapshotTabs,
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
@@ -77,6 +76,7 @@ import {
   domainFromUrl,
   groupTitleKey,
   isPlaceholderTabTitle,
+  planGroupPreviewPlacement,
   planTidyGroups,
   planTidyTabNames,
   planDuplicateUrlClosures,
@@ -90,7 +90,7 @@ const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
 const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
-const GROUP_PREVIEW_OPEN_DELAY_MS = 160;
+const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -735,6 +735,7 @@ function groupsRenderSignature(tabGroups, ungrouped) {
   return JSON.stringify({
     activeSpaceId: state.activeSpaceId,
     collapsed: isSpaceGroupsCollapsed(),
+    selectedTabIds: [...selectedTabIds].map(Number).sort((a, b) => a - b),
     groups: [...tabGroups, ungrouped].filter(Boolean).map((group) => ({
       key: group.key,
       id: group.id,
@@ -849,7 +850,7 @@ function createFolderSection(folder) {
     <strong>${escapeHtml(folder.title)}</strong>
   `;
   header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
-  bindGroupPreview(header, groupPreviewGroupForFolder(folder));
+  bindGroupPreview(header, groupPreviewGroupForFolder(folder, collapsed));
 
   const children = document.createElement('div');
   children.className = 'folder-children';
@@ -955,12 +956,13 @@ function createFolderTabs(group) {
   return section;
 }
 
-function groupPreviewGroupForFolder(folder) {
+function groupPreviewGroupForFolder(folder, collapsed = false) {
   const tabs = tabsForFolderPreview(folder.children || []);
   return {
     key: folder.key,
     title: folder.title,
     displayTitle: folder.title,
+    collapsed: Boolean(collapsed),
     color: 'grey',
     tabs,
   };
@@ -982,7 +984,7 @@ function tabsForFolderPreview(nodes = []) {
 }
 
 function bindGroupPreview(anchor, group) {
-  if (!group?.tabs?.length) return;
+  if (!group?.collapsed || !group?.tabs?.length) return;
   const show = (event) => {
     if (event?.pointerType === 'touch') return;
     scheduleShowGroupPreview(anchor, group);
@@ -991,7 +993,7 @@ function bindGroupPreview(anchor, group) {
   anchor.addEventListener('pointerenter', show);
   anchor.addEventListener('mouseleave', scheduleHideGroupPreview);
   anchor.addEventListener('pointerleave', scheduleHideGroupPreview);
-  anchor.addEventListener('focusin', () => showGroupPreview(anchor, group));
+  anchor.addEventListener('focusin', () => scheduleShowGroupPreview(anchor, group));
   anchor.addEventListener('focusout', (event) => {
     if (!groupPreviewPopover?.contains(event.relatedTarget)) scheduleHideGroupPreview();
   });
@@ -1157,19 +1159,18 @@ function positionGroupPreview() {
   const anchorRect = groupPreviewAnchor.getBoundingClientRect();
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 320;
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 600;
-  const width = Math.min(360, Math.max(252, viewportWidth - 16));
-  popover.style.width = `${width}px`;
-  popover.style.maxHeight = `${Math.max(180, viewportHeight - 16)}px`;
-
   const panelHeight = popover.offsetHeight || 280;
-  let x = anchorRect.right + 8;
-  if (x + width > viewportWidth - 8) {
-    x = Math.min(Math.max(8, anchorRect.left), viewportWidth - width - 8);
-  }
-  let y = anchorRect.top - 6;
-  if (y + panelHeight > viewportHeight - 8) y = viewportHeight - panelHeight - 8;
-  popover.style.left = `${Math.max(8, x)}px`;
-  popover.style.top = `${Math.max(8, y)}px`;
+  const placement = planGroupPreviewPlacement({
+    anchorRect,
+    viewportWidth,
+    viewportHeight,
+    panelHeight,
+  });
+  popover.dataset.placement = placement.placement;
+  popover.style.width = `${placement.width}px`;
+  popover.style.maxHeight = `${placement.maxHeight}px`;
+  popover.style.left = `${placement.left}px`;
+  popover.style.top = `${placement.top}px`;
 }
 
 function createUngroupedSection(group) {
@@ -1763,19 +1764,26 @@ async function moveTabsToSpace(tabIds, spaceId) {
     .filter((tab) => tab && !tab.pinned && !isEphemeralTab(tab) && tabBelongsToSpace(tab, sourceSpaceId));
   if (movedTabs.length === 0) return 0;
 
+  const moves = movedTabs.map((tab) => ({
+    tab,
+    targetGroupKey: ensureMovedTabTargetGroup(tab, groupForTab(tab, sourceView), spaceId),
+  }));
+  const groupedTabIds = moves
+    .filter(({ tab }) => isGroupedTab(tab))
+    .map(({ tab }) => tab.id);
+  if (groupedTabIds.length > 0) {
+    await send('tabs:ungroup', { tabIds: groupedTabIds });
+  }
+
   const targetOrder = ensureTabOrderForSpace(spaceId);
-  for (const tab of movedTabs) {
-    const sourceGroup = groupForTab(tab, sourceView);
-    const targetGroupKey = ensureMovedTabTargetGroup(tab, sourceGroup, spaceId);
-    if (isGroupedTab(tab)) {
-      await send('tabs:ungroup', { tabIds: [tab.id] });
-    }
+  for (const { tab, targetGroupKey } of moves) {
     state.tabSpaces[tab.id] = spaceId;
     state.tabGroups[tab.id] = targetGroupKey;
     removeTabFromSavedOrder(tab.id, sourceSpaceId);
     targetOrder[targetGroupKey] = uniqueKeys([...(targetOrder[targetGroupKey] || []), tab.id]);
   }
 
+  removeTabsFromSpaceSnapshot(sourceSpaceId, movedTabs);
   selectedTabIds = new Set(movedTabs.map((tab) => tab.id));
   selectionAnchorTabId = movedTabs.at(-1)?.id ?? null;
   await finishMoveToSpace(spaceId);
@@ -2210,10 +2218,8 @@ async function closeEphemeralTabsExcept(keepTabId) {
 function snapshotOpenSpace(spaceId) {
   if (!spaceId) return;
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
-  const view = buildSpaceViewForSpace(spaceId).filter((group) => group.key !== 'ungrouped');
-  const liveSnapshot = buildSpaceSnapshot({ view });
-  const storedSnapshot = dropTemporarySnapshotGroups(state.spaceSnapshots[spaceId]);
-  const snapshot = mergeSpaceSnapshot(liveSnapshot, storedSnapshot);
+  const view = buildSpaceViewForSpace(spaceId);
+  const snapshot = mergeOpenSpaceSnapshot(view, state.spaceSnapshots[spaceId]);
   const previousSnapshot = state.spaceSnapshots[spaceId];
   if (snapshotTabCount(snapshot) === 0) {
     delete state.spaceSnapshots[spaceId];
@@ -2250,7 +2256,11 @@ function sanitizeStoredSpaceSnapshot(spaceId) {
 
 function removeTemporarySnapshotTabs(spaceId) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
-  const snapshot = dropTemporarySnapshotGroups(state.spaceSnapshots?.[spaceId]);
+  const storedSnapshot = sanitizeSpaceSnapshot(state.spaceSnapshots?.[spaceId]);
+  const snapshot = storedSnapshot ? {
+    ...storedSnapshot,
+    groups: (storedSnapshot.groups || []).filter((group) => !isUngroupedSnapshotGroup(group)),
+  } : null;
   if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
   else state.spaceSnapshots[spaceId] = snapshot;
   if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';

@@ -150,3 +150,40 @@ test('Move to context actions render as a right-side submenu', async () => {
   assert.match(styles, /left: calc\(100% \+ 6px\)/);
   assert.doesNotMatch(styles, /submenu-left/);
 });
+
+test('tab selection participates in the groups render signature', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function groupsRenderSignature\(tabGroups, ungrouped\)[\s\S]*selectedTabIds:\s*\[\.\.\.selectedTabIds\]/);
+});
+
+test('moving tabs to another Space activates the target Space', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*removeTabsFromSpaceSnapshot\(sourceSpaceId, movedTabs\)/);
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*await finishMoveToSpace\(spaceId\);\s*return movedTabs\.length/);
+  assert.match(source, /async function moveSelectedTabsToSpace\(tabIds, spaceId\)[\s\S]*setStatus\(`Moved \$\{moved\} selected tabs to \$\{spaceName\(spaceId\)\}\.`\)/);
+  assert.match(source, /async function moveGroupToSpace\(group, spaceId\)[\s\S]*moveGroupsWithoutSaving\(\[group\], spaceId\);\s*await finishMoveToSpace\(spaceId\);\s*setStatus\(`Moved group/);
+  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId\)[\s\S]*moveGroupsWithoutSaving\(groups, spaceId\);\s*await finishMoveToSpace\(spaceId\);\s*setStatus\(`Moved group/);
+});
+
+test('open Space snapshots are merged from the full live view including ungrouped tabs', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function snapshotOpenSpace\(spaceId\)[\s\S]*const view = buildSpaceViewForSpace\(spaceId\);\s*const snapshot = mergeOpenSpaceSnapshot\(view, state\.spaceSnapshots\[spaceId\]\)/);
+});
+
+test('group hover preview only binds for collapsed tag groups', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /bindGroupPreview\(header,\s*groupPreviewGroupForFolder\(folder,\s*collapsed\)\)/);
+  assert.match(source, /if \(!group\?\.collapsed \|\| !group\?\.tabs\?\.length\) return;/);
+});
+
+test('group hover preview waits two seconds before opening', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;/);
+  assert.match(source, /setTimeout\(\(\) => showGroupPreview\(anchor, group\), GROUP_PREVIEW_OPEN_DELAY_MS\)/);
+  assert.match(source, /anchor\.addEventListener\('focusin', \(\) => scheduleShowGroupPreview\(anchor, group\)\)/);
+});
