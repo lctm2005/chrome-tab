@@ -61,6 +61,7 @@ export function appendArcImportPlan(state, plan) {
 
   return {
     importedSpaces: spaces.length,
+    importedSpaceIds: spaces.map((space) => space.id),
     importedTabs: Object.values(snapshots).reduce((sum, snapshot) => (
       sum + arrayValue(snapshot?.groups).reduce((groupSum, group) => groupSum + arrayValue(group?.tabs).length, 0)
     ), 0),

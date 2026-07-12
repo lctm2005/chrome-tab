@@ -184,6 +184,21 @@ async function main() {
       JSON.stringify({ actionTargetId }),
     );
 
+    const onboardingOpen = await waitFor(
+      client,
+      `document.querySelector('#onboardingDialog')?.open === true`,
+      8000,
+    ).then(() => true).catch(() => false);
+    record(
+      'fresh installs open the focused Space setup',
+      onboardingOpen,
+      JSON.stringify({ onboardingOpen }),
+    );
+    if (onboardingOpen) {
+      await evaluate(client, `document.querySelector('#skipOnboardingButton').click()`);
+      await waitFor(client, `document.querySelector('#onboardingDialog')?.open === false`);
+    }
+
     const runtime = await evaluate(client, `({
       id: chrome.runtime?.id || '',
       storage: Boolean(chrome.storage?.local),

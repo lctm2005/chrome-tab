@@ -56,6 +56,23 @@ test('sidepanel exposes Space Context, Ask Space, and portable backup controls',
   assert.match(source, /restoreSpaceBackup\(state, pendingSpaceBackup\)/);
 });
 
+test('sidepanel exposes focused onboarding and full-page Workbench Settings', async () => {
+  const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+
+  for (const id of ['openWorkbenchButton', 'onboardingDialog', 'onboardingArcInput', 'undoArcImportButton']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
+  assert.match(source, /maybeShowOnboarding\(\)/);
+  assert.match(source, /rememberArcImport\(/);
+  assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
+  assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
+  assert.doesNotMatch(html, /Cross-Space Search/i);
+  assert.doesNotMatch(source, /workspace-search/);
+});
+
 test('settings Save click prevents dialog submit before async work starts', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 

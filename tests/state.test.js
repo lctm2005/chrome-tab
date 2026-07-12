@@ -6,7 +6,7 @@ import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 5);
+  assert.equal(state.version, 6);
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.name), ['Space']);
@@ -20,6 +20,8 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.collapsedSpaceGroups, {});
   assert.deepEqual(state.askSessions, {});
   assert.deepEqual(state.spaceContexts, {});
+  assert.deepEqual(state.onboarding, { version: 1, completed: false });
+  assert.equal(state.lastArcImport, null);
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
@@ -115,7 +117,7 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
-test('migrates v4 Space ownership and Context into v5 without resetting shortcuts', () => {
+test('migrates v4 Space ownership and Context into v6 without resetting shortcuts', () => {
   const merged = mergeStoredState({
     version: 4,
     activeSpaceId: 'work',
@@ -126,12 +128,27 @@ test('migrates v4 Space ownership and Context into v5 without resetting shortcut
     shortcuts: { togglePanel: 'Meta+S' },
   }, createDefaultState());
 
-  assert.equal(merged.version, 5);
+  assert.equal(merged.version, 6);
   assert.equal(merged.activeSpaceId, 'work');
   assert.deepEqual(merged.groupSpaces, { 7: 'work' });
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
   assert.equal(merged.spaceContexts.work, '# Launch\nShip the store update.');
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
+  assert.deepEqual(merged.onboarding, { version: 1, completed: false });
+});
+
+test('preserves completed onboarding and a valid Arc import undo record', () => {
+  const merged = mergeStoredState({
+    version: 6,
+    onboarding: { version: 1, completed: true },
+    lastArcImport: { spaceIds: ['arc-work', 'arc-work', 'arc-home'], importedAt: 123 },
+  }, createDefaultState());
+
+  assert.deepEqual(merged.onboarding, { version: 1, completed: true });
+  assert.deepEqual(merged.lastArcImport, {
+    spaceIds: ['arc-work', 'arc-home'],
+    importedAt: 123,
+  });
 });
 
 test('preserves empty current shortcuts as disabled actions', () => {

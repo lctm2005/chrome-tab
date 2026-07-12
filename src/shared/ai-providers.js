@@ -22,6 +22,35 @@ export const AI_PROVIDER_CATALOG = [
     ],
   },
   {
+    id: 'gemini',
+    label: 'Google Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    editableBaseUrl: false,
+    models: [
+      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+      { id: 'gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash-Lite Preview' },
+    ],
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    editableBaseUrl: false,
+    models: [
+      { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+    ],
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama (Local)',
+    baseUrl: 'http://localhost:11434/v1',
+    editableBaseUrl: false,
+    requiresApiKey: false,
+    models: [],
+  },
+  {
     id: CUSTOM_AI_PROVIDER_ID,
     label: 'Custom OpenAI-compatible',
     baseUrl: '',
@@ -40,6 +69,13 @@ export function providerForBaseUrl(baseUrl) {
   return AI_PROVIDER_CATALOG
     .filter((provider) => provider.id !== CUSTOM_AI_PROVIDER_ID)
     .find((provider) => normalizeProviderUrl(provider.baseUrl) === normalized) || null;
+}
+
+export function providerRequiresApiKey(settings = {}) {
+  const provider = settings.provider
+    ? providerById(settings.provider)
+    : providerForBaseUrl(settings.baseUrl) || customProvider();
+  return provider.requiresApiKey !== false;
 }
 
 export function normalizeAIProviderSettings(settings = {}) {

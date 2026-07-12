@@ -7,6 +7,6 @@ window.SPACE_TABS_CONFIG = {
     thinking: 'disabled',
     language: 'zh-CN',
     temperature: 0.6,
-    maxTokens: 2048
+    maxTokens: 1000000
   }
 };

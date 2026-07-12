@@ -279,6 +279,7 @@ test('appends imported Spaces without changing the active Space', () => {
 
   assert.equal(result.importedSpaces, 1);
   assert.equal(result.importedTabs, 1);
+  assert.deepEqual(result.importedSpaceIds, [plan.spaces[0].id]);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.id), ['default', 'arc-work']);
   assert.equal(state.spaceSnapshots['arc-work'].groups[0].tabs[0].title, 'Spec');

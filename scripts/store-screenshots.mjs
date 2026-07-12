@@ -326,6 +326,43 @@ function storeShotHtml(shot) {
         background: #090812;
         box-shadow: 0 34px 90px rgba(0, 0, 0, 0.44);
       }
+      .workbench-shot .canvas {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: 82px minmax(0, 1fr);
+        gap: 18px;
+        padding: 28px 34px 32px;
+      }
+      .workbench-shot .story {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr) auto;
+        grid-template-rows: minmax(0, 1fr);
+        align-items: center;
+        gap: 24px;
+        padding: 0;
+      }
+      .workbench-shot .kicker,
+      .workbench-shot .description,
+      .workbench-shot .browser {
+        display: none;
+      }
+      .workbench-shot h1 {
+        margin: 0;
+        font-size: 42px;
+        line-height: 1;
+      }
+      .workbench-shot .story > div:last-child {
+        min-width: 0;
+      }
+      .workbench-shot .notes {
+        max-width: 480px;
+        justify-content: flex-end;
+        margin: 0;
+      }
+      .workbench-shot .panel-wrap {
+        align-self: stretch;
+        width: 100%;
+        height: 100%;
+      }
       .panel-titlebar {
         display: flex;
         align-items: center;
@@ -345,7 +382,7 @@ function storeShotHtml(shot) {
       }
     </style>
   </head>
-  <body>
+  <body class="${shot.id === 'settings' ? 'workbench-shot' : ''}">
     <main class="canvas">
       <section class="story">
         <div class="brand">
@@ -401,7 +438,9 @@ function storeShotHtml(shot) {
           document.body.dataset.error = error?.stack || error?.message || String(error);
         }
       }, { once: true });
-      panel.src = '/sidepanel.html';
+      panel.src = scenario.action === 'settings'
+        ? '/sidepanel.html?layout=workbench&view=settings'
+        : '/sidepanel.html';
 
       async function afterPanelLoad(frame, scenario) {
         const win = frame.contentWindow;
@@ -432,7 +471,6 @@ function storeShotHtml(shot) {
       }
 
       function openSettings(doc) {
-        doc.querySelector('#settingsButton')?.click();
         const dialog = doc.querySelector('#settingsDialog');
         const form = doc.querySelector('.settings');
         const arcStatus = doc.querySelector('#arcImportStatus');

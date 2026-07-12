@@ -1,4 +1,5 @@
 import { normalizeAIProviderSettings } from './ai-providers.js';
+import { DEFAULT_MAX_TOKENS } from './ai.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
@@ -16,7 +17,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 5,
+    version: 6,
     theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
@@ -36,6 +37,11 @@ export function createDefaultState(localConfig = {}) {
     activeAskSessionKey: '',
     spaceContexts: {},
     spaceSnapshots: {},
+    onboarding: {
+      version: 1,
+      completed: false,
+    },
+    lastArcImport: null,
     shortcuts: mergeShortcuts(),
     ai: {
       provider: normalizedAI.provider,
@@ -45,7 +51,7 @@ export function createDefaultState(localConfig = {}) {
       thinking: ai.thinking || 'disabled',
       language: ai.language || 'zh-CN',
       temperature: Number(ai.temperature ?? 0.6),
-      maxTokens: Number(ai.maxTokens ?? 2048),
+      maxTokens: Number(ai.maxTokens ?? DEFAULT_MAX_TOKENS),
     },
   };
 }
@@ -81,8 +87,30 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
+    onboarding: normalizeOnboarding(stored.onboarding, defaults.onboarding),
+    lastArcImport: normalizeLastArcImport(stored.lastArcImport),
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
     ai: migrateAISettings(stored.ai, defaults.ai),
+  };
+}
+
+function normalizeOnboarding(value, fallback = { version: 1, completed: false }) {
+  if (!value || typeof value !== 'object') return { ...fallback };
+  return {
+    version: Number(value.version) || Number(fallback.version) || 1,
+    completed: value.completed === true,
+  };
+}
+
+function normalizeLastArcImport(value) {
+  if (!value || typeof value !== 'object') return null;
+  const spaceIds = Array.isArray(value.spaceIds)
+    ? [...new Set(value.spaceIds.map(String).filter(Boolean))]
+    : [];
+  if (spaceIds.length === 0) return null;
+  return {
+    spaceIds,
+    importedAt: Number(value.importedAt) || 0,
   };
 }
 

@@ -1,3 +1,5 @@
+export const DEFAULT_MAX_TOKENS = 1_000_000;
+
 export function normalizeBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || '').trim().replace(/\/+$/, '');
   return trimmed.replace(/\/chat\/completions$/, '');
@@ -27,7 +29,7 @@ export function buildChatCompletionRequest(settings, messages) {
     messages,
     stream: false,
     temperature: Number(settings.temperature ?? 0.6),
-    max_tokens: Number(settings.maxTokens ?? 2048),
+    max_tokens: Number(settings.maxTokens ?? DEFAULT_MAX_TOKENS),
   };
 
   if (String(settings.model || '').startsWith('glm-5')) {

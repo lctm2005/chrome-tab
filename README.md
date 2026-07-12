@@ -12,6 +12,7 @@ BYOK, and sent only to the provider the user configures.
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
 - Context: keep one local Markdown document for each Space.
 - Ask Space: ask questions using the current Space Context and active page together.
+- Workbench: use a full-page view for the current Space's Sources, Context, Ask, and Settings.
 - Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
@@ -19,7 +20,7 @@ BYOK, and sent only to the provider the user configures.
 - Auto Group: group ungrouped tabs locally, with optional BYOK AI support.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
-- Arc import: append Arc `StorableSidebar.json` Spaces and folders as saved Space content.
+- Arc import: preview and choose Arc `StorableSidebar.json` Spaces, then undo the latest import if needed.
 - Portable backup: export and restore Spaces, Context documents, saved tabs, and Ask history without API keys.
 - Local-first privacy: no account, hosted sync service, or persistent script running on every website.
 - Panel shortcuts: built-in keyboard actions with user-editable bindings in Settings.
@@ -69,24 +70,26 @@ After updating the source files, reload the unpacked extension from `chrome://ex
 
 AI features are optional and use your own API key.
 
-Open `Settings` in the side panel and configure:
+Click `Settings` in the side panel to open the full-page Workbench, then configure:
 
-- `Provider`: choose `Z.ai / GLM`, `OpenAI`, or `Custom OpenAI-compatible`.
+- `Provider`: choose `Z.ai / GLM`, `OpenAI`, `Google Gemini`, `DeepSeek`,
+  `Ollama (Local)`, or `Custom OpenAI-compatible`.
 - `Base URL`: built-in providers fill this automatically; custom providers can
   edit it.
 - `Model`: choose a provider model, or pick `Custom model...` for compatible
-  endpoints.
-- `API Key`: stored locally by Chrome for the current extension session.
+  endpoints and local Ollama models.
+- `API Key`: stored locally by Chrome for the current extension session; Ollama
+  runs locally and does not require one.
 - `Language`: controls Ask Space and summary output language.
 
 If no API key is configured, normal Space, folder, and tab management features continue to work.
 
 ## Arc Import
 
-1. Open `Settings`.
+1. Open `Settings` from the side panel or Workbench.
 2. Choose Arc's `StorableSidebar.json`.
 3. Review the import summary.
-4. Click `Append Import`.
+4. Click `Append Import`; use `Undo Last Import` if you need to remove that batch.
 
 The importer appends Spaces and keeps the current Space active. Arc folders become nested folder paths, leaf folders become Chrome tab groups when opened, and saved tabs remain dormant until selected.
 

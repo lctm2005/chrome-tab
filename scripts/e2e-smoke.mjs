@@ -536,20 +536,31 @@ async function main() {
   await waitFor(client, `!document.querySelector('#groupsList')?.classList.contains('groups-collapsed')`);
   record('Space collapse toggle hides and restores group content', true);
 
-  await evaluate(client, `document.querySelector('#settingsButton').click()`);
-  await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+  const settingsUrl = new URL(sidepanelUrl);
+  settingsUrl.searchParams.set('layout', 'workbench');
+  settingsUrl.searchParams.set('view', 'settings');
+  await client.send('Page.navigate', { url: settingsUrl.toString() });
+  await waitFor(client, `document.documentElement.dataset.layout === 'workbench' && document.querySelector('#settingsDialog')?.open`);
   const settingsState = await evaluate(client, `(() => ({
     api: document.querySelector('#apiKeyStatus')?.textContent,
     exportBackup: Boolean(document.querySelector('#exportSpaceDataButton')),
     restoreBackup: Boolean(document.querySelector('#restoreSpaceDataButton')),
+    workbench: document.documentElement.dataset.layout === 'workbench',
+    inShell: document.querySelector('#settingsDialog')?.parentElement?.classList.contains('shell'),
+    position: getComputedStyle(document.querySelector('#settingsDialog')).position,
   }))()`);
   record(
-    'Settings opens with local backup controls and no configured API key',
-    settingsState.api === 'No API key configured.' && settingsState.exportBackup && settingsState.restoreBackup,
+    'Workbench Settings uses the full page with local backup controls',
+    settingsState.api === 'No API key configured.'
+      && settingsState.exportBackup
+      && settingsState.restoreBackup
+      && settingsState.workbench
+      && settingsState.inShell
+      && settingsState.position === 'static',
     JSON.stringify(settingsState),
   );
-  await evaluate(client, `document.querySelector('#settingsDialog [value="cancel"]').click()`);
-  await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
+  await client.send('Page.navigate', { url: sidepanelUrl });
+  await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Space' && document.querySelector('.context-space')`);
 
   await evaluate(client, `document.querySelector('.context-space').click()`);
   await waitFor(client, `!document.querySelector('#contextView')?.hidden`);

@@ -38,7 +38,9 @@ what matters.
 Create a Space for a project, decision, trip, research thread, client, or any
 other focused piece of work. Organize its pages with folders and Chrome tab
 groups, keep saved tabs dormant until needed, and switch contexts without
-keeping every page loaded.
+keeping every page loaded. Stay compact in the side panel, or open the
+full-page Workbench to see the current Space's Sources beside its Context,
+Ask, and Settings.
 
 Each Space has a local Context document for outcomes, notes, decisions, and
 next actions. Ask Space can combine that Context with the current page, so AI
@@ -48,7 +50,7 @@ browser tab.
 Features:
 
 - Arc-like Spaces for separate browser work contexts.
-- Arc StorableSidebar.json import for moving existing Spaces into Chrome.
+- Previewed Arc StorableSidebar.json import with Space selection and one-step undo.
 - Nested folders and Chrome tab group integration.
 - Dormant saved tabs that stay unloaded until opened.
 - One local Context document per Space.
@@ -120,12 +122,12 @@ Core features do not require an account or AI API key.
 
 Suggested review flow:
 
-1. Install Space and click the toolbar action to open the side panel.
+1. Install Space, click the toolbar action, and complete or skip the focused setup.
 2. Create a Space and open its Context document from the document icon.
 3. Add notes, switch Spaces, and return to verify that Context is local and
    Space-specific.
 4. Open several pages and use folders, tab groups, dormant tabs, and sorting.
-5. Open Settings to review Arc import, Space backup, BYOK AI, and shortcuts.
+5. Open Workbench Settings to review Arc import, Space backup, BYOK AI, and shortcuts.
 6. Use Ask Space only if an AI API key is configured by the reviewer.
 
 Space has no persistent content script. Current page text is extracted only
@@ -146,7 +148,7 @@ order:
 1. `01-spaces-overview.png`: Arc-like Spaces with live Chrome tab groups.
 2. `02-nested-folders-dormant-tabs.png`: nested folders and dormant saved tabs.
 3. `03-tab-context-menu.png`: tab context menu and Move to Space actions.
-4. `04-settings-arc-import-shortcuts.png`: Arc import, portable backup, BYOK, and shortcuts.
+4. `04-settings-arc-import-shortcuts.png`: full-page Workbench Settings with Arc import, backup, BYOK, and shortcuts.
 5. `05-ask-page-byok-ai.png`: Ask Space grounded in local Context and the current page.
 
 ## Launch Checklist

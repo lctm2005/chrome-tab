@@ -1,8 +1,16 @@
-import { createPrompt, formatAIError, getOriginPattern, parseTidyGroups, parseTidyNames } from './src/shared/ai.js';
+import {
+  createPrompt,
+  DEFAULT_MAX_TOKENS,
+  formatAIError,
+  getOriginPattern,
+  parseTidyGroups,
+  parseTidyNames,
+} from './src/shared/ai.js';
 import {
   AI_PROVIDER_CATALOG,
   CUSTOM_AI_PROVIDER_ID,
   normalizeAIProviderSettings,
+  providerRequiresApiKey,
   providerById,
 } from './src/shared/ai-providers.js';
 import {
@@ -93,6 +101,12 @@ import {
 const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
 const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
+const pageParams = new URLSearchParams(window.location.search);
+const layoutMode = pageParams.get('layout') === 'workbench'
+  ? 'workbench'
+  : 'sidepanel';
+const workbenchMode = layoutMode === 'workbench';
+document.documentElement.dataset.layout = layoutMode;
 const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
@@ -119,7 +133,11 @@ let spaceView = [];
 let dormantSpaceView = [];
 let dormantSpaceViewSpaceId = '';
 const syntheticPlaceholderTabIds = new Set();
-let activeView = 'space';
+let activeView = workbenchMode && pageParams.get('view') === 'settings'
+  ? 'settings'
+  : workbenchMode
+  ? 'context'
+  : 'space';
 let dragState = null;
 let activeAIRequestId = '';
 let activePanelAction = '';
@@ -128,7 +146,12 @@ let panelWindowId = null;
 let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
 let pendingArcImportText = '';
+let pendingArcImportPlan = null;
 let pendingSpaceBackup = null;
+let pendingOnboardingArcPlan = null;
+let onboardingStep = 0;
+let onboardingPath = '';
+let onboardingResult = '';
 let contextSaveTimer = 0;
 let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
@@ -148,6 +171,7 @@ const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
+  openWorkbenchButton: document.querySelector('#openWorkbenchButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   autoGroupButton: document.querySelector('#autoGroupButton'),
@@ -166,6 +190,7 @@ const els = {
   settingsStatus: document.querySelector('#settingsStatus'),
   arcImportInput: document.querySelector('#arcImportInput'),
   importArcButton: document.querySelector('#importArcButton'),
+  undoArcImportButton: document.querySelector('#undoArcImportButton'),
   arcImportStatus: document.querySelector('#arcImportStatus'),
   exportSpaceDataButton: document.querySelector('#exportSpaceDataButton'),
   spaceBackupInput: document.querySelector('#spaceBackupInput'),
@@ -182,6 +207,27 @@ const els = {
   actionDialogCancel: document.querySelector('#actionDialogCancel'),
   actionDialogConfirm: document.querySelector('#actionDialogConfirm'),
   settingsDialog: document.querySelector('#settingsDialog'),
+  runOnboardingButton: document.querySelector('#runOnboardingButton'),
+  settingsOpenWorkbenchButton: document.querySelector('#settingsOpenWorkbenchButton'),
+  onboardingDialog: document.querySelector('#onboardingDialog'),
+  onboardingProgress: document.querySelector('#onboardingProgress'),
+  onboardingStepLabel: document.querySelector('#onboardingStepLabel'),
+  onboardingChooseStep: document.querySelector('#onboardingChooseStep'),
+  onboardingFreshStep: document.querySelector('#onboardingFreshStep'),
+  onboardingArcStep: document.querySelector('#onboardingArcStep'),
+  onboardingFinishStep: document.querySelector('#onboardingFinishStep'),
+  onboardingFooter: document.querySelector('#onboardingFooter'),
+  onboardingSpaceNameInput: document.querySelector('#onboardingSpaceNameInput'),
+  onboardingContextInput: document.querySelector('#onboardingContextInput'),
+  onboardingArcInput: document.querySelector('#onboardingArcInput'),
+  onboardingArcStatus: document.querySelector('#onboardingArcStatus'),
+  onboardingArcSpaces: document.querySelector('#onboardingArcSpaces'),
+  onboardingFinishMessage: document.querySelector('#onboardingFinishMessage'),
+  onboardingBackButton: document.querySelector('#onboardingBackButton'),
+  onboardingNextButton: document.querySelector('#onboardingNextButton'),
+  skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
+  onboardingOpenWorkbenchButton: document.querySelector('#onboardingOpenWorkbenchButton'),
+  onboardingStayButton: document.querySelector('#onboardingStayButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
@@ -198,16 +244,19 @@ const els = {
   themeOptions: document.querySelector('.theme-options'),
 };
 
+if (workbenchMode) document.querySelector('.shell').append(els.settingsDialog);
+
 init();
 
 async function init() {
   try {
     panelWindowId = await currentPanelWindowId();
-    connectPanelPort();
+    if (!workbenchMode) connectPanelPort();
     await loadState();
     bindEvents();
     renderSettings();
     await refreshTabs({ adopt: true });
+    await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => refreshTabs({ adopt: true }), 2500);
   } catch (error) {
     els.syncStatus.textContent = 'Failed to initialize';
@@ -279,7 +328,7 @@ async function loadState() {
       ...state.ai,
       apiKey: localConfig.ai.apiKey,
       baseUrl: String(state.ai.baseUrl || localConfig.ai.baseUrl || '').trim().replace(/\/+$/, ''),
-      maxTokens: Number(state.ai.maxTokens ?? localConfig.ai.maxTokens ?? 2048),
+      maxTokens: Number(state.ai.maxTokens ?? localConfig.ai.maxTokens ?? DEFAULT_MAX_TOKENS),
       temperature: Number(state.ai.temperature ?? localConfig.ai.temperature ?? 0.6),
     };
   } else if (secrets[SECRET_STORAGE_KEY]?.ai?.apiKey) {
@@ -294,10 +343,21 @@ async function saveState() {
 }
 
 function bindEvents() {
-  els.settingsButton.addEventListener('click', () => {
+  els.settingsButton.addEventListener('click', () => runTask(async () => {
+    if (!workbenchMode) {
+      await openWorkbench({ view: 'settings' });
+      return;
+    }
     state.tempTheme = state.theme || 'purple';
     renderSettings();
-    els.settingsDialog.showModal();
+    activeView = 'settings';
+    render();
+  }));
+  els.openWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
+  els.settingsOpenWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
+  els.runOnboardingButton.addEventListener('click', () => {
+    els.settingsDialog.close();
+    openOnboarding();
   });
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
   els.autoGroupButton.addEventListener('click', () => runTask(autoGroupTabs));
@@ -312,12 +372,28 @@ function bindEvents() {
   els.modelInput.addEventListener('change', () => updateCustomModelVisibility());
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
+  els.undoArcImportButton.addEventListener('click', () => runTask(undoLastArcImport));
   els.exportSpaceDataButton.addEventListener('click', () => runTask(exportSpaceData));
   els.spaceBackupInput.addEventListener('change', () => runTask(previewSpaceBackupFile));
   els.restoreSpaceDataButton.addEventListener('click', () => runTask(restoreSpaceData));
   els.saveSettingsButton.addEventListener('click', (event) => {
     event.preventDefault();
     runTask(() => saveSettings());
+  });
+  els.onboardingSpaceNameInput.addEventListener('input', renderOnboarding);
+  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
+    button.addEventListener('click', () => chooseOnboardingPath(button.dataset.onboardingPath));
+  }
+  els.onboardingArcInput.addEventListener('change', () => runTask(previewOnboardingArcFile));
+  els.onboardingArcSpaces.addEventListener('change', renderOnboarding);
+  els.onboardingBackButton.addEventListener('click', goBackOnboarding);
+  els.onboardingNextButton.addEventListener('click', () => runTask(continueOnboarding));
+  els.skipOnboardingButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
+  els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask(() => finishOnboarding(true)));
+  els.onboardingStayButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
+  els.onboardingDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    void runTask(() => finishOnboarding(false));
   });
 
   els.themeOptions.addEventListener('click', (event) => {
@@ -334,6 +410,13 @@ function bindEvents() {
     if (state.tempTheme) {
       applyTheme(state.theme);
       delete state.tempTheme;
+    }
+    if (workbenchMode && activeView === 'settings') {
+      activeView = 'context';
+      const url = new URL(window.location.href);
+      url.searchParams.delete('view');
+      window.history.replaceState(null, '', url);
+      render();
     }
   });
 
@@ -551,6 +634,7 @@ async function loadDormantSpaceView(spaceId, options = {}) {
 }
 
 function render() {
+  if (workbenchMode && activeView === 'space') activeView = 'context';
   const activeSpace = currentSpace();
   const liveSpaceView = buildSpaceView({
     activeSpaceId: state.activeSpaceId,
@@ -571,7 +655,10 @@ function render() {
   const isSpaceView = activeView === 'space';
   const isContextView = activeView === 'context';
   const isAskView = activeView === 'ask';
-  const groupsCollapsed = isSpaceView && isSpaceGroupsCollapsed();
+  const isSettingsView = activeView === 'settings';
+  const showSources = workbenchMode || isSpaceView;
+  const showContext = workbenchMode ? !isAskView && !isSettingsView : isContextView;
+  const groupsCollapsed = showSources && isSpaceGroupsCollapsed();
   if (isAskView) ensureCurrentAskSession();
   els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
@@ -580,14 +667,22 @@ function render() {
     ? 'Local Context'
     : isAskView
     ? 'Ask Space'
+    : isSettingsView
+    ? 'Settings'
     : '';
-  els.groupsList.hidden = !isSpaceView;
-  els.contextView.hidden = !isContextView;
+  els.groupsList.hidden = !showSources;
+  els.contextView.hidden = !showContext;
   els.askPageView.hidden = !isAskView;
-  if (!isSpaceView) hideGroupPreview();
-  els.tidyNamesButton.hidden = !isSpaceView;
-  els.autoGroupButton.hidden = !isSpaceView;
-  els.collapseGroupsButton.hidden = !isSpaceView;
+  if (!showSources) hideGroupPreview();
+  els.tidyNamesButton.hidden = !showSources;
+  els.autoGroupButton.hidden = !showSources;
+  els.collapseGroupsButton.hidden = !showSources;
+  els.openWorkbenchButton.hidden = workbenchMode;
+  els.settingsButton.classList.toggle('active', isSettingsView);
+  if (workbenchMode) {
+    if (isSettingsView && !els.settingsDialog.open) els.settingsDialog.show();
+    if (!isSettingsView && els.settingsDialog.open) els.settingsDialog.close();
+  }
   els.collapseGroupsButton.innerHTML = groupsCollapsed
     ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
     : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
@@ -597,7 +692,7 @@ function render() {
   els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
-  if (isContextView) renderSpaceContext();
+  if (showContext) renderSpaceContext();
   if (isAskView) {
     els.askScope.textContent = `Context + ${activePageStatus()}`;
     renderAskMessages();
@@ -1359,11 +1454,17 @@ function renderSpaces() {
 
   const spaceButtons = state.spaces.map((space) => {
     const button = document.createElement('button');
-    button.className = `space${activeView === 'space' && space.id === state.activeSpaceId ? ' active' : ''}`;
+    button.className = `space${space.id === state.activeSpaceId && (workbenchMode || activeView === 'space') ? ' active' : ''}`;
     button.type = 'button';
     button.title = space.name;
     button.setAttribute('aria-label', space.name);
-    button.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
+    const mark = document.createElement('span');
+    mark.className = 'space-mark';
+    mark.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
+    const label = document.createElement('span');
+    label.className = 'space-label';
+    label.textContent = space.name;
+    button.append(mark, label);
     button.addEventListener('click', () => runTask(() => activateSpace(space.id)));
     button.addEventListener('contextmenu', (event) => showSpaceContextMenu(event, space));
     return button;
@@ -1375,6 +1476,8 @@ function renderSpaces() {
   askButton.title = 'Ask Space';
   askButton.setAttribute('aria-label', 'Ask Space');
   askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v14"/><path d="M12 12h6"/><path d="M12 12H6"/></svg>`;
+  askButton.querySelector('svg').classList.add('space-mark');
+  askButton.append(spaceButtonLabel('Ask Space'));
   askButton.addEventListener('click', () => runTask(openAskPage));
 
   const contextButton = document.createElement('button');
@@ -1383,6 +1486,8 @@ function renderSpaces() {
   contextButton.title = 'Context';
   contextButton.setAttribute('aria-label', 'Context');
   contextButton.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>`;
+  contextButton.querySelector('svg').classList.add('space-mark');
+  contextButton.append(spaceButtonLabel('Context'));
   contextButton.addEventListener('click', () => runTask(openSpaceContext));
 
   const addButton = document.createElement('button');
@@ -1391,6 +1496,8 @@ function renderSpaces() {
   addButton.title = 'Add Space';
   addButton.setAttribute('aria-label', 'Add Space');
   addButton.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
+  addButton.querySelector('svg').classList.add('space-mark');
+  addButton.append(spaceButtonLabel('New Space'));
   addButton.addEventListener('click', () => runTask(addSpace));
 
   const spacesGroup = document.createElement('div');
@@ -1408,10 +1515,245 @@ function renderSpaces() {
 
 function spacesRenderSignature() {
   return JSON.stringify([
+    layoutMode,
     activeView,
     state.activeSpaceId,
     (state.spaces || []).map((space) => [space.id, space.name, space.icon || '']),
   ]);
+}
+
+function spaceButtonLabel(text) {
+  const label = document.createElement('span');
+  label.className = 'space-label';
+  label.textContent = text;
+  return label;
+}
+
+async function openWorkbench(options = {}) {
+  if (els.settingsDialog.open) els.settingsDialog.close();
+  if (workbenchMode) return;
+
+  const url = extensionRuntime
+    ? new URL(chrome.runtime.getURL('sidepanel.html'))
+    : new URL(window.location.href);
+  url.searchParams.set('layout', 'workbench');
+  if (options.view) url.searchParams.set('view', options.view);
+  else url.searchParams.delete('view');
+
+  if (extensionRuntime) {
+    await send('tabs:create', { url: url.toString(), active: true });
+  } else {
+    window.open(url.toString(), '_blank', 'noopener');
+  }
+}
+
+async function maybeShowOnboarding() {
+  const forcedPreview = new URLSearchParams(window.location.search).get('onboarding') === '1';
+  if (!extensionRuntime && !forcedPreview) return;
+  if (state.onboarding?.completed) return;
+  openOnboarding();
+}
+
+function openOnboarding() {
+  onboardingStep = 0;
+  onboardingPath = '';
+  onboardingResult = '';
+  pendingOnboardingArcPlan = null;
+  els.onboardingArcInput.value = '';
+  els.onboardingArcStatus.textContent = 'No Arc file selected.';
+  els.onboardingArcSpaces.replaceChildren();
+  els.onboardingSpaceNameInput.value = currentSpace()?.name === 'Space' ? '' : 'New Space';
+  els.onboardingContextInput.value = '';
+  renderOnboarding();
+  if (!els.onboardingDialog.open) els.onboardingDialog.showModal();
+}
+
+function chooseOnboardingPath(path) {
+  if (path !== 'fresh' && path !== 'arc') return;
+  onboardingPath = path;
+  onboardingStep = 1;
+  renderOnboarding();
+  requestAnimationFrame(() => {
+    if (path === 'fresh') els.onboardingSpaceNameInput.focus();
+    else els.onboardingArcInput.focus();
+  });
+}
+
+function goBackOnboarding() {
+  if (onboardingStep <= 0) return;
+  onboardingStep -= 1;
+  if (onboardingStep === 0) onboardingPath = '';
+  renderOnboarding();
+}
+
+function renderOnboarding() {
+  const isChoose = onboardingStep === 0;
+  const isSetup = onboardingStep === 1;
+  const isFinish = onboardingStep === 2;
+  els.onboardingChooseStep.hidden = !isChoose;
+  els.onboardingFreshStep.hidden = !(isSetup && onboardingPath === 'fresh');
+  els.onboardingArcStep.hidden = !(isSetup && onboardingPath === 'arc');
+  els.onboardingFinishStep.hidden = !isFinish;
+  els.onboardingFooter.hidden = isFinish;
+  els.onboardingFooter.classList.toggle('single-action', isChoose);
+  els.onboardingBackButton.hidden = isChoose;
+  els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
+  els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
+
+  const progress = [...els.onboardingProgress.querySelectorAll('span')];
+  progress.forEach((item, index) => {
+    item.classList.toggle('active', index === onboardingStep);
+    item.classList.toggle('complete', index < onboardingStep);
+  });
+  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
+    button.classList.toggle('selected', button.dataset.onboardingPath === onboardingPath);
+  }
+
+  if (isChoose) {
+    els.onboardingNextButton.textContent = 'Continue';
+    els.onboardingNextButton.disabled = !onboardingPath;
+  } else if (onboardingPath === 'fresh') {
+    els.onboardingNextButton.textContent = 'Create Space';
+    els.onboardingNextButton.disabled = !els.onboardingSpaceNameInput.value.trim();
+  } else {
+    els.onboardingNextButton.textContent = 'Import selected Spaces';
+    els.onboardingNextButton.disabled = selectedOnboardingArcSpaceIds().length === 0;
+  }
+}
+
+async function continueOnboarding() {
+  if (onboardingStep === 0) {
+    if (!onboardingPath) return;
+    onboardingStep = 1;
+    renderOnboarding();
+    return;
+  }
+  if (onboardingStep !== 1) return;
+  if (onboardingPath === 'fresh') await applyFreshOnboarding();
+  else await applyArcOnboarding();
+  onboardingStep = 2;
+  renderOnboarding();
+}
+
+async function applyFreshOnboarding() {
+  const name = els.onboardingSpaceNameInput.value.trim();
+  if (!name) return;
+  const context = els.onboardingContextInput.value;
+  let targetSpace = currentSpace();
+  const canReuseDefault = state.spaces.length === 1 && targetSpace?.id === 'default' && targetSpace.name === 'Space';
+  if (canReuseDefault) {
+    targetSpace.name = name;
+    targetSpace.icon = name.slice(0, 1).toUpperCase();
+  } else {
+    targetSpace = {
+      id: uniqueSpaceId(name),
+      name,
+      icon: name.slice(0, 1).toUpperCase(),
+      color: nextSpaceColor(),
+    };
+    state.spaces.push(targetSpace);
+    await saveState();
+    await switchSpace(targetSpace.id);
+  }
+  state.activeSpaceId = targetSpace.id;
+  state.spaceContexts[targetSpace.id] = context;
+  activeView = workbenchMode ? 'context' : 'space';
+  lastRenderedSpacesSignature = '';
+  await saveState();
+  await refreshTabs({ adopt: true, reloadDormant: true });
+  onboardingResult = context.trim()
+    ? `${name} is ready with a local Context document.`
+    : `${name} is ready. Add Context whenever the work gains shape.`;
+}
+
+async function previewOnboardingArcFile() {
+  pendingOnboardingArcPlan = null;
+  els.onboardingArcSpaces.replaceChildren();
+  const file = els.onboardingArcInput.files?.[0];
+  if (!file) {
+    els.onboardingArcStatus.textContent = 'No Arc file selected.';
+    renderOnboarding();
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    els.onboardingArcStatus.textContent = 'This Arc file is too large to import safely.';
+    renderOnboarding();
+    return;
+  }
+
+  try {
+    pendingOnboardingArcPlan = createArcImportPlan(await file.text(), { existingSpaces: state.spaces });
+    els.onboardingArcStatus.textContent = formatArcImportSummary(pendingOnboardingArcPlan.summary, 'Preview');
+    renderOnboardingArcSpaces(pendingOnboardingArcPlan);
+  } catch (error) {
+    els.onboardingArcStatus.textContent = `Cannot read Arc file: ${error.message || String(error)}`;
+  }
+  renderOnboarding();
+}
+
+function renderOnboardingArcSpaces(plan) {
+  const rows = (plan?.spaces || []).map((space) => {
+    const label = document.createElement('label');
+    label.className = 'onboarding-space-option';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.dataset.arcSpaceId = space.id;
+    const icon = document.createElement('span');
+    icon.className = 'onboarding-space-icon';
+    icon.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
+    const name = document.createElement('strong');
+    name.textContent = space.name;
+    const count = document.createElement('small');
+    count.textContent = `${snapshotTabCount(plan.spaceSnapshots?.[space.id])} tabs`;
+    label.append(checkbox, icon, name, count);
+    return label;
+  });
+  els.onboardingArcSpaces.replaceChildren(...rows);
+}
+
+function selectedOnboardingArcSpaceIds() {
+  return [...els.onboardingArcSpaces.querySelectorAll('input[data-arc-space-id]:checked')]
+    .map((input) => input.dataset.arcSpaceId)
+    .filter(Boolean);
+}
+
+function selectedOnboardingArcPlan() {
+  const selectedIds = new Set(selectedOnboardingArcSpaceIds());
+  const spaces = (pendingOnboardingArcPlan?.spaces || []).filter((space) => selectedIds.has(space.id));
+  const spaceSnapshots = Object.fromEntries(spaces.map((space) => [
+    space.id,
+    pendingOnboardingArcPlan.spaceSnapshots?.[space.id],
+  ]));
+  return {
+    spaces,
+    spaceSnapshots,
+    summary: {
+      ...(pendingOnboardingArcPlan?.summary || {}),
+      spaces: spaces.length,
+      tabs: Object.values(spaceSnapshots).reduce((sum, snapshot) => sum + snapshotTabCount(snapshot), 0),
+    },
+  };
+}
+
+async function applyArcOnboarding() {
+  const plan = selectedOnboardingArcPlan();
+  if (plan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
+  const result = appendArcImportPlan(state, plan);
+  rememberArcImport(result.importedSpaceIds);
+  lastRenderedSpacesSignature = '';
+  await saveState();
+  render();
+  renderSettings();
+  onboardingResult = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
+}
+
+async function finishOnboarding(openWorkbenchAfter) {
+  state.onboarding = { version: 1, completed: true };
+  await saveState();
+  if (els.onboardingDialog.open) els.onboardingDialog.close();
+  render();
+  if (openWorkbenchAfter) await openWorkbench();
 }
 
 async function addSpace() {
@@ -3217,7 +3559,7 @@ async function tidyTabNames() {
 
 async function tidyTabNamesWithAI(tabsWithContext) {
   const candidates = tabsWithContext.filter((tab) => !hasManualPanelName(tab.id));
-  if (!state.ai.apiKey || candidates.length === 0) return {};
+  if ((providerRequiresApiKey(state.ai) && !state.ai.apiKey) || candidates.length === 0) return {};
 
   try {
     await ensureAIHostPermission();
@@ -3265,7 +3607,7 @@ async function autoGroupTabs() {
     let mergedGroups = await mergeDuplicateGroupsInActiveSpace();
     if (mergedGroups) await loadTabs({ adopt: false });
 
-    if (state.ai.apiKey) {
+    if (!providerRequiresApiKey(state.ai) || state.ai.apiKey) {
       try {
         await ensureAIHostPermission();
         const response = await send('ai:chat', {
@@ -3608,7 +3950,7 @@ async function testAI() {
   const requestId = beginAIRequest();
   try {
     const settings = currentAISettingsFromForm();
-    if (!settings.apiKey) {
+    if (providerRequiresApiKey(settings) && !settings.apiKey) {
       throw new Error('AI API key is missing. Add it in Settings.');
     }
     await ensureAIHostPermission(settings);
@@ -3705,6 +4047,7 @@ function formatSpaceBackupSummary(backup) {
 async function previewArcImportFile() {
   const file = els.arcImportInput.files?.[0];
   pendingArcImportText = '';
+  pendingArcImportPlan = null;
   els.importArcButton.disabled = true;
   if (!file) {
     setArcImportStatus('No Arc file selected.');
@@ -3720,6 +4063,7 @@ async function previewArcImportFile() {
     const text = await file.text();
     const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
     pendingArcImportText = text;
+    pendingArcImportPlan = plan;
     els.importArcButton.disabled = plan.spaces.length === 0;
     setArcImportStatus(formatArcImportSummary(plan.summary, 'Ready to append'));
   } catch (error) {
@@ -3728,17 +4072,19 @@ async function previewArcImportFile() {
 }
 
 async function importArcFile() {
-  if (!pendingArcImportText) {
+  if (!pendingArcImportText || !pendingArcImportPlan) {
     setArcImportStatus('Choose an Arc sidebar file first.');
     return;
   }
 
   try {
-    const plan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
-    const result = appendArcImportPlan(state, plan);
+    const result = appendArcImportPlan(state, pendingArcImportPlan);
+    rememberArcImport(result.importedSpaceIds);
     await saveState();
     render();
+    renderSettings();
     pendingArcImportText = '';
+    pendingArcImportPlan = null;
     els.arcImportInput.value = '';
     els.importArcButton.disabled = true;
     const message = `Imported ${result.importedSpaces} Spaces and ${result.importedTabs} tabs. Current Space stayed active.`;
@@ -3747,6 +4093,51 @@ async function importArcFile() {
   } catch (error) {
     setArcImportStatus(`Import failed: ${error.message || String(error)}`);
   }
+}
+
+function rememberArcImport(spaceIds) {
+  const ids = [...new Set((spaceIds || []).map(String).filter(Boolean))];
+  state.lastArcImport = ids.length
+    ? { spaceIds: ids, importedAt: Date.now() }
+    : null;
+}
+
+async function undoLastArcImport() {
+  const importedIds = new Set((state.lastArcImport?.spaceIds || []).map(String));
+  const removableSpaces = state.spaces.filter((space) => importedIds.has(space.id));
+  if (removableSpaces.length === 0) {
+    state.lastArcImport = null;
+    await saveState();
+    renderSettings();
+    setArcImportStatus('There is no Arc import to undo.');
+    return;
+  }
+
+  const ok = await askConfirm({
+    title: 'Undo Arc Import',
+    message: `Remove ${removableSpaces.length} imported Spaces and their saved tabs? Open tabs will stay open and return to the active Space.`,
+    confirmText: 'Undo Import',
+    danger: true,
+  });
+  if (!ok) return;
+
+  const remainingSpaces = state.spaces.filter((space) => !importedIds.has(space.id));
+  if (remainingSpaces.length === 0) throw new Error('Keep at least one Space before undoing this import.');
+  if (importedIds.has(state.activeSpaceId)) state.activeSpaceId = remainingSpaces[0].id;
+  for (const spaceId of importedIds) removeSpaceReferences(state, spaceId);
+  state.spaces = remainingSpaces;
+  state.lastArcImport = null;
+  activeView = workbenchMode ? 'context' : 'space';
+  dormantSpaceView = [];
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+  lastRenderedSpacesSignature = '';
+  await saveState();
+  await refreshTabs({ adopt: true, reloadDormant: true });
+  renderSettings();
+  const message = `Removed ${removableSpaces.length} imported Arc Spaces. Open tabs were kept.`;
+  setArcImportStatus(message);
+  setSettingsStatus(message);
 }
 
 function showTabContextMenu(event, tab) {
@@ -3969,7 +4360,9 @@ function renderSettings() {
   renderAIProviderFields(normalizeAIProviderSettings(state.ai));
   els.languageInput.value = state.ai.language || 'zh-CN';
   els.apiKeyInput.value = state.ai.apiKey;
-  els.apiKeyInput.placeholder = state.ai.apiKey ? 'API key configured' : 'Paste API key';
+  els.apiKeyInput.placeholder = state.ai.apiKey
+    ? 'API key configured'
+    : providerRequiresApiKey(state.ai) ? 'Paste API key' : 'Not required for Ollama';
   const statusText = apiKeyStatusText();
   els.apiKeyStatus.textContent = statusText;
   els.apiKeyStatus.hidden = !statusText;
@@ -3977,6 +4370,8 @@ function renderSettings() {
   els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
   els.maxTokensInput.value = state.ai.maxTokens;
+  els.undoArcImportButton.disabled = !(state.lastArcImport?.spaceIds || [])
+    .some((spaceId) => state.spaces.some((space) => space.id === spaceId));
 
   const theme = state.tempTheme || state.theme || 'purple';
   for (const option of els.themeOptions.querySelectorAll('.theme-option')) {
@@ -4004,6 +4399,7 @@ function renderAIProviderFields(settings) {
   els.baseUrlInput.value = normalized.provider === CUSTOM_AI_PROVIDER_ID ? normalized.baseUrl : provider.baseUrl;
   els.baseUrlInput.readOnly = !provider.editableBaseUrl;
   els.baseUrlInput.classList.toggle('readonly', els.baseUrlInput.readOnly);
+  els.apiKeyInput.placeholder = provider.requiresApiKey === false ? 'Not required for Ollama' : 'Paste API key';
   renderModelOptions(provider, normalized.model);
 }
 
@@ -4046,6 +4442,7 @@ function settingsFromProviderSelection() {
 function apiKeyStatusText() {
   if (localConfig.ai?.apiKey) return '';
   if (state.ai.apiKey) return 'API key is configured for this Chrome session.';
+  if (!providerRequiresApiKey(state.ai)) return 'Ollama does not require an API key.';
   return 'No API key configured.';
 }
 
@@ -4093,7 +4490,12 @@ async function saveSettings() {
   if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
   else await secretRemove(SECRET_STORAGE_KEY);
   await saveState();
-  els.settingsDialog.close();
+  if (workbenchMode) {
+    renderSettings();
+    setSettingsStatus('Settings saved.');
+  } else {
+    els.settingsDialog.close();
+  }
   render();
 }
 
@@ -4122,7 +4524,7 @@ function currentAISettingsFromForm() {
     language: els.languageInput.value || 'zh-CN',
     apiKey: els.apiKeyInput.value.trim(),
     thinking: els.thinkingInput.value,
-    maxTokens: Number(els.maxTokensInput.value || 2048),
+    maxTokens: Number(els.maxTokensInput.value || DEFAULT_MAX_TOKENS),
   };
 }
 

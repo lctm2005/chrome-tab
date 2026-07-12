@@ -1,4 +1,5 @@
 import { buildChatCompletionRequest, extractAssistantText, getZaiFallbackBaseUrl } from './src/shared/ai.js';
+import { providerRequiresApiKey } from './src/shared/ai-providers.js';
 import { serializeGroup, serializeTab } from './src/shared/state.js';
 
 const activeAIRequests = new Map();
@@ -327,7 +328,9 @@ async function extractTabOutline(tabId) {
 }
 
 async function runChatCompletion(settings, messages, requestId = '') {
-  if (!settings?.apiKey) throw new Error('AI API key is missing. Add it in Settings.');
+  if (providerRequiresApiKey(settings) && !settings?.apiKey) {
+    throw new Error('AI API key is missing. Add it in Settings.');
+  }
   const controller = new AbortController();
   const safeRequestId = requestId || crypto.randomUUID();
   activeAIRequests.set(safeRequestId, controller);
