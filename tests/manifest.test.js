@@ -133,11 +133,18 @@ test('tabs list requests are scoped to the side panel window when possible', asy
   assert.match(background, /tab\.pendingUrl \|\| tab\.url/);
 });
 
-test('sidepanel refresh adopts orphan Chrome groups with orphan tabs', async () => {
+test('sidepanel refresh adopts orphan groups without overwriting newer Workbench state', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(source, /adoptGroups:\s*Boolean\(options\.adoptGroups\s*\?\?\s*options\.adopt\)/);
-  assert.match(source, /setInterval\(\(\) => refreshTabs\(\{ adopt: true \}\), 2500\)/);
+  assert.match(source, /setInterval\(\(\) => void refreshSharedState\(\), 2500\)/);
+  assert.match(source, /async function refreshSharedState\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\)[\s\S]*refreshTabs\(\{ adopt: true \}\)/);
+  assert.match(source, /navigator\.locks\.request\(SHARED_STATE_LOCK_NAME/);
+  assert.match(source, /async function addSpace\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\)[\s\S]*state\.spaces\.push\(space\)[\s\S]*await saveState\(\)[\s\S]*activateSpace\(space\.id, \{ stateLocked: true \}\)/);
+  assert.match(source, /async function runTask\(task\)[\s\S]*if \(extensionRuntime\) await syncStateFromStorage\(\)/);
+  assert.match(source, /async function tidyTabNames\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
+  assert.match(source, /async function autoGroupTabs\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
+  assert.match(source, /async function importArcFile\(\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
 test('folder drag before or after reparents groups beside the target', async () => {

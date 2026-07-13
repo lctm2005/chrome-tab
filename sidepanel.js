@@ -171,6 +171,10 @@ let groupPreviewOpenTimer = 0;
 let groupPreviewCloseTimer = 0;
 let workbenchToastTimer = 0;
 let workbenchToastHideTimer = 0;
+let activeTaskCount = 0;
+let sharedRefreshRunning = false;
+
+const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -258,7 +262,7 @@ async function init() {
     renderSettings();
     await refreshTabs({ adopt: true });
     await maybeShowOnboarding();
-    if (extensionRuntime) setInterval(() => refreshTabs({ adopt: true }), 2500);
+    if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
     els.syncStatus.textContent = 'Failed to initialize';
     if (activeView === 'ask') addAskMessage('assistant', formatAIError(error));
@@ -311,32 +315,48 @@ function notifyPanelVisibility(visible) {
 
 function persistCurrentSpaceSnapshot() {
   if (!state?.activeSpaceId) return;
-  snapshotOpenSpace(state.activeSpaceId);
-  void saveState();
+  void withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await loadTabs({ adopt: false });
+    snapshotOpenSpace(state.activeSpaceId);
+    await saveState();
+  });
 }
 
 async function loadState() {
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await saveState();
+  });
+}
+
+async function syncStateFromStorage() {
+  const tempTheme = state?.tempTheme;
   const defaults = createDefaultState(localConfig);
-  const stored = await storageGet();
-  state = mergeStoredState(stored[STORAGE_KEY], defaults);
-  applyTheme(state.theme);
-  sanitizeStoredSpaceSnapshots();
-  const secrets = await secretGet();
+  const [stored, secrets] = await Promise.all([storageGet(), secretGet()]);
+  const nextState = mergeStoredState(stored[STORAGE_KEY], defaults);
 
   if (localConfig.ai?.apiKey) {
-    state.ai = {
+    nextState.ai = {
       ...localConfig.ai,
-      ...state.ai,
+      ...nextState.ai,
       apiKey: localConfig.ai.apiKey,
-      baseUrl: String(state.ai.baseUrl || localConfig.ai.baseUrl || '').trim().replace(/\/+$/, ''),
-      maxTokens: normalizeMaxTokens(state.ai.maxTokens ?? localConfig.ai.maxTokens, DEFAULT_MAX_TOKENS),
-      temperature: Number(state.ai.temperature ?? localConfig.ai.temperature ?? 0.6),
+      baseUrl: String(nextState.ai.baseUrl || localConfig.ai.baseUrl || '').trim().replace(/\/+$/, ''),
+      maxTokens: normalizeMaxTokens(nextState.ai.maxTokens ?? localConfig.ai.maxTokens, DEFAULT_MAX_TOKENS),
+      temperature: Number(nextState.ai.temperature ?? localConfig.ai.temperature ?? 0.6),
     };
   } else if (secrets[SECRET_STORAGE_KEY]?.ai?.apiKey) {
-    state.ai.apiKey = secrets[SECRET_STORAGE_KEY].ai.apiKey;
+    nextState.ai.apiKey = secrets[SECRET_STORAGE_KEY].ai.apiKey;
   }
 
-  await saveState();
+  if (tempTheme) nextState.tempTheme = tempTheme;
+  state = nextState;
+  applyTheme(state.tempTheme || state.theme);
+  sanitizeStoredSpaceSnapshots();
+  lastRenderedGroupsSignature = '';
+  lastRenderedAskSignature = '';
+  lastRenderedSpacesSignature = '';
+  return state;
 }
 
 async function saveState() {
@@ -552,6 +572,21 @@ async function refreshTabs(options = {}) {
   await loadDormantSpaceView(state.activeSpaceId, { force: Boolean(options.reloadDormant) });
   render();
   await saveState();
+}
+
+async function refreshSharedState() {
+  if (sharedRefreshRunning || activeTaskCount > 0) return;
+  sharedRefreshRunning = true;
+  try {
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      await refreshTabs({ adopt: true });
+    });
+  } catch (error) {
+    console.error(error);
+  } finally {
+    sharedRefreshRunning = false;
+  }
 }
 
 async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
@@ -1641,6 +1676,13 @@ async function continueOnboarding() {
 async function applyFreshOnboarding() {
   const name = els.onboardingSpaceNameInput.value.trim();
   if (!name) return;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await applyFreshOnboardingFromCurrentState(name);
+  });
+}
+
+async function applyFreshOnboardingFromCurrentState(name) {
   let targetSpace = currentSpace();
   const canReuseDefault = state.spaces.length === 1 && targetSpace?.id === 'default';
   if (canReuseDefault) {
@@ -1738,18 +1780,25 @@ function selectedOnboardingArcPlan() {
 async function applyArcOnboarding() {
   const plan = selectedOnboardingArcPlan();
   if (plan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
-  const result = appendArcImportPlan(state, plan);
-  rememberArcImport(result.importedSpaceIds);
-  lastRenderedSpacesSignature = '';
-  await saveState();
-  render();
-  renderSettings();
+  let result;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    result = appendArcImportPlan(state, plan);
+    rememberArcImport(result.importedSpaceIds);
+    lastRenderedSpacesSignature = '';
+    await saveState();
+    render();
+    renderSettings();
+  });
   onboardingResult = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
 }
 
 async function finishOnboarding(openWorkbenchAfter) {
-  state.onboarding = { version: 1, completed: true };
-  await saveState();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    state.onboarding = { version: 1, completed: true };
+    await saveState();
+  });
   if (els.onboardingDialog.open) els.onboardingDialog.close();
   render();
   if (openWorkbenchAfter) await openWorkbench();
@@ -1766,17 +1815,27 @@ async function addSpace() {
   const clean = name.trim();
   if (!clean) return;
 
-  const space = {
-    id: uniqueSpaceId(clean),
-    name: clean,
-    icon: clean.slice(0, 1).toUpperCase(),
-    color: nextSpaceColor(),
-  };
-  state.spaces.push(space);
-  await activateSpace(space.id);
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const space = {
+      id: uniqueSpaceId(clean),
+      name: clean,
+      icon: clean.slice(0, 1).toUpperCase(),
+      color: nextSpaceColor(),
+    };
+    state.spaces.push(space);
+    await saveState();
+    await activateSpace(space.id, { stateLocked: true });
+  });
 }
 
-async function activateSpace(spaceId) {
+async function activateSpace(spaceId, options = {}) {
+  if (!options.stateLocked) {
+    return withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      return activateSpace(spaceId, { stateLocked: true });
+    });
+  }
   if (!state.spaces.some((space) => space.id === spaceId)) return;
   if (spaceId !== state.activeSpaceId) {
     await switchSpace(spaceId);
@@ -1799,10 +1858,15 @@ async function renameSpace(space) {
   if (nextName === null) return;
   const clean = nextName.trim();
   if (!clean) return;
-  space.name = clean;
-  space.icon = clean.slice(0, 1).toUpperCase();
-  await saveState();
-  render();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const current = state.spaces.find((item) => item.id === space.id);
+    if (!current) return;
+    current.name = clean;
+    current.icon = clean.slice(0, 1).toUpperCase();
+    await saveState();
+    render();
+  });
 }
 
 async function deleteSpace(space) {
@@ -1818,6 +1882,15 @@ async function deleteSpace(space) {
   });
   if (!ok) return;
 
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const current = state.spaces.find((item) => item.id === space.id);
+    if (!current || state.spaces.length <= 1) return;
+    await deleteSpaceFromCurrentState(current);
+  });
+}
+
+async function deleteSpaceFromCurrentState(space) {
   await loadTabs({ adopt: true });
   const deletingActiveSpace = state.activeSpaceId === space.id;
   const fallback = fallbackSpaceAfterDelete(state.spaces, space.id);
@@ -1854,12 +1927,15 @@ async function deleteSpace(space) {
 }
 
 async function newTabInActiveSpace() {
-  const created = await send('tabs:create', { url: 'chrome://newtab', active: true });
-  const tabId = created.tab?.id;
-  if (tabId) state.tabSpaces[tabId] = state.activeSpaceId;
-  await closeEphemeralTabs();
-  await saveState();
-  await refreshTabs();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const created = await send('tabs:create', { url: 'chrome://newtab', active: true });
+    const tabId = created.tab?.id;
+    if (tabId) state.tabSpaces[tabId] = state.activeSpaceId;
+    await closeEphemeralTabs();
+    await saveState();
+    await refreshTabs();
+  });
 }
 
 async function clearUngroupedTabs(group) {
@@ -3521,6 +3597,7 @@ function clearDragState(event) {
 }
 
 async function tidyTabNames() {
+  const sourceSpaceId = state.activeSpaceId;
   const visibleTabs = spaceView
     .flatMap((group) => group.tabs)
     .filter((tab) => isPageShortcutCapableUrl(tab.url));
@@ -3571,17 +3648,28 @@ async function tidyTabNames() {
     });
     if (!confirmed) return;
 
-    for (const tabId of duplicateTabIds) {
-      delete state.tabSpaces[tabId];
-      delete state.renamedTabs[tabId];
-      delete state.tabGroups?.[tabId];
-      forgetEphemeralTab(tabId);
-      await send('tabs:close', { tabId });
-    }
-    Object.assign(state.renamedTabs, plannedNames);
-    await saveState();
-    await refreshTabs();
-    const duplicateText = duplicateTabIds.length ? ` Removed ${duplicateTabIds.length} duplicate tabs.` : '';
+    let closedDuplicateCount = 0;
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      if (state.activeSpaceId !== sourceSpaceId) {
+        throw new Error('The active Space changed while Tidy Names was open. Run it again in the current Space.');
+      }
+      await loadTabs({ adopt: false });
+      const openTabIds = new Set(tabs.map((tab) => Number(tab.id)));
+      for (const tabId of duplicateTabIds) {
+        if (!openTabIds.has(Number(tabId))) continue;
+        delete state.tabSpaces[tabId];
+        delete state.renamedTabs[tabId];
+        delete state.tabGroups?.[tabId];
+        forgetEphemeralTab(tabId);
+        await send('tabs:close', { tabId });
+        closedDuplicateCount += 1;
+      }
+      Object.assign(state.renamedTabs, plannedNames);
+      await saveState();
+      await refreshTabs();
+    });
+    const duplicateText = closedDuplicateCount ? ` Removed ${closedDuplicateCount} duplicate tabs.` : '';
     setStatus(`Renamed ${remainingTabs.length} tabs in the panel only.${duplicateText}`);
   } finally {
     endPanelAction();
@@ -3622,6 +3710,7 @@ function hasManualPanelName(tabId) {
 async function autoGroupTabs() {
   await syncAISettingsFromStorage();
   await loadTabs({ adopt: true });
+  const sourceSpaceId = state.activeSpaceId;
   const candidates = tabs.filter((tab) => (
     tabBelongsToSpace(tab, state.activeSpaceId) &&
     !tab.pinned &&
@@ -3710,33 +3799,53 @@ async function autoGroupTabs() {
     });
     if (!confirmed) return;
 
-    let mergedGroups = await mergeDuplicateGroupsInActiveSpace();
-    if (mergedGroups) await loadTabs({ adopt: false });
-    const existingGroupsByTitle = activeChromeGroupsByTitle();
     let createdGroups = 0;
-    for (const group of plannedGroups) {
-      const titleKey = groupTitleKey(group.title);
-      let groupId = existingGroupsByTitle.get(titleKey)?.id;
-      if (Number.isFinite(Number(groupId))) {
-        await addTabsToChromeGroup(groupId, group.tabIds, state.activeSpaceId);
-      } else {
-        groupId = await createChromeGroup(group.tabIds, {
-          title: group.title,
-          color: group.color || nextGroupColor(),
-        });
-        if (groupId === null) continue;
-        existingGroupsByTitle.set(titleKey, {
-          id: groupId,
-          title: group.title,
-          color: group.color,
-        });
-        createdGroups += 1;
+    let mergedGroups = 0;
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      if (state.activeSpaceId !== sourceSpaceId) {
+        throw new Error('The active Space changed while Auto Group was open. Run it again in the current Space.');
       }
-    }
+      await loadTabs({ adopt: true });
+      const currentCandidateIds = new Set(tabs
+        .filter((tab) => (
+          tabBelongsToSpace(tab, sourceSpaceId) &&
+          !tab.pinned &&
+          isPageShortcutCapableUrl(tab.url)
+        ))
+        .map((tab) => Number(tab.id)));
+      const plannedTabIds = plannedGroups.flatMap((group) => group.tabIds).map(Number);
+      if (plannedTabIds.some((tabId) => !currentCandidateIds.has(tabId))) {
+        throw new Error('Tabs changed while Auto Group was open. Review a fresh preview before applying groups.');
+      }
 
-    mergedGroups += await mergeDuplicateGroupsInActiveSpace();
-    await saveState();
-    await refreshTabs();
+      mergedGroups = await mergeDuplicateGroupsInActiveSpace();
+      if (mergedGroups) await loadTabs({ adopt: false });
+      const existingGroupsByTitle = activeChromeGroupsByTitle();
+      for (const group of plannedGroups) {
+        const titleKey = groupTitleKey(group.title);
+        let groupId = existingGroupsByTitle.get(titleKey)?.id;
+        if (Number.isFinite(Number(groupId))) {
+          await addTabsToChromeGroup(groupId, group.tabIds, state.activeSpaceId);
+        } else {
+          groupId = await createChromeGroup(group.tabIds, {
+            title: group.title,
+            color: group.color || nextGroupColor(),
+          });
+          if (groupId === null) continue;
+          existingGroupsByTitle.set(titleKey, {
+            id: groupId,
+            title: group.title,
+            color: group.color,
+          });
+          createdGroups += 1;
+        }
+      }
+
+      mergedGroups += await mergeDuplicateGroupsInActiveSpace();
+      await saveState();
+      await refreshTabs();
+    });
     const parts = [];
     if (createdGroups) parts.push(`created ${createdGroups}`);
     if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
@@ -3809,10 +3918,13 @@ async function addTidyContext(visibleTabs) {
 }
 
 async function toggleSpaceGroups() {
-  const next = !isSpaceGroupsCollapsed();
-  state.collapsedSpaceGroups[state.activeSpaceId] = next;
-  await saveState();
-  render();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const next = !isSpaceGroupsCollapsed();
+    state.collapsedSpaceGroups[state.activeSpaceId] = next;
+    await saveState();
+    render();
+  });
   focusPanelForShortcuts();
 }
 
@@ -3869,9 +3981,12 @@ function focusPanelForShortcuts() {
 }
 
 async function openAskPage() {
-  activeView = 'ask';
-  ensureCurrentAskSession();
-  await saveState();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    activeView = 'ask';
+    ensureCurrentAskSession();
+    await saveState();
+  });
   render();
   els.askPagePrompt.focus();
 }
@@ -3958,9 +4073,14 @@ async function testAI() {
 }
 
 async function exportSpaceData() {
-  snapshotOpenSpace(state.activeSpaceId);
-  await saveState();
-  const backup = createSpaceBackup(state);
+  let backup;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await loadTabs({ adopt: false });
+    snapshotOpenSpace(state.activeSpaceId);
+    await saveState();
+    backup = createSpaceBackup(state);
+  });
   const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -4008,19 +4128,23 @@ async function restoreSpaceData() {
   });
   if (!ok) return;
 
-  const summary = restoreSpaceBackup(state, pendingSpaceBackup);
-  activeView = 'space';
-  dormantSpaceView = [];
-  dormantSpaceViewSpaceId = '';
-  lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
-  lastRenderedSpacesSignature = '';
-  pendingSpaceBackup = null;
-  els.spaceBackupInput.value = '';
-  els.restoreSpaceDataButton.disabled = true;
-  await saveState();
-  els.settingsDialog.close();
-  await refreshTabs({ adopt: true, reloadDormant: true });
+  let summary;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    summary = restoreSpaceBackup(state, pendingSpaceBackup);
+    activeView = 'space';
+    dormantSpaceView = [];
+    dormantSpaceViewSpaceId = '';
+    lastRenderedGroupsSignature = '';
+    lastRenderedAskSignature = '';
+    lastRenderedSpacesSignature = '';
+    pendingSpaceBackup = null;
+    els.spaceBackupInput.value = '';
+    els.restoreSpaceDataButton.disabled = true;
+    await saveState();
+    els.settingsDialog.close();
+    await refreshTabs({ adopt: true, reloadDormant: true });
+  });
   setStatus(`Restored ${summary.spaces} Spaces and ${summary.savedTabs} saved tabs.`);
 }
 
@@ -4065,11 +4189,16 @@ async function importArcFile() {
   }
 
   try {
-    const result = appendArcImportPlan(state, pendingArcImportPlan);
-    rememberArcImport(result.importedSpaceIds);
-    await saveState();
-    render();
-    renderSettings();
+    let result;
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      const latestPlan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
+      result = appendArcImportPlan(state, latestPlan);
+      rememberArcImport(result.importedSpaceIds);
+      await saveState();
+      render();
+      renderSettings();
+    });
     pendingArcImportText = '';
     pendingArcImportPlan = null;
     els.arcImportInput.value = '';
@@ -4108,21 +4237,35 @@ async function undoLastArcImport() {
   });
   if (!ok) return;
 
-  const remainingSpaces = state.spaces.filter((space) => !importedIds.has(space.id));
-  if (remainingSpaces.length === 0) throw new Error('Keep at least one Space before undoing this import.');
-  if (importedIds.has(state.activeSpaceId)) state.activeSpaceId = remainingSpaces[0].id;
-  for (const spaceId of importedIds) removeSpaceReferences(state, spaceId);
-  state.spaces = remainingSpaces;
-  state.lastArcImport = null;
-  activeView = workbenchMode ? 'ask' : 'space';
-  dormantSpaceView = [];
-  dormantSpaceViewSpaceId = '';
-  lastRenderedGroupsSignature = '';
-  lastRenderedSpacesSignature = '';
-  await saveState();
-  await refreshTabs({ adopt: true, reloadDormant: true });
+  let removedCount = 0;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const latestImportedIds = new Set((state.lastArcImport?.spaceIds || []).map(String));
+    const latestRemovableSpaces = state.spaces.filter((space) => latestImportedIds.has(space.id));
+    if (latestRemovableSpaces.length === 0) {
+      state.lastArcImport = null;
+      await saveState();
+      return;
+    }
+    const remainingSpaces = state.spaces.filter((space) => !latestImportedIds.has(space.id));
+    if (remainingSpaces.length === 0) throw new Error('Keep at least one Space before undoing this import.');
+    if (latestImportedIds.has(state.activeSpaceId)) state.activeSpaceId = remainingSpaces[0].id;
+    for (const spaceId of latestImportedIds) removeSpaceReferences(state, spaceId);
+    state.spaces = remainingSpaces;
+    state.lastArcImport = null;
+    activeView = workbenchMode ? 'ask' : 'space';
+    dormantSpaceView = [];
+    dormantSpaceViewSpaceId = '';
+    lastRenderedGroupsSignature = '';
+    lastRenderedSpacesSignature = '';
+    removedCount = latestRemovableSpaces.length;
+    await saveState();
+    await refreshTabs({ adopt: true, reloadDormant: true });
+  });
   renderSettings();
-  const message = `Removed ${removableSpaces.length} imported Arc Spaces. Open tabs were kept.`;
+  const message = removedCount
+    ? `Removed ${removedCount} imported Arc Spaces. Open tabs were kept.`
+    : 'There is no Arc import to undo.';
   setArcImportStatus(message);
   setSettingsStatus(message);
 }
@@ -4571,23 +4714,26 @@ async function saveSettings() {
     setSettingsStatus(`${conflict.label} conflicts with ${conflict.otherLabel}. Pick a different shortcut.`);
     return;
   }
+  let aiSettings;
   try {
-    state.ai = currentAISettingsFromForm();
+    aiSettings = currentAISettingsFromForm();
   } catch (error) {
     setSettingsStatus(error.message || String(error));
     return;
   }
-  state.shortcuts = shortcuts;
+  const selectedTheme = state.tempTheme;
 
-  if (state.tempTheme) {
-    state.theme = state.tempTheme;
+  await ensureAIHostPermission(aiSettings).catch(() => null);
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    state.ai = aiSettings;
+    state.shortcuts = shortcuts;
+    if (selectedTheme) state.theme = selectedTheme;
     delete state.tempTheme;
-  }
-
-  await ensureAIHostPermission(state.ai).catch(() => null);
-  if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
-  else await secretRemove(SECRET_STORAGE_KEY);
-  await saveState();
+    if (state.ai.apiKey) await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
+    else await secretRemove(SECRET_STORAGE_KEY);
+    await saveState();
+  });
   if (workbenchMode) {
     renderSettings();
     setSettingsStatus('Settings saved.');
@@ -4602,10 +4748,13 @@ async function clearApiKey() {
     setSettingsStatus('API key comes from config.local.js. Remove it there and reload the extension.');
     return;
   }
-  state.ai.apiKey = '';
-  els.apiKeyInput.value = '';
-  await secretRemove(SECRET_STORAGE_KEY);
-  await saveState();
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    state.ai.apiKey = '';
+    els.apiKeyInput.value = '';
+    await secretRemove(SECRET_STORAGE_KEY);
+    await saveState();
+  });
   renderSettings();
   setSettingsStatus('API key cleared. AI requests are disabled until you add a key.');
 }
@@ -4793,7 +4942,9 @@ function actionButton(text, title, handler) {
 }
 
 async function runTask(task) {
+  activeTaskCount += 1;
   try {
+    if (extensionRuntime) await syncStateFromStorage();
     await task();
   } catch (error) {
     const message = formatAIError(error);
@@ -4801,7 +4952,14 @@ async function runTask(task) {
     if (activeView === 'settings') setSettingsStatus(message);
     if (activeView === 'ask') addAskMessage('assistant', message);
     console.error(error);
+  } finally {
+    activeTaskCount = Math.max(0, activeTaskCount - 1);
   }
+}
+
+async function withSharedStateLock(task) {
+  if (!extensionRuntime || !navigator.locks?.request) return task();
+  return navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
 }
 
 function currentSpace() {
