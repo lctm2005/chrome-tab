@@ -1,4 +1,31 @@
-export const DEFAULT_MAX_TOKENS = 1_000_000;
+export const TOKENS_PER_K = 1024;
+export const MIN_MAX_TOKENS = 1;
+export const MAX_MAX_TOKENS = 131_072;
+export const DEFAULT_MAX_TOKENS = 10_240;
+
+export function isValidMaxTokens(value) {
+  const tokens = Number(value);
+  return Number.isFinite(tokens) &&
+    Number.isInteger(tokens) &&
+    tokens >= MIN_MAX_TOKENS &&
+    tokens <= MAX_MAX_TOKENS;
+}
+
+export function normalizeMaxTokens(value, fallback = DEFAULT_MAX_TOKENS) {
+  const tokens = Math.round(Number(value));
+  if (isValidMaxTokens(tokens)) return tokens;
+  const fallbackTokens = Math.round(Number(fallback));
+  return isValidMaxTokens(fallbackTokens) ? fallbackTokens : DEFAULT_MAX_TOKENS;
+}
+
+export function maxTokensToK(value) {
+  return Number((normalizeMaxTokens(value) / TOKENS_PER_K).toFixed(3));
+}
+
+export function maxTokensFromK(value) {
+  const units = Number(value);
+  return Number.isFinite(units) ? Math.round(units * TOKENS_PER_K) : Number.NaN;
+}
 
 export function normalizeBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || '').trim().replace(/\/+$/, '');
@@ -29,7 +56,7 @@ export function buildChatCompletionRequest(settings, messages) {
     messages,
     stream: false,
     temperature: Number(settings.temperature ?? 0.6),
-    max_tokens: Number(settings.maxTokens ?? DEFAULT_MAX_TOKENS),
+    max_tokens: normalizeMaxTokens(settings.maxTokens),
   };
 
   if (String(settings.model || '').startsWith('glm-5')) {

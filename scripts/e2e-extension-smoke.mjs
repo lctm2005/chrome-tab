@@ -262,11 +262,22 @@ async function main() {
 
     const bridge = await evaluate(client, `(async () => {
       const response = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      return { ok: response?.ok, tabs: response?.tabs?.length || 0, groups: response?.groups?.length || 0 };
+      const ownPrefix = chrome.runtime.getURL('');
+      return {
+        ok: response?.ok,
+        tabs: response?.tabs?.length || 0,
+        groups: response?.groups?.length || 0,
+        ownPages: (response?.tabs || []).filter((tab) => String(tab.url || '').startsWith(ownPrefix)).length,
+      };
     })()`);
     record(
       'Workbench reaches the real background service worker',
       bridge.ok === true && bridge.tabs >= 1,
+      JSON.stringify(bridge),
+    );
+    record(
+      'tabs:list excludes extension-owned Workbench pages',
+      bridge.ownPages === 0,
       JSON.stringify(bridge),
     );
 
@@ -312,8 +323,24 @@ async function main() {
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
     const defaultMaxTokens = await evaluate(client, `document.querySelector('#maxTokensInput').value`);
-    record('fresh BYOK max tokens defaults to 1M', defaultMaxTokens === '1000000', defaultMaxTokens);
+    record('fresh BYOK max tokens displays 10K', defaultMaxTokens === '10', defaultMaxTokens);
     await evaluate(client, `(() => {
+      const input = document.querySelector('#maxTokensInput');
+      input.value = '129';
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    const invalidMaxTokenState = await waitFor(client, `(async () => {
+      if (!document.querySelector('#workbenchToast')?.textContent?.includes('between 0.001K and 128K')) return null;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return { maxTokens: stored.spaceTabsState?.ai?.maxTokens };
+    })()`);
+    record(
+      'max output tokens rejects values above the API limit',
+      invalidMaxTokenState.maxTokens === 10_240,
+      JSON.stringify(invalidMaxTokenState),
+    );
+    await evaluate(client, `(() => {
+      document.querySelector('#maxTokensInput').value = '10';
       const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
       input.dataset.shortcut = 'Control+Alt+K';
       input.value = 'Ctrl + Alt + K';
@@ -327,20 +354,24 @@ async function main() {
     record('real Workbench Save shows feedback and applies shortcuts immediately', true);
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
 
-    await evaluate(client, `(async () => {
+    const openUniqueResults = await evaluate(client, `(async () => {
       const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');
       const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
-      await chrome.tabs.create({ url: matchUrl, active: false });
-      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
-      await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+      history.replaceState(null, '', url);
+      await chrome.tabs.create({ url: matchUrl, active: false, index: 0 });
+      const first = await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+      const second = await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
+      return { first, second };
     })()`);
-    const workbenchCount = await waitFor(client, `(async () => (
-      await chrome.tabs.query({})
-    ).filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench')).length)()`);
+    const workbenchState = await waitFor(client, `(async () => {
+      const tabs = (await chrome.tabs.query({}))
+        .filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench'));
+      return { count: tabs.length, tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active })) };
+    })()`);
     record(
       'Open Workbench reuses one tab and closes old duplicates',
-      workbenchCount === 1,
-      String(workbenchCount),
+      workbenchState.count === 1,
+      JSON.stringify({ openUniqueResults, workbenchState }),
     );
 
     progress(`triggering ${extensionId} toolbar action`);

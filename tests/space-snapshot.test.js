@@ -282,7 +282,25 @@ test('trims snapshot URLs, fills default metadata, and counts remaining tabs', (
   });
   assert.equal(snapshotTabCount(snapshot), 1);
   assert.equal(isRestorableSnapshotTab({ url: 'chrome://newtab' }), false);
+  assert.equal(isRestorableSnapshotTab({ url: 'chrome-extension://abc/sidepanel.html?layout=workbench' }), false);
   assert.equal(isRestorableSnapshotTab({ url: ' file:///tmp/demo.html ' }), true);
+});
+
+test('removes extension-owned pages from old Space snapshots', () => {
+  const snapshot = sanitizeSpaceSnapshot({
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Pbknggfleiabfibnhebdkgmghlagiohp',
+      color: 'pink',
+      tabs: [{
+        title: 'Space',
+        url: 'chrome-extension://pbknggfleiabfibnhebdkgmghlagiohp/sidepanel.html?layout=workbench',
+      }],
+    }],
+  });
+
+  assert.deepEqual(snapshot.groups, []);
 });
 
 test('deduplicates stored snapshot URL variants within a group', () => {

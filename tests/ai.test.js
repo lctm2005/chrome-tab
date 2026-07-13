@@ -8,7 +8,10 @@ import {
   formatAIError,
   getOriginPattern,
   getZaiFallbackBaseUrl,
+  isValidMaxTokens,
   languageInstruction,
+  maxTokensFromK,
+  maxTokensToK,
   normalizeBaseUrl,
   parseTidyGroups,
   parseTidyNames,
@@ -58,6 +61,26 @@ test('builds a GLM-5.2 OpenAI-compatible chat request', () => {
   assert.equal(request.body.thinking.type, 'disabled');
   assert.equal(request.body.max_tokens, 2048);
   assert.equal(request.body.stream, false);
+});
+
+test('uses real tokens internally and K units only for settings display', () => {
+  assert.equal(maxTokensToK(10_240), 10);
+  assert.equal(maxTokensFromK(10), 10_240);
+  assert.equal(maxTokensToK(131_072), 128);
+  assert.equal(maxTokensFromK(0.001), 1);
+  assert.equal(isValidMaxTokens(1), true);
+  assert.equal(isValidMaxTokens(131_072), true);
+  assert.equal(isValidMaxTokens(131_073), false);
+});
+
+test('never sends an out-of-range max_tokens value', () => {
+  const request = buildChatCompletionRequest({
+    baseUrl: 'https://example.com/v1',
+    model: 'example',
+    maxTokens: 1_000_000,
+  }, []);
+
+  assert.equal(request.body.max_tokens, 10_240);
 });
 
 test('extracts assistant text from OpenAI-compatible responses', () => {

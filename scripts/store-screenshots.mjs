@@ -555,7 +555,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 7,
+    version: 8,
     theme: 'ocean',
     activeSpaceId,
     spaces,
@@ -658,7 +658,7 @@ function baseState(activeSpaceId) {
       thinking: 'disabled',
       language: 'en',
       temperature: 0.6,
-      maxTokens: 1000000,
+      maxTokens: 10240,
     },
   };
 }

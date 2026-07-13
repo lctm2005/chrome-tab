@@ -1,5 +1,5 @@
 import { normalizeAIProviderSettings } from './ai-providers.js';
-import { DEFAULT_MAX_TOKENS } from './ai.js';
+import { DEFAULT_MAX_TOKENS, normalizeMaxTokens } from './ai.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
@@ -8,6 +8,7 @@ const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
 const LEGACY_DEFAULT_MAX_TOKENS = new Set([1024, 2048, 32768]);
+const INVALID_V7_DEFAULT_MAX_TOKENS = 1_000_000;
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -18,7 +19,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 7,
+    version: 8,
     theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
@@ -52,7 +53,7 @@ export function createDefaultState(localConfig = {}) {
       thinking: ai.thinking || 'disabled',
       language: ai.language || 'zh-CN',
       temperature: Number(ai.temperature ?? 0.6),
-      maxTokens: Number(ai.maxTokens ?? DEFAULT_MAX_TOKENS),
+      maxTokens: normalizeMaxTokens(ai.maxTokens, DEFAULT_MAX_TOKENS),
     },
   };
 }
@@ -127,6 +128,10 @@ function migrateAISettings(storedAI = {}, defaultAI = {}, storedVersion = 0) {
   if (Number(storedVersion) < 7 && LEGACY_DEFAULT_MAX_TOKENS.has(Number(storedAI?.maxTokens))) {
     ai.maxTokens = defaultAI.maxTokens;
   }
+  if (Number(storedVersion) < 8 && Number(storedAI?.maxTokens) === INVALID_V7_DEFAULT_MAX_TOKENS) {
+    ai.maxTokens = defaultAI.maxTokens;
+  }
+  ai.maxTokens = normalizeMaxTokens(ai.maxTokens, defaultAI.maxTokens);
   if (isLegacyBuiltInAISettings(storedAI)) {
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';

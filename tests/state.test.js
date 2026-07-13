@@ -6,11 +6,11 @@ import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 7);
+  assert.equal(state.version, 8);
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.name), ['Default']);
-  assert.equal(state.ai.maxTokens, 1_000_000);
+  assert.equal(state.ai.maxTokens, 10_240);
   assert.deepEqual(state.groupSpaces, {});
   assert.deepEqual(state.virtualGroups, {});
   assert.deepEqual(state.tabGroups, {});
@@ -118,7 +118,7 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
   assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
-test('migrates v4 Space ownership into v7 without resetting shortcuts', () => {
+test('migrates v4 Space ownership into v8 without resetting shortcuts', () => {
   const merged = mergeStoredState({
     version: 4,
     activeSpaceId: 'work',
@@ -129,7 +129,7 @@ test('migrates v4 Space ownership into v7 without resetting shortcuts', () => {
     shortcuts: { togglePanel: 'Meta+S' },
   }, createDefaultState());
 
-  assert.equal(merged.version, 7);
+  assert.equal(merged.version, 8);
   assert.equal(merged.activeSpaceId, 'work');
   assert.deepEqual(merged.groupSpaces, { 7: 'work' });
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
@@ -161,7 +161,25 @@ test('migrates the legacy default Space and max token defaults', () => {
   }, createDefaultState());
 
   assert.deepEqual(merged.spaces[0], { id: 'default', name: 'Default', icon: 'D', color: 'blue' });
-  assert.equal(merged.ai.maxTokens, 1_000_000);
+  assert.equal(merged.ai.maxTokens, 10_240);
+});
+
+test('replaces the invalid v7 one-million token default', () => {
+  const merged = mergeStoredState({
+    version: 7,
+    ai: { maxTokens: 1_000_000 },
+  }, createDefaultState());
+
+  assert.equal(merged.ai.maxTokens, 10_240);
+});
+
+test('preserves explicit max tokens inside the API range', () => {
+  const merged = mergeStoredState({
+    version: 7,
+    ai: { maxTokens: 131_072 },
+  }, createDefaultState());
+
+  assert.equal(merged.ai.maxTokens, 131_072);
 });
 
 test('preserves empty current shortcuts as disabled actions', () => {

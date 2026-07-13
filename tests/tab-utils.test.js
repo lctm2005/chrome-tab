@@ -12,6 +12,7 @@ import {
   planTidyGroups,
   planTidyTabNames,
   planGroupPreviewPlacement,
+  plannedRegroupTabIds,
   preferredFocusableTab,
   sanitizeTidyGroups,
   spaceGroupPlan,
@@ -35,6 +36,7 @@ test('counts only grouped tabs that Auto Group would move to a different titled 
   ];
 
   assert.equal(countPlannedRegroups(plan, tabs, groups), 1);
+  assert.deepEqual(plannedRegroupTabIds(plan, tabs, groups), [3]);
   assert.equal(countPlannedRegroups([{ title: 'Research', tabIds: [1, 2] }], tabs, groups), 0);
   assert.equal(countPlannedRegroups([], tabs, groups), 0);
 });

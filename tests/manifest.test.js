@@ -124,7 +124,11 @@ test('tabs list requests are scoped to the side panel window when possible', asy
   assert.match(sidepanel, /panelWindowId\s*=\s*await currentPanelWindowId\(\)/);
   assert.match(sidepanel, /type === 'tabs:list'[\s\S]*windowId: panelWindowId/);
   assert.match(background, /case 'tabs:list':\s*return listTabs\(message\.windowId\)/);
+  assert.match(background, /openUniqueTab\(message\.url, message\.matchUrl, sender\.tab\?\.id\)/);
   assert.match(background, /chrome\.tabs\.query\(query\)/);
+  assert.match(background, /ownExtensionPrefix = chrome\.runtime\.getURL\(''\)/);
+  assert.match(background, /tabUrl\(tab\)\.startsWith\(ownExtensionPrefix\)/);
+  assert.match(background, /tab\.pendingUrl \|\| tab\.url/);
 });
 
 test('sidepanel refresh adopts orphan Chrome groups with orphan tabs', async () => {
@@ -170,12 +174,16 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /preserveExisting:\s*true/);
 });
 
-test('Auto Group includes grouped tabs and confirms only planned regroups', async () => {
+test('Tidy Names and Auto Group preview changes before applying them', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
+  assert.match(source, /title: 'Preview Tidy Names'/);
+  assert.match(source, /if \(!confirmed\) return;[\s\S]*for \(const tabId of duplicateTabIds\)/);
   assert.match(source, /tabBelongsToSpace\(tab, state\.activeSpaceId\)/);
+  assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
   assert.match(source, /const regroupedCount = countPlannedRegroups\(plannedGroups, candidates, groups\)/);
-  assert.match(source, /if \(regroupedCount > 0\)[\s\S]*title: 'Regroup existing tabs\?'/);
+  assert.match(source, /title: 'Preview Auto Group'/);
+  assert.match(source, /badge: regroup \? 'Regroup' : ''/);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {

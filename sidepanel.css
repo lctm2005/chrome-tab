@@ -15,6 +15,7 @@
   --accent-strong: #8c7cff;
   --accent-soft: rgba(109, 121, 255, 0.18);
   --danger: #ff6b62;
+  --warning: #fbbf24;
   
   /* Elevate & Shape Tokens */
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
@@ -47,6 +48,7 @@
     --accent-strong: #6366f1;
     --accent-soft: rgba(79, 70, 229, 0.1);
     --danger: #ef4444;
+    --warning: #b45309;
     
     --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.04);
     --shadow-md: 0 6px 16px rgba(50, 50, 93, 0.06), 0 2px 5px rgba(0, 0, 0, 0.04);
@@ -1641,6 +1643,99 @@ dialog::backdrop {
   line-height: 1.5;
 }
 
+#actionDialog.plan-dialog {
+  width: min(94vw, 620px);
+}
+
+.action-preview {
+  display: grid;
+  gap: 14px;
+  max-height: min(56vh, 460px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.action-preview-section {
+  display: grid;
+  gap: 6px;
+}
+
+.action-preview-section h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.action-preview-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.action-preview-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border-top: 1px solid var(--line);
+  padding: 7px 2px;
+}
+
+.action-preview-before,
+.action-preview-after {
+  min-width: 0;
+}
+
+.action-preview-title,
+.action-preview-result,
+.action-preview-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-preview-title,
+.action-preview-result {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.action-preview-result {
+  color: var(--accent-strong);
+}
+
+.action-preview-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.action-preview-arrow {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.action-preview-badge {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 3px;
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.action-preview-section.danger .action-preview-result {
+  color: var(--danger);
+}
+
 .action-buttons {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1658,6 +1753,40 @@ dialog::backdrop {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.input-with-unit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 36px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.settings .input-with-unit input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+}
+
+.input-with-unit > span {
+  padding-right: 11px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+@media (max-width: 480px) {
+  .action-preview-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .action-preview-arrow {
+    display: none;
+  }
 }
 
 .toggle-row {

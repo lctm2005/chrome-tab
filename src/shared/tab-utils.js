@@ -200,7 +200,7 @@ export function groupTitleKey(title) {
     .toLowerCase();
 }
 
-export function countPlannedRegroups(plannedGroups = [], candidateTabs = [], liveGroups = []) {
+export function plannedRegroupTabIds(plannedGroups = [], candidateTabs = [], liveGroups = []) {
   const plannedTitleByTabId = new Map();
   for (const group of plannedGroups) {
     const titleKey = groupTitleKey(group.title);
@@ -212,7 +212,11 @@ export function countPlannedRegroups(plannedGroups = [], candidateTabs = [], liv
     const plannedTitle = plannedTitleByTabId.get(Number(tab.id));
     if (!plannedTitle) return false;
     return plannedTitle !== groupTitleKey(liveGroupsById.get(Number(tab.groupId))?.title || '');
-  }).length;
+  }).map((tab) => Number(tab.id));
+}
+
+export function countPlannedRegroups(plannedGroups = [], candidateTabs = [], liveGroups = []) {
+  return plannedRegroupTabIds(plannedGroups, candidateTabs, liveGroups).length;
 }
 
 function uniqueNumbers(values = []) {

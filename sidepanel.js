@@ -3,6 +3,10 @@ import {
   DEFAULT_MAX_TOKENS,
   formatAIError,
   getOriginPattern,
+  isValidMaxTokens,
+  maxTokensFromK,
+  maxTokensToK,
+  normalizeMaxTokens,
   parseTidyGroups,
   parseTidyNames,
 } from './src/shared/ai.js';
@@ -89,10 +93,12 @@ import {
   decorateTabs,
   domainFromUrl,
   groupTitleKey,
+  isPageShortcutCapableUrl,
   isPlaceholderTabTitle,
   planGroupPreviewPlacement,
   planTidyGroups,
   planTidyTabNames,
+  plannedRegroupTabIds,
   planDuplicateUrlClosures,
   preferredFocusableTab,
   sanitizeTidyGroups,
@@ -196,6 +202,7 @@ const els = {
   actionDialog: document.querySelector('#actionDialog'),
   actionDialogTitle: document.querySelector('#actionDialogTitle'),
   actionDialogMessage: document.querySelector('#actionDialogMessage'),
+  actionDialogPreview: document.querySelector('#actionDialogPreview'),
   actionDialogLabel: document.querySelector('#actionDialogLabel'),
   actionDialogInput: document.querySelector('#actionDialogInput'),
   actionDialogClose: document.querySelector('#actionDialogClose'),
@@ -322,7 +329,7 @@ async function loadState() {
       ...state.ai,
       apiKey: localConfig.ai.apiKey,
       baseUrl: String(state.ai.baseUrl || localConfig.ai.baseUrl || '').trim().replace(/\/+$/, ''),
-      maxTokens: Number(state.ai.maxTokens ?? localConfig.ai.maxTokens ?? DEFAULT_MAX_TOKENS),
+      maxTokens: normalizeMaxTokens(state.ai.maxTokens ?? localConfig.ai.maxTokens, DEFAULT_MAX_TOKENS),
       temperature: Number(state.ai.temperature ?? localConfig.ai.temperature ?? 0.6),
     };
   } else if (secrets[SECRET_STORAGE_KEY]?.ai?.apiKey) {
@@ -3514,7 +3521,9 @@ function clearDragState(event) {
 }
 
 async function tidyTabNames() {
-  const visibleTabs = spaceView.flatMap((group) => group.tabs);
+  const visibleTabs = spaceView
+    .flatMap((group) => group.tabs)
+    .filter((tab) => isPageShortcutCapableUrl(tab.url));
   if (visibleTabs.length === 0) {
     setStatus('No tabs in this Space to rename.');
     return;
@@ -3524,14 +3533,6 @@ async function tidyTabNames() {
   try {
     const duplicateTabIds = planDuplicateUrlClosures(visibleTabs);
     const duplicateTabIdSet = new Set(duplicateTabIds);
-    for (const tabId of duplicateTabIds) {
-      delete state.tabSpaces[tabId];
-      delete state.renamedTabs[tabId];
-      delete state.tabGroups?.[tabId];
-      forgetEphemeralTab(tabId);
-      await send('tabs:close', { tabId });
-    }
-
     const remainingTabs = visibleTabs.filter((tab) => !duplicateTabIdSet.has(Number(tab.id)));
     const tabsWithContext = await addTidyContext(remainingTabs);
     const localNames = planTidyTabNames(tabsWithContext, {
@@ -3539,7 +3540,45 @@ async function tidyTabNames() {
       preserveExisting: true,
     });
     const aiNames = await tidyTabNamesWithAI(tabsWithContext);
-    Object.assign(state.renamedTabs, localNames, aiNames);
+    const plannedNames = { ...localNames, ...aiNames };
+    const renameItems = remainingTabs
+      .map((tab) => ({
+        title: tab.displayTitle || tab.title || 'Untitled',
+        result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
+        meta: tab.domain,
+      }))
+      .filter((item) => item.title !== item.result);
+    const duplicateItems = visibleTabs
+      .filter((tab) => duplicateTabIdSet.has(Number(tab.id)))
+      .map((tab) => ({
+        title: tab.displayTitle || tab.title || 'Untitled',
+        result: 'Close duplicate',
+        meta: tab.url,
+      }));
+    if (renameItems.length === 0 && duplicateItems.length === 0) {
+      setStatus('Tidy Names found no changes to apply.');
+      return;
+    }
+
+    const confirmed = await showPlanPreview({
+      title: 'Preview Tidy Names',
+      message: `${renameItems.length} names will change${duplicateItems.length ? ` and ${duplicateItems.length} duplicate tabs will close` : ''}.`,
+      confirmText: 'Apply tidy',
+      sections: [
+        { title: 'Rename in panel', items: renameItems },
+        { title: 'Close duplicates', tone: 'danger', items: duplicateItems },
+      ],
+    });
+    if (!confirmed) return;
+
+    for (const tabId of duplicateTabIds) {
+      delete state.tabSpaces[tabId];
+      delete state.renamedTabs[tabId];
+      delete state.tabGroups?.[tabId];
+      forgetEphemeralTab(tabId);
+      await send('tabs:close', { tabId });
+    }
+    Object.assign(state.renamedTabs, plannedNames);
     await saveState();
     await refreshTabs();
     const duplicateText = duplicateTabIds.length ? ` Removed ${duplicateTabIds.length} duplicate tabs.` : '';
@@ -3585,7 +3624,7 @@ async function autoGroupTabs() {
   const candidates = tabs.filter((tab) => (
     tabBelongsToSpace(tab, state.activeSpaceId) &&
     !tab.pinned &&
-    !tab.url.startsWith('chrome://')
+    isPageShortcutCapableUrl(tab.url)
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
   if (candidates.length === 0 && duplicateGroupCount === 0) {
@@ -3610,15 +3649,42 @@ async function autoGroupTabs() {
     }
 
     if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
+    const regroupedTabIds = new Set(plannedRegroupTabIds(plannedGroups, candidates, groups));
     const regroupedCount = countPlannedRegroups(plannedGroups, candidates, groups);
-    if (regroupedCount > 0) {
-      const confirmed = await askConfirm({
-        title: 'Regroup existing tabs?',
-        message: `Auto Group will move ${regroupedCount} already grouped ${regroupedCount === 1 ? 'tab' : 'tabs'} into new groups.`,
-        confirmText: 'Regroup',
+    const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
+    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const previewSections = plannedGroups.map((group) => ({
+      title: group.title,
+      items: group.tabIds.map((tabId) => {
+        const tab = tabsById.get(Number(tabId));
+        const regroup = regroupedTabIds.has(Number(tabId));
+        return {
+          title: tab?.displayTitle || tab?.title || 'Untitled',
+          result: group.title,
+          meta: tab?.domain || '',
+          badge: regroup ? 'Regroup' : '',
+        };
+      }),
+    }));
+    if (duplicateGroupCount > 0) {
+      previewSections.push({
+        title: 'Duplicate groups',
+        items: [{
+          title: `${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'group' : 'groups'}`,
+          result: 'Merge by title',
+        }],
       });
-      if (!confirmed) return;
     }
+    const regroupMessage = regroupedCount > 0
+      ? ` ${regroupedCount} already grouped ${regroupedCount === 1 ? 'tab will move' : 'tabs will move'}; review the Regroup labels.`
+      : '';
+    const confirmed = await showPlanPreview({
+      title: 'Preview Auto Group',
+      message: `${groupedCount} tabs are planned across ${plannedGroups.length} groups.${regroupMessage}`,
+      confirmText: 'Apply grouping',
+      sections: previewSections,
+    });
+    if (!confirmed) return;
 
     let mergedGroups = await mergeDuplicateGroupsInActiveSpace();
     if (mergedGroups) await loadTabs({ adopt: false });
@@ -3647,7 +3713,6 @@ async function autoGroupTabs() {
     mergedGroups += await mergeDuplicateGroupsInActiveSpace();
     await saveState();
     await refreshTabs();
-    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
     const parts = [];
     if (createdGroups) parts.push(`created ${createdGroups}`);
     if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
@@ -4200,6 +4265,16 @@ async function askConfirm({ title, message, confirmText = 'Confirm', danger = fa
   return result === true;
 }
 
+async function showPlanPreview({ title, message, confirmText, sections }) {
+  const result = await openActionDialog({
+    title,
+    message,
+    confirmText,
+    previewSections: sections,
+  });
+  return result === true;
+}
+
 function openActionDialog({
   title,
   message = '',
@@ -4208,6 +4283,7 @@ function openActionDialog({
   confirmText = 'Save',
   danger = false,
   withInput = false,
+  previewSections = [],
 }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -4220,6 +4296,7 @@ function openActionDialog({
       els.actionDialogCancel.removeEventListener('click', onCancel);
       els.actionDialog.querySelector('form').removeEventListener('submit', onSubmit);
       if (els.actionDialog.open) els.actionDialog.close();
+      els.actionDialog.classList.remove('plan-dialog');
       resolve(result);
     };
 
@@ -4238,6 +4315,8 @@ function openActionDialog({
     els.actionDialogLabel.firstChild.textContent = label || 'Name';
     els.actionDialogConfirm.textContent = confirmText;
     els.actionDialogConfirm.classList.toggle('danger', danger);
+    renderActionDialogPreview(previewSections);
+    els.actionDialog.classList.toggle('plan-dialog', previewSections.some((section) => section?.items?.length));
 
     els.actionDialog.addEventListener('close', onClose);
     els.actionDialogClose.addEventListener('click', onCancel);
@@ -4251,6 +4330,66 @@ function openActionDialog({
       els.actionDialogConfirm.focus();
     }
   });
+}
+
+function renderActionDialogPreview(sections = []) {
+  const populatedSections = sections.filter((section) => Array.isArray(section?.items) && section.items.length > 0);
+  els.actionDialogPreview.hidden = populatedSections.length === 0;
+  const nodes = populatedSections.map((section) => {
+    const container = document.createElement('section');
+    container.className = 'action-preview-section';
+    if (section.tone) container.classList.add(section.tone);
+
+    const heading = document.createElement('h3');
+    const title = document.createElement('span');
+    title.textContent = section.title || 'Changes';
+    const count = document.createElement('span');
+    count.className = 'action-preview-count';
+    count.textContent = String(section.items.length);
+    heading.append(title, count);
+    container.append(heading);
+
+    for (const item of section.items) {
+      const row = document.createElement('div');
+      row.className = 'action-preview-item';
+
+      const before = document.createElement('div');
+      before.className = 'action-preview-before';
+      const itemTitle = document.createElement('div');
+      itemTitle.className = 'action-preview-title';
+      itemTitle.textContent = item.title || 'Untitled';
+      before.append(itemTitle);
+      if (item.meta) {
+        const meta = document.createElement('div');
+        meta.className = 'action-preview-meta';
+        meta.textContent = item.meta;
+        meta.title = item.meta;
+        before.append(meta);
+      }
+      if (item.badge) {
+        const badge = document.createElement('span');
+        badge.className = 'action-preview-badge';
+        badge.textContent = item.badge;
+        before.append(badge);
+      }
+
+      const arrow = document.createElement('span');
+      arrow.className = 'action-preview-arrow';
+      arrow.textContent = '\u2192';
+
+      const after = document.createElement('div');
+      after.className = 'action-preview-after';
+      const result = document.createElement('div');
+      result.className = 'action-preview-result';
+      result.textContent = item.result || 'No change';
+      result.title = result.textContent;
+      after.append(result);
+      row.append(before, arrow, after);
+      container.append(row);
+    }
+    return container;
+  });
+  els.actionDialogPreview.replaceChildren(...nodes);
 }
 
 function renderSettings() {
@@ -4267,7 +4406,7 @@ function renderSettings() {
   els.clearApiKeyButton.hidden = !state.ai.apiKey || Boolean(localConfig.ai?.apiKey);
   els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
-  els.maxTokensInput.value = state.ai.maxTokens;
+  els.maxTokensInput.value = maxTokensToK(state.ai.maxTokens);
   els.undoArcImportButton.disabled = !(state.lastArcImport?.spaceIds || [])
     .some((spaceId) => state.spaces.some((space) => space.id === spaceId));
 
@@ -4376,7 +4515,12 @@ async function saveSettings() {
     setSettingsStatus(`${conflict.label} conflicts with ${conflict.otherLabel}. Pick a different shortcut.`);
     return;
   }
-  state.ai = currentAISettingsFromForm();
+  try {
+    state.ai = currentAISettingsFromForm();
+  } catch (error) {
+    setSettingsStatus(error.message || String(error));
+    return;
+  }
   state.shortcuts = shortcuts;
 
   if (state.tempTheme) {
@@ -4412,6 +4556,10 @@ async function clearApiKey() {
 
 function currentAISettingsFromForm() {
   const provider = providerById(els.providerInput.value);
+  const maxTokens = maxTokensFromK(els.maxTokensInput.value);
+  if (!isValidMaxTokens(maxTokens)) {
+    throw new Error('Max output tokens must be between 0.001K and 128K.');
+  }
   return {
     ...normalizeAIProviderSettings({
       ...state.ai,
@@ -4422,7 +4570,7 @@ function currentAISettingsFromForm() {
     language: els.languageInput.value || 'zh-CN',
     apiKey: els.apiKeyInput.value.trim(),
     thinking: els.thinkingInput.value,
-    maxTokens: Number(els.maxTokensInput.value || DEFAULT_MAX_TOKENS),
+    maxTokens,
   };
 }
 

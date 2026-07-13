@@ -4,7 +4,9 @@ export function shouldAutoCloseTab(tab = {}) {
 
 export function isRestorableSnapshotTab(tab = {}) {
   const url = String(tab.url || '').trim();
-  return Boolean(url) && url !== 'chrome://newtab';
+  return Boolean(url) &&
+    url !== 'chrome://newtab' &&
+    !url.startsWith('chrome-extension://');
 }
 
 export function buildSpaceSnapshot({ view = [], now = Date.now() } = {}) {

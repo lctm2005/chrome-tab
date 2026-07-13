@@ -43,7 +43,7 @@ async function handleMessage(message, sender = {}) {
     case 'tabs:create':
       return createTab(message.url, message.active);
     case 'tabs:openUnique':
-      return openUniqueTab(message.url, message.matchUrl);
+      return openUniqueTab(message.url, message.matchUrl, sender.tab?.id);
     case 'tabs:focus':
       return focusTab(message.tabId);
     case 'tabs:duplicate':
@@ -146,12 +146,15 @@ async function openSidePanel(windowId) {
 async function listTabs(windowId) {
   const numericWindowId = Number(windowId);
   const query = Number.isFinite(numericWindowId) ? { windowId: numericWindowId } : { currentWindow: true };
-  const tabs = await chrome.tabs.query(query);
-  const targetWindowId = Number.isFinite(numericWindowId) ? numericWindowId : tabs[0]?.windowId;
+  const queriedTabs = await chrome.tabs.query(query);
+  const ownExtensionPrefix = chrome.runtime.getURL('');
+  const tabs = queriedTabs.filter((tab) => !tabUrl(tab).startsWith(ownExtensionPrefix));
+  const targetWindowId = Number.isFinite(numericWindowId) ? numericWindowId : queriedTabs[0]?.windowId;
   const groups = Number.isFinite(targetWindowId) ? await chrome.tabGroups.query({ windowId: targetWindowId }) : [];
+  const visibleGroupIds = new Set(tabs.map((tab) => Number(tab.groupId)).filter((groupId) => groupId !== -1));
   return {
     tabs: tabs.sort((a, b) => a.index - b.index).map(serializeTab),
-    groups: groups.map(serializeGroup),
+    groups: groups.filter((group) => visibleGroupIds.has(Number(group.id))).map(serializeGroup),
   };
 }
 
@@ -160,16 +163,31 @@ async function createTab(url = 'chrome://newtab', active = true) {
   return { tab: serializeTab(tab) };
 }
 
-async function openUniqueTab(url, matchUrl = url) {
+async function openUniqueTab(url, matchUrl = url, preferredTabId) {
   const tabs = await chrome.tabs.query({});
-  const matches = tabs.filter((tab) => String(tab.url || '').startsWith(String(matchUrl || url)));
-  const existing = matches[0];
+  const matches = tabs.filter((tab) => tabUrl(tab).startsWith(String(matchUrl || url)));
+  const existing = matches.find((tab) => Number(tab.id) === Number(preferredTabId)) ||
+    matches.find((tab) => tab.active) ||
+    matches[0];
   if (!existing?.id) return { tab: serializeTab(await chrome.tabs.create({ url, active: true })), reused: false };
-  const tab = await chrome.tabs.update(existing.id, { url, active: true });
-  const duplicateIds = matches.slice(1).map((match) => match.id).filter(Number.isFinite);
+  const update = { active: true };
+  if (tabUrl(existing) !== String(url || '')) update.url = url;
+  let tab = await chrome.tabs.update(existing.id, update);
+  if (Number(tab.groupId) !== -1) {
+    await chrome.tabs.ungroup([existing.id]);
+    tab = await chrome.tabs.get(existing.id);
+  }
+  const duplicateIds = matches
+    .filter((match) => Number(match.id) !== Number(existing.id))
+    .map((match) => match.id)
+    .filter(Number.isFinite);
   if (duplicateIds.length) await chrome.tabs.remove(duplicateIds);
   if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
   return { tab: serializeTab(tab), reused: true, closedDuplicates: duplicateIds.length };
+}
+
+function tabUrl(tab = {}) {
+  return String(tab.pendingUrl || tab.url || '');
 }
 
 async function focusTab(tabId) {

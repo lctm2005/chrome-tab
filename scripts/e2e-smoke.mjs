@@ -1614,6 +1614,73 @@ async function main() {
     if (!moveToWorked) {
       bugs.push('Move to failed to move selected tabs into the target Space with grouping intact.');
     }
+
+    await evaluate(client, `(() => {
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      if (runtime.tabs?.[0]) {
+        runtime.tabs[0].title = 'Move Alpha planning document with a deliberately long browser title for tidy preview';
+      }
+      sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify(runtime));
+      location.reload();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' && document.querySelectorAll('.tab-row').length >= 2`);
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    const tidyPreview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open) return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Tidy Names') return null;
+      return {
+        items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
+        commands: window.__SPACE_TABS_PREVIEW_COMMANDS__ || [],
+      };
+    })()`);
+    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+    await waitFor(client, `!document.querySelector('#actionDialog')?.open`);
+    const tidyCancelState = await evaluate(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      return {
+        renamedTabs: stored.renamedTabs || {},
+        mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => ['tabs:close', 'tabs:group', 'tabs:groupExisting'].includes(command.type)),
+      };
+    })()`);
+    record(
+      'Tidy Names previews before mutation and Cancel has no side effects',
+      tidyPreview.items > 0 && tidyCancelState.mutations.length === 0 && Object.keys(tidyCancelState.renamedTabs).length === 0,
+      JSON.stringify({ tidyPreview, tidyCancelState })
+    );
+
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    const groupPreview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open) return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Auto Group') return null;
+      return {
+        items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
+        regroupBadges: [...document.querySelectorAll('#actionDialogPreview .action-preview-badge')]
+          .filter((node) => node.textContent === 'Regroup').length,
+        mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)),
+      };
+    })()`);
+    record(
+      'Auto Group previews regrouping before Chrome mutations',
+      groupPreview.items > 0 && groupPreview.regroupBadges > 0 && groupPreview.mutations.length === 0,
+      JSON.stringify(groupPreview)
+    );
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const groupApplyState = await waitFor(client, `(() => {
+      if (document.querySelector('#actionDialog')?.open) return null;
+      const mutations = (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => ['tabs:group', 'tabs:groupExisting'].includes(command.type));
+      return mutations.length > 0 ? { mutations } : null;
+    })()`);
+    record(
+      'Auto Group applies only after preview confirmation',
+      groupApplyState.mutations.length > 0,
+      JSON.stringify(groupApplyState)
+    );
   }
 
     console.log(JSON.stringify({ results, bugs }, null, 2));
