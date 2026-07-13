@@ -378,6 +378,8 @@ function bindEvents() {
   els.settingsOpenWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
   els.runOnboardingButton.addEventListener('click', () => {
     els.settingsDialog.close();
+    activeView = workbenchMode ? 'ask' : 'space';
+    render();
     openOnboarding();
   });
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
@@ -1894,13 +1896,14 @@ async function deleteSpaceFromCurrentState(space) {
   await loadTabs({ adopt: true });
   const deletingActiveSpace = state.activeSpaceId === space.id;
   const fallback = fallbackSpaceAfterDelete(state.spaces, space.id);
+  const preserveBrowserFocus = workbenchMode;
 
   if (deletingActiveSpace && fallback) {
     await snapshotOpenSpace(space.id);
     activeView = 'space';
     state.activeSpaceId = fallback.id;
-    await ensureSpaceOpenFromSnapshot(fallback.id, { active: true });
-    await focusFirstTabInSpace(fallback.id, { force: true });
+    await ensureSpaceOpenFromSnapshot(fallback.id, { active: !preserveBrowserFocus });
+    if (!preserveBrowserFocus) await focusFirstTabInSpace(fallback.id, { force: true });
     await collapseGroupsInSpace(fallback.id);
     await discardInactiveTabsInSpace(fallback.id);
     await saveState();
@@ -1915,12 +1918,12 @@ async function deleteSpaceFromCurrentState(space) {
 
   await loadTabs({ adopt: false });
   if (state.activeSpaceId) {
-    await ensureSpaceOpenFromSnapshot(state.activeSpaceId);
-    await focusFirstTabInSpace(state.activeSpaceId, { force: true });
+    await ensureSpaceOpenFromSnapshot(state.activeSpaceId, { active: !preserveBrowserFocus });
+    if (!preserveBrowserFocus) await focusFirstTabInSpace(state.activeSpaceId, { force: true });
     await collapseGroupsInSpace(state.activeSpaceId);
     await discardInactiveTabsInSpace(state.activeSpaceId);
   }
-  await closeTabsOutsideActiveSpace();
+  await closeTabsOutsideActiveSpace({ preserveBrowserFocus });
   await saveState();
   await refreshTabs();
   setStatus(`Deleted ${space.name}.`);
@@ -2518,36 +2521,41 @@ function preserveDormantPanelName(tab, tabId) {
 
 async function switchSpace(spaceId) {
   const previousSpaceId = state.activeSpaceId;
+  const preserveBrowserFocus = workbenchMode;
   await loadTabs({ adopt: false });
   await snapshotOpenSpace(previousSpaceId);
 
   activeView = 'space';
 
-  const keepAliveTab = await ensureSwitchKeepAliveTab(spaceId, previousSpaceId);
+  const keepAliveTab = await ensureSwitchKeepAliveTab(spaceId, previousSpaceId, { preserveBrowserFocus });
 
   state.activeSpaceId = spaceId;
   await loadDormantSpaceView(spaceId, { force: true });
-  await focusFirstTabInSpace(spaceId, {
-    force: true,
-    allowEphemeral: true,
-    ephemeralTabId: keepAliveTab?.id,
-  });
+  if (!preserveBrowserFocus) {
+    await focusFirstTabInSpace(spaceId, {
+      force: true,
+      allowEphemeral: true,
+      ephemeralTabId: keepAliveTab?.id,
+    });
+  }
   await closeSpaceTabs(previousSpaceId, shouldAutoCloseTab);
   await closeEphemeralTabsExcept(keepAliveTab?.id);
-  await closeTabsOutsideActiveSpace();
+  await closeTabsOutsideActiveSpace({ preserveBrowserFocus });
   await closeExtraFallbackTabs(keepAliveTab?.id);
-  await focusFirstTabInSpace(spaceId, {
-    force: true,
-    allowEphemeral: true,
-    ephemeralTabId: keepAliveTab?.id,
-  });
+  if (!preserveBrowserFocus) {
+    await focusFirstTabInSpace(spaceId, {
+      force: true,
+      allowEphemeral: true,
+      ephemeralTabId: keepAliveTab?.id,
+    });
+  }
   await collapseGroupsInSpace(spaceId);
   await discardInactiveTabsInSpace(spaceId);
   await saveState();
   await refreshTabs();
 }
 
-async function ensureSwitchKeepAliveTab(spaceId, previousSpaceId) {
+async function ensureSwitchKeepAliveTab(spaceId, previousSpaceId, options = {}) {
   await loadTabs({ adopt: false });
   const existing = preferredFocusableTab(tabs.filter((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, spaceId)));
   if (existing) return existing;
@@ -2563,12 +2571,12 @@ async function ensureSwitchKeepAliveTab(spaceId, previousSpaceId) {
       state.tabSpaces[reusable.id] = spaceId;
       delete state.tabGroups?.[reusable.id];
     }
-    await send('tabs:focus', { tabId: reusable.id });
+    if (!options.preserveBrowserFocus) await send('tabs:focus', { tabId: reusable.id });
     await loadTabs({ adopt: false });
     return tabs.find((tab) => Number(tab.id) === Number(reusable.id)) || reusable;
   }
 
-  return ensureSpaceHasOpenTab(spaceId, { active: true });
+  return ensureSpaceHasOpenTab(spaceId, { active: !options.preserveBrowserFocus });
 }
 
 function reusableFallbackTab(previousSpaceId) {
@@ -2601,9 +2609,9 @@ async function closeExtraFallbackTabs(keepTabId) {
   await loadTabs({ adopt: false });
 }
 
-async function closeTabsOutsideActiveSpace() {
+async function closeTabsOutsideActiveSpace(options = {}) {
   await loadTabs({ adopt: false });
-  await ensureActiveSpaceHasOpenTab();
+  await ensureActiveSpaceHasOpenTab({ active: !options.preserveBrowserFocus });
 
   for (const space of state.spaces) {
     if (space.id === state.activeSpaceId) continue;
@@ -2624,20 +2632,20 @@ async function closeTabsOutsideActiveSpace() {
   await loadTabs({ adopt: false });
 
   const activeSpaceTabs = tabs.filter((tab) => !isEphemeralTab(tab) && tabBelongsToSpace(tab, state.activeSpaceId));
-  if (activeSpaceTabs.length && !activeSpaceTabs.some((tab) => tab.active)) {
+  if (!options.preserveBrowserFocus && activeSpaceTabs.length && !activeSpaceTabs.some((tab) => tab.active)) {
     await send('tabs:focus', { tabId: preferredFocusableTab(activeSpaceTabs).id });
   }
 
   await saveState();
 }
 
-async function ensureActiveSpaceHasOpenTab() {
+async function ensureActiveSpaceHasOpenTab(options = {}) {
   if (!state.activeSpaceId) return;
   const activeSpaceTabs = tabs.filter((tab) => (
     isEphemeralTab(tab) || tabBelongsToSpace(tab, state.activeSpaceId)
   ));
   if (activeSpaceTabs.length > 0) return;
-  await ensureSpaceHasOpenTab(state.activeSpaceId, { active: true });
+  await ensureSpaceHasOpenTab(state.activeSpaceId, { active: options.active !== false });
   await loadTabs({ adopt: false });
 }
 
@@ -3718,7 +3726,9 @@ async function autoGroupTabs() {
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
   if (candidates.length === 0 && duplicateGroupCount === 0) {
-    setStatus('No tabs in this Space are available for Auto Group.');
+    const message = 'Open saved tabs in this Space first, then run Auto Group.';
+    setStatus(message);
+    showStatusToast(message, 'error');
     return;
   }
   if (extensionRuntime && candidates.length > 0 && providerRequiresApiKey(state.ai) && !state.ai.apiKey) {

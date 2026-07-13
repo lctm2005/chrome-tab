@@ -81,6 +81,16 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
+test('Workbench setup and Space switching preserve the Workbench surface', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+
+  assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\)/);
+  assert.match(source, /async function switchSpace\(spaceId\)[\s\S]*preserveBrowserFocus = workbenchMode/);
+  assert.match(source, /ensureSwitchKeepAliveTab\(spaceId, previousSpaceId, \{ preserveBrowserFocus \}\)/);
+  assert.match(source, /if \(!preserveBrowserFocus\) \{[\s\S]*focusFirstTabInSpace/);
+  assert.match(source, /closeTabsOutsideActiveSpace\(\{ preserveBrowserFocus \}\)/);
+});
+
 test('settings Save click prevents dialog submit before async work starts', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
@@ -195,6 +205,7 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /source: regroup \? liveGroupsById\.get/);
   assert.match(source, /variant: 'groups'/);
   assert.match(source, /AI returned no valid groups/);
+  assert.match(source, /Open saved tabs in this Space first, then run Auto Group\.[\s\S]*showStatusToast\(message, 'error'\)/);
   assert.match(source, /extensionRuntime && candidates\.length > 0 && providerRequiresApiKey/);
   assert.match(source, /async function autoGroupTabs\(\) \{\s*await syncAISettingsFromStorage\(\)/);
   assert.match(source, /showStatusToast\(message, 'error'\)/);

@@ -326,6 +326,25 @@ async function main() {
       JSON.stringify(createdTab),
     );
 
+    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    const dormantAutoGroupState = await waitFor(client, `(() => {
+      const message = 'Open saved tabs in this Space first, then run Auto Group.';
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      const toast = document.querySelector('#workbenchToast')?.textContent || '';
+      if (status !== message || toast !== message) return null;
+      return {
+        status,
+        toast,
+        tone: document.querySelector('#workbenchToast')?.dataset?.tone || '',
+        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+      };
+    })()`);
+    record(
+      'Workbench Auto Group explains that saved tabs must be opened first',
+      dormantAutoGroupState.tone === 'error' && !dormantAutoGroupState.previewOpen,
+      JSON.stringify(dormantAutoGroupState),
+    );
+
     const realGroup = await evaluate(client, `(async () => {
       const first = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://example.com/e2e-one', active: false });
       const second = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://example.org/e2e-two', active: false });
@@ -488,6 +507,11 @@ async function main() {
       JSON.stringify(workbenchCreateState),
     );
 
+    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
+    await waitFor(client, `(async () => {
+      const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      return activeTab.id === ${JSON.stringify(openedWorkbench.id)};
+    })()`);
     await evaluate(client, `[...document.querySelectorAll('.space')]
       .find((button) => button.title === 'Remote Current')?.click()`);
     await new Promise((resolve) => setTimeout(resolve, 4000));
@@ -501,6 +525,7 @@ async function main() {
         dormantRows: document.querySelectorAll('.tab-row.dormant').length,
         spaces: (stored.spaceTabsState?.spaces || []).map((space) => space.name),
         remoteSnapshot: stored.spaceTabsState?.spaceSnapshots?.['remote-current'] || null,
+        activeBrowserTab: (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null,
       };
     })()`);
     if (restoredRemoteState.dormantRows === 0 && restoredRemoteState.visibleText.includes('Remote Saved')) {
@@ -523,8 +548,9 @@ async function main() {
       })()`, 12000);
     }
     record(
-      'Workbench switching shows dormant data and opens it only on user action',
+      'Workbench switching stays active, shows dormant data, and opens it only on user action',
       restoredRemoteState.activeSpaceName === 'Remote Current' &&
+        restoredRemoteState.activeBrowserTab?.id === openedWorkbench.id &&
         restoredRemoteState.visibleText.includes('Remote Saved Tab') &&
         Number.isFinite(openedRemoteTab.id),
       JSON.stringify({ restoredRemoteState, openedRemoteTab }),
@@ -734,6 +760,11 @@ async function main() {
       JSON.stringify(clearedKeyState),
     );
 
+    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
+    await waitFor(client, `(async () => {
+      const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      return activeTab.id === ${JSON.stringify(openedWorkbench.id)};
+    })()`);
     await evaluate(client, `document.querySelector('#runOnboardingButton').click()`);
     const setupReentryState = await waitFor(client, `(() => {
       if (!document.querySelector('#onboardingDialog')?.open) return null;
@@ -748,9 +779,40 @@ async function main() {
       setupReentryState.chooseVisible && setupReentryState.step === 'Step 1 of 3' && !setupReentryState.settingsOpen,
       JSON.stringify(setupReentryState),
     );
-    await evaluate(client, `document.querySelector('#onboardingDialog')
-      .dispatchEvent(new Event('cancel', { cancelable: true }))`);
-    await waitFor(client, `!document.querySelector('#onboardingDialog')?.open`);
+    await evaluate(client, `document.querySelector('[data-onboarding-path="fresh"]').click()`);
+    await waitFor(client, `!document.querySelector('#onboardingFreshStep')?.hidden &&
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#onboardingSpaceNameInput');
+      input.value = 'Setup E2E';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#onboardingNextButton').click();
+    })()`);
+    const completedSetupState = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      const setupSpace = (stored.spaceTabsState?.spaces || []).find((space) => space.name === 'Setup E2E');
+      if (!setupSpace || document.querySelector('#onboardingFinishStep')?.hidden) return null;
+      return {
+        setupSpace,
+        activeSpaceId: stored.spaceTabsState?.activeSpaceId || '',
+        finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+        activeTab,
+      };
+    })()`, 12000);
+    record(
+      'Workbench Run Setup completes the Fresh flow without leaving Workbench',
+      completedSetupState.activeSpaceId === completedSetupState.setupSpace.id &&
+        completedSetupState.finishMessage === 'Setup E2E is ready.' &&
+        completedSetupState.activeTab?.id === openedWorkbench.id,
+      JSON.stringify(completedSetupState),
+    );
+    await evaluate(client, `document.querySelector('#onboardingStayButton').click()`);
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return !document.querySelector('#onboardingDialog')?.open &&
+        stored.spaceTabsState?.onboarding?.completed === true;
+    })()`);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
