@@ -2,37 +2,97 @@
 
 Branch: `codex/space-context-foundation`
 
-## Objective
+## Product Objective
 
-Establish Space as the primary local workspace for Chrome tabs, with a full-page Workbench that keeps Space state, tab organization, setup, and optional BYOK AI actions coherent across extension views.
+Space Tabs should be easy for Arc users to discover, safe to try, and credible to keep using. The branch is not a general feature expansion project. Its purpose is to sharpen the product's position, prove the difference in the Chrome Store, and complete the trust path from migration to everyday use.
 
-## In Scope
+## Positioning
 
-- Keep each Space's live tabs, saved tabs, groups, ordering, and panel names associated with the correct Space.
-- Provide a Workbench surface for Space browsing, Ask Space, setup, settings, and Space switching.
-- Keep Workbench state synchronized between the side panel, Workbench tab, and shared Chrome storage.
-- Support AI-backed Tidy Names and Auto Group with preview-before-apply behavior and explicit BYOK settings.
-- Preserve local-only data handling and avoid bundling developer API credentials.
-- Provide onboarding for creating a first Space and maintain the groundwork for Arc data import.
-- Validate critical flows with unit tests, preview smoke tests, and real MV3 extension E2E tests.
+> Keep Chrome. Bring your Arc workflow. Add private BYOK AI.
+
+Recommended store name:
+
+```text
+Space Tabs: Arc-like Spaces & BYOK AI
+```
+
+Recommended short description:
+
+```text
+Move your Arc workspace into Chrome. Organize Spaces, ask pages with your own AI key, and keep workspace data local.
+```
+
+The product promise is the combination of:
+
+- Arc-like Spaces and workflow migration without browser lock-in.
+- User-controlled BYOK AI for asking, naming, and organizing.
+- Local-first workspace data with explicit disclosure of what is sent to the selected AI provider.
+- Reviewable changes, user confirmation, and Undo instead of silent tab movement or deletion.
+
+## Priority Outcomes
+
+### P0: Discoverability and Trust
+
+- Publish the Arc-oriented name, short description, screenshot order, and Chinese listing.
+- Rebuild the five store screenshots around user outcomes and real Chrome usage:
+  1. Your Arc workspace, now in Chrome.
+  2. Import Arc Spaces in minutes.
+  3. Ask any page with your own AI key.
+  4. AI organizes tabs. You approve every change.
+  5. Local by default. Export anytime.
+- Create a real product page, privacy page, and support page.
+- Secure the first 10 to 20 Arc-returning users and the first five authentic reviews.
+
+### P1: Migration and Recovery
+
+- Turn Arc import into a first-run migration wizard instead of a hidden Settings append action.
+- Add selectable import, conflict preview, import Undo, complete JSON export, and restore.
+- Make the core migration promise true: `Import from Arc in minutes. Export anytime.`
+
+### P2: Controlled AI Workflow
+
+- Make Tidy Names and Auto Group produce a proposal before changing anything.
+- Show what will move, rename, merge, or remain untouched.
+- Add one-click Undo and an operation record.
+- Expand Ask Page into Ask Space for selected tabs and multi-tab comparison, with source tabs and clickable citations.
+- Show the chosen provider, source pages, and content size before sending; support streaming and stop generation.
+
+### P3: Right-Sized Surfaces
+
+- Keep Side Panel focused on quick switching, finding, and dragging tabs.
+- Use the full-page Workbench for Spaces, migration, backup, and multi-tab AI.
+- Add a Command Palette for switching Spaces, searching tabs, and Ask Page on demand.
+- Treat Pins/Favorites as a focused core workflow only if they improve daily retrieval; do not add features without a clear use case.
+- Keep any Hover Rail optional and off by default because it must not undermine the privacy-first position.
+
+## Privacy Requirements
+
+- Remove the default all-site `document_start` content script where the user action can use `activeTab` and `scripting` instead.
+- Use Chrome Commands for panel toggling; handle panel shortcuts only while the panel is focused.
+- Default AI grouping to title and URL; request page structure only when the user explicitly asks for it.
+- State clearly: no account, no telemetry, no Space Tabs server, and BYOK content is sent to the provider selected by the user.
+- Keep API keys in session storage and keep them out of ordinary workspace state and release packages.
 
 ## Acceptance Criteria
 
-- Switching Spaces does not overwrite saved content or create duplicate Workbench surfaces.
-- Setup can be reopened and completed without leaving the Workbench unexpectedly.
-- Tidy Names and Auto Group show a reviewable proposal before applying changes.
-- AI requests use the configured provider and session-scoped API key only.
-- A packaged extension can be loaded and exercised in a clean Chrome profile.
+- An Arc user can understand the product's value from the store title, first screenshot, and short description without reading a feature list.
+- Arc migration is visible during first-run setup, has preview and Undo, and does not require trusting an opaque append operation.
+- Export and restore provide a credible escape hatch before users commit their workspace.
+- AI changes are proposed, reviewable, confirmable, and reversible.
+- Ask Space identifies the pages and provider involved before sending content.
+- Privacy claims match the manifest, runtime permissions, storage model, and published privacy page.
+- The store listing, website, onboarding, and product UI repeat the same Arc migration, BYOK control, and local-data promise.
 
-## Explicit Follow-ups
+## Scope Discipline
 
-The following items are intentionally tracked as follow-ups rather than claimed as complete by this branch document:
+The goal is not to accumulate more controls. Cross-Space Search, dynamic integrations, files, Hover Rail, and other additions stay out unless they directly strengthen migration, retrieval, controlled AI, or trust. Every new feature needs a concrete use case and a corresponding user-visible proof point.
 
-- Make Arc import a visible, tested onboarding path while respecting Chrome's user-granted local file access boundary.
-- Decide how Ask Space should behave when the active Chrome tab is not an HTTP(S) page.
-- Define whether Auto Group should include dormant saved tabs in its proposal and how those tabs are preserved when applying a regroup.
-- Restore or replace the Tidy Names icon only after the intended visual language is confirmed.
+## Validation
 
-## Validation Record
+Each user-facing promise must have a matching check:
 
-The branch currently includes unit, preview, and MV3 extension smoke-test coverage. New behavior must add a regression test at the same layer where the failure can occur, and user-visible workflows must include at least one real extension E2E assertion.
+- Store claims: rendered screenshots and listing review.
+- Migration: real import preview, conflict handling, Undo, export, and restore E2E.
+- AI control: proposal, confirmation, no-op cancel, and Undo E2E.
+- Privacy: manifest permission audit, storage audit, and packaged-secret scan.
+- Core workflows: clean-profile MV3 E2E across onboarding, Space switching, dormant tabs, Workbench, and Ask Space.
