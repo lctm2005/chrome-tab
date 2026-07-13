@@ -258,7 +258,7 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
       }
       case 'ai:chat':
         return {
-          text: 'Preview AI response: the UI wiring works here. After installing the extension, this same action will call your configured BYOK model.',
+          text: previewAIText(payload.messages),
           usage: null,
         };
       case 'ai:abort':
@@ -267,6 +267,63 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
         throw new Error(`Preview mode does not support command: ${type}`);
     }
   };
+}
+
+function previewAIText(messages = []) {
+  const systemText = messages
+    .filter((message) => message?.role === 'system')
+    .map((message) => String(message.content || ''))
+    .join('\n');
+  const input = previewAIInput(messages);
+
+  if (/Group browser tabs into concise topic\/work buckets/i.test(systemText)) {
+    return JSON.stringify(previewTidyGroups(input));
+  }
+  if (/Rename browser tabs for a compact sidebar/i.test(systemText)) {
+    return JSON.stringify(input.map((tab) => ({
+      id: tab.id,
+      title: previewTabName(tab.title),
+    })));
+  }
+  return 'Preview AI response: the UI wiring works here. After installing the extension, this same action will call your configured BYOK model.';
+}
+
+function previewAIInput(messages = []) {
+  const content = [...messages]
+    .reverse()
+    .find((message) => message?.role === 'user')?.content;
+  try {
+    const parsed = JSON.parse(String(content || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function previewTidyGroups(tabs = []) {
+  const buckets = new Map();
+  for (const tab of tabs) {
+    const title = String(tab?.title || '');
+    let group = 'Related Work';
+    if (/pull request|code review|github|\bpr\b/i.test(title)) group = 'Code Review';
+    else if (/inbox|mail|message/i.test(title)) group = 'Team Inbox';
+    else if (/plan|alpha|beta|launch/i.test(title)) group = 'Planning';
+    else if (/documentation|\bdocs?\b|guide|browser|chrome|research/i.test(title)) group = 'Product Research';
+    if (!buckets.has(group)) buckets.set(group, []);
+    buckets.get(group).push(Number(tab.id));
+  }
+
+  const colors = ['cyan', 'purple', 'green', 'orange', 'blue'];
+  return [...buckets.entries()].map(([title, tabIds], index) => ({
+    title,
+    tabIds: tabIds.filter(Number.isFinite),
+    color: colors[index % colors.length],
+  }));
+}
+
+function previewTabName(title) {
+  const words = String(title || 'Untitled').trim().split(/\s+/).filter(Boolean);
+  return words.slice(0, 6).join(' ') || 'Untitled';
 }
 
 function readPreviewRuntimeState() {

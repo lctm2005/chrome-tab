@@ -182,8 +182,12 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /tabBelongsToSpace\(tab, state\.activeSpaceId\)/);
   assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
   assert.match(source, /const regroupedCount = countPlannedRegroups\(plannedGroups, candidates, groups\)/);
-  assert.match(source, /title: 'Preview Auto Group'/);
-  assert.match(source, /badge: regroup \? 'Regroup' : ''/);
+  assert.match(source, /title: 'Auto Group Preview'/);
+  assert.match(source, /source: regroup \? liveGroupsById\.get/);
+  assert.match(source, /variant: 'groups'/);
+  assert.match(source, /AI returned no valid groups/);
+  assert.match(source, /extensionRuntime && candidates\.length > 0 && providerRequiresApiKey/);
+  assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {

@@ -96,7 +96,6 @@ import {
   isPageShortcutCapableUrl,
   isPlaceholderTabTitle,
   planGroupPreviewPlacement,
-  planTidyGroups,
   planTidyTabNames,
   plannedRegroupTabIds,
   planDuplicateUrlClosures,
@@ -3628,14 +3627,19 @@ async function autoGroupTabs() {
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
   if (candidates.length === 0 && duplicateGroupCount === 0) {
-    setStatus('No ungrouped tabs in this Space to auto group.');
+    setStatus('No tabs in this Space are available for Auto Group.');
+    return;
+  }
+  if (extensionRuntime && candidates.length > 0 && providerRequiresApiKey(state.ai) && !state.ai.apiKey) {
+    setStatus('Auto Group needs a configured AI provider. Add your API key in Settings.');
+    await openWorkbench({ view: 'settings' });
     return;
   }
 
   beginPanelAction('autoGroup');
   let plannedGroups = [];
   try {
-    if (!providerRequiresApiKey(state.ai) || state.ai.apiKey) {
+    if (candidates.length > 0) {
       try {
         await ensureAIHostPermission();
         const response = await send('ai:chat', {
@@ -3643,46 +3647,63 @@ async function autoGroupTabs() {
           messages: createPrompt('tidy-tabs', { tabs: candidates.map(compactTabForAI) }),
         });
         plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
+        if (plannedGroups.length === 0) {
+          throw new Error('AI returned no valid groups. Check the configured model and try again.');
+        }
       } catch (error) {
-        setStatus(`${formatAIError(error)} Using local grouping instead.`);
+        throw new Error(`${formatAIError(error)} Auto Group stopped without making changes.`);
       }
     }
 
-    if (plannedGroups.length === 0) plannedGroups = planTidyGroups(candidates);
     const regroupedTabIds = new Set(plannedRegroupTabIds(plannedGroups, candidates, groups));
     const regroupedCount = countPlannedRegroups(plannedGroups, candidates, groups);
     const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
+    const liveGroupsById = new Map(groups.map((group) => [Number(group.id), group]));
     const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
     const previewSections = plannedGroups.map((group) => ({
       title: group.title,
+      color: group.color,
+      kind: 'group',
       items: group.tabIds.map((tabId) => {
         const tab = tabsById.get(Number(tabId));
         const regroup = regroupedTabIds.has(Number(tabId));
         return {
           title: tab?.displayTitle || tab?.title || 'Untitled',
-          result: group.title,
           meta: tab?.domain || '',
-          badge: regroup ? 'Regroup' : '',
+          source: regroup ? liveGroupsById.get(Number(tab?.groupId))?.title || 'Current group' : '',
         };
       }),
     }));
     if (duplicateGroupCount > 0) {
       previewSections.push({
-        title: 'Duplicate groups',
+        title: 'Merge duplicates',
+        color: 'yellow',
+        kind: 'notice',
+        countLabel: `${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'group' : 'groups'}`,
         items: [{
           title: `${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'group' : 'groups'}`,
-          result: 'Merge by title',
+          meta: 'Groups with the same name will be combined.',
         }],
       });
     }
-    const regroupMessage = regroupedCount > 0
-      ? ` ${regroupedCount} already grouped ${regroupedCount === 1 ? 'tab will move' : 'tabs will move'}; review the Regroup labels.`
-      : '';
+    const previewSummary = [];
+    if (plannedGroups.length > 0) {
+      previewSummary.push(
+        'AI proposal',
+        `${plannedGroups.length} proposed ${plannedGroups.length === 1 ? 'group' : 'groups'}`,
+        `${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}`,
+      );
+    }
+    if (regroupedCount > 0) previewSummary.push(`${regroupedCount} will move`);
+    if (duplicateGroupCount > 0) {
+      previewSummary.push(`${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'group' : 'groups'} to merge`);
+    }
     const confirmed = await showPlanPreview({
-      title: 'Preview Auto Group',
-      message: `${groupedCount} tabs are planned across ${plannedGroups.length} groups.${regroupMessage}`,
-      confirmText: 'Apply grouping',
+      title: 'Auto Group Preview',
+      message: previewSummary.join(' \u2022 '),
+      confirmText: 'Apply groups',
       sections: previewSections,
+      variant: 'groups',
     });
     if (!confirmed) return;
 
@@ -4265,12 +4286,13 @@ async function askConfirm({ title, message, confirmText = 'Confirm', danger = fa
   return result === true;
 }
 
-async function showPlanPreview({ title, message, confirmText, sections }) {
+async function showPlanPreview({ title, message, confirmText, sections, variant = 'changes' }) {
   const result = await openActionDialog({
     title,
     message,
     confirmText,
     previewSections: sections,
+    previewVariant: variant,
   });
   return result === true;
 }
@@ -4284,6 +4306,7 @@ function openActionDialog({
   danger = false,
   withInput = false,
   previewSections = [],
+  previewVariant = 'changes',
 }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -4296,7 +4319,7 @@ function openActionDialog({
       els.actionDialogCancel.removeEventListener('click', onCancel);
       els.actionDialog.querySelector('form').removeEventListener('submit', onSubmit);
       if (els.actionDialog.open) els.actionDialog.close();
-      els.actionDialog.classList.remove('plan-dialog');
+      els.actionDialog.classList.remove('plan-dialog', 'group-plan-dialog');
       resolve(result);
     };
 
@@ -4315,8 +4338,9 @@ function openActionDialog({
     els.actionDialogLabel.firstChild.textContent = label || 'Name';
     els.actionDialogConfirm.textContent = confirmText;
     els.actionDialogConfirm.classList.toggle('danger', danger);
-    renderActionDialogPreview(previewSections);
+    renderActionDialogPreview(previewSections, previewVariant);
     els.actionDialog.classList.toggle('plan-dialog', previewSections.some((section) => section?.items?.length));
+    els.actionDialog.classList.toggle('group-plan-dialog', previewVariant === 'groups');
 
     els.actionDialog.addEventListener('close', onClose);
     els.actionDialogClose.addEventListener('click', onCancel);
@@ -4332,21 +4356,38 @@ function openActionDialog({
   });
 }
 
-function renderActionDialogPreview(sections = []) {
+function renderActionDialogPreview(sections = [], variant = 'changes') {
   const populatedSections = sections.filter((section) => Array.isArray(section?.items) && section.items.length > 0);
   els.actionDialogPreview.hidden = populatedSections.length === 0;
+  els.actionDialogPreview.classList.toggle('group-plan-preview', variant === 'groups');
   const nodes = populatedSections.map((section) => {
     const container = document.createElement('section');
     container.className = 'action-preview-section';
     if (section.tone) container.classList.add(section.tone);
+    if (variant === 'groups') {
+      container.classList.add('group-plan-section');
+      if (section.kind === 'notice') container.classList.add('group-plan-notice');
+    }
 
     const heading = document.createElement('h3');
     const title = document.createElement('span');
     title.textContent = section.title || 'Changes';
     const count = document.createElement('span');
     count.className = 'action-preview-count';
-    count.textContent = String(section.items.length);
-    heading.append(title, count);
+    count.textContent = section.countLabel || (variant === 'groups'
+      ? `${section.items.length} ${section.items.length === 1 ? 'tab' : 'tabs'}`
+      : String(section.items.length));
+    if (variant === 'groups') {
+      const label = document.createElement('span');
+      label.className = 'group-plan-label';
+      const swatch = document.createElement('span');
+      swatch.className = 'group-plan-swatch';
+      swatch.style.backgroundColor = groupColor(section.color);
+      label.append(swatch, title);
+      heading.append(label, count);
+    } else {
+      heading.append(title, count);
+    }
     container.append(heading);
 
     for (const item of section.items) {
@@ -4371,6 +4412,18 @@ function renderActionDialogPreview(sections = []) {
         badge.className = 'action-preview-badge';
         badge.textContent = item.badge;
         before.append(badge);
+      }
+      if (item.source) {
+        const source = document.createElement('div');
+        source.className = 'group-plan-source';
+        source.textContent = `From ${item.source}`;
+        before.append(source);
+      }
+
+      if (variant === 'groups') {
+        row.append(before);
+        container.append(row);
+        continue;
       }
 
       const arrow = document.createElement('span');
@@ -4558,7 +4611,7 @@ function currentAISettingsFromForm() {
   const provider = providerById(els.providerInput.value);
   const maxTokens = maxTokensFromK(els.maxTokensInput.value);
   if (!isValidMaxTokens(maxTokens)) {
-    throw new Error('Max output tokens must be between 0.001K and 128K.');
+    throw new Error('Enter 0.001-128 K tokens. Default: 10 K (10,240 tokens).');
   }
   return {
     ...normalizeAIProviderSettings({

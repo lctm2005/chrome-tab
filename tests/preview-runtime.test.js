@@ -143,3 +143,25 @@ test('preview command handler returns mock AI text', async () => {
 
   assert.match(response.text, /Preview AI/);
 });
+
+test('preview AI returns a parseable topic plan for Auto Group', async () => {
+  const send = createPreviewCommandHandler();
+  const response = await send('ai:chat', {
+    messages: [
+      { role: 'system', content: 'Group browser tabs into concise topic/work buckets.' },
+      {
+        role: 'user',
+        content: JSON.stringify([
+          { id: 1, title: 'Browser AI documentation', url: 'https://docs.example/a' },
+          { id: 2, title: 'Chrome AI research', url: 'https://research.example/b' },
+          { id: 3, title: 'GitHub pull request review', url: 'https://github.com/example/repo/pull/3' },
+        ]),
+      },
+    ],
+  });
+
+  const groups = JSON.parse(response.text);
+  assert.deepEqual(groups[0].tabIds, [1, 2]);
+  assert.equal(groups[0].title, 'Product Research');
+  assert.equal(groups[1].title, 'Code Review');
+});

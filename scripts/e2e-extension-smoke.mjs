@@ -330,7 +330,7 @@ async function main() {
       document.querySelector('#saveSettingsButton').click();
     })()`);
     const invalidMaxTokenState = await waitFor(client, `(async () => {
-      if (!document.querySelector('#workbenchToast')?.textContent?.includes('between 0.001K and 128K')) return null;
+      if (!document.querySelector('#workbenchToast')?.textContent?.includes('Enter 0.001-128 K tokens')) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       return { maxTokens: stored.spaceTabsState?.ai?.maxTokens };
     })()`);
@@ -341,6 +341,7 @@ async function main() {
     );
     await evaluate(client, `(() => {
       document.querySelector('#maxTokensInput').value = '10';
+      document.querySelector('#apiKeyInput').value = '';
       const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
       input.dataset.shortcut = 'Control+Alt+K';
       input.value = 'Ctrl + Alt + K';
@@ -353,6 +354,45 @@ async function main() {
     await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'New Space'`);
     record('real Workbench Save shows feedback and applies shortcuts immediately', true);
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+
+    await evaluate(client, `(async () => {
+      document.querySelector('#settingsDialog').close();
+      const currentWindow = await chrome.windows.getCurrent();
+      const tab = await chrome.tabs.create({
+        windowId: currentWindow.id,
+        url: 'https://example.com/auto-group-e2e',
+        active: false,
+      });
+      let tabReady = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const loaded = await chrome.tabs.get(tab.id);
+        if (String(loaded.url || '').startsWith('https://example.com/auto-group-e2e')) {
+          tabReady = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!tabReady) throw new Error('Auto Group E2E tab did not finish navigation.');
+      const status = document.querySelector('#syncStatus');
+      window.__AUTO_GROUP_STATUS_HISTORY__ = [status?.textContent || ''];
+      new MutationObserver(() => {
+        window.__AUTO_GROUP_STATUS_HISTORY__.push(status?.textContent || '');
+      }).observe(status, { childList: true, characterData: true, subtree: true });
+      document.querySelector('#autoGroupButton').click();
+    })()`);
+    await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 1200))`);
+    const missingKeyAutoGroupState = await evaluate(client, `({
+      status: document.querySelector('#syncStatus')?.textContent || '',
+      statusHistory: window.__AUTO_GROUP_STATUS_HISTORY__ || [],
+      keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
+      previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+    })`);
+    record(
+      'Auto Group never presents local fallback as AI when BYOK is missing',
+      missingKeyAutoGroupState.statusHistory.some((status) => status.includes('Auto Group needs a configured AI provider')) &&
+        !missingKeyAutoGroupState.previewOpen,
+      JSON.stringify(missingKeyAutoGroupState),
+    );
 
     const openUniqueResults = await evaluate(client, `(async () => {
       const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');

@@ -1647,6 +1647,10 @@ dialog::backdrop {
   width: min(94vw, 620px);
 }
 
+#actionDialog.group-plan-dialog {
+  width: min(94vw, 680px);
+}
+
 .action-preview {
   display: grid;
   gap: 14px;
@@ -1736,6 +1740,90 @@ dialog::backdrop {
   color: var(--danger);
 }
 
+.action-preview.group-plan-preview {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 10px;
+  max-height: min(60vh, 500px);
+  padding: 2px 5px 2px 0;
+}
+
+.group-plan-section {
+  align-content: start;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.group-plan-section h3 {
+  min-height: 38px;
+  padding: 9px 11px;
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.group-plan-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.group-plan-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-plan-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.group-plan-section .action-preview-count {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.group-plan-section .action-preview-item {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 48px;
+  border-top: 1px solid var(--line);
+  padding: 8px 11px;
+}
+
+.group-plan-section .action-preview-title {
+  font-size: 11px;
+}
+
+.group-plan-source {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.group-plan-source::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.group-plan-notice {
+  border-color: color-mix(in srgb, var(--warning) 32%, transparent);
+}
+
 .action-buttons {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1786,6 +1874,10 @@ dialog::backdrop {
 
   .action-preview-arrow {
     display: none;
+  }
+
+  .action-preview.group-plan-preview {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

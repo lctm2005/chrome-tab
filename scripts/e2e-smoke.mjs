@@ -1655,18 +1655,18 @@ async function main() {
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
     const groupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Auto Group') return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
       return {
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        regroupBadges: [...document.querySelectorAll('#actionDialogPreview .action-preview-badge')]
-          .filter((node) => node.textContent === 'Regroup').length,
+        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)),
       };
     })()`);
     record(
       'Auto Group previews regrouping before Chrome mutations',
-      groupPreview.items > 0 && groupPreview.regroupBadges > 0 && groupPreview.mutations.length === 0,
+      groupPreview.items > 0 && groupPreview.sourceLabels > 0 && groupPreview.groupCards > 0 && groupPreview.mutations.length === 0,
       JSON.stringify(groupPreview)
     );
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
