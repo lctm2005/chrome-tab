@@ -74,6 +74,8 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(source, /addEventListener\('keydown', handleDocumentKeydown, \{ capture: true \}\)/);
   assert.match(html, /id="workbenchToast"/);
   assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
+  assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
+  assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
   assert.match(html, /class="arc-import-settings" hidden/);
   assert.doesNotMatch(html, /Cross-Space Search/i);
   assert.doesNotMatch(source, /workspace-search/);
@@ -187,6 +189,9 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /variant: 'groups'/);
   assert.match(source, /AI returned no valid groups/);
   assert.match(source, /extensionRuntime && candidates\.length > 0 && providerRequiresApiKey/);
+  assert.match(source, /async function autoGroupTabs\(\) \{\s*await syncAISettingsFromStorage\(\)/);
+  assert.match(source, /showStatusToast\(message, 'error'\)/);
+  assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
   assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
 });
 

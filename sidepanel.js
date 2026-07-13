@@ -170,6 +170,7 @@ let groupPreviewQuery = '';
 let groupPreviewOpenTimer = 0;
 let groupPreviewCloseTimer = 0;
 let workbenchToastTimer = 0;
+let workbenchToastHideTimer = 0;
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -3619,6 +3620,7 @@ function hasManualPanelName(tabId) {
 }
 
 async function autoGroupTabs() {
+  await syncAISettingsFromStorage();
   await loadTabs({ adopt: true });
   const candidates = tabs.filter((tab) => (
     tabBelongsToSpace(tab, state.activeSpaceId) &&
@@ -3631,8 +3633,9 @@ async function autoGroupTabs() {
     return;
   }
   if (extensionRuntime && candidates.length > 0 && providerRequiresApiKey(state.ai) && !state.ai.apiKey) {
-    setStatus('Auto Group needs a configured AI provider. Add your API key in Settings.');
-    await openWorkbench({ view: 'settings' });
+    const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
+    setStatus(message);
+    showStatusToast(message, 'error');
     return;
   }
 
@@ -4748,6 +4751,16 @@ async function secretRemove(key) {
   sessionStorage.removeItem(key);
 }
 
+async function syncAISettingsFromStorage() {
+  const defaults = createDefaultState(localConfig);
+  const [stored, secrets] = await Promise.all([storageGet(), secretGet()]);
+  const storedState = mergeStoredState(stored[STORAGE_KEY], defaults);
+  state.ai = {
+    ...storedState.ai,
+    apiKey: localConfig.ai?.apiKey || secrets[SECRET_STORAGE_KEY]?.ai?.apiKey || '',
+  };
+}
+
 function stateForStorage() {
   return {
     ...state,
@@ -5130,17 +5143,35 @@ function groupColor(color) {
   return colors[color] || colors.blue;
 }
 
-function setSettingsStatus(text) {
+function setSettingsStatus(text, tone = settingsStatusTone(text)) {
   els.settingsStatus.textContent = text;
   if (!workbenchMode) return;
+  showStatusToast(text, tone);
+}
+
+function showStatusToast(text, tone = 'info') {
   clearTimeout(workbenchToastTimer);
+  clearTimeout(workbenchToastHideTimer);
   els.workbenchToast.textContent = text;
+  els.workbenchToast.dataset.tone = tone;
+  els.workbenchToast.setAttribute('role', tone === 'error' ? 'alert' : 'status');
   els.workbenchToast.hidden = false;
   els.workbenchToast.classList.add('visible');
+  const visibleFor = tone === 'error' ? 5200 : tone === 'progress' ? 8000 : 3800;
   workbenchToastTimer = setTimeout(() => {
     els.workbenchToast.classList.remove('visible');
-    els.workbenchToast.hidden = true;
-  }, 3200);
+    workbenchToastHideTimer = setTimeout(() => {
+      if (!els.workbenchToast.classList.contains('visible')) els.workbenchToast.hidden = true;
+    }, 200);
+  }, visibleFor);
+}
+
+function settingsStatusTone(text) {
+  const message = String(text || '');
+  if (/saved|exported|imported|removed|cleared|connected/i.test(message)) return 'success';
+  if (/testing|working|loading/i.test(message)) return 'progress';
+  if (/failed|error|missing|invalid|cannot|conflict|rejected|must|enter|choose|too large|needs/i.test(message)) return 'error';
+  return 'info';
 }
 
 function setArcImportStatus(text) {

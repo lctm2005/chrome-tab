@@ -567,6 +567,24 @@ async function main() {
     return true;
   })()`);
   await waitFor(client, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.' && !document.querySelector('#workbenchToast')?.hidden`);
+  const toastState = await evaluate(client, `(() => {
+    const toast = document.querySelector('#workbenchToast');
+    const rect = toast.getBoundingClientRect();
+    const style = getComputedStyle(toast);
+    return {
+      tone: toast.dataset.tone,
+      top: rect.top,
+      centerDelta: Math.abs((rect.left + rect.width / 2) - window.innerWidth / 2),
+      fontSize: parseFloat(style.fontSize),
+      width: rect.width,
+    };
+  })()`);
+  record(
+    'Workbench Save feedback is prominent and top centered',
+    toastState.tone === 'success' && toastState.top <= 24 && toastState.centerDelta <= 2 &&
+      toastState.fontSize >= 13 && toastState.width >= 280,
+    JSON.stringify(toastState),
+  );
   await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
     key: 'k', code: 'KeyK', ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
   }))`);
