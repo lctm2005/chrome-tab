@@ -241,7 +241,7 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
   assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
   assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
-  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
+  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
   assert.match(source, /async function importArcFile\(\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 

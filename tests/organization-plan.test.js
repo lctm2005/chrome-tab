@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
+  rebaseOrganizationPlan,
 } from '../src/shared/organization-plan.js';
 
 test('builds stable numeric candidates from live and one-to-one dormant snapshot rows', () => {
@@ -229,6 +230,202 @@ test('invalidates an organization preview when titles, panel names, or empty Tag
     },
     liveGroups,
   }).fingerprint, initial);
+});
+
+test('rebases planned targets across display updates and unrelated candidate insertions', () => {
+  const previewSnapshot = {
+    groups: [{
+      title: 'Historical',
+      color: 'purple',
+      collapsed: false,
+      tabs: [{ title: 'Saved title', panelTitle: 'Saved panel name', url: 'https://saved.example/item?id=1' }],
+    }],
+  };
+  const previewLiveGroups = [{
+    id: 10,
+    title: 'Current',
+    color: 'blue',
+    collapsed: false,
+    tabs: [{
+      id: 101,
+      title: 'Original live title',
+      displayTitle: 'Original panel title',
+      panelTitle: 'Original panel title',
+      url: 'https://live.example/item?id=1#old',
+    }],
+  }];
+  const preview = buildOrganizationCandidates({ snapshot: previewSnapshot, liveGroups: previewLiveGroups });
+  const savedPreview = preview.candidates.find((candidate) => candidate.dormant);
+  const livePreview = preview.candidates.find((candidate) => candidate.source.live?.tabId === 101);
+
+  const current = buildOrganizationCandidates({
+    snapshot: {
+      groups: [
+        {
+          title: 'Unrelated',
+          color: 'orange',
+          tabs: [{ title: 'Inserted row', url: 'https://unrelated.example/' }],
+        },
+        {
+          title: 'Historical',
+          color: 'green',
+          collapsed: true,
+          tabs: [{ title: 'Updated saved title', panelTitle: 'Updated saved name', url: 'https://saved.example/item?id=1' }],
+        },
+      ],
+    },
+    liveGroups: [{
+      ...previewLiveGroups[0],
+      color: 'cyan',
+      collapsed: true,
+      tabs: [{
+        ...previewLiveGroups[0].tabs[0],
+        title: '(3) Updated live title',
+        displayTitle: 'Updated panel title',
+        panelTitle: 'Updated panel title',
+      }],
+    }],
+  });
+  const savedCurrent = current.candidates.find((candidate) => (
+    candidate.source.snapshot?.url === 'https://saved.example/item?id=1'
+  ));
+  const liveCurrent = current.candidates.find((candidate) => candidate.source.live?.tabId === 101);
+
+  const rebased = rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: current.candidates,
+    plannedGroups: [{
+      title: 'Proposal',
+      color: 'green',
+      tabIds: [livePreview.id, savedPreview.id],
+    }],
+  });
+
+  assert.deepEqual(rebased, [{
+    title: 'Proposal',
+    color: 'green',
+    tabIds: [liveCurrent.id, savedCurrent.id],
+  }]);
+  assert.notDeepEqual(rebased[0].tabIds, [livePreview.id, savedPreview.id]);
+});
+
+test('rejects rebasing when a planned live target meaningfully changes', () => {
+  const preview = buildOrganizationCandidates({
+    snapshot: { groups: [] },
+    liveGroups: [{
+      id: 10,
+      title: 'Current',
+      tabs: [{ id: 101, title: 'Page', url: 'https://example.com/original?id=1' }],
+    }],
+  });
+  const plannedGroups = [{ title: 'Proposal', tabIds: [preview.candidates[0].id] }];
+  const rebase = (liveGroups) => rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: buildOrganizationCandidates({ snapshot: { groups: [] }, liveGroups }).candidates,
+    plannedGroups,
+  });
+
+  assert.throws(() => rebase([]), /no longer open/);
+  assert.throws(() => rebase([{
+    id: 10,
+    title: 'Current',
+    tabs: [{ id: 101, title: 'Page', url: 'https://example.com/original?id=1', pinned: true }],
+  }]), /was pinned/);
+  assert.throws(() => rebase([{
+    id: 10,
+    title: 'Current',
+    tabs: [{ id: 101, title: 'Page', url: 'https://example.com/another-path' }],
+  }]), /navigated to another page/);
+  assert.throws(() => rebase([{
+    id: 10,
+    title: 'Current',
+    tabs: [{ id: 101, title: 'Page', url: 'https://example.com/original?id=2' }],
+  }]), /navigated to another page/);
+  assert.throws(() => rebase([{
+    id: 10,
+    title: 'Current',
+    tabs: [{ id: 101, title: 'Page', url: 'https://example.com/original?id=1#section' }],
+  }]), /navigated to another page/);
+  assert.throws(() => rebase([{
+    id: 11,
+    title: 'Another Tag',
+    tabs: [{ id: 101, title: 'Page', url: 'https://example.com/original?id=1' }],
+  }]), /moved to another Tag/);
+});
+
+test('rejects rebasing when a planned saved target changes or is removed', () => {
+  const preview = buildOrganizationCandidates({
+    snapshot: {
+      groups: [{
+        title: 'Historical',
+        tabs: [{ title: 'Saved', url: 'https://example.com/saved?id=1' }],
+      }],
+    },
+    liveGroups: [],
+  });
+  const plannedGroups = [{ title: 'Proposal', tabIds: [preview.candidates[0].id] }];
+  const rebase = (snapshot) => rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: buildOrganizationCandidates({ snapshot, liveGroups: [] }).candidates,
+    plannedGroups,
+  });
+
+  assert.throws(() => rebase({ groups: [] }), /saved row changed or was removed/);
+  assert.throws(() => rebase({
+    groups: [{
+      title: 'Historical',
+      tabs: [{ title: 'Saved', url: 'https://example.com/saved?id=2' }],
+    }],
+  }), /saved row changed or was removed/);
+  assert.throws(() => rebase({
+    groups: [{
+      title: 'Renamed Tag',
+      tabs: [{ title: 'Saved', url: 'https://example.com/saved?id=1' }],
+    }],
+  }), /saved row changed or was removed/);
+});
+
+test('rejects ambiguous saved targets instead of rebinding by row position', () => {
+  const preview = buildOrganizationCandidates({
+    snapshot: {
+      groups: [
+        {
+          title: 'Historical',
+          color: 'red',
+          tabs: [{ title: 'A', panelTitle: 'A', url: 'https://example.com/saved' }],
+        },
+        {
+          title: 'Historical',
+          color: 'blue',
+          tabs: [{ title: 'B', panelTitle: 'B', url: 'https://example.com/saved' }],
+        },
+      ],
+    },
+    liveGroups: [],
+  });
+  const current = buildOrganizationCandidates({
+    snapshot: {
+      groups: [
+        {
+          title: 'Historical',
+          color: 'blue',
+          tabs: [{ title: 'B', panelTitle: 'B', url: 'https://example.com/saved' }],
+        },
+        {
+          title: 'Historical',
+          color: 'red',
+          tabs: [{ title: 'A', panelTitle: 'A', url: 'https://example.com/saved' }],
+        },
+      ],
+    },
+    liveGroups: [],
+  });
+
+  assert.throws(() => rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: current.candidates,
+    plannedGroups: [{ title: 'Proposal', tabIds: [preview.candidates[0].id] }],
+  }), /could not be matched unambiguously/);
 });
 
 test('moves a planned live row without absorbing unplanned dormant tabs or history metadata', () => {

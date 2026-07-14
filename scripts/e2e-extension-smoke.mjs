@@ -2049,6 +2049,19 @@ async function main() {
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Auto Group Preview' &&
       document.querySelector('#actionDialogConfirm')?.textContent === 'Apply groups'`, 12000);
+    const autoGroupDynamicTitle = 'Ask Source Alpha (metadata changed after preview)';
+    await evaluate(client, `(async () => {
+      await chrome.scripting.executeScript({
+        target: { tabId: ${JSON.stringify(askSourceTabs.alpha.id)} },
+        func: (title) => { document.title = title; },
+        args: [${JSON.stringify('Ask Source Alpha (metadata changed after preview)')}],
+      });
+    })()`);
+    const autoGroupTitleChange = await waitFor(client, `(async () => {
+      const tab = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
+      if (tab.title !== ${JSON.stringify('Ask Source Alpha (metadata changed after preview)')}) return null;
+      return { tabId: tab.id, title: tab.title, url: tab.url, groupId: tab.groupId };
+    })()`);
     await clickElementWithCDP(client, '#actionDialogConfirm');
     const appliedAutoGroupState = await waitFor(client, `(async () => {
       const captured = await window.__captureAutoGroupE2E();
@@ -2091,6 +2104,12 @@ async function main() {
     const beforeSnapshotUrls = (autoGroupFixtureBefore.storage.snapshot.groups || [])
       .flatMap((group) => (group.tabs || []).map((tab) => tab.url))
       .sort();
+    const autoGroupSnapshotBeforeApply = structuredClone(autoGroupFixtureBefore.storage.snapshot);
+    for (const group of autoGroupSnapshotBeforeApply.groups || []) {
+      for (const tab of group.tabs || []) {
+        if (tab.url === askFixtureServer.sourceAlphaUrl) tab.title = autoGroupDynamicTitle;
+      }
+    }
     const autoGroupProviderRequestsAfterApply = askFixtureServer.requests
       .filter((request) => request.mode === 'auto-group').length;
     const autoGroupRequestsAfterApply = askFixtureServer.requests
@@ -2112,6 +2131,8 @@ async function main() {
         appliedAutoGroupState.operation.spaceId === 'default' &&
         appliedAutoGroupState.undoText === 'Undo' &&
         appliedAutoGroupState.status.includes('Auto group updated Default') &&
+        autoGroupTitleChange.title === autoGroupDynamicTitle &&
+        autoGroupTitleChange.url === askFixtureServer.sourceAlphaUrl &&
         autoGroupProviderRequestsAfterApply === autoGroupRequestsBefore + 2 &&
         autoGroupPermissionRequestsAfterApply === autoGroupPermissionRequestsBefore + 2 &&
         !Object.hasOwn(appliedAutoGroupState.captured.storage.ai || {}, 'maxTokens') &&
@@ -2132,6 +2153,7 @@ async function main() {
           status: appliedAutoGroupState.operation.status,
         },
         status: appliedAutoGroupState.status,
+        titleChangedAfterPreview: autoGroupTitleChange,
         providerRequests: autoGroupProviderRequestsAfterApply,
         permissionRequests: autoGroupPermissionRequestsAfterApply,
         legacyMaxTokensPresent: Object.hasOwn(appliedAutoGroupState.captured.storage.ai || {}, 'maxTokens'),
@@ -2172,7 +2194,7 @@ async function main() {
       'Auto Group Undo restores live and saved organization without orphaning or losing Tags',
       JSON.stringify(undoneAutoGroupState.captured.layout) === JSON.stringify(autoGroupFixtureBefore.layout) &&
         JSON.stringify(undoneAutoGroupState.captured.storage.snapshot) ===
-          JSON.stringify(autoGroupFixtureBefore.storage.snapshot) &&
+          JSON.stringify(autoGroupSnapshotBeforeApply) &&
         undoneAutoGroupState.historical.tabs.some((tab) =>
           tab.url === askFixtureServer.autoGroupDormantUrl) &&
         !undoneAutoGroupState.target &&
@@ -2187,7 +2209,7 @@ async function main() {
         layoutRestored: JSON.stringify(undoneAutoGroupState.captured.layout) ===
           JSON.stringify(autoGroupFixtureBefore.layout),
         snapshotRestored: JSON.stringify(undoneAutoGroupState.captured.storage.snapshot) ===
-          JSON.stringify(autoGroupFixtureBefore.storage.snapshot),
+          JSON.stringify(autoGroupSnapshotBeforeApply),
         historical: undoneAutoGroupState.historical,
         target: undoneAutoGroupState.target,
         newOrphansAfterUndo,

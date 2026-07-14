@@ -36,6 +36,51 @@ export function buildOrganizationCandidates({ liveGroups = [], snapshot = null }
 }
 
 /**
+ * Rebinds an AI proposal to the current candidate ids without trusting their
+ * positional ids from the preview. Page titles and unrelated rows may change
+ * while the preview is open; the targets themselves must retain a stable live
+ * tab id or a unique saved Tag + URL identity.
+ */
+export function rebaseOrganizationPlan({
+  previewCandidates = [],
+  currentCandidates = [],
+  plannedGroups = [],
+} = {}) {
+  const previewById = indexCandidates(previewCandidates);
+  indexCandidates(currentCandidates);
+  const assignments = normalizeAssignments(plannedGroups, previewById);
+  const currentIdByPreviewId = new Map();
+  const usedCurrentIds = new Set();
+
+  for (const assignment of assignments) {
+    if (currentIdByPreviewId.has(assignment.candidateId)) continue;
+    const previewCandidate = previewById.get(assignment.candidateId);
+    const currentCandidate = resolveCurrentPlanCandidate(
+      previewCandidate,
+      previewCandidates,
+      currentCandidates,
+    );
+    const currentId = Number(currentCandidate.id);
+    if (usedCurrentIds.has(currentId)) {
+      throw stalePlanError('could not be matched unambiguously');
+    }
+    usedCurrentIds.add(currentId);
+    currentIdByPreviewId.set(assignment.candidateId, currentId);
+  }
+
+  return plannedGroups.map((group) => ({
+    ...group,
+    tabIds: arrayValue(group?.tabIds).map((candidateId) => {
+      const currentId = currentIdByPreviewId.get(Number(candidateId));
+      if (!Number.isSafeInteger(currentId)) {
+        throw stalePlanError('is no longer available');
+      }
+      return currentId;
+    }),
+  }));
+}
+
+/**
  * Applies a confirmed Auto Group plan to the saved snapshot explicitly.
  *
  * Unlike merge-by-URL snapshot refreshes, this function only moves candidate
@@ -307,6 +352,58 @@ function liveSource(entry) {
     groupIndex: entry.groupIndex,
     tabIndex: entry.tabIndex,
   };
+}
+
+function resolveCurrentPlanCandidate(previewCandidate, previewCandidates, currentCandidates) {
+  const liveTabId = Number(previewCandidate?.source?.live?.tabId);
+  let currentCandidate;
+
+  if (Number.isSafeInteger(liveTabId)) {
+    const matches = currentCandidates.filter((candidate) => (
+      Number(candidate?.source?.live?.tabId) === liveTabId
+    ));
+    if (matches.length !== 1) throw stalePlanError('is no longer open');
+    [currentCandidate] = matches;
+    if (exactUrlIdentity(currentCandidate.url) !== exactUrlIdentity(previewCandidate.url)) {
+      throw stalePlanError('navigated to another page');
+    }
+  } else {
+    const previewMatches = snapshotIdentityMatches(previewCandidates, previewCandidate);
+    const currentMatches = snapshotIdentityMatches(currentCandidates, previewCandidate);
+    if (previewMatches.length === 0 || currentMatches.length === 0) {
+      throw stalePlanError('saved row changed or was removed');
+    }
+    if (previewMatches.length !== 1 || currentMatches.length !== 1) {
+      throw stalePlanError('saved row could not be matched unambiguously');
+    }
+    [currentCandidate] = currentMatches;
+  }
+
+  if (currentCandidate.pinned) throw stalePlanError('was pinned');
+  if (
+    normalizedGroupTitle(currentCandidate.currentGroup?.title) !==
+    normalizedGroupTitle(previewCandidate.currentGroup?.title)
+  ) {
+    throw stalePlanError('moved to another Tag');
+  }
+  return currentCandidate;
+}
+
+function snapshotIdentityMatches(candidates, previewCandidate) {
+  const source = previewCandidate?.source?.snapshot;
+  const groupTitle = normalizedGroupTitle(source?.groupTitle || previewCandidate?.currentGroup?.title);
+  const url = exactUrlIdentity(source?.url !== undefined ? source.url : previewCandidate?.url);
+  if (!source || !groupTitle || !url) return [];
+  return arrayValue(candidates).filter((candidate) => {
+    const candidateSource = candidate?.source?.snapshot;
+    return candidateSource &&
+      normalizedGroupTitle(candidateSource.groupTitle || candidate?.currentGroup?.title) === groupTitle &&
+      exactUrlIdentity(candidateSource.url !== undefined ? candidateSource.url : candidate?.url) === url;
+  });
+}
+
+function stalePlanError(reason) {
+  return new Error(`An Auto Group target ${reason}. Review a fresh preview before applying groups.`);
 }
 
 function normalizeCurrentGroup(group, groupIndex, source) {

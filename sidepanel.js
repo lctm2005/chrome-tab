@@ -39,6 +39,7 @@ import { renderMarkdown } from './src/shared/markdown.js';
 import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
+  rebaseOrganizationPlan,
 } from './src/shared/organization-plan.js';
 import {
   fingerprintTidyNameTargets,
@@ -4781,6 +4782,7 @@ async function autoGroupTabs(options = {}) {
     !tab.pinned && isPageShortcutCapableUrl(tab.url)
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
+  const duplicateGroupFingerprint = fingerprintDuplicateActiveGroups();
   if (candidates.length === 0 && duplicateGroupCount === 0) {
     const message = 'No live or saved http(s) tabs are available to organize in this Space.';
     setStatus(message);
@@ -4938,14 +4940,19 @@ async function autoGroupTabs(options = {}) {
         liveGroups: buildSpaceViewForSpace(sourceSpaceId),
         snapshot: currentSnapshot,
       });
-      if (currentOrganization.fingerprint !== organization.fingerprint) {
-        throw new Error('Tabs changed while Auto Group was open. Review a fresh preview before applying groups.');
+      if (fingerprintDuplicateActiveGroups() !== duplicateGroupFingerprint) {
+        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
       }
+      const rebasedPlannedGroups = rebaseOrganizationPlan({
+        previewCandidates: organization.candidates,
+        currentCandidates: currentOrganization.candidates,
+        plannedGroups,
+      });
 
       const beforeSnapshot = structuredClone(currentSnapshot);
       const beforeLive = captureLiveOrganization(sourceSpaceId);
       const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
-      const livePlannedGroups = plannedGroups
+      const livePlannedGroups = rebasedPlannedGroups
         .map((group) => ({
           ...group,
           tabIds: group.tabIds
@@ -4959,7 +4966,7 @@ async function autoGroupTabs(options = {}) {
         state.spaceSnapshots[sourceSpaceId] = applyOrganizationPlanToSnapshot({
           snapshot: currentSnapshot,
           candidates: currentOrganization.candidates,
-          plannedGroups,
+          plannedGroups: rebasedPlannedGroups,
         });
         dormantSpaceViewSpaceId = '';
 
@@ -5066,10 +5073,29 @@ function duplicateActiveGroupBuckets() {
   return [...buckets.values()].filter((bucket) => bucket.length > 1);
 }
 
+function fingerprintDuplicateActiveGroups() {
+  const buckets = duplicateActiveGroupBuckets().map((bucket) => ({
+    title: groupTitleKey(bucket[0]?.title),
+    groups: bucket
+      .map((group) => ({
+        id: Number(group.id),
+        tabIds: tabs
+          .filter((tab) => Number(tab.groupId) === Number(group.id))
+          .map((tab) => Number(tab.id))
+          .filter(Number.isFinite)
+          .sort((left, right) => left - right),
+      }))
+      .sort((left, right) => left.id - right.id),
+  }));
+  buckets.sort((left, right) => left.title.localeCompare(right.title));
+  return JSON.stringify(buckets);
+}
+
 async function mergeDuplicateGroupsInActiveSpace() {
   let merged = 0;
   for (const bucket of duplicateActiveGroupBuckets()) {
-    const [keep, ...duplicates] = bucket;
+    const [keep, ...duplicates] = [...bucket]
+      .sort((left, right) => Number(left.id) - Number(right.id));
     for (const duplicate of duplicates) {
       const tabIds = tabs
         .filter((tab) => Number(tab.groupId) === Number(duplicate.id))
