@@ -3,7 +3,7 @@
   "name": "Space Tabs: Arc-like Spaces & BYOK AI",
   "short_name": "Space Tabs",
   "description": "Move your Arc workspace into Chrome. Organize Spaces, ask pages with your own AI key, and keep workspace data local.",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "Open Space Tabs",
