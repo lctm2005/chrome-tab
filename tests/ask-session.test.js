@@ -118,7 +118,23 @@ test('prunes Ask sessions for closed tabs and caps retained sessions', () => {
     'tab:1:https://example.com/a',
     'tab:3:https://example.com/c',
   ]);
-  assert.equal(ASK_SESSION_LIMITS.maxMessageChars, 8000);
+  assert.equal(ASK_SESSION_LIMITS.maxMessageChars, 65_536);
+  assert.equal(ASK_SESSION_LIMITS.maxSessionChars, 96_000);
+  assert.equal(ASK_SESSION_LIMITS.maxSessions, 12);
+});
+
+test('drops oldest Ask messages when a session reaches its character budget', () => {
+  const session = createSpaceAskSession({ id: 'large', name: 'Large' });
+  const limits = {
+    maxMessagesPerSession: 10,
+    maxMessageChars: 100,
+    maxSessionChars: 12,
+  };
+  appendAskSessionMessage(session, 'user', 'first', limits);
+  appendAskSessionMessage(session, 'assistant', 'second', limits);
+  appendAskSessionMessage(session, 'user', 'latest', limits);
+
+  assert.deepEqual(session.messages.map((message) => message.text), ['second', 'latest']);
 });
 
 test('keeps Ask sessions for existing Spaces and removes deleted Spaces', () => {

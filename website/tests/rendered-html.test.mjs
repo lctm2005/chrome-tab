@@ -32,6 +32,8 @@ test("renders the Arc migration and controlled-AI product promise", async () => 
   assert.match(html, /Sources appendices stay out of the context sent to your provider/i);
   assert.match(html, /No telemetry/);
   assert.match(html, /Space Tabs: Arc-like Spaces &amp; BYOK AI/i);
+  assert.match(html, /Install from GitHub/i);
+  assert.match(html, /github\.com\/lctm2005\/chrome-tab#install-from-source/i);
   for (const screenshot of [
     "01-spaces-overview.png",
     "02-nested-folders-dormant-tabs.png",

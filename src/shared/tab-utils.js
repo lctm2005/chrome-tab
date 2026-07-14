@@ -426,10 +426,27 @@ export function titleForDomain(domain, title = '') {
 export function compactTabForAI(tab) {
   return {
     id: tab.id,
-    title: tab.title || '',
-    url: tab.url || '',
+    title: String(tab.title || '').trim().slice(0, 240),
+    url: compactUrlForAI(tab.url),
     domain: domainFromUrl(tab.url),
   };
+}
+
+export function compactUrlForAI(value) {
+  const raw = String(value || '').trim();
+  try {
+    const url = new URL(raw);
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      return url.toString().slice(0, 512);
+    }
+  } catch {
+    // Preserve a bounded fallback for custom or malformed URLs.
+  }
+  return raw.slice(0, 512);
 }
 
 export function spaceGroupPlan({ space, tabIds }) {

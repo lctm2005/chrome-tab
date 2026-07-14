@@ -6,7 +6,6 @@ window.SPACE_TABS_CONFIG = {
     apiKey: '',
     thinking: 'disabled',
     language: 'zh-CN',
-    temperature: 0.6,
-    maxTokens: 1000000
+    temperature: 0.6
   }
 };

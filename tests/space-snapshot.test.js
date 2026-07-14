@@ -1053,3 +1053,84 @@ test('merge consumes an exact duplicate from the corresponding group first', () 
     },
   ]);
 });
+
+test('duplicate exact URLs preserve candidate order, group priority, and one-to-one consumption', () => {
+  const sharedUrl = 'https://app.test/shared';
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Archive',
+        color: 'green',
+        tabs: [{ title: 'Archive copy', url: sharedUrl }],
+      },
+      {
+        title: 'Current',
+        color: 'blue',
+        tabs: [{ title: 'Current copy', url: sharedUrl }],
+      },
+      {
+        title: 'Later',
+        color: 'purple',
+        tabs: [{ title: 'Later copy', url: sharedUrl }],
+      },
+    ],
+  };
+
+  const result = removeSnapshotTabs(snapshot, [
+    { url: sharedUrl, groupTitle: 'Current', groupColor: 'blue' },
+    { url: sharedUrl, groupTitle: 'Archive', groupColor: 'green' },
+  ]);
+
+  assert.deepEqual(result.groups, [
+    {
+      title: 'Archive',
+      color: 'green',
+      tabs: [],
+    },
+    {
+      title: 'Current',
+      color: 'blue',
+      tabs: [],
+    },
+    {
+      title: 'Later',
+      color: 'purple',
+      tabs: [{ title: 'Later copy', url: sharedUrl }],
+    },
+  ]);
+});
+
+test('large disjoint live and saved snapshots merge in bounded time without reordering tabs', () => {
+  const tabCount = 2_000;
+  const storedTabs = Array.from({ length: tabCount }, (_, index) => ({
+    title: `Saved ${index}`,
+    url: `https://saved.example/items/${index}`,
+  }));
+  const liveTabs = Array.from({ length: tabCount }, (_, index) => ({
+    title: `Live ${index}`,
+    url: `https://live.example/items/${index}`,
+  }));
+  const startedAt = performance.now();
+  const merged = mergeSpaceSnapshot({
+    version: 1,
+    updatedAt: 2,
+    groups: [{ title: 'Live', color: 'blue', tabs: liveTabs }],
+  }, {
+    version: 1,
+    updatedAt: 1,
+    groups: [{ title: 'Saved', color: 'green', tabs: storedTabs }],
+  });
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.deepEqual(merged.groups.map((group) => group.title), ['Saved', 'Live']);
+  assert.equal(merged.groups[0].tabs.length, tabCount);
+  assert.equal(merged.groups[0].tabs[0].title, 'Saved 0');
+  assert.equal(merged.groups[0].tabs.at(-1).title, `Saved ${tabCount - 1}`);
+  assert.equal(merged.groups[1].tabs.length, tabCount);
+  assert.equal(merged.groups[1].tabs[0].title, 'Live 0');
+  assert.equal(merged.groups[1].tabs.at(-1).title, `Live ${tabCount - 1}`);
+  assert.ok(elapsedMs < 2_500, `large disjoint merge took ${elapsedMs.toFixed(1)} ms`);
+});

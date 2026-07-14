@@ -351,29 +351,25 @@ function storeShotHtml(shot) {
         font-size: 38px;
         line-height: 1;
       }
-      .workbench-shot .story > div:last-child {
-        min-width: 0;
+      .auto-group-shot .brand {
+        visibility: hidden;
       }
-      .arc-import-shot h1::before,
-      .auto-group-shot h1::before {
-        position: absolute;
-        top: 50%;
-        left: -210px;
-        width: 170px;
+      .auto-group-shot::before {
+        position: fixed;
+        z-index: 10;
+        top: 52px;
+        left: 38px;
         min-height: 38px;
-        transform: translateY(-50%);
-        padding-left: 48px;
+        padding-left: 50px;
         background: url('/icons/icon128.png') left center / 38px 38px no-repeat;
         color: rgba(247, 248, 251, 0.86);
         content: 'Space Tabs';
         font-size: 15px;
         font-weight: 750;
         line-height: 38px;
-        white-space: nowrap;
       }
-      .arc-import-shot .brand,
-      .auto-group-shot .brand {
-        visibility: hidden;
+      .workbench-shot .story > div:last-child {
+        min-width: 0;
       }
       .workbench-shot .notes {
         max-width: 480px;
@@ -482,6 +478,7 @@ function storeShotHtml(shot) {
       }
 
       function openArcImport(doc) {
+        doc.defaultView.showOpenFilePicker = () => new Promise(() => {});
         doc.querySelector('[data-onboarding-path="arc"]')?.click();
         const status = doc.querySelector('#onboardingArcStatus');
         const list = doc.querySelector('#onboardingArcSpaces');
@@ -530,6 +527,7 @@ function storeShotHtml(shot) {
         const backupPicker = backupInput?.closest('.file-picker');
         const arcInput = doc.querySelector('#arcImportInput');
         const arcPicker = arcInput?.closest('.file-picker');
+        const arcUse = doc.querySelector('#arcImportUseButton');
         const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
@@ -548,6 +546,7 @@ function storeShotHtml(shot) {
           fakeArcPicker.innerHTML = '<span class="store-file-button">Choose Arc File</span><span>No file selected</span>';
           arcPicker.append(fakeArcPicker);
         }
+        if (arcUse) arcUse.hidden = false;
         if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
         if (restoreBackup) restoreBackup.disabled = false;
         if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
@@ -569,16 +568,16 @@ function storeShotHtml(shot) {
         select(3);
         await wait(80);
         doc.querySelector('.ask-space')?.click();
-        await waitFor(() => !doc.querySelector('#askPageView')?.hidden);
+        await waitFor(() => !doc.querySelector('#askPageView')?.hidden, 8000, 'Ask Space view');
         const input = doc.querySelector('#askPagePrompt');
         input.value = 'Compare the launch brief with the reviewer notes. What is still missing?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
         await waitFor(() => doc.querySelector('#actionDialog')?.open &&
-          /Review Ask Space/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000);
+          /Review Ask Space/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000, 'Ask Space send review');
         doc.querySelector('#actionDialogConfirm')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
-          .some((node) => /Preview AI response/i.test(node.textContent)), 5000);
+          .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Space preview response');
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
           assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review and package verification <a href="https://docs.example.com/launch-brief">[1]</a>. Reviewer notes also require multi-page Ask and Auto Group Undo checks <a href="https://example.com/reviewer-notes">[2]</a>.</p><p><strong>Sources</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a> · <a href="https://example.com/reviewer-notes">[2] Reviewer notes</a></p>';
@@ -588,14 +587,14 @@ function storeShotHtml(shot) {
         }
       }
 
-      async function waitFor(check, timeoutMs = 8000) {
+      async function waitFor(check, timeoutMs = 8000, label = 'screenshot state') {
         const started = Date.now();
         while (Date.now() - started < timeoutMs) {
           const value = check();
           if (value) return value;
           await wait(50);
         }
-        throw new Error('Timed out while preparing screenshot.');
+        throw new Error(\`Timed out while preparing screenshot: \${label}.\`);
       }
 
       function wait(ms) {
@@ -610,6 +609,7 @@ function scenarioFor(shot) {
   const state = baseState(shot.activeSpaceId);
   const runtime = baseRuntime();
   if (shot.id === 'arc-import') state.onboarding = { version: 1, completed: false };
+  if (shot.id === 'ask') state.ai.apiKey = 'store-preview-fixture-key';
   if (shot.id === 'auto-group') {
     state.spaceSnapshots.launch = {
       version: 1,
@@ -747,7 +747,6 @@ function baseState(activeSpaceId) {
       thinking: 'disabled',
       language: 'en',
       temperature: 0.6,
-      maxTokens: 10240,
     },
   };
 }

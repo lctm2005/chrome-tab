@@ -1,7 +1,8 @@
 export const ASK_SESSION_LIMITS = {
-  maxSessions: 24,
+  maxSessions: 12,
   maxMessagesPerSession: 40,
-  maxMessageChars: 8000,
+  maxMessageChars: 65_536,
+  maxSessionChars: 96_000,
 };
 
 export function normalizeSessionUrl(value) {
@@ -58,7 +59,10 @@ export function appendAskSessionMessage(session, role, text, limits = ASK_SESSIO
     text: clampMessageText(text, limits.maxMessageChars),
     createdAt: now,
   };
-  session.messages = [...(session.messages || []), message].slice(-limits.maxMessagesPerSession);
+  session.messages = clampSessionMessages(
+    [...(session.messages || []), message].slice(-limits.maxMessagesPerSession),
+    limits,
+  );
   session.updatedAt = now;
   return message;
 }
@@ -76,6 +80,7 @@ export function updateAskSessionMessage(session, messageId, text, limits = ASK_S
     };
     return updated;
   });
+  session.messages = clampSessionMessages(session.messages, limits);
   if (updated) session.updatedAt = now;
   return updated;
 }
@@ -121,4 +126,14 @@ function clampMessageText(text, maxChars) {
     return `${value.slice(0, headLength)}${truncationNotice}${suffix}`;
   }
   return `${value.slice(0, limit)}...`;
+}
+
+function clampSessionMessages(messages, limits = ASK_SESSION_LIMITS) {
+  const retained = [...(messages || [])];
+  const maxChars = Number(limits.maxSessionChars || ASK_SESSION_LIMITS.maxSessionChars);
+  let total = retained.reduce((sum, message) => sum + String(message?.text || '').length, 0);
+  while (retained.length > 1 && total > maxChars) {
+    total -= String(retained.shift()?.text || '').length;
+  }
+  return retained;
 }

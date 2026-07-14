@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=23">
+    <link rel="stylesheet" href="sidepanel.css?v=24">
   </head>
   <body>
     <div class="shell">
@@ -139,12 +139,12 @@
           <section class="onboarding-step" id="onboardingArcStep" hidden>
             <div class="onboarding-copy">
               <h2>Choose what comes over from Arc.</h2>
-              <p>Select Arc's <code>StorableSidebar.json</code>. Space Tabs previews names, conflicts, folders, and tab counts before importing anything.</p>
+              <p>Authorize Arc's <code>StorableSidebar.json</code> once. Chrome requires this system-file approval; Space Tabs remembers the file locally and reuses it for later imports.</p>
             </div>
-            <label class="onboarding-file-picker">
-              <input id="onboardingArcInput" type="file" accept=".json,application/json">
-            </label>
-            <div class="onboarding-import-status" id="onboardingArcStatus">No Arc file selected.</div>
+            <input id="onboardingArcInput" type="file" accept=".json,application/json" hidden>
+            <button type="button" class="secondary-button arc-file-button" id="onboardingArcChooseButton">Authorize Arc file</button>
+            <p class="arc-file-help">The system picker opens immediately. Cancel keeps you on this step, and no data is imported until you review and confirm.</p>
+            <div class="onboarding-import-status" id="onboardingArcStatus">Arc file access has not been granted.</div>
             <div class="onboarding-space-list" id="onboardingArcSpaces"></div>
           </section>
 
@@ -220,22 +220,13 @@
           <span id="apiKeyStatus">No API key configured.</span>
           <button type="button" id="clearApiKeyButton" class="link-button">Clear API key</button>
         </div>
-        <div class="form-grid">
-          <label>
-            Thinking
-            <select id="thinkingInput">
-              <option value="disabled">Disabled</option>
-              <option value="enabled">Enabled</option>
-            </select>
-          </label>
-          <label>
-            Max output (K tokens)
-            <span class="input-with-unit">
-              <input id="maxTokensInput" type="number" min="0.001" max="128" step="0.001" inputmode="decimal" required>
-              <span aria-hidden="true">K</span>
-            </span>
-          </label>
-        </div>
+        <label>
+          Thinking
+          <select id="thinkingInput">
+            <option value="disabled">Disabled</option>
+            <option value="enabled">Enabled</option>
+          </select>
+        </label>
         <button type="button" id="testAIButton" class="secondary-button">Test AI</button>
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
         <section class="workspace-settings">
@@ -256,13 +247,13 @@
         </section>
         <section class="arc-import-settings">
           <h3>Import from Arc</h3>
-          <p>Choose Arc's <code>StorableSidebar.json</code>. Review the preview before appending imported Spaces; the latest import can be undone.</p>
-          <label class="file-picker">
-            <input id="arcImportInput" type="file" accept=".json,application/json">
-          </label>
+          <p>Space Tabs reuses the Arc file you authorized during setup. Choose another copy only when you want to change the source.</p>
+          <input id="arcImportInput" type="file" accept=".json,application/json" hidden>
+          <button type="button" id="arcImportUseButton" class="secondary-button" hidden>Use authorized Arc file</button>
+          <button type="button" id="arcImportChooseButton" class="secondary-button">Choose another Arc file</button>
           <button type="button" id="importArcButton" class="secondary-button" disabled>Append Import</button>
           <button type="button" id="undoArcImportButton" class="secondary-button" disabled>Undo Last Import</button>
-          <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
+          <div id="arcImportStatus" class="settings-status">Arc file access has not been granted.</div>
         </section>
         <section class="shortcut-settings">
           <h3>Panel Shortcuts</h3>
@@ -285,6 +276,6 @@
     </dialog>
 
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=23"></script>
+    <script type="module" src="sidepanel.js?v=24"></script>
   </body>
 </html>

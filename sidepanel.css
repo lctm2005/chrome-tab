@@ -1934,36 +1934,6 @@ dialog::backdrop {
   border: 0;
 }
 
-.form-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.input-with-unit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  min-height: 36px;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-}
-
-.settings .input-with-unit input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-}
-
-.input-with-unit > span {
-  padding-right: 11px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-}
-
 @media (max-width: 480px) {
   .action-preview-item {
     grid-template-columns: minmax(0, 1fr);
@@ -2246,8 +2216,7 @@ menu {
   line-height: 1.4;
 }
 
-.onboarding-field,
-.onboarding-file-picker {
+.onboarding-field {
   display: grid;
   gap: 7px;
   color: var(--text-soft);
@@ -2256,8 +2225,7 @@ menu {
 }
 
 .onboarding-field input,
-.onboarding-field textarea,
-.onboarding-file-picker input {
+.onboarding-field textarea {
   width: 100%;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
@@ -2268,10 +2236,19 @@ menu {
 }
 
 .onboarding-field input:focus,
-.onboarding-field textarea:focus,
-.onboarding-file-picker input:focus {
+.onboarding-field textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.arc-file-button {
+  justify-self: start;
+}
+
+.arc-file-help {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .onboarding-import-status {

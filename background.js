@@ -1,7 +1,9 @@
 import {
   buildChatCompletionRequest,
   extractAssistantText,
+  extractFinishReason,
   getZaiFallbackBaseUrl,
+  outputTokenBudgetForPurpose,
   parseChatStreamEvent,
 } from './src/shared/ai.js';
 import { providerRequiresApiKey } from './src/shared/ai-providers.js';
@@ -76,7 +78,14 @@ async function handleMessage(message, sender = {}) {
     case 'pages:extract':
       return extractPages(message.tabIds, message.options);
     case 'ai:chat':
-      return runChatCompletion(message.settings, message.messages, message.requestId, message.stream);
+      return runChatCompletion(
+        message.settings,
+        message.messages,
+        message.requestId,
+        message.stream,
+        message.purpose,
+        message.itemCount,
+      );
     case 'ai:abort':
       return abortChatCompletion(message.requestId);
     default:
@@ -401,7 +410,15 @@ function clampInteger(value, minimum, maximum, fallback) {
   return Math.max(minimum, Math.min(maximum, number));
 }
 
-async function runChatCompletion(settings, messages, requestId = '', stream = false) {
+async function runChatCompletion(
+  settings,
+  messages,
+  requestId = '',
+  stream = false,
+  purpose = '',
+  itemCount,
+) {
+  outputTokenBudgetForPurpose(purpose, itemCount);
   if (providerRequiresApiKey(settings) && !settings?.apiKey) {
     throw new Error('AI API key is missing. Add it in Settings.');
   }
@@ -409,12 +426,13 @@ async function runChatCompletion(settings, messages, requestId = '', stream = fa
   const safeRequestId = requestId || crypto.randomUUID();
   activeAIRequests.set(safeRequestId, controller);
   try {
-    const payload = await fetchChatCompletion(settings, messages, controller.signal, stream
+    const payload = await fetchChatCompletion(settings, messages, purpose, itemCount, controller.signal, stream
       ? (text) => notifyAIStream(safeRequestId, text)
       : null);
     return {
       text: extractAssistantText(payload),
       usage: payload.usage || null,
+      finishReason: extractFinishReason(payload),
     };
   } catch (error) {
     if (error?.name === 'AbortError') throw new Error('AI request was stopped.');
@@ -441,8 +459,8 @@ async function abortChatCompletion(requestId = '') {
   return { aborted: true };
 }
 
-async function fetchChatCompletion(settings, messages, signal, onStream = null) {
-  const request = buildChatCompletionRequest(settings, messages);
+async function fetchChatCompletion(settings, messages, purpose, itemCount, signal, onStream = null) {
+  const request = buildChatCompletionRequest(settings, messages, purpose, itemCount);
   if (onStream) request.body.stream = true;
   const response = await fetch(request.url, {
     method: request.method,
@@ -462,7 +480,14 @@ async function fetchChatCompletion(settings, messages, signal, onStream = null) 
     const message = payload?.error?.message || payload?.message || `AI request failed with ${response.status}`;
     const fallbackBaseUrl = getZaiFallbackBaseUrl(settings.baseUrl);
     if (fallbackBaseUrl && /insufficient|balance|quota|余额不足|资源包/i.test(message)) {
-      return fetchChatCompletion({ ...settings, baseUrl: fallbackBaseUrl }, messages, signal, onStream);
+      return fetchChatCompletion(
+        { ...settings, baseUrl: fallbackBaseUrl },
+        messages,
+        purpose,
+        itemCount,
+        signal,
+        onStream,
+      );
     }
     throw new Error(message);
   }
@@ -477,6 +502,7 @@ async function fetchChatCompletion(settings, messages, signal, onStream = null) 
   let buffer = '';
   let text = '';
   let usage = null;
+  let finishReason = null;
   let streamDone = false;
   while (true) {
     const { done, value } = await reader.read();
@@ -491,6 +517,7 @@ async function fetchChatCompletion(settings, messages, signal, onStream = null) 
         break;
       }
       if (event.usage) usage = event.usage;
+      if (event.finishReason) finishReason = event.finishReason;
       if (event.text) {
         text += event.text;
         onStream(text);
@@ -508,8 +535,9 @@ async function fetchChatCompletion(settings, messages, signal, onStream = null) 
     onStream(text);
   }
   if (finalEvent?.usage) usage = finalEvent.usage;
+  if (finalEvent?.finishReason) finishReason = finalEvent.finishReason;
   return {
-    choices: [{ message: { content: text } }],
+    choices: [{ message: { content: text }, finish_reason: finishReason }],
     usage,
   };
 }

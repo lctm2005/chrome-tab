@@ -1,30 +1,25 @@
-export const TOKENS_PER_K = 1024;
-export const MIN_MAX_TOKENS = 1;
-export const MAX_MAX_TOKENS = 131_072;
-export const DEFAULT_MAX_TOKENS = 10_240;
+export const AI_OUTPUT_TOKEN_BUDGETS = Object.freeze({
+  'tidy-names': Object.freeze({ small: 8_192, medium: 16_384, large: 32_768 }),
+  'auto-group': Object.freeze({ small: 16_384, medium: 32_768, large: 65_536 }),
+  'ask-space': 32_768,
+  'test-ai': 1_024,
+});
 
-export function isValidMaxTokens(value) {
-  const tokens = Number(value);
-  return Number.isFinite(tokens) &&
-    Number.isInteger(tokens) &&
-    tokens >= MIN_MAX_TOKENS &&
-    tokens <= MAX_MAX_TOKENS;
-}
+export function outputTokenBudgetForPurpose(purpose, itemCount) {
+  const normalized = String(purpose || '').trim();
+  if (!Object.hasOwn(AI_OUTPUT_TOKEN_BUDGETS, normalized)) {
+    throw new Error(`Unsupported AI purpose: ${normalized || 'missing'}.`);
+  }
+  const budget = AI_OUTPUT_TOKEN_BUDGETS[normalized];
+  if (typeof budget === 'number') return budget;
 
-export function normalizeMaxTokens(value, fallback = DEFAULT_MAX_TOKENS) {
-  const tokens = Math.round(Number(value));
-  if (isValidMaxTokens(tokens)) return tokens;
-  const fallbackTokens = Math.round(Number(fallback));
-  return isValidMaxTokens(fallbackTokens) ? fallbackTokens : DEFAULT_MAX_TOKENS;
-}
-
-export function maxTokensToK(value) {
-  return Number((normalizeMaxTokens(value) / TOKENS_PER_K).toFixed(3));
-}
-
-export function maxTokensFromK(value) {
-  const units = Number(value);
-  return Number.isFinite(units) ? Math.round(units * TOKENS_PER_K) : Number.NaN;
+  const count = Number(itemCount);
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error(`${normalized} AI requests require a non-negative integer itemCount.`);
+  }
+  if (count <= 80) return budget.small;
+  if (count <= 200) return budget.medium;
+  return budget.large;
 }
 
 export function normalizeBaseUrl(baseUrl) {
@@ -48,7 +43,7 @@ export function getZaiFallbackBaseUrl(baseUrl) {
   return '';
 }
 
-export function buildChatCompletionRequest(settings, messages) {
+export function buildChatCompletionRequest(settings, messages, purpose, itemCount) {
   const baseUrl = normalizeBaseUrl(settings.baseUrl);
   const headers = {
     'Content-Type': 'application/json',
@@ -59,7 +54,7 @@ export function buildChatCompletionRequest(settings, messages) {
     messages,
     stream: false,
     temperature: Number(settings.temperature ?? 0.6),
-    max_tokens: normalizeMaxTokens(settings.maxTokens),
+    max_tokens: outputTokenBudgetForPurpose(purpose, itemCount),
   };
 
   if (String(settings.model || '').startsWith('glm-5')) {
@@ -81,18 +76,25 @@ export function extractAssistantText(payload) {
   return choice?.message?.content || choice?.delta?.content || '';
 }
 
+export function extractFinishReason(payload) {
+  return payload?.choices?.[0]?.finish_reason || null;
+}
+
 export function parseChatStreamEvent(line) {
   const value = String(line || '').trim();
   if (!value.startsWith('data:')) return null;
   const data = value.slice(5).trim();
   if (!data) return null;
-  if (data === '[DONE]') return { done: true, text: '', usage: null };
+  if (data === '[DONE]') {
+    return { done: true, text: '', usage: null, finishReason: null };
+  }
   try {
     const payload = JSON.parse(data);
     return {
       done: false,
       text: extractAssistantText(payload),
       usage: payload.usage || null,
+      finishReason: extractFinishReason(payload),
     };
   } catch {
     return null;

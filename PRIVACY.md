@@ -1,6 +1,6 @@
 # Space Tabs Privacy Policy
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 Space Tabs is a Chrome extension for Arc-like browser workspaces, dormant saved
 tabs, and optional BYOK AI.
@@ -16,9 +16,9 @@ Space may handle:
 - Titles, URLs, selected text, and page text from up to 12 confirmed live
   HTTP(S) source tabs only when the user starts Ask Space. Ask prioritizes the
   pages the user selects.
-- Tab titles, URLs, domains, and—for Auto Group—current Tag and live/saved
-  status, only after the user confirms generation of a Tidy Names or Auto
-  Group proposal.
+- Tab titles, simplified URLs without query strings or fragments, domains,
+  and—for Auto Group—current Tag and live/saved status, only when the user
+  starts a Tidy Names or Auto Group proposal.
 - User-provided AI provider settings and an optional AI API key.
 
 ## Local Storage
@@ -44,10 +44,11 @@ source pages, extracted character count, truncation state, whether stored text
 from recent conversation messages will be included, and any confirmed sources
 that could not be read or fit within the content limit. Generated-response
 Sources appendices are not included in the conversation context sent to the AI
-provider. Before Tidy Names or Auto Group sends tab metadata, it shows the
-provider, model, exact
-tabs, full URLs, and fields involved. Confirmation generates a proposal; a
-separate review controls whether that proposal is applied. Space Tabs sends
+provider. Tidy Names shows the provider, model, exact tabs, simplified URLs,
+and fields before generating a proposal. Auto Group starts generation from
+the user's explicit action and shows the provider, model, sent fields, tab
+count, and elapsed time in the resulting preview. A separate review controls
+whether either proposal is applied. Space Tabs sends
 the confirmed prompt, source content, stored text from recent conversation
 messages, or tab metadata directly to the AI endpoint configured by the user.
 The API key is sent to that provider as an authorization credential.

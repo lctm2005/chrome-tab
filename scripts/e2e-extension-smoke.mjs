@@ -311,6 +311,51 @@ async function startAskFixtureServer() {
         .filter((message) => message?.role === 'system')
         .map((message) => String(message?.content || ''))
         .join('\n');
+      if (lastUserMessage.includes('Reply with one short sentence: AI is connected.')) {
+        requests.push({
+          mode: 'test-ai',
+          body,
+          receivedAt: Date.now(),
+        });
+        response.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        });
+        response.end(JSON.stringify({
+          choices: [{ message: { content: 'AI is connected.' }, finish_reason: 'stop' }],
+        }));
+        return;
+      }
+      if (systemText.includes('Rename browser tabs for a compact sidebar')) {
+        let candidates = [];
+        try {
+          const parsed = JSON.parse(lastUserMessage);
+          candidates = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          candidates = [];
+        }
+        const names = candidates.map((candidate, index) => ({
+          id: Number(candidate.id),
+          title: `E2E tidy ${index + 1}`,
+        }));
+        requests.push({
+          mode: 'tidy-names',
+          body,
+          receivedAt: Date.now(),
+          candidates,
+          names,
+        });
+        response.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        });
+        response.end(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(names) }, finish_reason: 'stop' }],
+        }));
+        return;
+      }
       if (systemText.includes('Group browser tabs into concise topic/work buckets')) {
         let candidates = [];
         try {
@@ -565,6 +610,27 @@ async function main() {
     await evaluate(client, `document.querySelector('[data-onboarding-path="arc"]').click()`);
     await waitFor(client, `!document.querySelector('#onboardingArcStep')?.hidden &&
       document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
+    const arcPickerCancelState = await evaluate(client, `(async () => {
+      const input = document.querySelector('#onboardingArcInput');
+      input.dispatchEvent(new Event('cancel', { bubbles: true }));
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return {
+        dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+        arcStepVisible: !document.querySelector('#onboardingArcStep')?.hidden,
+        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
+        completed: stored.spaceTabsState?.onboarding?.completed === true,
+        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+      };
+    })()`);
+    record(
+      'Arc file picker Cancel bubbles without dismissing or completing setup',
+      arcPickerCancelState.dialogOpen &&
+        arcPickerCancelState.arcStepVisible &&
+        arcPickerCancelState.stepLabel === 'Step 2 of 3' &&
+        !arcPickerCancelState.completed &&
+        arcPickerCancelState.nextDisabled,
+      JSON.stringify(arcPickerCancelState),
+    );
     await evaluate(client, `(() => {
       const transfer = new DataTransfer();
       transfer.items.add(new File(
@@ -579,7 +645,7 @@ async function main() {
     const arcPreviewState = await waitFor(client, `(() => {
       const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
       const status = document.querySelector('#onboardingArcStatus')?.textContent || '';
-      if (rows.length !== 2 || !status.startsWith('Preview: 2 Spaces, 1 folders, 3 tabs')) return null;
+      if (rows.length !== 2 || !status.includes('Preview: 2 Spaces, 1 folders, 3 tabs')) return null;
       return {
         status,
         nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
@@ -596,7 +662,7 @@ async function main() {
     const arcPersonalRow = arcPreviewState.rows.find((row) => row.name === 'Arc Personal');
     record(
       'Arc setup previews per-Space counts and resolved naming conflicts',
-      arcPreviewState.status === 'Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
+      arcPreviewState.status === 'StorableSidebar.json · Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
         arcPreviewState.nextText === 'Import selected Spaces' &&
         !arcPreviewState.nextDisabled &&
         arcConflictRow?.checked === true &&
@@ -645,7 +711,7 @@ async function main() {
       };
     })()`, 12000);
     record(
-      'Arc setup persists the selected Space and reaches completion',
+      'Arc setup imports the fixture successfully after file picker Cancel',
       completedArcSetup.importedTabs === 2 &&
         !completedArcSetup.unselectedImported &&
         completedArcSetup.completed &&
@@ -1387,7 +1453,6 @@ async function main() {
       document.querySelector('#customModelInput').value = 'ask-e2e-model';
       document.querySelector('#languageInput').value = 'en';
       document.querySelector('#apiKeyInput').value = '';
-      document.querySelector('#maxTokensInput').value = '10';
       document.querySelector('#saveSettingsButton').click();
     })()`);
     const configuredAskSettingsState = await waitFor(client, `(async () => {
@@ -1419,7 +1484,7 @@ async function main() {
       document.querySelector('#askProvider')?.textContent ===
         'Custom OpenAI-compatible · ask-e2e-model'`);
     await evaluate(client, `(() => {
-      window.__askE2ECalls = { permissionRequests: 0, pageExtractions: 0 };
+      window.__askE2ECalls = { permissionRequests: 0, pageExtractions: 0, aiChats: [] };
       const requestPermission = chrome.permissions.request;
       const sendMessage = chrome.runtime.sendMessage;
       window.__askE2EOriginals = { requestPermission, sendMessage };
@@ -1429,6 +1494,13 @@ async function main() {
       };
       chrome.runtime.sendMessage = (message, ...args) => {
         if (message?.type === 'pages:extract') window.__askE2ECalls.pageExtractions += 1;
+        if (message?.type === 'ai:chat') {
+          window.__askE2ECalls.aiChats.push({
+            purpose: message.purpose || '',
+            itemCount: Number.isInteger(message.itemCount) ? message.itemCount : null,
+            stream: message.stream === true,
+          });
+        }
         return sendMessage.call(chrome.runtime, message, ...args);
       };
     })()`);
@@ -1485,9 +1557,31 @@ async function main() {
         document.querySelector('#settingsStatus')?.textContent === 'Settings saved.';
     })()`);
 
+    const testAIRequestsBefore = askFixtureServer.requests
+      .filter((request) => request.mode === 'test-ai').length;
+    await clickElementWithCDP(client, '#testAIButton');
+    await waitFor(client, `document.querySelector('#settingsStatus')?.textContent === 'AI is connected.'`, 12000);
+    const testAIRequest = askFixtureServer.requests
+      .filter((request) => request.mode === 'test-ai')[testAIRequestsBefore];
+    const testAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'test-ai').at(-1)`);
+    record(
+      'Test AI uses its fixed 1K output budget',
+      testAIRequest?.body?.stream === false &&
+        testAIRequest?.body?.max_tokens === 1_024 &&
+        testAIChat?.purpose === 'test-ai' &&
+        testAIChat?.itemCount === null,
+      JSON.stringify({ request: {
+        stream: testAIRequest?.body?.stream,
+        maxTokens: testAIRequest?.body?.max_tokens,
+      }, chat: testAIChat }),
+    );
+
     await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = structuredClone(stored.spaceTabsState);
+      saved.ai = saved.ai || {};
+      saved.ai.maxTokens = 1;
       const snapshot = saved.spaceSnapshots?.default || {
         version: 1,
         updatedAt: Date.now(),
@@ -1553,6 +1647,7 @@ async function main() {
       return {
         storage: {
           snapshot,
+          ai: structuredClone(saved.ai || {}),
           operationHistory: structuredClone(saved.operationHistory || []),
           groupSpaces: structuredClone(saved.groupSpaces || {}),
           tabSpaces: structuredClone(saved.tabSpaces || {}),
@@ -1581,79 +1676,6 @@ async function main() {
       `window.__askE2ECalls.permissionRequests`);
 
     await clickElementWithCDP(client, '#autoGroupButton');
-    const autoGroupSendDisclosure = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !==
-            'Generate Auto Group preview?') return null;
-      const section = document.querySelector('#actionDialogPreview .action-preview-section');
-      const rows = [...(section?.querySelectorAll('.action-preview-item') || [])].map((row) => ({
-        title: row.querySelector('.action-preview-title')?.textContent || '',
-        url: row.querySelector('.action-preview-meta')?.textContent || '',
-        details: row.querySelector('.action-preview-result')?.textContent || '',
-      }));
-      if (rows.length === 0) return null;
-      return {
-        message: document.querySelector('#actionDialogMessage')?.textContent || '',
-        sectionTitle: section?.querySelector('h3 span')?.textContent || '',
-        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-        rows,
-      };
-    })()`, 12000);
-    const disclosureSavedRow = autoGroupSendDisclosure.rows.find((row) =>
-      row.url === askFixtureServer.autoGroupDormantUrl);
-    const disclosureLiveRow = autoGroupSendDisclosure.rows.find((row) =>
-      row.url === askFixtureServer.sourceAlphaUrl);
-    record(
-      'Auto Group discloses provider, model, full candidate data, and live or saved status before sending',
-      autoGroupSendDisclosure.message.includes('Custom OpenAI-compatible') &&
-        autoGroupSendDisclosure.message.includes('ask-e2e-model') &&
-        autoGroupSendDisclosure.message.includes(`${autoGroupSendDisclosure.rows.length} tabs`) &&
-        autoGroupSendDisclosure.message.includes('Nothing is sent until you choose Generate preview') &&
-        autoGroupSendDisclosure.sectionTitle ===
-          'Data sent: title, full URL, domain, current Tag, and live/saved status' &&
-        autoGroupSendDisclosure.confirmText === 'Generate preview' &&
-        autoGroupSendDisclosure.rows.every((row) => /^https?:\/\//.test(row.url)) &&
-        disclosureSavedRow?.title === 'Saved Historical Auto Group E2E' &&
-        disclosureSavedRow?.details === 'example.net · Historical Tag E2E · Saved' &&
-        disclosureLiveRow?.title === 'Ask Source Alpha' &&
-        disclosureLiveRow?.details === '127.0.0.1 · Ungrouped · Live',
-      JSON.stringify(autoGroupSendDisclosure),
-    );
-
-    await clickElementWithCDP(client, '#actionDialogCancel');
-    const autoGroupPreSendCancelledState = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#autoGroupButton')?.disabled) return null;
-      return window.__captureAutoGroupE2E();
-    })()`);
-    const autoGroupRequestsAfterPreSendCancel = askFixtureServer.requests
-      .filter((request) => request.mode === 'auto-group').length;
-    const autoGroupPermissionRequestsAfterPreSendCancel = await evaluate(client,
-      `window.__askE2ECalls.permissionRequests`);
-    record(
-      'Auto Group pre-send Cancel causes zero permission or provider traffic and no mutation',
-      autoGroupRequestsAfterPreSendCancel === autoGroupRequestsBefore &&
-        autoGroupPermissionRequestsAfterPreSendCancel === autoGroupPermissionRequestsBefore &&
-        JSON.stringify(autoGroupPreSendCancelledState.chrome) === JSON.stringify(autoGroupFixtureBefore.chrome) &&
-        JSON.stringify(autoGroupPreSendCancelledState.storage) === JSON.stringify(autoGroupFixtureBefore.storage),
-      JSON.stringify({
-        providerRequestsBefore: autoGroupRequestsBefore,
-        providerRequestsAfter: autoGroupRequestsAfterPreSendCancel,
-        permissionRequestsBefore: autoGroupPermissionRequestsBefore,
-        permissionRequestsAfter: autoGroupPermissionRequestsAfterPreSendCancel,
-        chromeUnchanged: JSON.stringify(autoGroupPreSendCancelledState.chrome) ===
-          JSON.stringify(autoGroupFixtureBefore.chrome),
-        storageUnchanged: JSON.stringify(autoGroupPreSendCancelledState.storage) ===
-          JSON.stringify(autoGroupFixtureBefore.storage),
-      }),
-    );
-
-    await clickElementWithCDP(client, '#autoGroupButton');
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent ===
-        'Generate Auto Group preview?' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     let autoGroupMixedPreview;
     try {
       autoGroupMixedPreview = await waitFor(client, `(() => {
@@ -1700,7 +1722,9 @@ async function main() {
       throw new Error(`${error.message}\nAuto Group debug: ${JSON.stringify({ browserState, providerState })}`);
     }
     const autoGroupPreviewRequest = askFixtureServer.requests
-      .filter((request) => request.mode === 'auto-group')[0];
+      .filter((request) => request.mode === 'auto-group')[autoGroupRequestsBefore];
+    const autoGroupChat = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'auto-group').at(-1)`);
     const previewSavedRow = autoGroupMixedPreview.proposal.rows.find((row) =>
       row.title === 'Saved Historical Auto Group E2E');
     const previewLiveRow = autoGroupMixedPreview.proposal.rows.find((row) =>
@@ -1708,9 +1732,16 @@ async function main() {
     const previewNotSentSection = autoGroupMixedPreview.sections.find((section) =>
       section.title === 'Not sent · remain untouched');
     record(
-      'Auto Group proposes one live tab with a dormant saved Tag and labels both origins',
+      'Auto Group directly opens the final disclosed preview with a purpose-sized budget',
       autoGroupMixedPreview.message.includes('AI proposal') &&
         autoGroupMixedPreview.message.includes('2 tabs') &&
+        autoGroupMixedPreview.message.includes('Custom OpenAI-compatible') &&
+        autoGroupMixedPreview.message.includes('ask-e2e-model') &&
+        autoGroupMixedPreview.message.includes(
+          `sent ${autoGroupChat?.itemCount} tab titles, simplified URLs, domains, current Tags, and live/saved status`,
+        ) &&
+        autoGroupMixedPreview.message.includes('generated in') &&
+        !autoGroupMixedPreview.message.includes('Nothing is sent until you choose Generate preview') &&
         autoGroupMixedPreview.confirmText === 'Apply groups' &&
         autoGroupMixedPreview.proposal.rows.length === 2 &&
         previewSavedRow?.badge === 'Saved' &&
@@ -1719,14 +1750,23 @@ async function main() {
         previewLiveRow?.source === 'From Ungrouped' &&
         previewNotSentSection?.rows?.some((row) => row.meta.includes('restricted URL')) &&
         autoGroupPreviewRequest?.body?.stream === false &&
+        autoGroupPreviewRequest?.body?.max_tokens === 16_384 &&
+        autoGroupChat?.purpose === 'auto-group' &&
+        autoGroupChat?.itemCount === autoGroupPreviewRequest?.candidates?.length &&
+        autoGroupChat.itemCount > 0 &&
+        autoGroupChat.itemCount <= 80 &&
         autoGroupPreviewRequest?.liveCandidate?.status === 'live' &&
         autoGroupPreviewRequest?.savedCandidate?.status === 'saved' &&
         autoGroupPreviewRequest?.savedCandidate?.currentGroup === 'Historical Tag E2E' &&
         autoGroupPreviewRequest?.plan?.[0]?.tabIds?.length === 2 &&
-        autoGroupRequestsAfterPreSendCancel === autoGroupRequestsBefore &&
+        askFixtureServer.requests.filter((request) => request.mode === 'auto-group').length ===
+          autoGroupRequestsBefore + 1 &&
         (await evaluate(client, `window.__askE2ECalls.permissionRequests`)) ===
           autoGroupPermissionRequestsBefore + 1,
       JSON.stringify({ preview: autoGroupMixedPreview, request: {
+        purpose: autoGroupChat?.purpose,
+        itemCount: autoGroupChat?.itemCount,
+        maxTokens: autoGroupPreviewRequest?.body?.max_tokens,
         liveCandidate: autoGroupPreviewRequest?.liveCandidate,
         savedCandidate: autoGroupPreviewRequest?.savedCandidate,
         plan: autoGroupPreviewRequest?.plan,
@@ -1756,11 +1796,6 @@ async function main() {
     );
 
     await clickElementWithCDP(client, '#autoGroupButton');
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent ===
-        'Generate Auto Group preview?' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Auto Group Preview' &&
       document.querySelector('#actionDialogConfirm')?.textContent === 'Apply groups'`, 12000);
@@ -1800,6 +1835,11 @@ async function main() {
       .sort();
     const autoGroupProviderRequestsAfterApply = askFixtureServer.requests
       .filter((request) => request.mode === 'auto-group').length;
+    const autoGroupRequestsAfterApply = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group')
+      .slice(autoGroupRequestsBefore, autoGroupRequestsBefore + 2);
+    const autoGroupChatsAfterApply = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'auto-group')`);
     const autoGroupPermissionRequestsAfterApply = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
     record(
@@ -1813,7 +1853,13 @@ async function main() {
         appliedAutoGroupState.undoText === 'Undo' &&
         appliedAutoGroupState.status.includes('Auto group updated Default') &&
         autoGroupProviderRequestsAfterApply === autoGroupRequestsBefore + 2 &&
-        autoGroupPermissionRequestsAfterApply === autoGroupPermissionRequestsBefore + 2,
+        autoGroupPermissionRequestsAfterApply === autoGroupPermissionRequestsBefore + 2 &&
+        !Object.hasOwn(appliedAutoGroupState.captured.storage.ai || {}, 'maxTokens') &&
+        autoGroupRequestsAfterApply.length === 2 &&
+        autoGroupRequestsAfterApply.every((request) => request.body?.max_tokens === 16_384) &&
+        autoGroupChatsAfterApply.length >= 2 &&
+        autoGroupChatsAfterApply.slice(-2).every((request) =>
+          request.purpose === 'auto-group' && request.itemCount > 0 && request.itemCount <= 80),
       JSON.stringify({
         alphaGroup: appliedAutoGroupState.alphaGroup,
         historical: appliedAutoGroupState.historical,
@@ -1827,6 +1873,9 @@ async function main() {
         status: appliedAutoGroupState.status,
         providerRequests: autoGroupProviderRequestsAfterApply,
         permissionRequests: autoGroupPermissionRequestsAfterApply,
+        legacyMaxTokensPresent: Object.hasOwn(appliedAutoGroupState.captured.storage.ai || {}, 'maxTokens'),
+        outputBudgets: autoGroupRequestsAfterApply.map((request) => request.body?.max_tokens),
+        chats: autoGroupChatsAfterApply.slice(-2),
       }),
     );
 
@@ -1885,9 +1934,43 @@ async function main() {
         status: undoneAutoGroupState.status,
       }),
     );
+
+    const tidyAIRequestsBefore = askFixtureServer.requests
+      .filter((request) => request.mode === 'tidy-names').length;
+    await clickElementWithCDP(client, '#tidyNamesButton');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Generate Tidy Names preview?' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    const tidyAIRequest = askFixtureServer.requests
+      .filter((request) => request.mode === 'tidy-names')[tidyAIRequestsBefore];
+    const tidyAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'tidy-names').at(-1)`);
+    record(
+      'Tidy Names uses its fixed small-batch 8K output budget',
+      tidyAIRequest?.body?.stream === false &&
+        tidyAIRequest?.body?.max_tokens === 8_192 &&
+        tidyAIChat?.purpose === 'tidy-names' &&
+        tidyAIChat?.itemCount === tidyAIRequest?.candidates?.length &&
+        tidyAIChat.itemCount > 0 &&
+        tidyAIChat.itemCount <= 80,
+      JSON.stringify({ request: {
+        stream: tidyAIRequest?.body?.stream,
+        maxTokens: tidyAIRequest?.body?.max_tokens,
+        candidateCount: tidyAIRequest?.candidates?.length,
+      }, chat: tidyAIChat }),
+    );
+    await clickElementWithCDP(client, '#actionDialogCancel');
+    await waitFor(client, `!document.querySelector('#actionDialog')?.open &&
+      !document.querySelector('#tidyNamesButton')?.disabled`);
+
     await evaluate(client, `window.__askE2ECalls = {
       permissionRequests: 0,
       pageExtractions: 0,
+      aiChats: [],
     }`);
 
     await evaluate(client, `document.querySelector('.ask-space').click()`);
@@ -1968,6 +2051,8 @@ async function main() {
     })()`, 12000);
     const completedAskAt = Date.now();
     const completedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'complete');
+    const completedAskChat = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'ask-space').at(-1)`);
     record(
       'Ask Space streams a cited result and renders clickable Sources',
       completedAskState.text.includes('Sources') &&
@@ -1979,14 +2064,19 @@ async function main() {
     record(
       'Ask Space sends both confirmed pages to the OpenAI-compatible mock',
       completedMockRequest?.body?.stream === true &&
+        completedMockRequest?.body?.max_tokens === 32_768 &&
         completedMockRequest.sourceCount === 2 &&
         completedMockRequest.includesAlpha &&
-        completedMockRequest.includesBeta,
+        completedMockRequest.includesBeta &&
+        completedAskChat?.purpose === 'ask-space' &&
+        completedAskChat?.itemCount === null,
       JSON.stringify({
         sourceCount: completedMockRequest?.sourceCount,
         includesAlpha: completedMockRequest?.includesAlpha,
         includesBeta: completedMockRequest?.includesBeta,
         stream: completedMockRequest?.body?.stream,
+        maxTokens: completedMockRequest?.body?.max_tokens,
+        chat: completedAskChat,
       }),
     );
     record(
@@ -2113,40 +2203,32 @@ async function main() {
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
-    const defaultAISettings = await evaluate(client, `({
-      maxTokens: document.querySelector('#maxTokensInput').value,
-      keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
-      providerOptions: document.querySelector('#providerInput')?.options.length || 0,
-      modelOptions: document.querySelector('#modelInput')?.options.length || 0,
-    })`);
+    const defaultAISettings = await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const settingsText = document.querySelector('#settingsDialog')?.textContent || '';
+      return {
+        maxTokensInputPresent: Boolean(document.querySelector('#maxTokensInput')),
+        hasMaxOutputCopy: /Max output/i.test(settingsText),
+        storedHasMaxTokens: Object.hasOwn(stored.spaceTabsState?.ai || {}, 'maxTokens'),
+        keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
+        providerOptions: document.querySelector('#providerInput')?.options.length || 0,
+        modelOptions: document.querySelector('#modelInput')?.options.length || 0,
+      };
+    })()`);
     record(
-      'fresh BYOK settings start at 10K with no bundled API key',
-      defaultAISettings.maxTokens === '10' &&
+      'AI Settings removes Max output and migrated storage no longer carries the legacy override',
+      !defaultAISettings.maxTokensInputPresent &&
+        !defaultAISettings.hasMaxOutputCopy &&
+        !defaultAISettings.storedHasMaxTokens &&
         defaultAISettings.keyStatus === 'No API key configured.' &&
         defaultAISettings.providerOptions > 1 &&
         defaultAISettings.modelOptions > 0,
       JSON.stringify(defaultAISettings),
     );
     await evaluate(client, `(() => {
-      const input = document.querySelector('#maxTokensInput');
-      input.value = '129';
-      document.querySelector('#saveSettingsButton').click();
-    })()`);
-    const invalidMaxTokenState = await waitFor(client, `(async () => {
-      if (!document.querySelector('#workbenchToast')?.textContent?.includes('Enter 0.001-128 K tokens')) return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return { maxTokens: stored.spaceTabsState?.ai?.maxTokens };
-    })()`);
-    record(
-      'max output tokens rejects values above the API limit',
-      invalidMaxTokenState.maxTokens === 10_240,
-      JSON.stringify(invalidMaxTokenState),
-    );
-    await evaluate(client, `(() => {
       const provider = document.querySelector('#providerInput');
       provider.value = 'openai';
       provider.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#maxTokensInput').value = '10';
       document.querySelector('#apiKeyInput').value = 'e2e-session-key';
       const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
       input.dataset.shortcut = 'Control+Alt+K';
@@ -2372,14 +2454,14 @@ async function main() {
         activeSpaceId: saved.activeSpaceId,
         spaces: saved.spaces.map((space) => space.name),
         urls,
-        maxTokens: saved.ai?.maxTokens,
+        hasMaxTokens: Object.hasOwn(saved.ai || {}, 'maxTokens'),
         addSpaceShortcut: saved.shortcuts?.addSpace,
         restoreDisabled: document.querySelector('#restoreSpaceDataButton')?.disabled,
       };
     })()`, 12000);
     record(
       'Workbench restore replaces Space data but preserves local AI and shortcuts',
-      restoredBackupState.maxTokens === 10_240 &&
+      !restoredBackupState.hasMaxTokens &&
         restoredBackupState.addSpaceShortcut === 'Control+Alt+K' &&
         restoredBackupState.restoreDisabled,
       JSON.stringify(restoredBackupState),
@@ -2413,13 +2495,13 @@ async function main() {
       return {
         activeSpaceId: saved.activeSpaceId,
         names,
-        maxTokens: saved.ai?.maxTokens,
+        hasMaxTokens: Object.hasOwn(saved.ai || {}, 'maxTokens'),
         addSpaceShortcut: saved.shortcuts?.addSpace,
       };
     })()`, 12000);
     record(
       'A real downloaded export restores end-to-end after the workspace was replaced',
-      exportRoundTripState.maxTokens === 10_240 &&
+      !exportRoundTripState.hasMaxTokens &&
         exportRoundTripState.addSpaceShortcut === 'Control+Alt+K',
       JSON.stringify(exportRoundTripState),
     );

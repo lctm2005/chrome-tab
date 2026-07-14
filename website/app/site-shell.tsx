@@ -9,7 +9,7 @@ export function SiteHeader() {
         <span className="brand-copy"><b>Space Tabs</b><small>Arc-like Spaces &amp; BYOK AI</small></span>
       </Link>
       <nav aria-label="Primary navigation"><Link href="/#migration">Migration</Link><Link href="/privacy">Privacy</Link><Link href="/support">Support</Link></nav>
-      <Link className="header-cta" href="/#product">See product <span>↓</span></Link>
+      <a className="header-cta" href="https://github.com/lctm2005/chrome-tab#install-from-source" target="_blank" rel="noreferrer">Install <span>↗</span></a>
     </header>
   );
 }
@@ -22,7 +22,7 @@ export function SiteFooter() {
         <span className="brand-copy"><b>Space Tabs</b><small>Arc-like Spaces &amp; BYOK AI</small></span>
       </div>
       <p>Keep Chrome. Bring your Arc workflow. Add private BYOK AI.</p>
-      <nav aria-label="Footer navigation"><Link href="/privacy">Privacy</Link><Link href="/support">Support</Link><a href="mailto:lctm2005@gmail.com">Contact</a></nav>
+      <nav aria-label="Footer navigation"><a href="https://github.com/lctm2005/chrome-tab#install-from-source" target="_blank" rel="noreferrer">Install</a><Link href="/privacy">Privacy</Link><Link href="/support">Support</Link><a href="mailto:lctm2005@gmail.com">Contact</a></nav>
       <small>© 2026 Space Tabs. Chrome and Arc are trademarks of their respective owners.</small>
     </footer>
   );

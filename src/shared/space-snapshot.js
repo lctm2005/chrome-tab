@@ -380,28 +380,30 @@ function targetSnapshotGroupKey(target = {}) {
 function matchSnapshotTabs(consumers = [], candidates = [], { preferSameGroup = true } = {}) {
   const consumedTabs = new Set();
   const matchedConsumers = new Set();
+  const candidateIndex = indexSnapshotMatchCandidates(candidates);
+  const preparedConsumers = consumers.map((consumer) => {
+    const exactUrl = snapshotUrlIdentity(consumer?.tab?.url);
+    return {
+      consumer,
+      exactUrl,
+      fallbackUrl: exactUrl ? comparableSnapshotUrl(exactUrl) : '',
+    };
+  });
   let exactCount = 0;
 
   const matchPass = (exact) => {
-    for (let consumerIndex = 0; consumerIndex < consumers.length; consumerIndex += 1) {
+    for (let consumerIndex = 0; consumerIndex < preparedConsumers.length; consumerIndex += 1) {
       if (matchedConsumers.has(consumerIndex)) continue;
-      const consumer = consumers[consumerIndex];
-      const consumerUrl = snapshotUrlIdentity(consumer?.tab?.url);
-      if (!consumerUrl) continue;
-      const fallbackKey = exact ? '' : comparableSnapshotUrl(consumerUrl);
-      if (!exact && !fallbackKey) continue;
-
-      const matches = (candidate) => {
-        if (consumedTabs.has(candidate.tab)) return false;
-        const candidateUrl = snapshotUrlIdentity(candidate?.tab?.url);
-        return exact
-          ? candidateUrl === consumerUrl
-          : comparableSnapshotUrl(candidateUrl) === fallbackKey;
-      };
-      const sameGroupMatch = preferSameGroup && consumer.groupKey
-        ? candidates.find((candidate) => candidate.groupKey === consumer.groupKey && matches(candidate))
-        : null;
-      const match = sameGroupMatch || candidates.find(matches);
+      const prepared = preparedConsumers[consumerIndex];
+      const key = exact ? prepared.exactUrl : prepared.fallbackUrl;
+      if (!key) continue;
+      const match = firstIndexedSnapshotMatch({
+        index: exact ? candidateIndex.exact : candidateIndex.fallback,
+        key,
+        groupKey: prepared.consumer?.groupKey,
+        preferSameGroup,
+        consumedTabs,
+      });
       if (!match) continue;
 
       consumedTabs.add(match.tab);
@@ -417,6 +419,62 @@ function matchSnapshotTabs(consumers = [], candidates = [], { preferSameGroup = 
     exactCount,
     totalCount: matchedConsumers.size,
   };
+}
+
+function indexSnapshotMatchCandidates(candidates) {
+  const exact = createSnapshotMatchIndex();
+  const fallback = createSnapshotMatchIndex();
+  for (const candidate of candidates || []) {
+    const exactUrl = snapshotUrlIdentity(candidate?.tab?.url);
+    if (!exactUrl) continue;
+    addSnapshotMatchCandidate(exact, exactUrl, candidate);
+    const fallbackUrl = comparableSnapshotUrl(exactUrl);
+    if (fallbackUrl) addSnapshotMatchCandidate(fallback, fallbackUrl, candidate);
+  }
+  return { exact, fallback };
+}
+
+function createSnapshotMatchIndex() {
+  return {
+    all: new Map(),
+    byGroup: new Map(),
+  };
+}
+
+function addSnapshotMatchCandidate(index, key, candidate) {
+  addSnapshotMatchBucketEntry(index.all, key, candidate);
+  if (!candidate?.groupKey) return;
+  if (!index.byGroup.has(candidate.groupKey)) index.byGroup.set(candidate.groupKey, new Map());
+  addSnapshotMatchBucketEntry(index.byGroup.get(candidate.groupKey), key, candidate);
+}
+
+function addSnapshotMatchBucketEntry(buckets, key, candidate) {
+  if (!buckets.has(key)) buckets.set(key, { candidates: [], cursor: 0 });
+  buckets.get(key).candidates.push(candidate);
+}
+
+function firstIndexedSnapshotMatch({
+  index,
+  key,
+  groupKey,
+  preferSameGroup,
+  consumedTabs,
+}) {
+  const sameGroupMatch = preferSameGroup && groupKey
+    ? firstUnconsumedSnapshotCandidate(index.byGroup.get(groupKey)?.get(key), consumedTabs)
+    : null;
+  return sameGroupMatch || firstUnconsumedSnapshotCandidate(index.all.get(key), consumedTabs);
+}
+
+function firstUnconsumedSnapshotCandidate(bucket, consumedTabs) {
+  if (!bucket) return null;
+  while (
+    bucket.cursor < bucket.candidates.length &&
+    consumedTabs.has(bucket.candidates[bucket.cursor].tab)
+  ) {
+    bucket.cursor += 1;
+  }
+  return bucket.candidates[bucket.cursor] || null;
 }
 
 function snapshotGroupKey(group = {}) {

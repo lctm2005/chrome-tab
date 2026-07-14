@@ -10,7 +10,7 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.name), ['Default']);
-  assert.equal(state.ai.maxTokens, 10_240);
+  assert.equal(Object.hasOwn(state.ai, 'maxTokens'), false);
   assert.deepEqual(state.groupSpaces, {});
   assert.deepEqual(state.virtualGroups, {});
   assert.deepEqual(state.tabGroups, {});
@@ -40,6 +40,7 @@ test('keeps explicitly configured BYOK AI settings', () => {
       baseUrl: 'https://api.z.ai/api/coding/paas/v4/',
       model: 'glm-5.2',
       apiKey: 'secret',
+      maxTokens: 131_072,
     },
   });
 
@@ -47,6 +48,7 @@ test('keeps explicitly configured BYOK AI settings', () => {
   assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
   assert.equal(state.ai.model, 'glm-5.2');
   assert.equal(state.ai.apiKey, 'secret');
+  assert.equal(Object.hasOwn(state.ai, 'maxTokens'), false);
 });
 
 test('recognizes stored built-in provider settings without losing explicit choice', () => {
@@ -202,7 +204,7 @@ test('preserves a bounded normalized operation history for Undo', () => {
   assert.deepEqual(merged.operationHistory[0].after, { fingerprint: 'fingerprint-2' });
 });
 
-test('migrates the legacy default Space and max token defaults', () => {
+test('migrates the legacy default Space and removes obsolete max tokens', () => {
   const merged = mergeStoredState({
     version: 6,
     activeSpaceId: 'default',
@@ -211,25 +213,31 @@ test('migrates the legacy default Space and max token defaults', () => {
   }, createDefaultState());
 
   assert.deepEqual(merged.spaces[0], { id: 'default', name: 'Default', icon: 'D', color: 'blue' });
-  assert.equal(merged.ai.maxTokens, 10_240);
+  assert.equal(Object.hasOwn(merged.ai, 'maxTokens'), false);
 });
 
-test('replaces the invalid v7 one-million token default', () => {
+test('removes the invalid v7 one-million token default', () => {
   const merged = mergeStoredState({
     version: 7,
     ai: { maxTokens: 1_000_000 },
   }, createDefaultState());
 
-  assert.equal(merged.ai.maxTokens, 10_240);
+  assert.equal(Object.hasOwn(merged.ai, 'maxTokens'), false);
 });
 
-test('preserves explicit max tokens inside the API range', () => {
+test('removes explicit max tokens from current settings while preserving other AI fields', () => {
   const merged = mergeStoredState({
-    version: 7,
-    ai: { maxTokens: 131_072 },
+    version: 8,
+    ai: {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'custom-model',
+      maxTokens: 131_072,
+    },
   }, createDefaultState());
 
-  assert.equal(merged.ai.maxTokens, 131_072);
+  assert.equal(merged.ai.baseUrl, 'https://llm.example.com/v1');
+  assert.equal(merged.ai.model, 'custom-model');
+  assert.equal(Object.hasOwn(merged.ai, 'maxTokens'), false);
 });
 
 test('preserves empty current shortcuts as disabled actions', () => {

@@ -4,19 +4,19 @@ Keep Chrome. Bring your Arc workflow. Add private BYOK AI.
 
 Space Tabs is an Arc-like workspace for Chrome. Its first-run migration wizard
 previews selected Arc Spaces before import, while controlled AI workflows show
-what data will be sent before generating a proposal and what will change before applying it.
+what data is involved and what will change before anything is applied.
 
 ## Features
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
-- Arc migration: import selected Spaces from `StorableSidebar.json`, review conflicts and counts, and undo the latest import.
+- Arc migration: authorize `StorableSidebar.json` once, reuse that local file for later previews, import selected Spaces, review conflicts and counts, and undo the latest import.
 - Ask Space: ask across up to 12 confirmed live HTTP(S) pages in a Space, prioritizing pages you select, with disclosure of the provider, sources, content size, and stored text from recent conversation messages, plus streaming, Stop, and clickable citations.
 - Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
 - Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Tidy Names and Auto Group: confirm tab metadata before AI generation, then review the proposal before applying it. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
+- Tidy Names and Auto Group: Tidy confirms tab metadata before generation; Auto Group generates its final reviewable preview in one click and reports the provider, fields, tab count, and timing there. Nothing is applied without a separate review. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
 - Recovery: use the operation record to undo the latest Tidy, Auto Group, or restore action; Arc import has a dedicated visible Undo. Undo stops safely if the affected portable content changed afterward.
 - Command palette: switch Spaces, find tabs, and open Ask with `Cmd/Ctrl+K`.
 - Drag sorting: reorder tab groups and tabs inside a Space.

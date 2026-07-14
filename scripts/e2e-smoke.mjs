@@ -300,7 +300,6 @@ async function main() {
         thinking: 'disabled',
         language: 'zh-CN',
         temperature: 0.6,
-        maxTokens: 2048,
       },
     };
     state.spaces = [

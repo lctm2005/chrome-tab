@@ -45,7 +45,7 @@ Features:
 
 Space Tabs is local-first. Core organization works without an account or AI key. There is no telemetry, Space Tabs server, hosted sync service, or persistent script running on every website.
 
-Before Ask sends anything, Space Tabs shows the selected provider, source pages, extracted content size, and whether stored text from recent conversation messages is included. Generated-response Sources appendices are not sent as conversation context. Before Tidy Names or Auto Group sends tab metadata, it shows the provider, model, exact tabs, URLs, and fields. AI requests go directly to the provider you configure. API keys are kept in Chrome session storage and are excluded from workspace data, backups, and release packages.
+Before Ask sends anything, Space Tabs shows the selected provider, source pages, extracted content size, and whether stored text from recent conversation messages is included. Generated-response Sources appendices are not sent as conversation context. Tidy Names shows the provider, model, exact tabs, simplified URLs, and fields before generation. Auto Group starts from an explicit click and reports the provider, model, sent fields, tab count, and generation time in its reviewable preview. AI requests go directly to the provider you configure. API keys are kept in Chrome session storage and are excluded from workspace data, backups, and release packages.
 ```
 
 ## 中文（简体）
@@ -71,7 +71,7 @@ Space Tabs 可预览并选择要导入的 Arc Spaces，提前显示命名冲突�
 
 侧边栏用于快速切换、查找和拖动标签页；全屏 Workbench 用于迁移、备份、多页面 Ask 和 AI 整理。
 
-Ask Space 最多读取 12 个用户确认的、当前打开的 HTTP(S) 页面，并优先使用你选择的页面。发送前会明确显示 AI 提供商、来源页面、内容大小，以及是否包含近期对话中已存储的消息文本；生成回复中的 Sources 附录不会作为对话上下文发送。Tidy Names 与 Auto Group 会先展示即将发送的标签元数据；确认生成方案后，还需再次确认才会应用，并支持撤销。
+Ask Space 最多读取 12 个用户确认的、当前打开的 HTTP(S) 页面，并优先使用你选择的页面。发送前会明确显示 AI 提供商、来源页面、内容大小，以及是否包含近期对话中已存储的消息文本；生成回复中的 Sources 附录不会作为对话上下文发送。Tidy Names 会在生成前展示标签元数据；Auto Group 由用户点击后直接生成预览，并在预览中展示提供商、模型、发送字段、标签数量和耗时。两者都要再次确认才会应用，并支持撤销。
 
 无需账号、无遥测、没有 Space Tabs 中转服务器。工作区数据默认保存在 Chrome 本地；只有当你主动确认 AI 操作时，相关内容才会直接发送给你选择的 AI 提供商。API Key 保存在 Chrome 会话存储中，不会进入普通工作区数据、备份或发布包。
 ```
@@ -106,7 +106,7 @@ Space Tabs stores workspace data locally in Chrome extension storage. This can i
 
 Space Tabs does not sell user data, require an account, collect telemetry, or operate a hosted sync or proxy service. It does not run a persistent content script on every website.
 
-AI is optional. Ask uses up to 12 confirmed live HTTP(S) pages, prioritizing pages the user selects. Before Ask, Space Tabs shows the provider, source pages, content size, and whether stored text from recent conversation messages will be included; generated-response Sources appendices are excluded from the conversation context. Before Tidy Names or Auto Group, it shows the exact tab metadata to be sent. After confirmation it sends the relevant prompt, content, stored text from recent conversation messages, or metadata directly to the provider selected by the user. A second review controls whether organization changes are applied. The API key stays in Chrome session storage and is excluded from workspace state, backups, and release packages.
+AI is optional. Ask uses up to 12 confirmed live HTTP(S) pages, prioritizing pages the user selects. Before Ask, Space Tabs shows the provider, source pages, content size, and whether stored text from recent conversation messages will be included; generated-response Sources appendices are excluded from the conversation context. Tidy Names shows the exact tab metadata before generation. Auto Group begins from an explicit click and reports the provider, model, sent fields, tab count and timing in its final preview. A separate review controls whether changes are applied. The API key stays in Chrome session storage and is excluded from workspace state, backups, and release packages.
 ```
 
 ## Reviewer Notes
@@ -121,7 +121,7 @@ Suggested review flow:
 3. Create or switch a Space, open several pages, and use the command palette, folders, tab groups, and dormant tabs.
 4. Open Workbench Settings to review backup, restore, BYOK settings, and shortcuts.
 5. With a test AI provider configured, select two live tabs, ask a comparison, review provider/sources/size, confirm, observe streaming, and Stop if desired.
-6. Run Tidy Names or Auto Group, cancel once before generation (verify no provider request), then generate, cancel the apply preview, generate again, apply, and Undo from the visible operation record.
+6. Run Tidy Names and cancel once before generation (verify no provider request), then generate and cancel its apply preview. Run Auto Group and verify one click opens the final preview without an intermediate confirmation, cancel once, run again, apply, and Undo from the visible operation record.
 
 Space Tabs has no persistent content script. Source text is extracted only after a user starts Ask Space and grants the requested source origins.
 ```

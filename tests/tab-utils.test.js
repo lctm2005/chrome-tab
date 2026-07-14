@@ -5,6 +5,8 @@ import {
   buildGroupPreviewItems,
   buildSpaceView,
   countPlannedRegroups,
+  compactTabForAI,
+  compactUrlForAI,
   decorateTabs,
   domainFromUrl,
   isPageShortcutCapableUrl,
@@ -18,6 +20,22 @@ import {
   spaceGroupPlan,
   searchTabs,
 } from '../src/shared/tab-utils.js';
+
+test('bounds Auto Group AI input and removes URL query data', () => {
+  assert.equal(
+    compactUrlForAI('https://example.com/research/item?token=secret&source=campaign#private'),
+    'https://example.com/research/item',
+  );
+  const compact = compactTabForAI({
+    id: 7,
+    title: `Long title ${'x'.repeat(400)}`,
+    url: `https://example.com/path?${'private='.repeat(200)}`,
+  });
+  assert.equal(compact.id, 7);
+  assert.equal(compact.title.length, 240);
+  assert.equal(compact.url, 'https://example.com/path');
+  assert.equal(compact.domain, 'example.com');
+});
 
 test('counts only grouped tabs that Auto Group would move to a different titled group', () => {
   const tabs = [

@@ -8,7 +8,7 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.name, 'Space Tabs: Arc-like Spaces & BYOK AI');
   assert.equal(manifest.short_name, 'Space Tabs');
-  assert.equal(manifest.version, '0.5.1');
+  assert.equal(manifest.version, '0.5.2');
   assert.equal(manifest.name.includes('Arc Sidecar'), false);
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -84,9 +84,18 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
-  for (const id of ['openWorkbenchButton', 'onboardingDialog', 'onboardingArcInput', 'undoArcImportButton']) {
+  for (const id of [
+    'openWorkbenchButton',
+    'onboardingDialog',
+    'onboardingArcInput',
+    'onboardingArcChooseButton',
+    'arcImportUseButton',
+    'arcImportChooseButton',
+    'undoArcImportButton',
+  ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(html, /id="maxTokensInput"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
   assert.match(html, /id="onboardingOpenWorkbenchButton">Start using Workbench</);
   assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
@@ -104,6 +113,11 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(html, /data-onboarding-path="arc"/);
   assert.doesNotMatch(html, /data-onboarding-path="arc" hidden/);
   assert.doesNotMatch(html, /Arc import is not available/i);
+  assert.match(source, /window\.showOpenFilePicker/);
+  assert.match(source, /rememberArcFileHandle\(handle\)/);
+  assert.match(source, /previewRememberedArcFileIfGranted\('settings'\)/);
+  assert.match(source, /onboardingArcInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
+  assert.match(source, /if \(event\.target !== event\.currentTarget\) return/);
   assert.doesNotMatch(html, /Cross-Space Search/i);
   assert.doesNotMatch(source, /workspace-search/);
 });
@@ -201,7 +215,7 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
   assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
   assert.match(source, /async function tidyTabNames\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
-  assert.match(source, /async function autoGroupTabs\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
+  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
   assert.match(source, /async function importArcFile\(\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
@@ -244,6 +258,7 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
 test('Tidy Names and Auto Group preview changes before applying them', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
+  assert.match(source, /const TIDY_NAMES_ICON = `[\s\S]*🧹[\s\S]*`;/);
   assert.match(source, /title: 'Preview Tidy Names'/);
   assert.match(source, /No tabs will close or move/);
   assert.match(source, /type: 'tidy-names'/);
@@ -260,33 +275,41 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /type: 'auto-group'/);
   assert.match(source, /No live or saved http\(s\) tabs are available to organize/);
   assert.match(source, /extensionRuntime && candidates\.length > 0 && providerRequiresApiKey/);
-  assert.match(source, /async function autoGroupTabs\(\) \{\s*await refreshOrganizationActionState\(\{ adopt: true \}\);\s*const aiSettings = structuredClone\(state\.ai\)/);
+  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*beginPanelAction\('autoGroup'\);\s*try \{\s*await refreshOrganizationActionState\(\{ adopt: true \}\)/);
   assert.match(source, /async function refreshOrganizationActionState[\s\S]*await syncStateFromStorage\(\);[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
   assert.match(source, /showStatusToast\(message, 'error'\)/);
   assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
   assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
 });
 
-test('Tidy Names and Auto Group disclose metadata and ask permission before provider traffic', async () => {
+test('Tidy Names confirms before sending while Auto Group goes directly to its final preview', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const tidySource = source.slice(
     source.indexOf('async function tidyTabNames()'),
     source.indexOf('async function tidyTabNamesWithAI'),
   );
   const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs()'),
+    source.indexOf('async function autoGroupTabs(options = {})'),
     source.indexOf('function activeChromeGroupsByTitle'),
   );
 
   assert.match(source, /title: `Generate \$\{action\} preview\?`/);
   assert.match(source, /confirmText: 'Generate preview'/);
   assert.match(source, /onConfirm: \(\) => \{[\s\S]*requestAIHostPermissionFromUserGesture\(settings\)/);
-  assert.match(tidySource, /fields: 'title, full URL, and domain'/);
+  assert.match(tidySource, /fields: 'title, simplified URL, and domain'/);
+  assert.match(tidySource, /itemMeta: \(tab\) => compactTabForAI\(tab\)\.url/);
   assert.match(tidySource, /confirmAIProposalGeneration\(\{[\s\S]*settings: aiSettings[\s\S]*tidyTabNamesWithAI\(aiCandidates, \{ permissionRequest, settings: aiSettings \}\)/);
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
-  assert.match(autoSource, /fields: 'title, full URL, domain, current Tag, and live\/saved status'/);
-  assert.match(autoSource, /settings: aiSettings/);
-  assert.ok(autoSource.indexOf('confirmAIProposalGeneration({') < autoSource.indexOf("send('ai:chat'"));
+  assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*hasCurrentAutoGroupAICandidates\(\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
+  assert.match(source, /permissionRequest\.catch\(\(\) => null\)/);
+  assert.match(autoSource, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
+  assert.doesNotMatch(autoSource, /confirmAIProposalGeneration/);
+  assert.match(autoSource, /purpose: 'auto-group'/);
+  assert.match(autoSource, /itemCount: candidates\.length/);
+  assert.match(autoSource, /title: 'Auto Group Preview'/);
+  assert.match(autoSource, /sent \$\{candidates\.length\} tab titles, simplified URLs, domains, current Tags, and live\/saved status/);
+  assert.match(source, /function updateAutoGroupDisclosure\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
+  assert.ok(autoSource.indexOf("send('ai:chat'") < autoSource.indexOf("title: 'Auto Group Preview'"));
 });
 
 test('organization commits validate freshness and record Undo only after the applied state refreshes', async () => {
@@ -296,7 +319,7 @@ test('organization commits validate freshness and record Undo only after the app
     source.indexOf('async function tidyTabNamesWithAI'),
   );
   const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs()'),
+    source.indexOf('async function autoGroupTabs(options = {})'),
     source.indexOf('function activeChromeGroupsByTitle'),
   );
 

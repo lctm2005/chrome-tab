@@ -5,14 +5,13 @@ import {
   buildChatCompletionRequest,
   createPrompt,
   extractAssistantText,
+  extractFinishReason,
   formatAIError,
   getOriginPattern,
   getZaiFallbackBaseUrl,
-  isValidMaxTokens,
   languageInstruction,
-  maxTokensFromK,
-  maxTokensToK,
   normalizeBaseUrl,
+  outputTokenBudgetForPurpose,
   parseTidyGroups,
   parseTidyNames,
   parseChatStreamEvent,
@@ -23,8 +22,20 @@ test('parses OpenAI-compatible streaming content events', () => {
     done: false,
     text: 'Hi',
     usage: null,
+    finishReason: null,
   });
   assert.equal(parseChatStreamEvent('event: ping'), null);
+});
+
+test('preserves finish reasons from OpenAI-compatible streaming events', () => {
+  assert.deepEqual(parseChatStreamEvent(
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":1024}}'
+  ), {
+    done: false,
+    text: '',
+    usage: { completion_tokens: 1024 },
+    finishReason: 'length',
+  });
 });
 
 test('treats SSE DONE lines as terminal with valid protocol whitespace', () => {
@@ -33,6 +44,7 @@ test('treats SSE DONE lines as terminal with valid protocol whitespace', () => {
       done: true,
       text: '',
       usage: null,
+      finishReason: null,
     });
   }
 });
@@ -64,7 +76,7 @@ test('falls back from general Z.AI endpoint to coding endpoint for coding-plan k
   assert.equal(getZaiFallbackBaseUrl('https://api.z.ai/api/coding/paas/v4'), '');
 });
 
-test('builds a GLM-5.2 OpenAI-compatible chat request', () => {
+test('builds a GLM-5.2 request with a purpose budget instead of stored max tokens', () => {
   const request = buildChatCompletionRequest({
     provider: 'openai-compatible',
     baseUrl: 'https://api.z.ai/api/paas/v4/',
@@ -72,38 +84,50 @@ test('builds a GLM-5.2 OpenAI-compatible chat request', () => {
     apiKey: 'secret',
     thinking: 'disabled',
     temperature: 0.4,
-    maxTokens: 2048,
+    maxTokens: 1,
   }, [
     { role: 'system', content: 'Be concise.' },
     { role: 'user', content: 'Summarize this page.' },
-  ]);
+  ], 'tidy-names', 42);
 
   assert.equal(request.url, 'https://api.z.ai/api/paas/v4/chat/completions');
   assert.equal(request.headers.Authorization, 'Bearer secret');
   assert.equal(request.body.model, 'glm-5.2');
   assert.equal(request.body.thinking.type, 'disabled');
-  assert.equal(request.body.max_tokens, 2048);
+  assert.equal(request.body.max_tokens, 8_192);
   assert.equal(request.body.stream, false);
 });
 
-test('uses real tokens internally and K units only for settings display', () => {
-  assert.equal(maxTokensToK(10_240), 10);
-  assert.equal(maxTokensFromK(10), 10_240);
-  assert.equal(maxTokensToK(131_072), 128);
-  assert.equal(maxTokensFromK(0.001), 1);
-  assert.equal(isValidMaxTokens(1), true);
-  assert.equal(isValidMaxTokens(131_072), true);
-  assert.equal(isValidMaxTokens(131_073), false);
+test('selects bounded output budgets from the purpose and item count whitelist', () => {
+  assert.equal(outputTokenBudgetForPurpose('tidy-names', 0), 8_192);
+  assert.equal(outputTokenBudgetForPurpose('tidy-names', 80), 8_192);
+  assert.equal(outputTokenBudgetForPurpose('tidy-names', 81), 16_384);
+  assert.equal(outputTokenBudgetForPurpose('tidy-names', 200), 16_384);
+  assert.equal(outputTokenBudgetForPurpose('tidy-names', 201), 32_768);
+
+  assert.equal(outputTokenBudgetForPurpose('auto-group', 80), 16_384);
+  assert.equal(outputTokenBudgetForPurpose('auto-group', 81), 32_768);
+  assert.equal(outputTokenBudgetForPurpose('auto-group', 200), 32_768);
+  assert.equal(outputTokenBudgetForPurpose('auto-group', 201), 65_536);
+
+  assert.equal(outputTokenBudgetForPurpose('ask-space'), 32_768);
+  assert.equal(outputTokenBudgetForPurpose('test-ai'), 1_024);
+  assert.throws(
+    () => outputTokenBudgetForPurpose('tidy-names'),
+    /require a non-negative integer itemCount/i,
+  );
+  assert.throws(
+    () => outputTokenBudgetForPurpose('unknown', 1),
+    /Unsupported AI purpose: unknown/i,
+  );
 });
 
-test('never sends an out-of-range max_tokens value', () => {
-  const request = buildChatCompletionRequest({
+test('request construction rejects unknown purposes', () => {
+  assert.throws(() => buildChatCompletionRequest({
     baseUrl: 'https://example.com/v1',
     model: 'example',
-    maxTokens: 1_000_000,
-  }, []);
-
-  assert.equal(request.body.max_tokens, 10_240);
+    maxTokens: 131_072,
+  }, [], 'custom', 1), /Unsupported AI purpose: custom/i);
 });
 
 test('extracts assistant text from OpenAI-compatible responses', () => {
@@ -115,6 +139,11 @@ test('extracts assistant text from OpenAI-compatible responses', () => {
     extractAssistantText({ choices: [{ delta: { content: 'Hi' } }] }),
     'Hi'
   );
+  assert.equal(
+    extractFinishReason({ choices: [{ message: { content: 'Done' }, finish_reason: 'stop' }] }),
+    'stop'
+  );
+  assert.equal(extractFinishReason({ choices: [] }), null);
 });
 
 test('keeps missing API key errors distinct from provider rejection', () => {

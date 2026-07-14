@@ -51,8 +51,8 @@ export default function Home() {
               Arc Spaces in minutes, and lets you ask or organize with the AI provider you choose.
             </p>
             <div className="hero-actions">
-              <a className="primary-action" href="#product">See Space Tabs in action</a>
-              <a className="secondary-action" href="#migration">Explore Arc migration</a>
+              <a className="primary-action" href="https://github.com/lctm2005/chrome-tab#install-from-source" target="_blank" rel="noreferrer">Install from GitHub</a>
+              <a className="secondary-action" href="#product">See Space Tabs in action</a>
             </div>
             <ul className="trust-line" aria-label="Privacy summary">
               <li>No account</li>
@@ -107,9 +107,9 @@ export default function Home() {
             caption="Real Auto Group preview · live and historical tabs stay visible before Apply"
           />
           <div className="section-heading right-copy">
-            <p className="eyebrow"><span /> AI that asks permission</p>
+            <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
-            <p>Tidy Names and Auto Group first show the provider, exact tabs, URLs, and metadata fields. After you generate a proposal, a separate review shows what will move, rename, merge, and remain untouched. Every applied change creates a visible operation record with one-click Undo.</p>
+            <p>Tidy Names shows the provider, exact tabs, simplified URLs, and metadata fields before generation. Auto Group produces its final preview in one click, then reports the provider, fields, tab count, timing, and exactly what will move, merge, or remain untouched. Nothing changes until you approve, and every applied change creates a visible operation record with one-click Undo.</p>
             <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Space uses up to 12 confirmed live HTTP(S) pages, prioritizes pages you select, and shows the provider, sources, extracted content size, and whether stored text from recent conversation messages will be included. Nothing is sent until you confirm. Generated-response Sources appendices stay out of the context sent to your provider.</span></div>
           </div>
         </section>
