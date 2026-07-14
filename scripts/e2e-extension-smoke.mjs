@@ -903,7 +903,7 @@ async function main() {
       JSON.stringify(createdTab),
     );
 
-    await evaluate(client, `(async () => {
+    await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState;
       saved.spaceSnapshots = saved.spaceSnapshots || {};
@@ -919,7 +919,7 @@ async function main() {
       ];
       saved.spaceSnapshots.default = snapshot;
       await chrome.storage.local.set({ spaceTabsState: saved });
-    })()`);
+    })`);
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
     const dormantAutoGroupState = await waitFor(client, `(async () => {
       const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
