@@ -363,11 +363,6 @@ h1 {
   stroke-width: 2.2;
 }
 
-.tidy-icon {
-  font-size: 15px;
-  line-height: 1;
-}
-
 .operation-record {
   display: flex;
   grid-row: 2;

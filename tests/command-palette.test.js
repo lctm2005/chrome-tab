@@ -16,6 +16,8 @@ test('command palette exposes Space switching, tab search, and Ask', () => {
   });
 
   assert.ok(items.some((item) => item.action === 'ask'));
+  assert.equal(items.find((item) => item.action === 'tidy')?.icon, '✦');
+  assert.ok(items.every((item) => item.icon !== '🧹'));
   assert.ok(items.some((item) => item.kind === 'space' && item.spaceId === 'research'));
   assert.ok(items.some((item) => item.kind === 'tab' && item.tab.id === 7));
   assert.ok(items.some((item) => item.kind === 'tab' && item.tab.dormant));

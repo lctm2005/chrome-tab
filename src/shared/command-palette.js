@@ -2,7 +2,7 @@ export function buildCommandPaletteItems({ spaces = [], spaceView = [], query = 
   const needle = clean(query).toLowerCase();
   const commands = [
     { id: 'command:ask', kind: 'command', action: 'ask', icon: 'AI', title: 'Ask this Space', meta: 'Command' },
-    { id: 'command:tidy', kind: 'command', action: 'tidy', icon: '🧹', title: 'Tidy tab names', meta: 'Command' },
+    { id: 'command:tidy', kind: 'command', action: 'tidy', icon: '✦', title: 'Tidy tab names', meta: 'Command' },
     { id: 'command:auto-group', kind: 'command', action: 'auto-group', icon: 'AG', title: 'Auto Group tabs', meta: 'Command' },
     { id: 'command:settings', kind: 'command', action: 'settings', icon: '⚙', title: 'Open Settings', meta: 'Command' },
   ];

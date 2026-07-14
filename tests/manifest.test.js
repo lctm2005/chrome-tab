@@ -284,7 +284,8 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
 test('Tidy Names and Auto Group preview changes before applying them', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /const TIDY_NAMES_ICON = `[\s\S]*🧹[\s\S]*`;/);
+  assert.match(source, /const TIDY_NAMES_ICON = `[\s\S]*m12 3-1\.912 5\.813[\s\S]*`;/);
+  assert.doesNotMatch(source, /🧹|tidy-icon/);
   assert.match(source, /title: 'Preview Tidy Names'/);
   assert.match(source, /title: 'Rename in panel'/);
   assert.match(source, /type: 'tidy-names'/);
