@@ -1,3 +1,5 @@
+import Image from "next/image";
+import Link from "next/link";
 import { SiteFooter, SiteHeader } from "./site-shell";
 
 const promises = [
@@ -18,6 +20,23 @@ const promises = [
   },
 ];
 
+type ProductScreenshotProps = {
+  src: string;
+  alt: string;
+  caption: string;
+  priority?: boolean;
+  className?: string;
+};
+
+function ProductScreenshot({ src, alt, caption, priority = false, className = "" }: ProductScreenshotProps) {
+  return (
+    <figure className={`product-screenshot ${className}`.trim()}>
+      <Image src={src} alt={alt} width={1280} height={800} priority={priority} unoptimized sizes="(max-width: 980px) 100vw, 60vw" />
+      <figcaption>{caption}</figcaption>
+    </figure>
+  );
+}
+
 export default function Home() {
   return (
     <div className="site-frame">
@@ -28,12 +47,12 @@ export default function Home() {
             <p className="eyebrow"><span /> Arc workflow, without browser lock-in</p>
             <h1>Keep Chrome.<br />Bring your Arc workflow.<br /><em>Add private BYOK AI.</em></h1>
             <p className="hero-lede">
-              Space Tabs turns Chrome into focused workspaces, imports selected Arc Spaces in minutes,
-              and lets you ask or organize with the AI provider you choose.
+              Space Tabs: Arc-like Spaces &amp; BYOK AI turns Chrome into focused workspaces, imports selected
+              Arc Spaces in minutes, and lets you ask or organize with the AI provider you choose.
             </p>
             <div className="hero-actions">
-              <a className="primary-action" href="mailto:lctm2005@gmail.com?subject=Space%20Tabs%20beta">Join the beta</a>
-              <a className="secondary-action" href="#migration">See how migration works</a>
+              <a className="primary-action" href="#product">See Space Tabs in action</a>
+              <a className="secondary-action" href="#migration">Explore Arc migration</a>
             </div>
             <ul className="trust-line" aria-label="Privacy summary">
               <li>No account</li>
@@ -42,44 +61,13 @@ export default function Home() {
             </ul>
           </div>
 
-          <div className="product-stage" aria-label="Space Tabs product preview">
-            <div className="browser-bar">
-              <span className="traffic red" /><span className="traffic yellow" /><span className="traffic green" />
-              <span className="browser-pill">chrome · Space Tabs Workbench</span>
-            </div>
-            <div className="product-grid">
-              <aside className="space-rail">
-                <span className="mini-logo">S</span>
-                <span className="space-dot active">R</span>
-                <span className="space-dot">P</span>
-                <span className="space-dot">D</span>
-                <span className="space-dot add">+</span>
-              </aside>
-              <div className="workspace-card">
-                <div className="workspace-title">
-                  <div><small>SPACE</small><strong>Research launch</strong></div>
-                  <span className="safe-pill">Local</span>
-                </div>
-                <div className="group-card purple">
-                  <div><span className="group-icon">●</span><b>Market notes</b><small>3 live · 8 saved</small></div>
-                  <p>Competitor landscape</p><p>Pricing notes</p>
-                </div>
-                <div className="group-card blue">
-                  <div><span className="group-icon">●</span><b>User research</b><small>2 live · 14 saved</small></div>
-                  <p>Interview synthesis</p><p>Arc returners</p>
-                </div>
-              </div>
-              <div className="ask-card">
-                <p className="card-label">ASK SPACE</p>
-                <h3>Compare the launch risks.</h3>
-                <div className="disclosure-row"><span>Provider</span><b>Your OpenAI-compatible endpoint</b></div>
-                <div className="disclosure-row"><span>Sources</span><b>2 confirmed live HTTP(S) pages · selected first</b></div>
-                <div className="source-tags"><span>[1] Market notes</span><span>[2] Interview synthesis</span></div>
-                <button type="button">Review, then send</button>
-                <small>Nothing is sent until you confirm.</small>
-              </div>
-            </div>
-          </div>
+          <ProductScreenshot
+            className="hero-product-shot"
+            src="/screenshots/01-spaces-overview.png"
+            alt="Current Space Tabs extension showing the Launch Space, nested groups, and saved tabs in Chrome"
+            caption="Current extension UI · Space switching, folders, Chrome-native groups, and dormant saved tabs"
+            priority
+          />
         </section>
 
         <section className="proof-strip" aria-label="Product promise">
@@ -93,38 +81,56 @@ export default function Home() {
           <div className="section-heading">
             <p className="eyebrow"><span /> Migration without the leap of faith</p>
             <h2>Your Arc workspace,<br />now in Chrome.</h2>
-            <p>Import is a visible first-run path, not a hidden append button. You choose what crosses over and see conflicts before committing.</p>
+            <p>Import is a visible three-step setup, not a hidden append button. You choose what crosses over and see conflicts before committing.</p>
           </div>
-          <div className="promise-list">
-            {promises.map((item) => (
-              <article key={item.number}>
-                <span>{item.number}</span>
-                <div><h3>{item.title}</h3><p>{item.copy}</p></div>
-              </article>
-            ))}
+          <div className="feature-stack">
+            <ProductScreenshot
+              src="/screenshots/02-nested-folders-dormant-tabs.png"
+              alt="Current Space Tabs three-step Arc import preview with selectable Spaces and conflict details"
+              caption="Real setup flow · Choose, Bring data, Ready"
+            />
+            <div className="promise-list">
+              {promises.map((item) => (
+                <article key={item.number}>
+                  <span>{item.number}</span>
+                  <div><h3>{item.title}</h3><p>{item.copy}</p></div>
+                </article>
+              ))}
+            </div>
           </div>
         </section>
 
         <section className="control-section section-wrap">
-          <div className="control-preview">
-            <div className="proposal-head"><span>Auto Group proposal</span><b>6 tabs will move</b></div>
-            <div className="proposal-group"><i className="dot purple-dot" /><div><b>Launch research</b><span>3 live · 2 saved</span></div><em>Proposed</em></div>
-            <div className="proposal-group"><i className="dot blue-dot" /><div><b>Customer evidence</b><span>1 live · 5 saved</span></div><em>Proposed</em></div>
-            <div className="untouched"><b>Remain untouched</b><span>11 historical tabs and 3 Tags</span></div>
-            <div className="proposal-actions"><button type="button">Cancel</button><button type="button">Apply groups</button></div>
-          </div>
+          <ProductScreenshot
+            src="/screenshots/03-tab-context-menu.png"
+            alt="Current Space Tabs Auto Group preview showing live and saved tabs before applying changes"
+            caption="Real Auto Group preview · live and historical tabs stay visible before Apply"
+          />
           <div className="section-heading right-copy">
             <p className="eyebrow"><span /> AI that asks permission</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
             <p>Tidy Names and Auto Group first show the provider, exact tabs, URLs, and metadata fields. After you generate a proposal, a separate review shows what will move, rename, merge, and remain untouched. Every applied change creates a visible operation record with one-click Undo.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Space uses up to 12 confirmed live HTTP(S) pages, prioritizes pages you select, and shows the provider, sources, extracted content size, and whether stored text from recent conversation messages will be included. Generated-response Sources appendices stay out of the context sent to your provider.</span></div>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Space uses up to 12 confirmed live HTTP(S) pages, prioritizes pages you select, and shows the provider, sources, extracted content size, and whether stored text from recent conversation messages will be included. Nothing is sent until you confirm. Generated-response Sources appendices stay out of the context sent to your provider.</span></div>
           </div>
         </section>
 
         <section className="surfaces-section section-wrap">
           <div className="section-heading centered">
-            <p className="eyebrow"><span /> Right-sized surfaces</p>
+            <p className="eyebrow"><span /> The actual extension, not a mockup</p>
             <h2>Quick in the side panel.<br />Deliberate in the Workbench.</h2>
+            <p>Every product image on this page comes from the current extension UI.</p>
+          </div>
+          <div className="screenshot-grid" id="product">
+            <ProductScreenshot
+              src="/screenshots/05-ask-page-byok-ai.png"
+              alt="Current Space Tabs Ask Space view comparing two selected live pages with cited sources"
+              caption="Ask Space · confirmed sources, BYOK provider, citations, streaming, and Stop"
+            />
+            <ProductScreenshot
+              src="/screenshots/04-settings-arc-import-shortcuts.png"
+              alt="Current Space Tabs Workbench Settings showing backup, restore, and Arc import controls"
+              caption="Workbench Settings · export, restore, Arc import, and local BYOK configuration"
+            />
           </div>
           <div className="surface-grid">
             <article><span className="surface-kicker">SIDE PANEL</span><h3>Switch, find, drag</h3><p>Keep daily retrieval close to the page you are using. Open dormant tabs only when you need them.</p><b>Command palette included →</b></article>
@@ -134,7 +140,10 @@ export default function Home() {
 
         <section className="final-cta section-wrap">
           <div><p className="eyebrow light"><span /> Built for Arc returners</p><h2>Bring the workflow.<br />Keep control.</h2></div>
-          <div><p>Help validate the next Chrome Web Store release with your real Arc workspace. We are looking for thoughtful feedback, not inflated reviews.</p><a href="mailto:lctm2005@gmail.com?subject=Space%20Tabs%20beta">Join the Arc-returner beta</a></div>
+          <div>
+            <p>Review how Space Tabs handles your workspace, then follow the exact setup and troubleshooting guidance whenever you need it.</p>
+            <div className="final-links"><Link href="/privacy">Read privacy</Link><Link href="/support">Read setup &amp; support</Link></div>
+          </div>
         </section>
       </main>
       <SiteFooter />

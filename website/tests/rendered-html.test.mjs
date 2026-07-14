@@ -31,7 +31,17 @@ test("renders the Arc migration and controlled-AI product promise", async () => 
   assert.match(html, /uses up to 12 confirmed live HTTP\(S\) pages/i);
   assert.match(html, /Sources appendices stay out of the context sent to your provider/i);
   assert.match(html, /No telemetry/);
-  assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
+  assert.match(html, /Space Tabs: Arc-like Spaces &amp; BYOK AI/i);
+  for (const screenshot of [
+    "01-spaces-overview.png",
+    "02-nested-folders-dormant-tabs.png",
+    "03-tab-context-menu.png",
+    "04-settings-arc-import-shortcuts.png",
+    "05-ask-page-byok-ai.png",
+  ]) {
+    assert.match(html, new RegExp(`/screenshots/${screenshot.replaceAll(".", "\\.")}`, "i"));
+  }
+  assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton|Space Tags|\bbeta\b|waitlist/i);
 });
 
 test("renders a privacy page that matches the extension data path", async () => {
@@ -60,7 +70,7 @@ test("renders support for Arc setup, Ask Space, and historical Tags", async () =
 
 test("uses site-specific metadata and project assets", async () => {
   const html = await htmlFor("/");
-  assert.match(html, /<title>Space Tabs — Keep Chrome\. Bring your Arc workflow\.<\/title>/i);
+  assert.match(html, /<title>Space Tabs: Arc-like Spaces &amp; BYOK AI — Keep Chrome\. Bring your Arc workflow\.<\/title>/i);
   assert.match(html, /property="og:image" content="http:\/\/localhost(?::3000)?\/og\.png"/i);
   assert.match(html, /href="(?:http:\/\/localhost(?::3000)?)?\/icon\.png"/i);
   assert.doesNotMatch(html, /Starter Project|favicon\.svg/i);

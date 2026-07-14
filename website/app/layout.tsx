@@ -11,14 +11,14 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "Space Tabs — Keep Chrome. Bring your Arc workflow.";
+  const title = "Space Tabs: Arc-like Spaces & BYOK AI — Keep Chrome. Bring your Arc workflow.";
   const description = "Import selected Arc Spaces, organize with private BYOK AI, and keep workspace data local in Chrome.";
   return {
     metadataBase: new URL(origin),
     title: { default: title, template: "%s · Space Tabs" },
     description,
     icons: { icon: "/icon.png", shortcut: "/icon.png" },
-    openGraph: { title, description, type: "website", url: origin, images: [{ url: `${origin}/og.png`, width: 1536, height: 1024, alt: "Space Tabs for Chrome" }] },
+    openGraph: { title, description, type: "website", url: origin, images: [{ url: `${origin}/og.png`, width: 1280, height: 800, alt: "Current Space Tabs extension for Chrome" }] },
     twitter: { card: "summary_large_image", title, description, images: [`${origin}/og.png`] },
   };
 }

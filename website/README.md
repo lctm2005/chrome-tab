@@ -6,7 +6,7 @@ controlled BYOK AI, and local-first workspace data.
 
 ## Routes
 
-- `/` — product positioning, migration, AI review, and beta invitation
+- `/` — product positioning, migration, controlled AI, and current extension screenshots
 - `/privacy` — data handling, permissions, network requests, and user control
 - `/support` — setup, Arc import, Ask Space, Auto Group, backup, and contact
 
