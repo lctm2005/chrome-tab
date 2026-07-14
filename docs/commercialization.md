@@ -1,15 +1,16 @@
-# Space Commercialization Plan
+# Space Tabs Commercialization Plan
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Positioning
 
-Space should be positioned as an Arc-like workspace for Chrome:
+Space Tabs should be positioned as an Arc migration and controlled-AI workflow for Chrome:
 
-> One thing. One Space.
+> Keep Chrome. Bring your Arc workflow. Add private BYOK AI.
 
-The strongest promise is not generic vertical tabs. It is a focused unit of
-work that keeps related pages together.
+The strongest promise is not generic vertical tabs. It is the complete trust
+path: selectable Arc import, dormant local context, reviewable BYOK AI, Undo,
+and portable export without browser lock-in.
 
 Use `Arc-like` deliberately in store discovery copy so people looking for an
 Arc workflow in Chrome can recognize the product quickly.
@@ -33,8 +34,9 @@ Free release:
 - Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
-- Local Auto Group fallback.
-- BYOK Ask Space grounded in the active page.
+- Tidy Names and Auto Group proposals with confirmation and Undo.
+- BYOK Ask Space grounded in up to 12 confirmed live HTTP(S) pages, prioritizing selected pages, with disclosure,
+  streaming, Stop, and citations.
 
 Future Pro tier:
 
@@ -61,8 +63,8 @@ The first store release should not require sign-in.
 2. Watch support issues, uninstall reasons, reviews, and qualitative feedback.
 3. Publish a public free release once onboarding, privacy copy, screenshots,
    and reviewer notes are stable.
-4. Add a product landing page with privacy policy, feedback form, release notes,
-   and paid waitlist.
+4. Make the validated product, privacy, and support site public and link it from
+   the Chrome Web Store listing.
 5. Build Pro only after there is evidence that users return to Spaces across
    multiple days.
 
@@ -70,7 +72,8 @@ The first store release should not require sign-in.
 
 - Keep the core local-first and usable without AI.
 - Request optional host permissions at the moment of need, not during install.
-- Keep AI scoped to an explicit user action and the selected page.
+- Keep AI scoped to an explicit user action and the confirmed source pages or
+  tab metadata shown in a proposal.
 - Charge for durable value such as sync, templates, and team reuse.
 - Avoid ads and affiliate links. Trust is a more important asset for this
   category than short-term revenue.

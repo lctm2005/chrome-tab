@@ -15,7 +15,27 @@ import {
   normalizeBaseUrl,
   parseTidyGroups,
   parseTidyNames,
+  parseChatStreamEvent,
 } from '../src/shared/ai.js';
+
+test('parses OpenAI-compatible streaming content events', () => {
+  assert.deepEqual(parseChatStreamEvent('data: {"choices":[{"delta":{"content":"Hi"}}]}'), {
+    done: false,
+    text: 'Hi',
+    usage: null,
+  });
+  assert.equal(parseChatStreamEvent('event: ping'), null);
+});
+
+test('treats SSE DONE lines as terminal with valid protocol whitespace', () => {
+  for (const line of ['data: [DONE]', 'data:[DONE]', '  data: [DONE]\r']) {
+    assert.deepEqual(parseChatStreamEvent(line), {
+      done: true,
+      text: '',
+      usage: null,
+    });
+  }
+});
 
 test('normalizes OpenAI-compatible base URLs without duplicating chat/completions', () => {
   assert.equal(
@@ -30,7 +50,10 @@ test('normalizes OpenAI-compatible base URLs without duplicating chat/completion
 
 test('derives the permission origin pattern for BYOK endpoints', () => {
   assert.equal(getOriginPattern('https://api.z.ai/api/paas/v4/'), 'https://api.z.ai/*');
-  assert.equal(getOriginPattern('http://localhost:11434/v1'), 'http://localhost:11434/*');
+  assert.equal(getOriginPattern('http://localhost:11434/v1'), 'http://localhost/*');
+  assert.equal(getOriginPattern('http://127.0.0.1:4545/v1'), 'http://127.0.0.1/*');
+  assert.throws(() => getOriginPattern('file:///tmp/provider'), /must use http or https/i);
+  assert.throws(() => getOriginPattern('ftp://example.com/v1'), /must use http or https/i);
 });
 
 test('falls back from general Z.AI endpoint to coding endpoint for coding-plan keys', () => {
@@ -116,7 +139,7 @@ test('adds language instructions to AI prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
-test('grounds Ask Space in the current page', () => {
+test('keeps the legacy single-page Ask Space prompt compatible', () => {
   const prompt = createPrompt('ask-space', {
     spaceName: 'Store launch',
     page: {
@@ -130,9 +153,42 @@ test('grounds Ask Space in the current page', () => {
 
   assert.match(prompt[0].content, /focused work Space/);
   assert.match(prompt[0].content, /reference data/);
+  assert.match(prompt[0].content, /Cite every factual claim/);
   assert.match(prompt[1].content, /Store launch/);
+  assert.match(prompt[1].content, /Source \[1\]/);
   assert.match(prompt[1].content, /Competitor listing/);
   assert.match(prompt[1].content, /What should we emphasize/);
+});
+
+test('numbers multiple Ask Space sources and restricts citations to them', () => {
+  const prompt = createPrompt('ask-space', {
+    spaceName: 'Launch research',
+    pages: [
+      {
+        title: 'Chrome listing',
+        url: 'https://example.com/chrome',
+        text: 'Chrome users value familiar workflows.',
+      },
+      {
+        title: 'Arc notes',
+        url: 'https://example.net/arc',
+        text: 'Arc users value Spaces.',
+      },
+    ],
+    history: [{ role: 'user', text: 'Compare the audiences.' }],
+    question: 'What overlaps?',
+    language: 'en',
+  });
+
+  const system = prompt[0].content;
+  const user = prompt.at(-1).content;
+  assert.match(system, /Cite every factual claim[\s\S]*such as \[1\] or \[2\]/);
+  assert.match(system, /Use only citation numbers shown in the provided source list/);
+  assert.match(system, /never invent sources or citations/);
+  assert.match(user, /Source \[1\]:\nTitle: Chrome listing/);
+  assert.match(user, /Source \[2\]:\nTitle: Arc notes/);
+  assert.ok(user.indexOf('Source [1]') < user.indexOf('Source [2]'));
+  assert.match(user, /Question:\nWhat overlaps\?/);
 });
 
 test('asks tidy-tabs AI to cluster by topic instead of domain', () => {

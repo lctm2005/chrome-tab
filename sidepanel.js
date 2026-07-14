@@ -25,9 +25,15 @@ import {
   updateAskSessionMessage,
 } from './src/shared/ask-session.js';
 import {
+  appendAskSourceLinks,
+  selectAskSpaceSources,
+} from './src/shared/ask-sources.js';
+import {
   appendArcImportPlan,
   createArcImportPlan,
+  selectArcImportPlan,
 } from './src/shared/arc-import.js';
+import { buildCommandPaletteItems } from './src/shared/command-palette.js';
 import {
   createFolderTree,
   folderTitleParts,
@@ -35,6 +41,11 @@ import {
   renamedFolderGroupTitle,
 } from './src/shared/folder-tree.js';
 import { renderMarkdown } from './src/shared/markdown.js';
+import {
+  applyOrganizationPlanToSnapshot,
+  buildOrganizationCandidates,
+} from './src/shared/organization-plan.js';
+import { fingerprintTidyNameTargets } from './src/shared/operation-safety.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
   findShortcutConflict,
@@ -66,6 +77,8 @@ import {
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
+  snapshotGroupShouldPersist,
+  snapshotHasPersistentContent,
   snapshotTabCount,
   updateSnapshotTab,
 } from './src/shared/space-snapshot.js';
@@ -81,7 +94,10 @@ import {
   tabBelongsToSpace as entityBelongsToSpace,
 } from './src/shared/space-membership.js';
 import {
+  assertWorkspaceStorageBudget,
   createSpaceBackup,
+  fingerprintPortableSpacesContent,
+  fingerprintPortableWorkspaceContent,
   parseSpaceBackup,
   restoreSpaceBackup,
 } from './src/shared/space-transfer.js';
@@ -89,16 +105,12 @@ import {
   buildGroupPreviewItems,
   buildSpaceView,
   compactTabForAI,
-  countPlannedRegroups,
   decorateTabs,
   domainFromUrl,
   groupTitleKey,
   isPageShortcutCapableUrl,
-  isPlaceholderTabTitle,
   planGroupPreviewPlacement,
   planTidyTabNames,
-  plannedRegroupTabIds,
-  planDuplicateUrlClosures,
   preferredFocusableTab,
   sanitizeTidyGroups,
   titleForDomain,
@@ -118,9 +130,7 @@ const CUSTOM_MODEL_VALUE = '__custom__';
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const TIDY_NAMES_ICON = `
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-  </svg>
+  <span class="tidy-icon" aria-hidden="true">🧹</span>
 `;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -153,6 +163,7 @@ let pendingArcImportText = '';
 let pendingArcImportPlan = null;
 let pendingSpaceBackup = null;
 let pendingOnboardingArcPlan = null;
+let pendingOnboardingArcText = '';
 let onboardingStep = 0;
 let onboardingPath = '';
 let onboardingResult = '';
@@ -172,7 +183,11 @@ let groupPreviewCloseTimer = 0;
 let workbenchToastTimer = 0;
 let workbenchToastHideTimer = 0;
 let activeTaskCount = 0;
+let taskQueue = Promise.resolve();
 let sharedRefreshRunning = false;
+let commandPaletteItems = [];
+let commandPaletteIndex = 0;
+const activeAskStreams = new Map();
 
 const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 
@@ -180,6 +195,7 @@ const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
+  commandPaletteButton: document.querySelector('#commandPaletteButton'),
   openWorkbenchButton: document.querySelector('#openWorkbenchButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
@@ -187,6 +203,10 @@ const els = {
   groupsList: document.querySelector('#groupsList'),
   askPageView: document.querySelector('#askPageView'),
   askScope: document.querySelector('#askScope'),
+  askProvider: document.querySelector('#askProvider'),
+  askSourceSummary: document.querySelector('#askSourceSummary'),
+  askSourceHint: document.querySelector('#askSourceHint'),
+  askSourceList: document.querySelector('#askSourceList'),
   askMessages: document.querySelector('#askMessages'),
   askPagePrompt: document.querySelector('#askPagePrompt'),
   askAIButton: document.querySelector('#askAIButton'),
@@ -203,6 +223,9 @@ const els = {
   spacesList: document.querySelector('#spacesList'),
   contextMenu: document.querySelector('#contextMenu'),
   workbenchToast: document.querySelector('#workbenchToast'),
+  operationRecord: document.querySelector('#operationRecord'),
+  operationRecordText: document.querySelector('#operationRecordText'),
+  undoOrganizationButton: document.querySelector('#undoOrganizationButton'),
   actionDialog: document.querySelector('#actionDialog'),
   actionDialogTitle: document.querySelector('#actionDialogTitle'),
   actionDialogMessage: document.querySelector('#actionDialogMessage'),
@@ -232,7 +255,8 @@ const els = {
   onboardingNextButton: document.querySelector('#onboardingNextButton'),
   skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
   onboardingOpenWorkbenchButton: document.querySelector('#onboardingOpenWorkbenchButton'),
-  onboardingStayButton: document.querySelector('#onboardingStayButton'),
+  onboardingExportButton: document.querySelector('#onboardingExportButton'),
+  onboardingUndoArcButton: document.querySelector('#onboardingUndoArcButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
@@ -247,6 +271,9 @@ const els = {
   saveSettingsButton: document.querySelector('#saveSettingsButton'),
   shortcutsList: document.querySelector('#shortcutsList'),
   themeOptions: document.querySelector('.theme-options'),
+  commandPaletteDialog: document.querySelector('#commandPaletteDialog'),
+  commandPaletteInput: document.querySelector('#commandPaletteInput'),
+  commandPaletteResults: document.querySelector('#commandPaletteResults'),
 };
 
 if (workbenchMode) document.querySelector('.shell').append(els.settingsDialog);
@@ -257,15 +284,24 @@ async function init() {
   try {
     panelWindowId = await currentPanelWindowId();
     if (!workbenchMode) connectPanelPort();
-    await loadState();
+    await withSharedStateLock(async () => {
+      await loadState({ stateLocked: true });
+      await refreshTabs({ adopt: true });
+    });
     bindEvents();
     renderSettings();
-    await refreshTabs({ adopt: true });
     await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
     els.syncStatus.textContent = 'Failed to initialize';
-    if (activeView === 'ask') addAskMessage('assistant', formatAIError(error));
+    if (activeView === 'ask') {
+      try {
+        await addAskMessage('assistant', formatAIError(error));
+      } catch (persistenceError) {
+        console.error(persistenceError);
+      }
+    }
+    console.error(error);
   }
 }
 
@@ -323,11 +359,13 @@ function persistCurrentSpaceSnapshot() {
   });
 }
 
-async function loadState() {
-  await withSharedStateLock(async () => {
+async function loadState(options = {}) {
+  const load = async () => {
     await syncStateFromStorage();
     await saveState();
-  });
+  };
+  if (options.stateLocked) return load();
+  return withSharedStateLock(load);
 }
 
 async function syncStateFromStorage() {
@@ -364,6 +402,9 @@ async function saveState() {
 }
 
 function bindEvents() {
+  if (extensionRuntime && chrome.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener(handleRuntimeEvent);
+  }
   els.settingsButton.addEventListener('click', () => runTask(async () => {
     if (!workbenchMode) {
       await openWorkbench({ view: 'settings' });
@@ -375,6 +416,8 @@ function bindEvents() {
     render();
   }));
   els.openWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
+  els.commandPaletteButton.addEventListener('click', openCommandPalette);
+  els.undoOrganizationButton.addEventListener('click', () => runTask(undoLastOperation));
   els.settingsOpenWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
   els.runOnboardingButton.addEventListener('click', () => {
     els.settingsDialog.close();
@@ -385,8 +428,8 @@ function bindEvents() {
   els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
   els.autoGroupButton.addEventListener('click', () => runTask(autoGroupTabs));
   els.collapseGroupsButton.addEventListener('click', () => runTask(toggleSpaceGroups));
-  els.askAIButton.addEventListener('click', () => runTask(askCustomPrompt));
-  els.testAIButton.addEventListener('click', () => runTask(testAI));
+  els.askAIButton.addEventListener('click', startAskFromUserGesture);
+  els.testAIButton.addEventListener('click', startTestAIFromUserGesture);
   els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
   els.providerInput.addEventListener('change', () => renderAIProviderFields(settingsFromProviderSelection()));
   els.modelInput.addEventListener('change', () => updateCustomModelVisibility());
@@ -410,7 +453,11 @@ function bindEvents() {
   els.onboardingNextButton.addEventListener('click', () => runTask(continueOnboarding));
   els.skipOnboardingButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
   els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask(() => finishOnboarding(true)));
-  els.onboardingStayButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
+  els.onboardingExportButton.addEventListener('click', () => runTask(exportSpaceData));
+  els.onboardingUndoArcButton.addEventListener('click', () => runTask(async () => {
+    els.onboardingDialog.close();
+    await undoLastArcImport({ confirm: false });
+  }));
   els.onboardingDialog.addEventListener('cancel', (event) => {
     event.preventDefault();
     els.onboardingDialog.close();
@@ -441,6 +488,19 @@ function bindEvents() {
     }
   });
 
+  els.commandPaletteInput.addEventListener('input', () => renderCommandPalette());
+  els.commandPaletteResults.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-command-index]');
+    if (!button) return;
+    commandPaletteIndex = Number(button.dataset.commandIndex) || 0;
+    void runTask(runSelectedCommandPaletteItem);
+  });
+  els.commandPaletteDialog.addEventListener('keydown', handleCommandPaletteKeydown);
+  els.commandPaletteDialog.addEventListener('close', () => {
+    commandPaletteItems = [];
+    commandPaletteIndex = 0;
+  });
+
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   els.groupsList.addEventListener('scroll', () => positionGroupPreview(), { passive: true });
@@ -450,6 +510,14 @@ function bindEvents() {
     hideGroupPreview();
   });
   document.addEventListener('keydown', handleDocumentKeydown, { capture: true });
+}
+
+function handleRuntimeEvent(message) {
+  if (message?.type !== 'ai:stream' || !message.requestId) return;
+  const stream = activeAskStreams.get(message.requestId);
+  if (!stream) return;
+  stream.text = String(message.text || '');
+  void updateAskMessage(stream.messageRef, stream.text || 'Thinking...', { persist: false });
 }
 
 function handleDocumentKeydown(event) {
@@ -462,6 +530,13 @@ function handleDocumentKeydown(event) {
   if (event.key === 'Escape') {
     hideContextMenu();
     hideGroupPreview();
+  }
+
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    event.stopPropagation();
+    openCommandPalette();
+    return;
   }
 
   const shortcuts = mergeShortcuts(state.shortcuts);
@@ -483,7 +558,7 @@ function handleDocumentKeydown(event) {
     event.preventDefault();
     event.stopPropagation();
     if (activeAIRequestId) void abortActiveAIRequest();
-    else void runTask(askCustomPrompt);
+    else startAskFromUserGesture();
     return;
   }
 
@@ -511,6 +586,90 @@ function captureShortcutInput(event, input) {
   if (!shortcut) return;
   input.value = formatShortcut(shortcut);
   input.dataset.shortcut = shortcut;
+}
+
+function openCommandPalette() {
+  if (els.onboardingDialog.open || els.actionDialog.open) return;
+  if (els.settingsDialog.open && !workbenchMode) els.settingsDialog.close();
+  els.commandPaletteInput.value = '';
+  commandPaletteIndex = 0;
+  renderCommandPalette();
+  if (!els.commandPaletteDialog.open) els.commandPaletteDialog.showModal();
+  requestAnimationFrame(() => els.commandPaletteInput.focus());
+}
+
+function renderCommandPalette() {
+  commandPaletteItems = buildCommandPaletteItems({
+    spaces: state.spaces,
+    spaceView,
+    query: els.commandPaletteInput.value,
+  });
+  commandPaletteIndex = Math.max(0, Math.min(commandPaletteIndex, commandPaletteItems.length - 1));
+  const nodes = commandPaletteItems.map((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'command-palette-item';
+    button.classList.toggle('active', index === commandPaletteIndex);
+    button.dataset.commandIndex = String(index);
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === commandPaletteIndex));
+    const icon = document.createElement('span');
+    icon.textContent = item.icon || '•';
+    const title = document.createElement('strong');
+    title.textContent = item.title;
+    const meta = document.createElement('small');
+    meta.textContent = item.meta || '';
+    button.append(icon, title, meta);
+    return button;
+  });
+  if (nodes.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'No matching Spaces, tabs, or commands.';
+    nodes.push(empty);
+  }
+  els.commandPaletteResults.replaceChildren(...nodes);
+}
+
+function handleCommandPaletteKeydown(event) {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (commandPaletteItems.length === 0) return;
+    const offset = event.key === 'ArrowDown' ? 1 : -1;
+    commandPaletteIndex = (commandPaletteIndex + offset + commandPaletteItems.length) % commandPaletteItems.length;
+    renderCommandPalette();
+    els.commandPaletteResults.querySelector(`[data-command-index="${commandPaletteIndex}"]`)?.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  if (event.key === 'Enter' && event.target === els.commandPaletteInput) {
+    event.preventDefault();
+    void runTask(runSelectedCommandPaletteItem);
+  }
+}
+
+async function runSelectedCommandPaletteItem() {
+  const item = commandPaletteItems[commandPaletteIndex];
+  if (!item) return;
+  if (els.commandPaletteDialog.open) els.commandPaletteDialog.close();
+  if (item.kind === 'space') {
+    await activateSpace(item.spaceId);
+    return;
+  }
+  if (item.kind === 'tab') {
+    if (item.tab.dormant) await openDormantTab(item.tab, item.tab.dormantGroupKey);
+    else await send('tabs:focus', { tabId: item.tab.id });
+    return;
+  }
+  if (item.action === 'ask') await openAskPage();
+  else if (item.action === 'tidy') await tidyTabNames();
+  else if (item.action === 'auto-group') await autoGroupTabs();
+  else if (item.action === 'settings') {
+    if (!workbenchMode) await openWorkbench({ view: 'settings' });
+    else {
+      activeView = 'settings';
+      render();
+    }
+  }
 }
 
 function isEditableTarget(target) {
@@ -566,6 +725,7 @@ async function refreshTabs(options = {}) {
   await loadTabs({
     adopt: Boolean(options.adopt),
     adoptGroups: Boolean(options.adoptGroups ?? options.adopt),
+    skipSnapshotCleanupForTabIds: options.skipSnapshotCleanupForTabIds,
   });
   if (await materializeLegacyVirtualGroups(state.activeSpaceId)) {
     await loadTabs({ adopt: false });
@@ -591,13 +751,19 @@ async function refreshSharedState() {
   }
 }
 
-async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
+async function loadTabs({
+  adopt = false,
+  adoptGroups = false,
+  skipSnapshotCleanupForTabIds = [],
+} = {}) {
   const previousTabs = tabs;
   const response = await send('tabs:list');
   tabs = decorateTabs(response.tabs || [], state);
   groups = response.groups || [];
   const contentTabs = tabs.filter((tab) => !isEphemeralTab(tab));
-  removeStaleActiveSpaceTabsFromSnapshot(previousTabs, contentTabs);
+  removeStaleActiveSpaceTabsFromSnapshot(previousTabs, contentTabs, {
+    skipTabIds: skipSnapshotCleanupForTabIds,
+  });
   cleanupEphemeralTabIds();
   restoreSnapshotOwnership(state, contentTabs, groups);
   if (adopt) adoptUnassignedEntities(state, contentTabs, groups, state.activeSpaceId, { adoptGroups });
@@ -605,21 +771,63 @@ async function loadTabs({ adopt = false, adoptGroups = false } = {}) {
   syncCollapsedGroupsFromChrome(state, groups);
 }
 
-function removeStaleActiveSpaceTabsFromSnapshot(previousTabs = [], currentTabs = []) {
+function removeStaleActiveSpaceTabsFromSnapshot(previousTabs = [], currentTabs = [], options = {}) {
   if (!previousTabs.length || !state.activeSpaceId) return;
-  const currentById = new Map(currentTabs.map((tab) => [Number(tab.id), tab]));
-  const currentUrlKeys = new Set(currentTabs
-    .map((tab) => comparableSnapshotUrl(tab.url))
-    .filter(Boolean));
-  const staleTabs = previousTabs.filter((tab) => {
-    if (isEphemeralTab(tab) || !tabBelongsToSpace(tab, state.activeSpaceId)) return false;
-    const oldUrlKey = comparableSnapshotUrl(tab.url);
-    if (!oldUrlKey) return false;
-    const nextTab = currentById.get(Number(tab.id));
-    if (!nextTab) return true;
-    const nextUrlKey = comparableSnapshotUrl(nextTab.url);
-    return oldUrlKey && oldUrlKey !== nextUrlKey && !currentUrlKeys.has(oldUrlKey);
-  });
+  const skipTabIds = new Set((options.skipTabIds || []).map(Number).filter(Number.isFinite));
+  const currentPool = currentTabs.map((tab) => ({
+    tab,
+    urlIdentity: snapshotUrlIdentity(tab.url),
+    consumed: false,
+  }));
+  const previousPool = previousTabs
+    .filter((tab) => {
+      if (skipTabIds.has(Number(tab.id))) return false;
+      return !isEphemeralTab(tab) && tabBelongsToSpace(tab, state.activeSpaceId);
+    })
+    .map((tab) => ({
+      tab,
+      urlIdentity: snapshotUrlIdentity(tab.url),
+      matched: false,
+    }))
+    .filter((entry) => entry.urlIdentity);
+
+  // Reserve surviving browser-tab identities before matching duplicate URLs.
+  // Otherwise an earlier closed duplicate can consume the one live row and make
+  // the surviving tab look stale in its original Tag.
+  for (const previous of previousPool) {
+    const sameTabMatch = currentPool.find((current) => (
+      !current.consumed &&
+      Number(current.tab.id) === Number(previous.tab.id) &&
+      current.urlIdentity === previous.urlIdentity
+    ));
+    if (!sameTabMatch) continue;
+    sameTabMatch.consumed = true;
+    previous.matched = true;
+  }
+  for (const previous of previousPool) {
+    if (previous.matched) continue;
+    const exactUrlMatch = currentPool.find((current) => (
+      !current.consumed && current.urlIdentity === previous.urlIdentity
+    ));
+    if (!exactUrlMatch) continue;
+    exactUrlMatch.consumed = true;
+    previous.matched = true;
+  }
+
+  const staleTabs = previousPool
+    .filter((entry) => !entry.matched)
+    .map((entry) => {
+      const previousGroup = spaceView.find((group) => (group.tabs || []).some((tab) => (
+        !tab.dormant &&
+        Number(tab.id) === Number(entry.tab.id) &&
+        snapshotUrlIdentity(tab.url) === entry.urlIdentity
+      )));
+      return {
+        ...entry.tab,
+        groupTitle: previousGroup?.title || '',
+        groupColor: previousGroup?.color || '',
+      };
+    });
   if (staleTabs.length === 0) return;
   removeTabsFromSpaceSnapshot(state.activeSpaceId, staleTabs);
 }
@@ -724,17 +932,256 @@ function render() {
 
   renderGroups();
   if (isAskView) {
-    els.askScope.textContent = activePageStatus();
+    els.askScope.textContent = `${activeSpace.name} · sources stay local until you confirm an Ask`;
+    renderAskDisclosure();
     renderAskMessages();
   }
   renderSpaces();
+  renderOperationRecord();
   updateAIRequestUI();
   updatePanelActionUI();
 }
 
+function latestAppliedOperation() {
+  return [...(state.operationHistory || [])]
+    .reverse()
+    .find((operation) => operation?.status !== 'undone') || null;
+}
+
+function renderOperationRecord() {
+  const operation = latestAppliedOperation();
+  els.operationRecord.hidden = !operation;
+  if (!operation) return;
+  els.operationRecordText.textContent = operation.summary || 'Workspace change applied';
+  els.undoOrganizationButton.disabled = false;
+  els.undoOrganizationButton.textContent = 'Undo';
+}
+
+function recordOperation({ type, spaceId, summary, before, after }) {
+  if (!Array.isArray(state.operationHistory)) state.operationHistory = [];
+  const operation = {
+    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    type,
+    spaceId,
+    summary,
+    before,
+    ...(after === undefined ? {} : { after }),
+    createdAt: Date.now(),
+    status: 'applied',
+  };
+  state.operationHistory.push(operation);
+  state.operationHistory = state.operationHistory.slice(-10);
+  return operation;
+}
+
+function removeOperationRecord(operationId) {
+  if (!operationId || !Array.isArray(state.operationHistory)) return;
+  state.operationHistory = state.operationHistory.filter((operation) => operation?.id !== operationId);
+}
+
+function rollbackFailureError(originalError, failures = []) {
+  const originalMessage = originalError?.message || String(originalError || 'Operation failed.');
+  const rollbackMessage = failures
+    .map(({ stage, error }) => `${stage}: ${error?.message || String(error)}`)
+    .join('; ');
+  const combined = new Error(`${originalMessage} Rollback was incomplete (${rollbackMessage}).`);
+  combined.cause = originalError;
+  combined.rollbackFailures = failures;
+  return combined;
+}
+
+function captureLiveOrganization(spaceId = state.activeSpaceId) {
+  const view = buildSpaceViewForSpace(spaceId);
+  return {
+    groups: view
+      .filter((group) => group.key !== 'ungrouped')
+      .map((group) => ({
+        title: group.title || 'Tabs',
+        color: group.color || 'blue',
+        collapsed: Boolean(group.collapsed),
+        tabIds: group.tabs.map((tab) => Number(tab.id)).filter(Number.isFinite),
+      }))
+      .filter((group) => group.tabIds.length > 0),
+    ungroupedTabIds: (view.find((group) => group.key === 'ungrouped')?.tabs || [])
+      .map((tab) => Number(tab.id))
+      .filter(Number.isFinite),
+  };
+}
+
+async function restoreLiveOrganization(layout = {}, spaceId = state.activeSpaceId) {
+  await loadTabs({ adopt: false });
+  const existingIds = new Set(tabs.map((tab) => Number(tab.id)));
+  const targetIds = uniqueNumberIds([
+    ...(layout.ungroupedTabIds || []),
+    ...(layout.groups || []).flatMap((group) => group.tabIds || []),
+  ]).filter((tabId) => existingIds.has(tabId));
+  const groupedIds = tabs
+    .filter((tab) => targetIds.includes(Number(tab.id)) && isGroupedTab(tab))
+    .map((tab) => Number(tab.id));
+  if (groupedIds.length > 0) await send('tabs:ungroup', { tabIds: groupedIds });
+  clearLocalTabGrouping(targetIds);
+  for (const tabId of uniqueNumberIds(layout.ungroupedTabIds).filter((tabId) => existingIds.has(tabId))) {
+    state.tabSpaces[tabId] = spaceId;
+  }
+  await loadTabs({ adopt: false });
+
+  for (const group of layout.groups || []) {
+    const tabIds = uniqueNumberIds(group.tabIds).filter((tabId) => existingIds.has(tabId));
+    if (tabIds.length === 0) continue;
+    const restoredGroupId = await createChromeGroup(tabIds, {
+      title: group.title,
+      color: group.color,
+      collapsed: Boolean(group.collapsed),
+      spaceId,
+    });
+    if (restoredGroupId === null) {
+      throw new Error(`Could not restore Chrome group "${group.title || 'Tabs'}".`);
+    }
+  }
+  await loadTabs({ adopt: false });
+}
+
+function organizationForCurrentSpaceState(spaceId) {
+  const liveGroups = buildSpaceViewForSpace(spaceId);
+  const snapshot = mergeOpenSpaceSnapshot(liveGroups, state.spaceSnapshots?.[spaceId]) || {
+    version: 1,
+    updatedAt: Date.now(),
+    groups: [],
+  };
+  return buildOrganizationCandidates({ liveGroups, snapshot });
+}
+
+async function assertOperationUndoIsFresh(operation) {
+  if (operation?.type === 'restore-backup') {
+    const expectedFingerprint = operation.after?.portableFingerprint;
+    if (!expectedFingerprint) {
+      throw new Error('This restore record does not contain the safety data required for Undo.');
+    }
+    if (fingerprintPortableWorkspaceContent(state) !== expectedFingerprint) {
+      throw new Error('Portable Space data changed after this backup was restored. Undo was stopped to preserve the newer Spaces, Tags, saved pages, context, or Ask history.');
+    }
+    return;
+  }
+  if (!['tidy-names', 'auto-group'].includes(operation?.type)) return;
+  if (!state.spaces.some((space) => space.id === operation.spaceId)) {
+    throw new Error('This organization change belongs to a Space that no longer exists, so it cannot be safely undone.');
+  }
+
+  await loadTabs({ adopt: false });
+  if (operation.type === 'tidy-names') {
+    const expectedFingerprint = operation.after?.targetFingerprint;
+    const targetIds = Object.keys(operation.after?.renamedTabs || {})
+      .map(Number)
+      .filter(Number.isSafeInteger);
+    if (!expectedFingerprint || targetIds.length === 0) {
+      throw new Error('This Tidy Names record does not contain the safety data required for Undo.');
+    }
+    const targetIdSet = new Set(targetIds);
+    const currentTargets = tabs.filter((tab) => targetIdSet.has(Number(tab.id)));
+    const currentFingerprint = fingerprintTidyNameTargets(currentTargets, state.renamedTabs);
+    if (currentFingerprint !== expectedFingerprint) {
+      throw new Error('These tabs changed after Tidy Names was applied. Undo was stopped to preserve the newer names or pages.');
+    }
+    return;
+  }
+
+  const expectedFingerprint = operation.after?.organizationFingerprint;
+  if (!expectedFingerprint) {
+    throw new Error('This Auto Group record does not contain the safety data required for Undo.');
+  }
+  if (organizationForCurrentSpaceState(operation.spaceId).fingerprint !== expectedFingerprint) {
+    throw new Error('This Space changed after Auto Group was applied. Undo was stopped to preserve the newer organization.');
+  }
+}
+
+async function undoLastOperation() {
+  let operation;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    operation = latestAppliedOperation();
+    if (!operation) return;
+    await assertOperationUndoIsFresh(operation);
+    if (operation.type === 'tidy-names') {
+      for (const [tabId, previousName] of Object.entries(operation.before?.renamedTabs || {})) {
+        if (previousName === null || previousName === undefined || previousName === '') delete state.renamedTabs[tabId];
+        else state.renamedTabs[tabId] = previousName;
+      }
+    } else if (operation.type === 'auto-group') {
+      if (operation.before?.snapshot) state.spaceSnapshots[operation.spaceId] = structuredClone(operation.before.snapshot);
+      else delete state.spaceSnapshots[operation.spaceId];
+      dormantSpaceViewSpaceId = '';
+      await restoreLiveOrganization(operation.before?.live, operation.spaceId);
+    } else if (operation.type === 'restore-backup') {
+      restoreSpaceBackup(state, operation.before?.backup);
+      dormantSpaceViewSpaceId = '';
+      lastRenderedGroupsSignature = '';
+      lastRenderedAskSignature = '';
+      lastRenderedSpacesSignature = '';
+    } else {
+      throw new Error(`Undo is not available for ${operation.type || 'this operation'}.`);
+    }
+    operation.status = 'undone';
+    operation.undoneAt = Date.now();
+    await saveState();
+    await refreshTabs({ reloadDormant: true });
+  });
+  if (!operation) {
+    setStatus('There is no organization change to undo.');
+    return;
+  }
+  const message = `Undid: ${operation.summary}.`;
+  setStatus(message);
+  showStatusToast(message, 'success');
+}
+
+function currentAskSources() {
+  return selectAskSpaceSources(spaceView, selectedTabIds);
+}
+
+function renderAskDisclosure() {
+  const selection = currentAskSources();
+  const provider = providerById(state.ai.provider);
+  els.askProvider.textContent = [provider.label, state.ai.model].filter(Boolean).join(' · ');
+  els.askSourceSummary.textContent = `${selection.count} live ${selection.count === 1 ? 'page' : 'pages'}`;
+  if (selection.mode === 'selected') {
+    const limited = selection.truncated
+      ? ` ${selection.counts.limited} additional selected ${selection.counts.limited === 1 ? 'page is' : 'pages are'} excluded by the 12-page limit.`
+      : '';
+    els.askSourceHint.textContent = selection.count
+      ? `${selection.count} selected ${selection.count === 1 ? 'source' : 'sources'} will be read after confirmation.${limited}`
+      : 'The selected rows are saved or restricted. Select at least one live http(s) tab.';
+  } else {
+    const limited = selection.truncated ? ` Limited to ${selection.count} of ${selection.counts.requested} readable pages.` : '';
+    els.askSourceHint.textContent = `No tabs selected, so Ask uses live pages in this Space.${limited}`;
+  }
+  const chips = selection.tabs.map((tab, index) => {
+    const chip = document.createElement('span');
+    chip.className = 'ask-source-chip';
+    chip.title = tab.url;
+    const number = document.createElement('small');
+    number.textContent = `[${index + 1}]`;
+    const title = document.createElement('b');
+    title.textContent = tab.displayTitle || tab.title || tab.url;
+    chip.append(number, title);
+    return chip;
+  });
+  els.askSourceList.replaceChildren(...chips);
+}
+
 function mergeDormantSpaceView(liveView, dormantView) {
-  const liveTabs = liveView.flatMap((group) => group.tabs || []);
-  const openUrls = new Set(liveTabs.map((tab) => comparableSnapshotUrl(tab.url)).filter(Boolean));
+  const dormantEntries = (dormantView || []).flatMap((group) => (
+    (group.tabs || []).map((tab) => ({ tab, group }))
+  ));
+  const liveMatchPool = liveView.flatMap((group) => (
+    (group.tabs || []).map((tab) => ({
+      tab,
+      groupKey: groupTitleKey(group.title),
+      urlIdentity: snapshotUrlIdentity(tab.url),
+      navigationUrlKey: comparableSnapshotUrl(tab.url),
+      consumed: false,
+    }))
+  ));
+  const openDormantTabs = matchDormantTabsToLiveTabs(dormantEntries, liveMatchPool);
   const ungrouped = cloneGroup(liveView.find((group) => group.key === 'ungrouped') || null);
   const liveGroups = liveView
     .filter((group) => group.key !== 'ungrouped')
@@ -749,13 +1196,15 @@ function mergeDormantSpaceView(liveView, dormantView) {
   const dormantUngroupedTabs = [];
   for (const group of dormantView || []) {
     const matchingLiveGroup = liveGroupsByTitle.get(groupTitleKey(group.title));
-    const liveCandidates = matchingLiveGroup?.tabs?.length ? matchingLiveGroup.tabs : liveTabs;
     const dormantGroup = {
       ...group,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-      tabs: group.tabs.filter((tab) => !isDormantTabAlreadyOpen(tab, group, liveCandidates, openUrls)),
+      tabs: group.tabs.filter((tab) => !openDormantTabs.has(tab)),
     };
-    if (dormantGroup.tabs.length === 0) continue;
+    if (dormantGroup.tabs.length === 0) {
+      if (!isUngroupedSnapshotGroup(dormantGroup)) dormantGroups.push(dormantGroup);
+      continue;
+    }
 
     if (isUngroupedSnapshotGroup(dormantGroup)) {
       dormantUngroupedTabs.push(...dormantGroup.tabs);
@@ -772,6 +1221,53 @@ function mergeDormantSpaceView(liveView, dormantView) {
 
   if (ungrouped) ungrouped.tabs.push(...dormantUngroupedTabs);
   return ungrouped ? [...liveGroups, ...dormantGroups, ungrouped] : [...liveGroups, ...dormantGroups];
+}
+
+function matchDormantTabsToLiveTabs(dormantEntries, liveMatchPool) {
+  const matchedDormantTabs = new Set();
+  for (const matchMode of ['exact', 'recently-opened', 'navigation-fallback']) {
+    for (const sameGroupOnly of [true, false]) {
+      for (const { tab, group } of dormantEntries) {
+        if (matchedDormantTabs.has(tab)) continue;
+        if (isDormantTabAlreadyOpen(tab, group, liveMatchPool, matchMode, { sameGroupOnly })) {
+          matchedDormantTabs.add(tab);
+        }
+      }
+    }
+  }
+  return matchedDormantTabs;
+}
+
+function isDormantTabAlreadyOpen(dormantTab, dormantGroup, liveMatchPool, matchMode, options = {}) {
+  const dormantUrlIdentity = snapshotUrlIdentity(dormantTab?.url);
+  const dormantNavigationUrlKey = comparableSnapshotUrl(dormantTab?.url);
+  const dormantGroupKey = groupTitleKey(dormantGroup?.title || '');
+  const opened = matchMode === 'recently-opened'
+    ? recentlyOpenedDormantRecordForTab(dormantTab, dormantGroup)
+    : null;
+  const matches = (entry) => {
+    if (entry.consumed) return false;
+    if (matchMode === 'exact') {
+      return Boolean(dormantUrlIdentity && entry.urlIdentity === dormantUrlIdentity);
+    }
+    if (matchMode === 'recently-opened') {
+      return Boolean(opened && liveTabMatchesOpenedDormantRecord(entry.tab, opened));
+    }
+    return Boolean(
+      dormantNavigationUrlKey &&
+      entry.navigationUrlKey === dormantNavigationUrlKey
+    );
+  };
+  const match = liveMatchPool.find((entry) => (
+    (!options.sameGroupOnly || entry.groupKey === dormantGroupKey) && matches(entry)
+  ));
+  if (!match) return false;
+  match.consumed = true;
+  return true;
+}
+
+function snapshotUrlIdentity(url) {
+  return String(url || '').trim();
 }
 
 function cloneGroup(group) {
@@ -812,8 +1308,7 @@ function dormantGroupsFromSnapshot(snapshot = {}) {
           };
         }),
       };
-    })
-    .filter((group) => group.tabs.length > 0);
+    });
 }
 
 function renderGroups() {
@@ -839,6 +1334,9 @@ function renderGroups() {
   const tree = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId });
   renderedGroupContexts = groupContextsFromFolderTree(tree);
   renderedGroupDragContexts = groupDragContextsFromFolderTree(tree);
+  for (const context of renderedGroupDragContexts.values()) {
+    context.fingerprint = folderGroupContextFingerprint(context, renderedGroupContexts);
+  }
   const nodes = tree.map(createFolderTreeNode);
   if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
   els.groupsList.replaceChildren(...nodes);
@@ -887,6 +1385,13 @@ function groupDragContextsFromFolderTree(nodes) {
     }
   }
   return contexts;
+}
+
+function folderGroupContextFingerprint(context, groupContexts = renderedGroupContexts) {
+  return JSON.stringify((context?.groupKeys || []).map((key) => {
+    const group = groupContexts.get(key);
+    return group ? groupMutationFingerprint(group) : `missing:${key}`;
+  }));
 }
 
 function uniqueKeys(keys) {
@@ -1022,7 +1527,15 @@ function createFolderSection(folder) {
   return section;
 }
 
-async function toggleFolder(folderKey) {
+async function toggleFolder(folderKey, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      if (!renderedGroupDragContexts.has(folderKey)) {
+        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
+      }
+      return toggleFolder(folderKey, { stateLocked: true });
+    });
+  }
   state.collapsedGroups[folderKey] = !state.collapsedGroups[folderKey];
   await saveState();
   lastRenderedGroupsSignature = '';
@@ -1600,6 +2113,7 @@ function openOnboarding() {
   onboardingPath = '';
   onboardingResult = '';
   pendingOnboardingArcPlan = null;
+  pendingOnboardingArcText = '';
   els.onboardingArcInput.value = '';
   els.onboardingArcStatus.textContent = 'No Arc file selected.';
   els.onboardingArcSpaces.replaceChildren();
@@ -1639,6 +2153,7 @@ function renderOnboarding() {
   els.onboardingBackButton.hidden = isChoose;
   els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
   els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
+  els.onboardingUndoArcButton.hidden = !(isFinish && onboardingPath === 'arc' && state.lastArcImport?.spaceIds?.length);
 
   const progress = [...els.onboardingProgress.querySelectorAll('span')];
   progress.forEach((item, index) => {
@@ -1702,6 +2217,7 @@ async function applyFreshOnboardingFromCurrentState(name) {
     await switchSpace(targetSpace.id);
   }
   state.activeSpaceId = targetSpace.id;
+  state.onboarding = { version: 1, completed: true };
   activeView = workbenchMode ? 'ask' : 'space';
   lastRenderedSpacesSignature = '';
   await saveState();
@@ -1711,6 +2227,7 @@ async function applyFreshOnboardingFromCurrentState(name) {
 
 async function previewOnboardingArcFile() {
   pendingOnboardingArcPlan = null;
+  pendingOnboardingArcText = '';
   els.onboardingArcSpaces.replaceChildren();
   const file = els.onboardingArcInput.files?.[0];
   if (!file) {
@@ -1725,8 +2242,9 @@ async function previewOnboardingArcFile() {
   }
 
   try {
-    pendingOnboardingArcPlan = createArcImportPlan(await file.text(), { existingSpaces: state.spaces });
-    els.onboardingArcStatus.textContent = formatArcImportSummary(pendingOnboardingArcPlan.summary, 'Preview');
+    pendingOnboardingArcText = await file.text();
+    pendingOnboardingArcPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
+    els.onboardingArcStatus.textContent = `${formatArcImportSummary(pendingOnboardingArcPlan.summary, 'Preview')}${formatArcConflictSummary(pendingOnboardingArcPlan)}`;
     renderOnboardingArcSpaces(pendingOnboardingArcPlan);
   } catch (error) {
     els.onboardingArcStatus.textContent = `Cannot read Arc file: ${error.message || String(error)}`;
@@ -1735,6 +2253,7 @@ async function previewOnboardingArcFile() {
 }
 
 function renderOnboardingArcSpaces(plan) {
+  const previewsBySpaceId = new Map((plan?.spacePreviews || []).map((preview) => [preview.spaceId, preview]));
   const rows = (plan?.spaces || []).map((space) => {
     const label = document.createElement('label');
     label.className = 'onboarding-space-option';
@@ -1747,8 +2266,13 @@ function renderOnboardingArcSpaces(plan) {
     icon.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
     const name = document.createElement('strong');
     name.textContent = space.name;
+    const preview = previewsBySpaceId.get(space.id);
     const count = document.createElement('small');
-    count.textContent = `${snapshotTabCount(plan.spaceSnapshots?.[space.id])} tabs`;
+    const conflictText = (preview?.conflicts || []).length
+      ? ` · ${preview.conflicts.map((conflict) => `${conflict.original} → ${conflict.resolved}`).join(', ')}`
+      : '';
+    count.textContent = `${preview?.folders ?? 0} folders · ${preview?.tabs ?? snapshotTabCount(plan.spaceSnapshots?.[space.id])} tabs${conflictText}`;
+    count.classList.toggle('conflict', Boolean(conflictText));
     label.append(checkbox, icon, name, count);
     return label;
   });
@@ -1762,35 +2286,44 @@ function selectedOnboardingArcSpaceIds() {
 }
 
 function selectedOnboardingArcPlan() {
-  const selectedIds = new Set(selectedOnboardingArcSpaceIds());
-  const spaces = (pendingOnboardingArcPlan?.spaces || []).filter((space) => selectedIds.has(space.id));
-  const spaceSnapshots = Object.fromEntries(spaces.map((space) => [
-    space.id,
-    pendingOnboardingArcPlan.spaceSnapshots?.[space.id],
-  ]));
-  return {
-    spaces,
-    spaceSnapshots,
-    summary: {
-      ...(pendingOnboardingArcPlan?.summary || {}),
-      spaces: spaces.length,
-      tabs: Object.values(spaceSnapshots).reduce((sum, snapshot) => sum + snapshotTabCount(snapshot), 0),
-    },
-  };
+  return selectArcImportPlan(pendingOnboardingArcPlan, selectedOnboardingArcSpaceIds());
 }
 
 async function applyArcOnboarding() {
-  const plan = selectedOnboardingArcPlan();
-  if (plan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
+  const previewPlan = selectedOnboardingArcPlan();
+  if (previewPlan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
+  const selectedSourceIds = new Set((previewPlan.spacePreviews || []).map((preview) => preview.sourceSpaceId));
   let result;
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
-    result = appendArcImportPlan(state, plan);
-    rememberArcImport(result.importedSpaceIds);
-    lastRenderedSpacesSignature = '';
-    await saveState();
-    render();
-    renderSettings();
+    const latestPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
+    const latestResolvedIds = (latestPlan.spacePreviews || [])
+      .filter((preview) => selectedSourceIds.has(preview.sourceSpaceId))
+      .map((preview) => preview.spaceId);
+    const plan = selectArcImportPlan(latestPlan, latestResolvedIds);
+    const resolution = (selection) => (selection.spacePreviews || []).map((preview) => [
+      preview.sourceSpaceId,
+      preview.resolvedId,
+      preview.resolvedName,
+    ]);
+    if (JSON.stringify(resolution(previewPlan)) !== JSON.stringify(resolution(plan))) {
+      throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
+    }
+    const beforeState = structuredClone(state);
+    try {
+      result = appendArcImportPlan(state, plan);
+      rememberArcImport(result.importedSpaceIds);
+      state.onboarding = { version: 1, completed: true };
+      assertCurrentStateFitsStorage();
+      lastRenderedSpacesSignature = '';
+      await saveState();
+      render();
+      renderSettings();
+    } catch (error) {
+      restoreFailedWorkspaceMutation(beforeState);
+      els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
+      throw error;
+    }
   });
   onboardingResult = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
 }
@@ -1941,7 +2474,14 @@ async function newTabInActiveSpace() {
   });
 }
 
-async function clearUngroupedTabs(group) {
+async function clearUngroupedTabs(group, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const current = spaceView.find((item) => item.key === 'ungrouped');
+      if (!current) throw new Error('The ungrouped tabs changed in another Space Tabs view. Try again.');
+      return clearUngroupedTabs(current, { stateLocked: true });
+    });
+  }
   const closable = group.tabs.filter((tab) => !tab.dormant && shouldAutoCloseTab(tab));
   const dormantClosable = group.tabs.filter((tab) => tab.dormant && shouldAutoCloseTab(tab));
   if (closable.length === 0 && dormantClosable.length === 0) return;
@@ -1988,7 +2528,10 @@ function handleTabClick(event, tab) {
   runTask(() => focusTab(tab));
 }
 
-async function focusTab(tab) {
+async function focusTab(tab, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => focusTab(currentTabForMutation(tab), { stateLocked: true }));
+  }
   await send('tabs:focus', { tabId: tab.id });
   await refreshTabs();
 }
@@ -2002,13 +2545,19 @@ async function renameTab(tab) {
   });
   if (nextName === null) return;
   const clean = nextName.trim();
-  if (clean) state.renamedTabs[tab.id] = clean;
-  else delete state.renamedTabs[tab.id];
-  await saveState();
-  await refreshTabs();
+  await withFreshSpaceStateMutation(async () => {
+    const current = currentTabForMutation(tab);
+    if (clean) state.renamedTabs[current.id] = clean;
+    else delete state.renamedTabs[current.id];
+    await saveState();
+    await refreshTabs();
+  });
 }
 
-async function duplicateTab(tab) {
+async function duplicateTab(tab, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => duplicateTab(currentTabForMutation(tab), { stateLocked: true }));
+  }
   const sourceGroup = groupForTab(tab);
   const result = await send('tabs:duplicate', { tabId: tab.id });
   const duplicated = result.tab;
@@ -2054,27 +2603,30 @@ async function renameGroup(group) {
   const clean = nextName.trim();
   if (!clean) return;
 
-  if (group.dormant) {
-    renameDormantSnapshotGroup(group, clean);
-  } else if (group.id === 'ungrouped') {
-    const tabIds = group.tabs.filter((tab) => !tab.pinned).map((tab) => tab.id);
-    if (tabIds.length === 0) return;
-    await createChromeGroup(tabIds, { title: clean, color: nextGroupColor() });
-  } else if (isVirtualGroupKey(group.key)) {
-    state.virtualGroups[group.key] = {
-      ...(state.virtualGroups[group.key] || {}),
-      id: group.key,
-      title: clean,
-      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
-      spaceId: state.activeSpaceId,
-    };
-  } else {
-    await send('groups:update', { groupId: group.id, update: { title: clean } });
-    bindChromeGroup(group.id, state.activeSpaceId);
-  }
+  await withFreshSpaceStateMutation(async () => {
+    const current = currentGroupForMutation(group);
+    if (current.dormant) {
+      renameDormantSnapshotGroup(current, clean);
+    } else if (current.id === 'ungrouped') {
+      const tabIds = current.tabs.filter((tab) => !tab.pinned).map((tab) => tab.id);
+      if (tabIds.length === 0) return;
+      await createChromeGroup(tabIds, { title: clean, color: nextGroupColor() });
+    } else if (isVirtualGroupKey(current.key)) {
+      state.virtualGroups[current.key] = {
+        ...(state.virtualGroups[current.key] || {}),
+        id: current.key,
+        title: clean,
+        color: current.color || state.virtualGroups[current.key]?.color || 'blue',
+        spaceId: state.activeSpaceId,
+      };
+    } else {
+      await send('groups:update', { groupId: current.id, update: { title: clean } });
+      bindChromeGroup(current.id, state.activeSpaceId);
+    }
 
-  await saveState();
-  await refreshTabs();
+    await saveState();
+    await refreshTabs();
+  });
 }
 
 async function renameFolderGroup(folderContext) {
@@ -2093,21 +2645,35 @@ async function renameFolderGroup(folderContext) {
   const clean = nextName.trim();
   if (!clean) return;
 
-  const replacements = new Map();
-  const visibleKeys = spaceView.map((group) => group.key);
-  for (const group of groups) {
-    const title = renamedFolderGroupTitle(group, sourcePath, clean);
-    const nextKey = await retitleGroupWithoutSaving(group, title);
-    if (nextKey) replacements.set(group.key, nextKey);
-  }
-  replaceGroupOrderKeys(replacements, visibleKeys);
+  await withFreshSpaceStateMutation(async () => {
+    const currentContext = renderedGroupDragContexts.get(folderContext.key);
+    if (
+      !currentContext ||
+      JSON.stringify(currentContext.path || []) !== JSON.stringify(sourcePath) ||
+      currentContext.fingerprint !== folderContext.fingerprint
+    ) {
+      throw new Error('This folder changed in another Space Tabs view. Try the action again.');
+    }
+    const currentGroups = groupsForFolderContext(currentContext);
+    const replacements = new Map();
+    const visibleKeys = spaceView.map((group) => group.key);
+    for (const group of currentGroups) {
+      const title = renamedFolderGroupTitle(group, sourcePath, clean);
+      const nextKey = await retitleGroupWithoutSaving(group, title);
+      if (nextKey) replacements.set(group.key, nextKey);
+    }
+    replaceGroupOrderKeys(replacements, visibleKeys);
 
-  await saveState();
-  await refreshTabs();
-  setStatus(`Renamed group "${currentName}" to "${clean}".`);
+    await saveState();
+    await refreshTabs();
+    setStatus(`Renamed group "${currentName}" to "${clean}".`);
+  });
 }
 
-async function groupSelectedTabs(tabIds) {
+async function groupSelectedTabs(tabIds, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => groupSelectedTabs(tabIds, { stateLocked: true }));
+  }
   const ids = tabIds.map(Number).filter(Number.isFinite);
   if (ids.length === 0) {
     setStatus('Select a tab to group.');
@@ -2136,10 +2702,17 @@ async function groupSelectedTabs(tabIds) {
   setStatus(`Grouped ${selectedTabs.length === 1 ? '1 tab' : `${selectedTabs.length} selected tabs`}.`);
 }
 
-async function closeTab(tab, groupKey = '') {
-  const sourceGroup = groupKey
-    ? spaceView.find((group) => group.key === groupKey)
-    : spaceView.find((group) => (group.tabs || []).some((item) => Number(item.id) === Number(tab.id)));
+async function closeTab(tab, groupKey = '', options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const current = currentTabForMutation(tab);
+      return closeTab(current, groupForTab(current)?.key || '', { stateLocked: true });
+    });
+  }
+  const sourceGroup = groupForTab(tab) || (
+    groupKey ? spaceView.find((group) => group.key === groupKey) : null
+  );
+  await send('tabs:close', { tabId: tab.id });
   removeClosedTabFromSnapshot(tab, sourceGroup);
   removeTabFromSavedOrder(tab.id);
   delete state.tabSpaces[tab.id];
@@ -2147,11 +2720,28 @@ async function closeTab(tab, groupKey = '') {
   delete state.tabGroups?.[tab.id];
   forgetEphemeralTab(tab.id);
   await saveState();
-  await send('tabs:close', { tabId: tab.id });
-  await refreshTabs({ reloadDormant: true });
+  await refreshTabs({
+    reloadDormant: true,
+    skipSnapshotCleanupForTabIds: [tab.id],
+  });
 }
 
-async function removeDormantTab(tab, groupKey = '') {
+async function removeDormantTab(tab, groupKey = '', options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const currentGroup = dormantSpaceView.find((group) => (
+        group.key === groupKey || group.key === tab.dormantGroupKey
+      ));
+      const currentTab = currentGroup?.tabs?.find((item) => (
+        String(item.url || '') === String(tab.url || '') &&
+        String(item.title || item.displayTitle || '') === String(tab.title || tab.displayTitle || '')
+      ));
+      if (!currentGroup || !currentTab) {
+        throw new Error('This saved tab changed in another Space Tabs view. Try the action again.');
+      }
+      return removeDormantTab(currentTab, currentGroup.key, { stateLocked: true });
+    });
+  }
   const dormantGroup = dormantSpaceView.find((group) => (
     group.key === groupKey || group.key === tab.dormantGroupKey
   ));
@@ -2161,7 +2751,10 @@ async function removeDormantTab(tab, groupKey = '') {
   setStatus('Removed saved tab.');
 }
 
-async function updateSavedTabUrl(tab) {
+async function updateSavedTabUrl(tab, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => updateSavedTabUrl(currentTabForMutation(tab), { stateLocked: true }));
+  }
   if (tab?.dormant) return;
   const sourceGroup = groupForTab(tab);
   if (!sourceGroup || sourceGroup.key === 'ungrouped') {
@@ -2216,7 +2809,10 @@ async function moveSelectedTabsToSpace(tabIds, spaceId) {
   if (moved > 0) setStatus(`Moved ${moved} selected tabs to ${spaceName(spaceId)}.`);
 }
 
-async function moveTabsToSpace(tabIds, spaceId) {
+async function moveTabsToSpace(tabIds, spaceId, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => moveTabsToSpace(tabIds, spaceId, { stateLocked: true }));
+  }
   if (!state.spaces.some((space) => space.id === spaceId)) return 0;
   const sourceSpaceId = state.activeSpaceId;
   const ids = uniqueNumberIds(tabIds);
@@ -2251,7 +2847,7 @@ async function moveTabsToSpace(tabIds, spaceId) {
   removeTabsFromSpaceSnapshot(sourceSpaceId, movedTabs);
   selectedTabIds = new Set(movedTabs.map((tab) => tab.id));
   selectionAnchorTabId = movedTabs.at(-1)?.id ?? null;
-  await finishMoveToSpace(spaceId);
+  await finishMoveToSpace(spaceId, { stateLocked: true });
   return movedTabs.length;
 }
 
@@ -2275,26 +2871,49 @@ function ensureMovedTabTargetGroup(tab, sourceGroup, spaceId) {
   return ensureVirtualGroupForTitle(title || 'Tabs', color, spaceId);
 }
 
-async function moveGroupToSpace(group, spaceId) {
+async function moveGroupToSpace(group, spaceId, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => moveGroupToSpace(
+      currentGroupForMutation(group),
+      spaceId,
+      { stateLocked: true },
+    ));
+  }
   moveGroupsWithoutSaving([group], spaceId);
-  await finishMoveToSpace(spaceId);
+  await finishMoveToSpace(spaceId, { stateLocked: true });
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
-async function moveFolderGroupToSpace(folderContext, spaceId) {
+async function moveFolderGroupToSpace(folderContext, spaceId, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const currentContext = renderedGroupDragContexts.get(folderContext.key);
+      if (
+        !currentContext ||
+        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
+        currentContext.fingerprint !== folderContext.fingerprint
+      ) {
+        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
+      }
+      return moveFolderGroupToSpace(currentContext, spaceId, { stateLocked: true });
+    });
+  }
   const groups = groupsForFolderContext(folderContext);
   if (groups.length === 0) return;
   moveGroupsWithoutSaving(groups, spaceId);
-  await finishMoveToSpace(spaceId);
+  await finishMoveToSpace(spaceId, { stateLocked: true });
   setStatus(`Moved group to ${spaceName(spaceId)}.`);
 }
 
-async function finishMoveToSpace(spaceId) {
+async function finishMoveToSpace(spaceId, options = {}) {
   await saveState();
-  await activateSpace(spaceId);
+  await activateSpace(spaceId, { stateLocked: Boolean(options.stateLocked) });
 }
 
-async function deleteGroup(group) {
+async function deleteGroup(group, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => deleteGroup(currentGroupForMutation(group), { stateLocked: true }));
+  }
   if (!group || group.id === 'ungrouped') return;
   if (group.dormant) {
     deleteDormantSnapshotGroup(group);
@@ -2308,7 +2927,20 @@ async function deleteGroup(group) {
   setStatus(`Deleted group "${group.displayTitle || group.title}" and ${deletedTabs} tags.`);
 }
 
-async function deleteFolderGroup(folderContext) {
+async function deleteFolderGroup(folderContext, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const currentContext = renderedGroupDragContexts.get(folderContext.key);
+      if (
+        !currentContext ||
+        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
+        currentContext.fingerprint !== folderContext.fingerprint
+      ) {
+        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
+      }
+      return deleteFolderGroup(currentContext, { stateLocked: true });
+    });
+  }
   const groups = groupsForFolderContext(folderContext);
   if (groups.length === 0) return;
   const deletedTabs = await deleteGroupsAndTabs(groups);
@@ -2481,7 +3113,20 @@ function replaceGroupOrderKeys(replacements, fallbackOrder = []) {
   state.groupOrder[state.activeSpaceId] = uniqueKeys(order.map((key) => replacements.get(key) || key));
 }
 
-async function openDormantTab(tab, groupKey) {
+async function openDormantTab(tab, groupKey, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      const currentGroup = dormantSpaceView.find((group) => group.key === groupKey || group.key === tab.dormantGroupKey);
+      const currentTab = currentGroup?.tabs?.find((item) => (
+        String(item.url || '') === String(tab.url || '') &&
+        String(item.title || item.displayTitle || '') === String(tab.title || tab.displayTitle || '')
+      ));
+      if (!currentGroup || !currentTab) {
+        throw new Error('This saved tab changed in another Space Tabs view. Try the action again.');
+      }
+      return openDormantTab(currentTab, currentGroup.key, { stateLocked: true });
+    });
+  }
   const url = tab?.url || '';
   if (!url) return;
   const created = await send('tabs:create', { url, active: true });
@@ -2691,7 +3336,7 @@ function snapshotOpenSpace(spaceId) {
   const view = buildSpaceViewForSpace(spaceId);
   const snapshot = mergeOpenSpaceSnapshot(view, state.spaceSnapshots[spaceId]);
   const previousSnapshot = state.spaceSnapshots[spaceId];
-  if (snapshotTabCount(snapshot) === 0) {
+  if (!snapshotHasPersistentContent(snapshot)) {
     delete state.spaceSnapshots[spaceId];
     if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
     return;
@@ -2715,7 +3360,7 @@ function sanitizeStoredSpaceSnapshots() {
 function sanitizeStoredSpaceSnapshot(spaceId) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return null;
   const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots[spaceId]);
-  if (snapshotTabCount(snapshot) === 0) {
+  if (!snapshotHasPersistentContent(snapshot)) {
     delete state.spaceSnapshots[spaceId];
     if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
     return null;
@@ -2731,7 +3376,7 @@ function removeTemporarySnapshotTabs(spaceId) {
     ...storedSnapshot,
     groups: (storedSnapshot.groups || []).filter((group) => !isUngroupedSnapshotGroup(group)),
   } : null;
-  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
+  if (!snapshotHasPersistentContent(snapshot)) delete state.spaceSnapshots[spaceId];
   else state.spaceSnapshots[spaceId] = snapshot;
   if (spaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
 }
@@ -2770,7 +3415,7 @@ function updateDormantSnapshotGroup(group, updater) {
       ...snapshotGroup,
       tabs: [...(snapshotGroup.tabs || [])],
     });
-    if (nextGroup && (nextGroup.tabs || []).length > 0) groups.push(nextGroup);
+    if (nextGroup && snapshotGroupShouldPersist(snapshot, nextGroup)) groups.push(nextGroup);
     changed = true;
   }
 
@@ -2780,7 +3425,7 @@ function updateDormantSnapshotGroup(group, updater) {
     updatedAt: Date.now(),
     groups,
   };
-  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  if (!snapshotHasPersistentContent(nextSnapshot)) delete state.spaceSnapshots[state.activeSpaceId];
   else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
@@ -2802,7 +3447,7 @@ function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
     groupTitle: dormantGroup?.title,
     groupColor: dormantGroup?.color,
   });
-  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  if (!snapshotHasPersistentContent(snapshot)) delete state.spaceSnapshots[state.activeSpaceId];
   else state.spaceSnapshots[state.activeSpaceId] = snapshot;
   if (state.activeSpaceId === dormantSpaceViewSpaceId) dormantSpaceViewSpaceId = '';
 }
@@ -2811,7 +3456,7 @@ function removeTabsFromSpaceSnapshot(spaceId, snapshotTabs) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return;
   const snapshot = removeSnapshotTabs(state.spaceSnapshots[spaceId], snapshotTabs);
   if (!snapshot) return;
-  if (snapshotTabCount(snapshot) === 0) delete state.spaceSnapshots[spaceId];
+  if (!snapshotHasPersistentContent(snapshot)) delete state.spaceSnapshots[spaceId];
   else state.spaceSnapshots[spaceId] = {
     ...snapshot,
     updatedAt: Date.now(),
@@ -2894,7 +3539,10 @@ async function focusFirstTabInSpace(spaceId, options = {}) {
   if (target && (options.force || !target.active)) await send('tabs:focus', { tabId: target.id });
 }
 
-async function toggleGroup(group) {
+async function toggleGroup(group, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => toggleGroup(currentGroupForMutation(group), { stateLocked: true }));
+  }
   const nextCollapsed = !group.collapsed;
   state.collapsedGroups[group.key] = nextCollapsed;
   if (isVirtualGroupKey(group.key) && state.virtualGroups?.[group.key]) {
@@ -2930,7 +3578,14 @@ function startGroupDrag(event, group) {
   if (isInteractiveDragTarget(event.target)) return;
   const context = dragContextForTarget(group);
   if (!context?.groupKeys?.length) return;
-  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys, sourceContext: context };
+  dragState = {
+    type: 'group',
+    key: context.key,
+    groupKeys: context.groupKeys,
+    sourceContext: context,
+    sourceSpaceId: state.activeSpaceId,
+    organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
+  };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
@@ -2939,7 +3594,14 @@ function startFolderDrag(event, folder) {
   if (isInteractiveDragTarget(event.target)) return;
   const context = dragContextForTarget(folder);
   if (!context?.groupKeys?.length) return;
-  dragState = { type: 'group', key: context.key, groupKeys: context.groupKeys, sourceContext: context };
+  dragState = {
+    type: 'group',
+    key: context.key,
+    groupKeys: context.groupKeys,
+    sourceContext: context,
+    sourceSpaceId: state.activeSpaceId,
+    organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
+  };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
@@ -2972,14 +3634,19 @@ function dropGroup(event, target) {
   const targetContext = dragContextForTarget(target);
   if (!canDropGroupContext(targetContext)) return;
   const sourceKeys = [...dragState.groupKeys];
+  const moveOptions = {
+    sourceContext: dragState.sourceContext,
+    sourceSpaceId: dragState.sourceSpaceId,
+    expectedFingerprint: dragState.organizationFingerprint,
+  };
   const intent = groupDropIntent(event);
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
   runTask(() => (
     intent === 'inside'
-      ? moveGroupBlockIntoContext(sourceKeys, targetContext)
-      : moveGroupBlockBesideContext(sourceKeys, targetContext, intent)
+      ? moveGroupBlockIntoContext(sourceKeys, targetContext, moveOptions)
+      : moveGroupBlockBesideContext(sourceKeys, targetContext, intent, moveOptions)
   ));
 }
 
@@ -3027,11 +3694,19 @@ function isInteractiveDragTarget(target) {
   return Boolean(element?.closest?.('.tab-row, button:not(.folder-header), .group-actions'));
 }
 
-async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
+async function moveGroupBlockIntoContext(sourceKeys, targetContext, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      assertFreshOrganizationDrag(options);
+      const currentTarget = dragContextForTarget(targetContext?.key);
+      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
+      return moveGroupBlockIntoContext(sourceKeys, currentTarget, { ...options, stateLocked: true });
+    });
+  }
   const targetPath = targetContext?.path || [];
   if (!targetPath.length) return;
 
-  const sourceContext = dragState?.sourceContext || dragContextForTarget(dragState?.key);
+  const sourceContext = options.sourceContext;
   const visibleKeys = spaceView.map((group) => group.key);
   const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
   if (sourceBlock.length === 0) return;
@@ -3060,9 +3735,17 @@ async function moveGroupBlockIntoContext(sourceKeys, targetContext) {
   await refreshTabs();
 }
 
-async function moveGroupBlockBesideContext(sourceKeys, targetContext, placement = 'before') {
+async function moveGroupBlockBesideContext(sourceKeys, targetContext, placement = 'before', options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      assertFreshOrganizationDrag(options);
+      const currentTarget = dragContextForTarget(targetContext?.key);
+      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
+      return moveGroupBlockBesideContext(sourceKeys, currentTarget, placement, { ...options, stateLocked: true });
+    });
+  }
   const targetPath = targetPathForSiblingMove(targetContext);
-  const sourceContext = dragState?.sourceContext || dragContextForTarget(dragState?.key);
+  const sourceContext = options.sourceContext;
   const visibleKeys = spaceView.map((group) => group.key);
   const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
   if (sourceBlock.length === 0) return;
@@ -3220,9 +3903,9 @@ function replaceActiveSpaceSnapshotGroups(groups) {
   const nextSnapshot = {
     ...snapshot,
     updatedAt: Date.now(),
-    groups: groups.filter((group) => (group.tabs || []).length > 0),
+    groups: groups.filter((group) => snapshotGroupShouldPersist(snapshot, group)),
   };
-  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  if (!snapshotHasPersistentContent(nextSnapshot)) delete state.spaceSnapshots[state.activeSpaceId];
   else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
@@ -3252,9 +3935,28 @@ function groupOrderAfterSiblingMove(visibleKeys, sourceKeys, targetContext, next
   return base;
 }
 
+function assertFreshOrganizationDrag(options = {}) {
+  if (options.sourceSpaceId !== state.activeSpaceId) {
+    throw new Error('The active Space changed while dragging. Try the drag again in the current Space.');
+  }
+  if (
+    options.expectedFingerprint &&
+    organizationForCurrentSpaceState(state.activeSpaceId).fingerprint !== options.expectedFingerprint
+  ) {
+    throw new Error('This Space changed in another Space Tabs view. Review it before dragging again.');
+  }
+}
+
 function startTabDrag(event, tab, groupKey) {
   event.stopPropagation();
-  dragState = { type: 'tab', tabId: tab.id, groupKey };
+  dragState = {
+    type: 'tab',
+    tabId: tab.id,
+    tabUrl: tab.url,
+    groupKey,
+    sourceSpaceId: state.activeSpaceId,
+    organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
+  };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', String(tab.id));
 }
@@ -3267,22 +3969,52 @@ function acceptTabDrop(event) {
 
 function dropTabBefore(event, targetTab, targetGroupKey) {
   if (dragState?.type !== 'tab') return;
+  const tabId = dragState.tabId;
+  const moveOptions = {
+    expectedUrl: dragState.tabUrl,
+    sourceSpaceId: dragState.sourceSpaceId,
+    expectedFingerprint: dragState.organizationFingerprint,
+  };
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask(() => reorderTab(dragState.tabId, targetGroupKey, targetTab.id));
+  runTask(() => reorderTab(tabId, targetGroupKey, targetTab.id, moveOptions));
 }
 
 function dropTabAtEnd(event, targetGroup) {
   const targetRow = event.target.closest('.tab-row');
   if (dragState?.type !== 'tab' || (targetRow && !targetRow.classList.contains('dormant'))) return;
+  const tabId = dragState.tabId;
+  const moveOptions = {
+    targetGroup,
+    expectedUrl: dragState.tabUrl,
+    sourceSpaceId: dragState.sourceSpaceId,
+    expectedFingerprint: dragState.organizationFingerprint,
+  };
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask(() => reorderTab(dragState.tabId, targetGroup.key, null, { targetGroup }));
+  runTask(() => reorderTab(tabId, targetGroup.key, null, moveOptions));
 }
 
 async function reorderTab(tabId, targetGroupKey, beforeTabId, options = {}) {
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      assertFreshOrganizationDrag(options);
+      const numericTabId = Number(tabId);
+      const currentTab = tabs.find((item) => Number(item.id) === numericTabId);
+      if (!currentTab || (options.expectedUrl && currentTab.url !== options.expectedUrl)) {
+        throw new Error('This tab changed in another Space Tabs view. Try the drag again.');
+      }
+      const currentTarget = spaceView.find((group) => group.key === targetGroupKey) || options.targetGroup;
+      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
+      return reorderTab(tabId, targetGroupKey, beforeTabId, {
+        ...options,
+        stateLocked: true,
+        targetGroup: currentTarget,
+      });
+    });
+  }
   const numericTabId = Number(tabId);
   const tab = tabs.find((item) => item.id === numericTabId);
   const sourceGroup = spaceView.find((group) => liveTabsForOrdering(group).some((item) => item.id === numericTabId));
@@ -3380,39 +4112,45 @@ function liveTabsForOrdering(group) {
 function removeDormantSnapshotTabsForOpenTabs(openTabs) {
   const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots?.[state.activeSpaceId]);
   if (!snapshot) return;
-  const openUrls = new Set(openTabs
-    .map((tab) => comparableSnapshotUrl(tab.url))
-    .filter(Boolean));
-  if (openUrls.size === 0) return;
+  const targets = (openTabs || []).map((tab) => {
+    const group = groupForTab(tab);
+    return {
+      ...tab,
+      groupTitle: group?.title || '',
+      groupColor: group?.color || '',
+    };
+  }).sort((left, right) => (
+    Number(snapshotHasExactTargetInGroup(snapshot, right)) -
+    Number(snapshotHasExactTargetInGroup(snapshot, left))
+  ));
+  const nextSnapshot = removeSnapshotTabs(snapshot, targets);
+  if (!nextSnapshot || sameSnapshotGroups(snapshot, nextSnapshot)) return;
 
-  let changed = false;
-  const groups = [];
-  for (const group of snapshot.groups || []) {
-    const remainingTabs = (group.tabs || []).filter((tab) => {
-      const remove = openUrls.has(comparableSnapshotUrl(tab.url));
-      if (remove) changed = true;
-      return !remove;
-    });
-    if (remainingTabs.length > 0) groups.push({ ...group, tabs: remainingTabs });
-  }
-  if (!changed) return;
-
-  const nextSnapshot = {
-    ...snapshot,
+  const updatedSnapshot = {
+    ...nextSnapshot,
     updatedAt: Date.now(),
-    groups,
   };
-  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
-  else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
+  if (!snapshotHasPersistentContent(updatedSnapshot)) delete state.spaceSnapshots[state.activeSpaceId];
+  else state.spaceSnapshots[state.activeSpaceId] = updatedSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
+}
+
+function snapshotHasExactTargetInGroup(snapshot, target) {
+  const targetUrlIdentity = snapshotUrlIdentity(target?.url);
+  if (!targetUrlIdentity || !target.groupTitle) return false;
+  return (snapshot.groups || []).some((group) => (
+    String(group.title || 'Ungrouped') === target.groupTitle &&
+    String(group.color || 'grey') === (target.groupColor || 'grey') &&
+    (group.tabs || []).some((tab) => snapshotUrlIdentity(tab.url) === targetUrlIdentity)
+  ));
 }
 
 function removeClosedTabFromSnapshot(tab, sourceGroup) {
   const snapshot = sanitizeSpaceSnapshot(state.spaceSnapshots?.[state.activeSpaceId]);
   if (!snapshot) return;
   const target = snapshotRemovalTargetForClosedTab(tab, sourceGroup);
-  if (target.urlKeys.length === 0 && target.titleDomainPairs.length === 0) return;
+  if (target.urlIdentities.length === 0 && target.titleDomainPairs.length === 0) return;
 
   let result = removeSnapshotTabsForTarget(snapshot, target, { requireGroup: true });
   if (!result.changed && target.groupKey) {
@@ -3425,7 +4163,7 @@ function removeClosedTabFromSnapshot(tab, sourceGroup) {
     updatedAt: Date.now(),
     groups: result.groups,
   };
-  if (snapshotTabCount(nextSnapshot) === 0) delete state.spaceSnapshots[state.activeSpaceId];
+  if (!snapshotHasPersistentContent(nextSnapshot)) delete state.spaceSnapshots[state.activeSpaceId];
   else state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
@@ -3438,10 +4176,14 @@ function snapshotRemovalTargetForClosedTab(tab, sourceGroup) {
   const recentlyOpenedMatches = recentlyOpenedDormantTabs.filter((item) => (
     Number.isFinite(tabId) && Number(item.tabId) === tabId
   ));
-  const urlKeys = uniqueKeys([
-    comparableSnapshotUrl(tab?.url),
-    ...recentlyOpenedMatches.map((item) => item.urlKey),
+  const recentlyOpenedUrlIdentities = uniqueKeys(
+    recentlyOpenedMatches.map((item) => item.urlIdentity || snapshotUrlIdentity(item.url)),
+  );
+  const urlIdentities = uniqueKeys([
+    snapshotUrlIdentity(tab?.url),
+    ...recentlyOpenedUrlIdentities,
   ]);
+  const navigationUrlKeys = uniqueKeys(recentlyOpenedUrlIdentities.map(comparableSnapshotUrl));
   const titleDomainPairs = uniqueTitleDomainPairs([
     {
       titleKey: tabTitleMatchKey(tab),
@@ -3453,49 +4195,65 @@ function snapshotRemovalTargetForClosedTab(tab, sourceGroup) {
     })),
   ]);
   return {
-    urlKeys,
+    urlIdentities,
+    navigationUrlKeys,
     titleDomainPairs,
     groupKey: groupTitleKey(sourceGroup?.title || ''),
   };
 }
 
 function removeSnapshotTabsForTarget(snapshot, target, options = {}) {
-  const remainingUrlMatches = new Map(target.urlKeys.map((key) => [key, 1]));
-  let fallbackRemoved = false;
-  let changed = false;
+  const match = findSnapshotTabRemovalMatch(snapshot, target, options);
+  if (!match) return { changed: false, groups: snapshot.groups || [] };
   const groups = [];
 
-  for (const group of snapshot.groups || []) {
+  for (let groupIndex = 0; groupIndex < (snapshot.groups || []).length; groupIndex += 1) {
+    const group = snapshot.groups[groupIndex];
+    const tabs = (group.tabs || []).filter((_, tabIndex) => (
+      groupIndex !== match.groupIndex || tabIndex !== match.tabIndex
+    ));
+    const nextGroup = { ...group, tabs };
+    if (snapshotGroupShouldPersist(snapshot, nextGroup)) groups.push(nextGroup);
+  }
+
+  return { changed: true, groups };
+}
+
+function findSnapshotTabRemovalMatch(snapshot, target, options = {}) {
+  const candidates = [];
+  for (let groupIndex = 0; groupIndex < (snapshot.groups || []).length; groupIndex += 1) {
+    const group = snapshot.groups[groupIndex];
     const groupMatches = !options.requireGroup ||
       !target.groupKey ||
       groupTitleKey(group.title) === target.groupKey;
-    if (!groupMatches) {
-      groups.push(group);
-      continue;
+    if (!groupMatches) continue;
+    for (let tabIndex = 0; tabIndex < (group.tabs || []).length; tabIndex += 1) {
+      candidates.push({
+        groupIndex,
+        tabIndex,
+        tab: group.tabs[tabIndex],
+      });
     }
-
-    const tabs = [];
-    for (const snapshotTab of group.tabs || []) {
-      const snapshotUrlKey = comparableSnapshotUrl(snapshotTab.url);
-      const remainingUrlCount = remainingUrlMatches.get(snapshotUrlKey) || 0;
-      if (snapshotUrlKey && remainingUrlCount > 0) {
-        remainingUrlMatches.set(snapshotUrlKey, remainingUrlCount - 1);
-        changed = true;
-        continue;
-      }
-
-      if (!fallbackRemoved && snapshotTabMatchesTitleDomain(snapshotTab, target.titleDomainPairs)) {
-        fallbackRemoved = true;
-        changed = true;
-        continue;
-      }
-
-      tabs.push(snapshotTab);
-    }
-    if (tabs.length > 0) groups.push({ ...group, tabs });
   }
 
-  return { changed, groups };
+  for (const urlIdentity of target.urlIdentities || []) {
+    const exactMatch = candidates.find((candidate) => (
+      snapshotUrlIdentity(candidate.tab.url) === urlIdentity
+    ));
+    if (exactMatch) return exactMatch;
+  }
+  for (const navigationUrlKey of target.navigationUrlKeys || []) {
+    const navigationMatch = candidates.find((candidate) => (
+      comparableSnapshotUrl(candidate.tab.url) === navigationUrlKey
+    ));
+    if (navigationMatch) return navigationMatch;
+  }
+  if ((target.urlIdentities || []).length === 0) {
+    return candidates.find((candidate) => (
+      snapshotTabMatchesTitleDomain(candidate.tab, target.titleDomainPairs)
+    )) || null;
+  }
+  return null;
 }
 
 function snapshotTabMatchesTitleDomain(tab, pairs) {
@@ -3524,13 +4282,13 @@ function uniqueTitleDomainPairs(pairs) {
 }
 
 function rememberOpenedDormantTab(tab, dormantGroup, tabId) {
-  const urlKey = comparableSnapshotUrl(tab?.url);
+  const urlIdentity = snapshotUrlIdentity(tab?.url);
   const groupKey = groupTitleKey(dormantGroup?.title || '');
-  if (!urlKey || !groupKey) return;
+  if (!urlIdentity || !groupKey) return;
   pruneRecentlyOpenedDormantTabs();
   recentlyOpenedDormantTabs.push({
-    url: tab?.url || '',
-    urlKey,
+    url: urlIdentity,
+    urlIdentity,
     titleKey: tabTitleMatchKey(tab),
     domain: domainFromUrl(tab?.url),
     groupKey,
@@ -3541,40 +4299,21 @@ function rememberOpenedDormantTab(tab, dormantGroup, tabId) {
   });
 }
 
-function isDormantTabAlreadyOpen(dormantTab, dormantGroup, liveTabs, openUrls) {
-  const urlKey = comparableSnapshotUrl(dormantTab?.url);
-  if (urlKey && openUrls.has(urlKey)) return true;
-
-  const opened = recentlyOpenedDormantRecordForTab(dormantTab, dormantGroup);
-  if (!opened) return false;
-  return (liveTabs || []).some((liveTab) => liveTabMatchesOpenedDormantRecord(liveTab, opened));
-}
-
 function recentlyOpenedDormantRecordForTab(tab, dormantGroup) {
   pruneRecentlyOpenedDormantTabs();
-  const urlKey = comparableSnapshotUrl(tab?.url);
-  const titleKey = tabTitleMatchKey(tab);
-  const domain = domainFromUrl(tab?.url);
+  const urlIdentity = snapshotUrlIdentity(tab?.url);
   const groupKey = groupTitleKey(dormantGroup?.title || '');
   return recentlyOpenedDormantTabs.find((opened) => (
     opened.groupKey === groupKey &&
-    (
-      (urlKey && opened.urlKey === urlKey) ||
-      (titleKey && opened.titleKey === titleKey && opened.domain === domain)
-    )
+    urlIdentity &&
+    opened.urlIdentity === urlIdentity
   )) || null;
 }
 
 function liveTabMatchesOpenedDormantRecord(tab, opened) {
   if (Number.isFinite(Number(opened.tabId)) && Number(tab?.id) === Number(opened.tabId)) return true;
-  const urlKey = comparableSnapshotUrl(tab?.url);
-  if (urlKey && opened.urlKey === urlKey) return true;
-  return Boolean(
-    opened.titleKey &&
-    opened.domain &&
-    tabTitleMatchKey(tab) === opened.titleKey &&
-    domainFromUrl(tab?.url) === opened.domain
-  );
+  const urlIdentity = snapshotUrlIdentity(tab?.url);
+  return Boolean(urlIdentity && opened.urlIdentity === urlIdentity);
 }
 
 function recentlyOpenedDormantRecordForLiveTab(tab) {
@@ -3604,11 +4343,48 @@ function clearDragState(event) {
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
 
+async function confirmAIProposalGeneration({
+  action,
+  settings,
+  candidates = [],
+  fields,
+  itemResult,
+}) {
+  const provider = providerById(settings.provider);
+  let permissionRequest = Promise.resolve(true);
+  const confirmed = await openActionDialog({
+    title: `Generate ${action} preview?`,
+    message: `${provider.label} · ${settings.model || 'configured model'} · ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}. Nothing is sent until you choose Generate preview.`,
+    confirmText: 'Generate preview',
+    previewSections: [{
+      title: `Data sent: ${fields}`,
+      items: candidates.map((candidate) => ({
+        title: candidate.displayTitle || candidate.title || candidate.url || 'Untitled',
+        meta: candidate.url,
+        result: itemResult(candidate),
+      })),
+    }],
+    onConfirm: () => {
+      try {
+        permissionRequest = requestAIHostPermissionFromUserGesture(settings);
+      } catch (error) {
+        permissionRequest = Promise.reject(error);
+        permissionRequest.catch(() => null);
+      }
+    },
+  });
+  return { confirmed: confirmed === true, permissionRequest };
+}
+
 async function tidyTabNames() {
+  await refreshOrganizationActionState({ adopt: false });
   const sourceSpaceId = state.activeSpaceId;
+  const aiSettings = structuredClone(state.ai);
   const visibleTabs = spaceView
     .flatMap((group) => group.tabs)
-    .filter((tab) => isPageShortcutCapableUrl(tab.url));
+    .filter((tab) => (
+      !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
+    ));
   if (visibleTabs.length === 0) {
     setStatus('No tabs in this Space to rename.');
     return;
@@ -3616,85 +4392,141 @@ async function tidyTabNames() {
 
   beginPanelAction('tidyNames');
   try {
-    const duplicateTabIds = planDuplicateUrlClosures(visibleTabs);
-    const duplicateTabIdSet = new Set(duplicateTabIds);
-    const remainingTabs = visibleTabs.filter((tab) => !duplicateTabIdSet.has(Number(tab.id)));
-    const tabsWithContext = await addTidyContext(remainingTabs);
-    const localNames = planTidyTabNames(tabsWithContext, {
+    const aiCandidates = visibleTabs.filter((tab) => !hasManualPanelName(tab.id));
+    const useAI = aiCandidates.length > 0 && (!providerRequiresApiKey(aiSettings) || Boolean(aiSettings.apiKey));
+    let permissionRequest = null;
+    if (useAI) {
+      const approval = await confirmAIProposalGeneration({
+        action: 'Tidy Names',
+        settings: aiSettings,
+        candidates: aiCandidates,
+        fields: 'title, full URL, and domain',
+        itemResult: (tab) => domainFromUrl(tab.url),
+      });
+      if (!approval.confirmed) return;
+      permissionRequest = approval.permissionRequest;
+    }
+
+    const localNames = planTidyTabNames(visibleTabs, {
       existingNames: state.renamedTabs,
       preserveExisting: true,
     });
-    const aiNames = await tidyTabNamesWithAI(tabsWithContext);
+    const aiNames = useAI
+      ? await tidyTabNamesWithAI(aiCandidates, { permissionRequest, settings: aiSettings })
+      : {};
     const plannedNames = { ...localNames, ...aiNames };
-    const renameItems = remainingTabs
+    const renameItems = visibleTabs
       .map((tab) => ({
+        id: Number(tab.id),
         title: tab.displayTitle || tab.title || 'Untitled',
         result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
         meta: tab.domain,
       }))
       .filter((item) => item.title !== item.result);
-    const duplicateItems = visibleTabs
-      .filter((tab) => duplicateTabIdSet.has(Number(tab.id)))
+    const untouchedItems = visibleTabs
+      .filter((tab) => !renameItems.some((item) => item.id === Number(tab.id)))
       .map((tab) => ({
         title: tab.displayTitle || tab.title || 'Untitled',
-        result: 'Close duplicate',
-        meta: tab.url,
+        result: 'Unchanged',
+        meta: tab.domain,
       }));
-    if (renameItems.length === 0 && duplicateItems.length === 0) {
+    if (renameItems.length === 0) {
       setStatus('Tidy Names found no changes to apply.');
       return;
     }
+    const previewTargetIds = new Set(renameItems.map((item) => item.id));
+    const previewTargetFingerprint = fingerprintTidyNameTargets(
+      visibleTabs.filter((tab) => previewTargetIds.has(Number(tab.id))),
+      state.renamedTabs,
+    );
 
     const confirmed = await showPlanPreview({
       title: 'Preview Tidy Names',
-      message: `${renameItems.length} names will change${duplicateItems.length ? ` and ${duplicateItems.length} duplicate tabs will close` : ''}.`,
+      message: `${renameItems.length} panel-only names will change. No tabs will close or move.`,
       confirmText: 'Apply tidy',
       sections: [
         { title: 'Rename in panel', items: renameItems },
-        { title: 'Close duplicates', tone: 'danger', items: duplicateItems },
+        { title: 'Remain untouched', items: untouchedItems },
       ],
     });
     if (!confirmed) return;
 
-    let closedDuplicateCount = 0;
     await withSharedStateLock(async () => {
       await syncStateFromStorage();
       if (state.activeSpaceId !== sourceSpaceId) {
         throw new Error('The active Space changed while Tidy Names was open. Run it again in the current Space.');
       }
       await loadTabs({ adopt: false });
-      const openTabIds = new Set(tabs.map((tab) => Number(tab.id)));
-      for (const tabId of duplicateTabIds) {
-        if (!openTabIds.has(Number(tabId))) continue;
-        delete state.tabSpaces[tabId];
-        delete state.renamedTabs[tabId];
-        delete state.tabGroups?.[tabId];
-        forgetEphemeralTab(tabId);
-        await send('tabs:close', { tabId });
-        closedDuplicateCount += 1;
+      const targetIds = new Set(renameItems.map((item) => item.id));
+      const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+      if (
+        currentTargets.length !== renameItems.length ||
+        fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== previewTargetFingerprint
+      ) {
+        throw new Error('Tabs changed while Tidy Names was open. Review a fresh preview before applying names.');
       }
-      Object.assign(state.renamedTabs, plannedNames);
-      await saveState();
-      await refreshTabs();
+      const beforeNames = Object.fromEntries(renameItems.map((item) => [
+        item.id,
+        Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
+      ]));
+      const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
+      let operationId = '';
+      try {
+        for (const item of renameItems) state.renamedTabs[item.id] = item.result;
+        await saveState();
+        await refreshTabs();
+
+        const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+        if (refreshedTargets.length !== renameItems.length) {
+          throw new Error('Tabs changed while Tidy Names was being applied. The rename was rolled back.');
+        }
+        const operation = recordOperation({
+          type: 'tidy-names',
+          spaceId: sourceSpaceId,
+          summary: `Tidy Names renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
+          before: { renamedTabs: beforeNames },
+          after: {
+            renamedTabs: afterNames,
+            targetFingerprint: fingerprintTidyNameTargets(refreshedTargets, state.renamedTabs),
+          },
+        });
+        operationId = operation.id;
+        await saveState();
+        renderOperationRecord();
+      } catch (error) {
+        removeOperationRecord(operationId);
+        for (const [tabId, previousName] of Object.entries(beforeNames)) {
+          if (previousName === null || previousName === undefined || previousName === '') delete state.renamedTabs[tabId];
+          else state.renamedTabs[tabId] = previousName;
+        }
+        const rollbackFailures = [];
+        try {
+          await saveState();
+          await refreshTabs();
+        } catch (rollbackError) {
+          rollbackFailures.push({ stage: 'restoring Tidy Names state', error: rollbackError });
+        }
+        if (rollbackFailures.length > 0) throw rollbackFailureError(error, rollbackFailures);
+        throw error;
+      }
     });
-    const duplicateText = closedDuplicateCount ? ` Removed ${closedDuplicateCount} duplicate tabs.` : '';
-    setStatus(`Renamed ${remainingTabs.length} tabs in the panel only.${duplicateText}`);
+    setStatus(`Renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel only.`);
   } finally {
     endPanelAction();
   }
 }
 
-async function tidyTabNamesWithAI(tabsWithContext) {
-  const candidates = tabsWithContext.filter((tab) => !hasManualPanelName(tab.id));
-  if ((providerRequiresApiKey(state.ai) && !state.ai.apiKey) || candidates.length === 0) return {};
+async function tidyTabNamesWithAI(candidates, options = {}) {
+  const settings = options.settings || structuredClone(state.ai);
+  if ((providerRequiresApiKey(settings) && !settings.apiKey) || candidates.length === 0) return {};
 
   try {
-    await ensureAIHostPermission();
+    await (options.permissionRequest || ensureAIHostPermission(settings));
     const response = await send('ai:chat', {
-      settings: state.ai,
+      settings,
       messages: createPrompt('tidy-names', {
-        tabs: candidates.map(compactTabForTidyNameAI),
-        language: state.ai.language,
+        tabs: candidates.map(compactTabForAI),
+        language: settings.language,
       }),
     });
     return parseTidyNames(response.text, candidates);
@@ -3704,34 +4536,35 @@ async function tidyTabNamesWithAI(tabsWithContext) {
   }
 }
 
-function compactTabForTidyNameAI(tab) {
-  return {
-    ...compactTabForAI(tab),
-    headings: (tab.outlineHeadings || []).slice(0, 6),
-  };
-}
-
 function hasManualPanelName(tabId) {
   return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
 }
 
 async function autoGroupTabs() {
-  await syncAISettingsFromStorage();
-  await loadTabs({ adopt: true });
+  await refreshOrganizationActionState({ adopt: true });
+  const aiSettings = structuredClone(state.ai);
   const sourceSpaceId = state.activeSpaceId;
-  const candidates = tabs.filter((tab) => (
-    tabBelongsToSpace(tab, state.activeSpaceId) &&
-    !tab.pinned &&
-    isPageShortcutCapableUrl(tab.url)
+  snapshotOpenSpace(sourceSpaceId);
+  const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+    version: 1,
+    updatedAt: Date.now(),
+    groups: [],
+  });
+  const organization = buildOrganizationCandidates({
+    liveGroups: buildSpaceViewForSpace(sourceSpaceId),
+    snapshot: sourceSnapshot,
+  });
+  const candidates = organization.candidates.filter((tab) => (
+    !tab.pinned && isPageShortcutCapableUrl(tab.url)
   ));
   const duplicateGroupCount = countDuplicateActiveGroups();
   if (candidates.length === 0 && duplicateGroupCount === 0) {
-    const message = 'Open saved tabs in this Space first, then run Auto Group.';
+    const message = 'No live or saved http(s) tabs are available to organize in this Space.';
     setStatus(message);
     showStatusToast(message, 'error');
     return;
   }
-  if (extensionRuntime && candidates.length > 0 && providerRequiresApiKey(state.ai) && !state.ai.apiKey) {
+  if (extensionRuntime && candidates.length > 0 && providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
     const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
     setStatus(message);
     showStatusToast(message, 'error');
@@ -3742,11 +4575,29 @@ async function autoGroupTabs() {
   let plannedGroups = [];
   try {
     if (candidates.length > 0) {
+      const approval = await confirmAIProposalGeneration({
+        action: 'Auto Group',
+        settings: aiSettings,
+        candidates,
+        fields: 'title, full URL, domain, current Tag, and live/saved status',
+        itemResult: (candidate) => [
+          domainFromUrl(candidate.url),
+          candidate.currentGroup?.title || 'Ungrouped',
+          candidate.dormant ? 'Saved' : 'Live',
+        ].join(' · '),
+      });
+      if (!approval.confirmed) return;
       try {
-        await ensureAIHostPermission();
+        await approval.permissionRequest;
         const response = await send('ai:chat', {
-          settings: state.ai,
-          messages: createPrompt('tidy-tabs', { tabs: candidates.map(compactTabForAI) }),
+          settings: aiSettings,
+          messages: createPrompt('tidy-tabs', {
+            tabs: candidates.map((candidate) => ({
+              ...compactTabForAI(candidate),
+              currentGroup: candidate.currentGroup?.title || 'Ungrouped',
+              status: candidate.dormant ? 'saved' : 'live',
+            })),
+          }),
         });
         plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
         if (plannedGroups.length === 0) {
@@ -3757,10 +4608,17 @@ async function autoGroupTabs() {
       }
     }
 
-    const regroupedTabIds = new Set(plannedRegroupTabIds(plannedGroups, candidates, groups));
-    const regroupedCount = countPlannedRegroups(plannedGroups, candidates, groups);
+    const plannedTitleByCandidateId = new Map(plannedGroups.flatMap((group) => (
+      group.tabIds.map((candidateId) => [Number(candidateId), groupTitleKey(group.title)])
+    )));
+    const regroupedTabIds = new Set(candidates
+      .filter((candidate) => {
+        const plannedTitle = plannedTitleByCandidateId.get(Number(candidate.id));
+        return plannedTitle && plannedTitle !== groupTitleKey(candidate.currentGroup?.title || 'Ungrouped');
+      })
+      .map((candidate) => Number(candidate.id)));
+    const regroupedCount = regroupedTabIds.size;
     const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
-    const liveGroupsById = new Map(groups.map((group) => [Number(group.id), group]));
     const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
     const previewSections = plannedGroups.map((group) => ({
       title: group.title,
@@ -3771,11 +4629,51 @@ async function autoGroupTabs() {
         const regroup = regroupedTabIds.has(Number(tabId));
         return {
           title: tab?.displayTitle || tab?.title || 'Untitled',
-          meta: tab?.domain || '',
-          source: regroup ? liveGroupsById.get(Number(tab?.groupId))?.title || 'Current group' : '',
+          meta: domainFromUrl(tab?.url || ''),
+          source: regroup ? tab?.currentGroup?.title || 'Current group' : '',
+          badge: tab?.dormant ? 'Saved' : 'Live',
         };
       }),
     }));
+    const untouchedCandidates = candidates.filter((candidate) => !plannedTitleByCandidateId.has(Number(candidate.id)));
+    if (untouchedCandidates.length > 0) {
+      previewSections.push({
+        title: 'Remain untouched',
+        color: 'grey',
+        kind: 'notice',
+        items: untouchedCandidates.map((candidate) => ({
+          title: candidate.title || candidate.url || 'Untitled',
+          meta: candidate.currentGroup?.title || 'Ungrouped',
+          badge: candidate.dormant ? 'Saved' : 'Live',
+        })),
+      });
+    }
+    const candidateIds = new Set(candidates.map((candidate) => Number(candidate.id)));
+    const notSentCandidates = organization.candidates.filter((candidate) => !candidateIds.has(Number(candidate.id)));
+    const emptyHistoricalTags = (sourceSnapshot.groups || []).filter((group) => (
+      !isUngroupedSnapshotGroup(group) && (group.tabs || []).length === 0
+    ));
+    if (notSentCandidates.length > 0 || emptyHistoricalTags.length > 0) {
+      previewSections.push({
+        title: 'Not sent · remain untouched',
+        color: 'grey',
+        kind: 'notice',
+        items: [
+          ...notSentCandidates.map((candidate) => ({
+            title: candidate.title || candidate.url || 'Untitled',
+            meta: candidate.pinned
+              ? `${candidate.currentGroup?.title || 'Ungrouped'} · pinned`
+              : `${candidate.currentGroup?.title || 'Ungrouped'} · restricted URL`,
+            badge: candidate.dormant ? 'Saved' : 'Live',
+          })),
+          ...emptyHistoricalTags.map((group) => ({
+            title: group.title || 'Historical Tag',
+            meta: 'Empty historical Tag is preserved exactly.',
+            badge: 'Saved Tag',
+          })),
+        ],
+      });
+    }
     if (duplicateGroupCount > 0) {
       previewSections.push({
         title: 'Merge duplicates',
@@ -3817,44 +4715,106 @@ async function autoGroupTabs() {
         throw new Error('The active Space changed while Auto Group was open. Run it again in the current Space.');
       }
       await loadTabs({ adopt: true });
-      const currentCandidateIds = new Set(tabs
-        .filter((tab) => (
-          tabBelongsToSpace(tab, sourceSpaceId) &&
-          !tab.pinned &&
-          isPageShortcutCapableUrl(tab.url)
-        ))
-        .map((tab) => Number(tab.id)));
-      const plannedTabIds = plannedGroups.flatMap((group) => group.tabIds).map(Number);
-      if (plannedTabIds.some((tabId) => !currentCandidateIds.has(tabId))) {
+      snapshotOpenSpace(sourceSpaceId);
+      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+        version: 1,
+        updatedAt: Date.now(),
+        groups: [],
+      });
+      const currentOrganization = buildOrganizationCandidates({
+        liveGroups: buildSpaceViewForSpace(sourceSpaceId),
+        snapshot: currentSnapshot,
+      });
+      if (currentOrganization.fingerprint !== organization.fingerprint) {
         throw new Error('Tabs changed while Auto Group was open. Review a fresh preview before applying groups.');
       }
 
-      mergedGroups = await mergeDuplicateGroupsInActiveSpace();
-      if (mergedGroups) await loadTabs({ adopt: false });
-      const existingGroupsByTitle = activeChromeGroupsByTitle();
-      for (const group of plannedGroups) {
-        const titleKey = groupTitleKey(group.title);
-        let groupId = existingGroupsByTitle.get(titleKey)?.id;
-        if (Number.isFinite(Number(groupId))) {
-          await addTabsToChromeGroup(groupId, group.tabIds, state.activeSpaceId);
-        } else {
-          groupId = await createChromeGroup(group.tabIds, {
-            title: group.title,
-            color: group.color || nextGroupColor(),
-          });
-          if (groupId === null) continue;
-          existingGroupsByTitle.set(titleKey, {
-            id: groupId,
-            title: group.title,
-            color: group.color,
-          });
-          createdGroups += 1;
-        }
-      }
+      const beforeSnapshot = structuredClone(currentSnapshot);
+      const beforeLive = captureLiveOrganization(sourceSpaceId);
+      const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
+      const livePlannedGroups = plannedGroups
+        .map((group) => ({
+          ...group,
+          tabIds: group.tabIds
+            .map((candidateId) => Number(candidateById.get(Number(candidateId))?.source?.live?.tabId))
+            .filter(Number.isFinite),
+        }))
+        .filter((group) => group.tabIds.length > 0);
 
-      mergedGroups += await mergeDuplicateGroupsInActiveSpace();
-      await saveState();
-      await refreshTabs();
+      let operationId = '';
+      try {
+        state.spaceSnapshots[sourceSpaceId] = applyOrganizationPlanToSnapshot({
+          snapshot: currentSnapshot,
+          candidates: currentOrganization.candidates,
+          plannedGroups,
+        });
+        dormantSpaceViewSpaceId = '';
+
+        mergedGroups = await mergeDuplicateGroupsInActiveSpace();
+        if (mergedGroups) await loadTabs({ adopt: false });
+        const existingGroupsByTitle = activeChromeGroupsByTitle();
+        for (const group of livePlannedGroups) {
+          const titleKey = groupTitleKey(group.title);
+          let groupId = existingGroupsByTitle.get(titleKey)?.id;
+          if (Number.isFinite(Number(groupId))) {
+            const nextGroupId = await addTabsToChromeGroup(groupId, group.tabIds, state.activeSpaceId);
+            if (nextGroupId === null) {
+              throw new Error(`Chrome could not apply the proposed group "${group.title}".`);
+            }
+            groupId = nextGroupId;
+          } else {
+            groupId = await createChromeGroup(group.tabIds, {
+              title: group.title,
+              color: group.color || nextGroupColor(),
+            });
+            if (groupId === null) {
+              throw new Error(`Chrome could not create the proposed group "${group.title}".`);
+            }
+            existingGroupsByTitle.set(titleKey, {
+              id: groupId,
+              title: group.title,
+              color: group.color,
+            });
+            createdGroups += 1;
+          }
+        }
+
+        mergedGroups += await mergeDuplicateGroupsInActiveSpace();
+        await saveState();
+        await refreshTabs({ reloadDormant: true });
+        assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
+
+        const operation = recordOperation({
+          type: 'auto-group',
+          spaceId: sourceSpaceId,
+          summary: `Auto Group organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}`,
+          before: { snapshot: beforeSnapshot, live: beforeLive },
+          after: {
+            organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
+          },
+        });
+        operationId = operation.id;
+        await saveState();
+        renderOperationRecord();
+      } catch (error) {
+        removeOperationRecord(operationId);
+        const rollbackFailures = [];
+        state.spaceSnapshots[sourceSpaceId] = structuredClone(beforeSnapshot);
+        try {
+          await restoreLiveOrganization(beforeLive, sourceSpaceId);
+        } catch (rollbackError) {
+          rollbackFailures.push({ stage: 'restoring Chrome groups', error: rollbackError });
+        }
+        state.spaceSnapshots[sourceSpaceId] = structuredClone(beforeSnapshot);
+        try {
+          await saveState();
+          await refreshTabs({ reloadDormant: true });
+        } catch (rollbackError) {
+          rollbackFailures.push({ stage: 'saving restored Space state', error: rollbackError });
+        }
+        if (rollbackFailures.length > 0) throw rollbackFailureError(error, rollbackFailures);
+        throw error;
+      }
     });
     const parts = [];
     if (createdGroups) parts.push(`created ${createdGroups}`);
@@ -3901,7 +4861,12 @@ async function mergeDuplicateGroupsInActiveSpace() {
       const tabIds = tabs
         .filter((tab) => Number(tab.groupId) === Number(duplicate.id))
         .map((tab) => tab.id);
-      if (tabIds.length) await addTabsToChromeGroup(keep.id, tabIds, state.activeSpaceId);
+      if (tabIds.length) {
+        const mergedGroupId = await addTabsToChromeGroup(keep.id, tabIds, state.activeSpaceId);
+        if (mergedGroupId === null) {
+          throw new Error(`Chrome could not merge duplicate group "${keep.title || 'Tabs'}".`);
+        }
+      }
       delete state.groupSpaces[duplicate.id];
       delete state.collapsedGroups[duplicate.key];
       delete state.tabOrder[state.activeSpaceId]?.[duplicate.key];
@@ -3914,17 +4879,23 @@ async function mergeDuplicateGroupsInActiveSpace() {
   return merged;
 }
 
-async function addTidyContext(visibleTabs) {
-  return Promise.all(visibleTabs.map(async (tab) => {
-    if (!/^https?:/.test(tab.url || '')) return tab;
-    const outline = await send('page:outline', { tabId: tab.id }).catch(() => null);
-    const outlineTitle = outline?.title;
-    return {
-      ...tab,
-      title: outlineTitle && !isPlaceholderTabTitle(outlineTitle) ? outlineTitle : tab.title,
-      outlineHeadings: outline?.headings || [],
-    };
-  }));
+function assertLivePlannedGroupsApplied(livePlannedGroups, spaceId) {
+  const chromeGroupsById = new Map(groups.map((group) => [Number(group.id), group]));
+  for (const group of livePlannedGroups || []) {
+    const expectedTitle = groupTitleKey(group.title);
+    for (const tabId of group.tabIds || []) {
+      const currentTab = tabs.find((tab) => Number(tab.id) === Number(tabId));
+      const currentGroup = chromeGroupsById.get(Number(currentTab?.groupId));
+      if (
+        !currentTab ||
+        !currentGroup ||
+        state.groupSpaces[currentGroup.id] !== spaceId ||
+        groupTitleKey(currentGroup.title) !== expectedTitle
+      ) {
+        throw new Error(`Chrome did not finish applying the proposed group "${group.title}". The change was rolled back.`);
+      }
+    }
+  }
 }
 
 async function toggleSpaceGroups() {
@@ -4001,72 +4972,277 @@ async function openAskPage() {
   els.askPagePrompt.focus();
 }
 
-async function askCustomPrompt() {
+function startAskFromUserGesture() {
   if (activeAIRequestId) {
-    await abortActiveAIRequest();
+    void abortActiveAIRequest();
     return;
   }
   const prompt = els.askPagePrompt.value.trim();
   if (!prompt) return;
+  const sourceSpaceId = state.activeSpaceId;
+  const sourceSelection = currentAskSources();
+  if (sourceSelection.count === 0) {
+    const message = sourceSelection.mode === 'selected'
+      ? 'The selected rows cannot be read. Select at least one live http(s) tab in this Space.'
+      : 'Open at least one http(s) page in this Space before asking it.';
+    reportAskStartError(message);
+    return;
+  }
+  const aiSettings = structuredClone(state.ai);
+  if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
+    reportAskStartError('AI API key is missing. Add it in Settings before reading page sources.');
+    return;
+  }
+  let permissionRequest;
+  try {
+    permissionRequest = requestAskPermissionsFromUserGesture(sourceSelection.tabs, aiSettings);
+  } catch (error) {
+    reportAskStartError(formatAIError(error));
+    return;
+  }
+  void runTask(() => askCustomPrompt({
+    prompt,
+    sourceSpaceId,
+    sourceSelection,
+    aiSettings,
+    permissionRequest,
+  }));
+}
+
+function requestAskPermissionsFromUserGesture(sourceTabs = [], aiSettings = state.ai) {
+  if (!extensionRuntime) return Promise.resolve(true);
+  const origins = [...new Set([
+    ...(sourceTabs || [])
+      .map((tab) => tab?.url)
+      .filter((url) => /^https?:/.test(url || ''))
+      .map((url) => getOriginPattern(url)),
+    getOriginPattern(aiSettings.baseUrl),
+  ])];
+  if (origins.length < 2 && sourceTabs.length === 0) {
+    throw new Error('Select at least one live http(s) page for Ask Space.');
+  }
+  return chrome.permissions.request({ origins }).then((granted) => {
+    if (!granted) {
+      throw new Error('Ask Space permission was not granted. No page content was read or sent.');
+    }
+    return true;
+  });
+}
+
+function reportAskStartError(message) {
+  setStatus(message);
+  showStatusToast(message, 'error');
+}
+
+async function askCustomPrompt({
+  prompt,
+  sourceSpaceId,
+  sourceSelection,
+  aiSettings,
+  permissionRequest,
+} = {}) {
   activeView = 'ask';
   render();
+  if (state.activeSpaceId !== sourceSpaceId) {
+    throw new Error('The active Space changed before Ask started. Review the current sources and try again.');
+  }
   const session = ensureCurrentAskSession();
-  addAskMessage('user', prompt, session.key);
-  const statusMessage = addAskMessage('assistant', 'Thinking...', session.key);
-  const history = (session.messages || []).slice(0, -2).slice(-8);
+  const history = recentAskHistory(session.messages);
+  const sourceSpaceName = currentSpace().name;
   const requestId = beginAIRequest();
+  let statusMessage = null;
   try {
-    await ensureAIHostPermission();
-    const page = await extractCurrentPageForAI();
+    await permissionRequest;
+    assertAIRequestActive(requestId);
+    const extraction = await send('pages:extract', {
+      tabIds: sourceSelection.tabIds,
+      options: { maxCharsPerPage: 12000, maxTotalChars: 60000 },
+    });
+    assertAIRequestActive(requestId);
+    const pages = extraction.pages || [];
+    const failures = extraction.failures || [];
+    if (pages.length + failures.length !== sourceSelection.tabIds.length) {
+      throw new Error('Ask Space could not account for every confirmed source. No content was sent.');
+    }
+    if (pages.length === 0) {
+      const detail = failures[0]?.error;
+      throw new Error(detail || 'The selected pages could not be read. Reload them and try again.');
+    }
+    if (state.activeSpaceId !== sourceSpaceId) {
+      throw new Error('The active Space changed while sources were being prepared. Review the current Space and try again.');
+    }
+    const provider = providerById(aiSettings.provider);
+    const sourceTabById = new Map(sourceSelection.tabs.map((tab) => [Number(tab.id), tab]));
+    const limitedSourceCount = Number(sourceSelection.counts?.limited) || 0;
+    const otherUntouchedCount = Math.max(0, sourceSelection.untouchedCount - limitedSourceCount);
+    const limitedSourceLabel = sourceSelection.mode === 'selected' ? 'selected' : 'readable';
+    const confirmed = await showPlanPreview({
+      title: 'Review Ask Space',
+      message: `${provider.label} · ${aiSettings.model || 'configured model'} · ${formatCharacterCount(extraction.totalChars)} from ${pages.length} of ${sourceSelection.count} confirmed pages${limitedSourceCount ? ` · ${limitedSourceCount} additional ${limitedSourceLabel} ${limitedSourceCount === 1 ? 'page' : 'pages'} excluded by the 12-page limit` : ''}${history.length ? ` · stored text from ${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'} (generated Sources appendices excluded)` : ''}. Nothing is sent until you confirm.`,
+      confirmText: 'Send to provider',
+      sections: [
+        {
+          title: `${pages.length} source ${pages.length === 1 ? 'page' : 'pages'}`,
+          items: pages.map((page, index) => ({
+            title: `[${index + 1}] ${page.title || page.url || 'Untitled'}`,
+            result: `${formatCharacterCount(page.charCount || String(page.text || '').length)}${page.truncated ? ' · truncated' : ''}`,
+            meta: page.url,
+          })),
+        },
+        ...(failures.length ? [{
+          title: 'Confirmed sources not sent',
+          items: failures.map((failure) => {
+            const tab = sourceTabById.get(Number(failure.tabId));
+            return {
+              title: tab?.displayTitle || tab?.title || tab?.url || `Tab ${failure.tabId}`,
+              result: failure.reason === 'content-limit' ? 'Content limit reached' : 'Could not read',
+              meta: failure.error,
+            };
+          }),
+        }] : []),
+        {
+          title: 'Question and conversation context',
+          items: [
+            { title: 'Your current question', result: 'Sent as written' },
+            ...(history.length ? [{
+              title: `${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'}`,
+              result: 'Stored message text sent; generated Sources appendices excluded',
+            }] : []),
+          ],
+        },
+        ...(limitedSourceCount ? [{
+          title: '12-page source limit',
+          items: [{
+            title: `${limitedSourceCount} additional ${limitedSourceLabel} ${limitedSourceCount === 1 ? 'page' : 'pages'}`,
+            result: 'Not read or sent',
+          }],
+        }] : []),
+        ...(otherUntouchedCount ? [{
+          title: 'Other Space tabs not sent',
+          items: [{
+            title: `${otherUntouchedCount} other saved, restricted, or unselected tabs`,
+            result: 'Untouched',
+          }],
+        }] : []),
+      ],
+    });
+    if (!confirmed) return;
+    assertAIRequestActive(requestId);
+    statusMessage = await beginAskTurn(session.key, prompt, sourceSpaceId);
+    activeAskStreams.set(requestId, { messageRef: statusMessage, pages, text: '' });
+    assertAIRequestActive(requestId);
     const { text } = await send('ai:chat', {
-      settings: state.ai,
+      settings: aiSettings,
       requestId,
+      stream: true,
       messages: createPrompt('ask-space', {
         question: prompt,
-        spaceName: currentSpace().name,
-        page,
+        spaceName: sourceSpaceName,
+        pages,
         history,
-        language: state.ai.language,
+        language: aiSettings.language,
       }),
     });
-    const answer = text || 'No AI text returned.';
+    assertAIRequestActive(requestId);
+    const answer = appendAskSourceLinks(text || 'No AI text returned.', pages);
     els.askPagePrompt.value = '';
-    updateAskMessage(statusMessage, answer);
+    await persistAskMessage(statusMessage, answer);
   } catch (error) {
     const message = formatAIError(error);
-    updateAskMessage(statusMessage, message);
+    const stream = activeAskStreams.get(requestId);
+    const partial = stream?.text || '';
+    if (statusMessage) {
+      const stopped = Boolean(stream?.aborted) || /request was stopped|ask stopped/i.test(message);
+      const answer = partial
+        ? appendAskSourceLinks(`${partial}\n\n_${stopped ? 'Request stopped before completion.' : `Request failed before completion: ${message}`}_`, stream?.pages || [])
+        : message;
+      await persistAskMessage(statusMessage, answer);
+    }
+    else {
+      setStatus(message);
+      showStatusToast(message, 'error');
+    }
   } finally {
+    activeAskStreams.delete(requestId);
     endAIRequest(requestId);
   }
 }
 
-async function extractCurrentPageForAI() {
-  const active = currentActiveTab();
-  if (!/^https?:/.test(active?.url || '')) {
-    return {
-      title: active?.title || 'No current web page',
-      url: active?.url || '',
-      text: '',
-    };
-  }
-  await ensureActivePagePermission();
-  const { page } = await send('page:extract');
-  return page;
+function recentAskHistory(messages = []) {
+  return (messages || []).slice(-8).map((message) => ({
+    role: message.role,
+    text: String(message.text || '')
+      .split(/\n\n### Sources\n/i)[0]
+      .trim(),
+  })).filter((message) => message.text);
 }
 
-async function testAI() {
+async function beginAskTurn(sessionKey, prompt, sourceSpaceId) {
+  let assistantRef;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    if (state.activeSpaceId !== sourceSpaceId) {
+      throw new Error('The active Space changed before Ask was sent. Review the current sources and try again.');
+    }
+    const latestSession = ensureAskSessionByKey(sessionKey);
+    appendAskSessionMessage(latestSession, 'user', prompt);
+    const assistant = appendAskSessionMessage(latestSession, 'assistant', 'Thinking...');
+    assistantRef = { sessionKey: latestSession.key, messageId: assistant.id };
+    await saveState();
+  });
+  renderAskMessages();
+  return assistantRef;
+}
+
+async function persistAskMessage(ref, text) {
+  if (!ref) return;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const latestSession = ensureAskSessionByKey(ref.sessionKey);
+    const updated = updateAskSessionMessage(latestSession, ref.messageId, text);
+    if (!updated) appendAskSessionMessage(latestSession, 'assistant', text);
+    await saveState();
+  });
+  if (ref.sessionKey === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
+}
+
+function assertAIRequestActive(requestId) {
+  if (activeAIRequestId !== requestId) throw new Error('AI request was stopped.');
+}
+
+function formatCharacterCount(value) {
+  const count = Math.max(0, Number(value) || 0);
+  return count >= 1000 ? `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}K chars` : `${count} chars`;
+}
+
+function startTestAIFromUserGesture() {
   if (activeAIRequestId) {
-    await abortActiveAIRequest();
+    void abortActiveAIRequest();
     return;
   }
-  setSettingsStatus('Testing AI configuration...');
-  const requestId = beginAIRequest();
+  let settings;
+  let permissionRequest;
   try {
-    const settings = currentAISettingsFromForm();
+    settings = currentAISettingsFromForm();
     if (providerRequiresApiKey(settings) && !settings.apiKey) {
       throw new Error('AI API key is missing. Add it in Settings.');
     }
-    await ensureAIHostPermission(settings);
+    permissionRequest = requestAIHostPermissionFromUserGesture(settings);
+  } catch (error) {
+    setSettingsStatus(formatAIError(error));
+    return;
+  }
+  void runTask(() => testAI({ settings, permissionRequest }));
+}
+
+async function testAI({ settings = currentAISettingsFromForm(), permissionRequest } = {}) {
+  setSettingsStatus('Testing AI configuration...');
+  const requestId = beginAIRequest();
+  try {
+    if (providerRequiresApiKey(settings) && !settings.apiKey) {
+      throw new Error('AI API key is missing. Add it in Settings.');
+    }
+    await (permissionRequest || ensureAIHostPermission(settings));
     const { text } = await send('ai:chat', {
       settings,
       requestId,
@@ -4139,22 +5315,57 @@ async function restoreSpaceData() {
   if (!ok) return;
 
   let summary;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    summary = restoreSpaceBackup(state, pendingSpaceBackup);
-    activeView = 'space';
-    dormantSpaceView = [];
-    dormantSpaceViewSpaceId = '';
-    lastRenderedGroupsSignature = '';
-    lastRenderedAskSignature = '';
-    lastRenderedSpacesSignature = '';
-    pendingSpaceBackup = null;
-    els.spaceBackupInput.value = '';
-    els.restoreSpaceDataButton.disabled = true;
-    await saveState();
-    els.settingsDialog.close();
-    await refreshTabs({ adopt: true, reloadDormant: true });
-  });
+  try {
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      await loadTabs({ adopt: false });
+      snapshotOpenSpace(state.activeSpaceId);
+      const beforeState = structuredClone(state);
+      const beforeBackup = createSpaceBackup(state);
+      let persisted = false;
+      try {
+        summary = restoreSpaceBackup(state, pendingSpaceBackup);
+        recordOperation({
+          type: 'restore-backup',
+          spaceId: state.activeSpaceId,
+          summary: `Restored ${summary.spaces} Spaces and ${summary.savedTabs} saved tabs`,
+          before: { backup: beforeBackup },
+          after: { portableFingerprint: fingerprintPortableWorkspaceContent(state) },
+        });
+        assertCurrentStateFitsStorage();
+        await saveState();
+        persisted = true;
+        await refreshTabs({ adopt: false, reloadDormant: true });
+      } catch (error) {
+        state = beforeState;
+        const rollbackFailures = [];
+        if (persisted) {
+          try {
+            await saveState();
+          } catch (rollbackError) {
+            rollbackFailures.push({ stage: 'restoring workspace state', error: rollbackError });
+          }
+        }
+        restoreFailedWorkspaceMutation(beforeState);
+        if (rollbackFailures.length > 0) throw rollbackFailureError(error, rollbackFailures);
+        throw error;
+      }
+      activeView = 'space';
+      dormantSpaceView = [];
+      dormantSpaceViewSpaceId = '';
+      lastRenderedGroupsSignature = '';
+      lastRenderedAskSignature = '';
+      lastRenderedSpacesSignature = '';
+      pendingSpaceBackup = null;
+      els.spaceBackupInput.value = '';
+      els.restoreSpaceDataButton.disabled = true;
+      els.settingsDialog.close();
+      render();
+    });
+  } catch (error) {
+    setSpaceBackupStatus(`Restore failed: ${error.message || String(error)}`);
+    throw error;
+  }
   setStatus(`Restored ${summary.spaces} Spaces and ${summary.savedTabs} saved tabs.`);
 }
 
@@ -4186,7 +5397,7 @@ async function previewArcImportFile() {
     pendingArcImportText = text;
     pendingArcImportPlan = plan;
     els.importArcButton.disabled = plan.spaces.length === 0;
-    setArcImportStatus(formatArcImportSummary(plan.summary, 'Ready to append'));
+    setArcImportStatus(`${formatArcImportSummary(plan.summary, 'Ready to append')}${formatArcConflictSummary(plan)}`);
   } catch (error) {
     setArcImportStatus(`Cannot read Arc file: ${error.message || String(error)}`);
   }
@@ -4199,15 +5410,40 @@ async function importArcFile() {
   }
 
   try {
+    const previewById = new Map((pendingArcImportPlan.spacePreviews || []).map((preview) => [preview.spaceId, preview]));
+    const confirmed = await showPlanPreview({
+      title: 'Review Arc Import',
+      message: `${formatArcImportSummary(pendingArcImportPlan.summary, 'Import')}${formatArcConflictSummary(pendingArcImportPlan)}`,
+      confirmText: 'Import Spaces',
+      sections: [{
+        title: 'Spaces to append',
+        items: pendingArcImportPlan.spaces.map((space) => {
+          const preview = previewById.get(space.id);
+          return {
+            title: space.name,
+            result: `${preview?.folders || 0} folders · ${preview?.tabs || 0} tabs`,
+            meta: (preview?.conflicts || []).map((conflict) => `${conflict.original} → ${conflict.resolved}`).join(', '),
+          };
+        }),
+      }],
+    });
+    if (!confirmed) return;
     let result;
     await withSharedStateLock(async () => {
       await syncStateFromStorage();
       const latestPlan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
-      result = appendArcImportPlan(state, latestPlan);
-      rememberArcImport(result.importedSpaceIds);
-      await saveState();
-      render();
-      renderSettings();
+      const beforeState = structuredClone(state);
+      try {
+        result = appendArcImportPlan(state, latestPlan);
+        rememberArcImport(result.importedSpaceIds);
+        assertCurrentStateFitsStorage();
+        await saveState();
+        render();
+        renderSettings();
+      } catch (error) {
+        restoreFailedWorkspaceMutation(beforeState);
+        throw error;
+      }
     });
     pendingArcImportText = '';
     pendingArcImportPlan = null;
@@ -4224,22 +5460,48 @@ async function importArcFile() {
 function rememberArcImport(spaceIds) {
   const ids = [...new Set((spaceIds || []).map(String).filter(Boolean))];
   state.lastArcImport = ids.length
-    ? { spaceIds: ids, importedAt: Date.now() }
+    ? {
+      spaceIds: ids,
+      importedAt: Date.now(),
+      afterFingerprints: fingerprintPortableSpacesContent(state, ids),
+    }
     : null;
 }
 
-async function undoLastArcImport() {
+function assertArcImportUndoIsFresh(importRecord) {
+  const spaceIds = [...new Set((importRecord?.spaceIds || []).map(String).filter(Boolean))];
+  const afterFingerprints = importRecord?.afterFingerprints;
+  if (
+    spaceIds.length === 0 ||
+    !afterFingerprints ||
+    spaceIds.some((spaceId) => (
+      !Object.hasOwn(afterFingerprints, spaceId) || !String(afterFingerprints[spaceId] || '')
+    ))
+  ) {
+    throw new Error('This Arc import record does not contain the safety data required for Undo.');
+  }
+
+  const currentFingerprints = fingerprintPortableSpacesContent(state, spaceIds);
+  const changedSpaceIds = spaceIds.filter((spaceId) => (
+    currentFingerprints[spaceId] !== afterFingerprints[spaceId]
+  ));
+  if (changedSpaceIds.length > 0) {
+    const changedNames = changedSpaceIds.map((spaceId) => (
+      state.spaces.find((space) => space.id === spaceId)?.name || spaceId
+    ));
+    throw new Error(`Imported ${changedSpaceIds.length === 1 ? 'Space' : 'Spaces'} ${changedNames.join(', ')} changed after the Arc import. Undo was stopped to preserve the newer content.`);
+  }
+}
+
+async function undoLastArcImport(options = {}) {
   const importedIds = new Set((state.lastArcImport?.spaceIds || []).map(String));
   const removableSpaces = state.spaces.filter((space) => importedIds.has(space.id));
   if (removableSpaces.length === 0) {
-    state.lastArcImport = null;
-    await saveState();
-    renderSettings();
     setArcImportStatus('There is no Arc import to undo.');
     return;
   }
 
-  const ok = await askConfirm({
+  const ok = options.confirm === false || await askConfirm({
     title: 'Undo Arc Import',
     message: `Remove ${removableSpaces.length} imported Spaces and their saved tabs? Open tabs will stay open and return to the active Space.`,
     confirmText: 'Undo Import',
@@ -4250,6 +5512,7 @@ async function undoLastArcImport() {
   let removedCount = 0;
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
+    assertArcImportUndoIsFresh(state.lastArcImport);
     const latestImportedIds = new Set((state.lastArcImport?.spaceIds || []).map(String));
     const latestRemovableSpaces = state.spaces.filter((space) => latestImportedIds.has(space.id));
     if (latestRemovableSpaces.length === 0) {
@@ -4463,6 +5726,7 @@ function openActionDialog({
   withInput = false,
   previewSections = [],
   previewVariant = 'changes',
+  onConfirm = null,
 }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -4481,10 +5745,18 @@ function openActionDialog({
 
     const onSubmit = (event) => {
       event.preventDefault();
+      if (onConfirm) onConfirm();
       finish(withInput ? els.actionDialogInput.value.trim() : true);
     };
     const onCancel = () => finish(null);
-    const onClose = () => finish(null);
+    const onClose = () => {
+      // Calling dialog.close() queues a close event. A proposal workflow can
+      // open its second review dialog before that old event is delivered; in
+      // that case the shared dialog is open again and the stale event must not
+      // cancel the new review.
+      if (els.actionDialog.open) return;
+      finish(null);
+    };
 
     els.actionDialogTitle.textContent = title;
     els.actionDialogMessage.textContent = message;
@@ -4733,7 +6005,6 @@ async function saveSettings() {
   }
   const selectedTheme = state.tempTheme;
 
-  await ensureAIHostPermission(aiSettings).catch(() => null);
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
     state.ai = aiSettings;
@@ -4775,7 +6046,7 @@ function currentAISettingsFromForm() {
   if (!isValidMaxTokens(maxTokens)) {
     throw new Error('Enter 0.001-128 K tokens. Default: 10 K (10,240 tokens).');
   }
-  return {
+  const settings = {
     ...normalizeAIProviderSettings({
       ...state.ai,
       provider: provider.id,
@@ -4787,6 +6058,17 @@ function currentAISettingsFromForm() {
     thinking: els.thinkingInput.value,
     maxTokens,
   };
+  let url;
+  try {
+    url = new URL(settings.baseUrl);
+  } catch {
+    throw new Error('Enter a valid http(s) AI Base URL.');
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('AI Base URL must use http or https.');
+  }
+  if (!settings.model) throw new Error('Choose or enter an AI model.');
+  return settings;
 }
 
 function selectedModelFromForm() {
@@ -4821,22 +6103,18 @@ async function ensureAIHostPermission(settings = state.ai) {
   const origin = getOriginPattern(settings.baseUrl);
   const hasPermission = await chrome.permissions.contains({ origins: [origin] });
   if (hasPermission) return true;
-  return chrome.permissions.request({ origins: [origin] });
+  const granted = await chrome.permissions.request({ origins: [origin] });
+  if (!granted) throw new Error('AI provider access was not granted. No request was sent.');
+  return true;
 }
 
-async function ensureActivePagePermission() {
-  if (!extensionRuntime) return true;
-  const active = tabs.find((tab) => tab.active);
-  const url = active?.url || '';
-  if (!/^https?:/.test(url)) {
-    throw new Error('Switch to an http or https page before asking this Space.');
-  }
-  const origin = getOriginPattern(url);
-  const hasPermission = await chrome.permissions.contains({ origins: [origin] });
-  if (hasPermission) return true;
-  const granted = await chrome.permissions.request({ origins: [origin] });
-  if (!granted) throw new Error(`Space needs permission to read ${new URL(url).hostname} for Ask Space.`);
-  return true;
+function requestAIHostPermissionFromUserGesture(settings = state.ai) {
+  if (!extensionRuntime) return Promise.resolve(true);
+  const origin = getOriginPattern(settings.baseUrl);
+  return chrome.permissions.request({ origins: [origin] }).then((granted) => {
+    if (!granted) throw new Error('AI provider access was not granted. No request was sent.');
+    return true;
+  });
 }
 
 async function send(type, payload = {}) {
@@ -4865,6 +6143,8 @@ function endAIRequest(requestId) {
 async function abortActiveAIRequest() {
   if (!activeAIRequestId) return;
   const requestId = activeAIRequestId;
+  const stream = activeAskStreams.get(requestId);
+  if (stream) stream.aborted = true;
   activeAIRequestId = '';
   updateAIRequestUI();
   await send('ai:abort', { requestId }).catch(() => null);
@@ -4873,7 +6153,7 @@ async function abortActiveAIRequest() {
 
 function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
-  els.askAIButton.textContent = busy ? 'Stop' : 'Ask';
+  els.askAIButton.textContent = busy ? 'Stop' : 'Ask Space';
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
 }
 
@@ -4910,16 +6190,6 @@ async function secretRemove(key) {
   sessionStorage.removeItem(key);
 }
 
-async function syncAISettingsFromStorage() {
-  const defaults = createDefaultState(localConfig);
-  const [stored, secrets] = await Promise.all([storageGet(), secretGet()]);
-  const storedState = mergeStoredState(stored[STORAGE_KEY], defaults);
-  state.ai = {
-    ...storedState.ai,
-    apiKey: localConfig.ai?.apiKey || secrets[SECRET_STORAGE_KEY]?.ai?.apiKey || '',
-  };
-}
-
 function stateForStorage() {
   return {
     ...state,
@@ -4928,6 +6198,21 @@ function stateForStorage() {
       apiKey: '',
     },
   };
+}
+
+function assertCurrentStateFitsStorage() {
+  return assertWorkspaceStorageBudget({ [STORAGE_KEY]: stateForStorage() });
+}
+
+function restoreFailedWorkspaceMutation(previousState) {
+  state = previousState;
+  dormantSpaceView = [];
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
+  lastRenderedAskSignature = '';
+  lastRenderedSpacesSignature = '';
+  render();
+  renderSettings();
 }
 
 function actionButton(text, title, handler) {
@@ -4951,20 +6236,30 @@ function actionButton(text, title, handler) {
   return button;
 }
 
-async function runTask(task) {
+function runTask(task) {
   activeTaskCount += 1;
-  try {
-    if (extensionRuntime) await syncStateFromStorage();
-    await task();
-  } catch (error) {
-    const message = formatAIError(error);
-    setStatus(message);
-    if (activeView === 'settings') setSettingsStatus(message);
-    if (activeView === 'ask') addAskMessage('assistant', message);
-    console.error(error);
-  } finally {
-    activeTaskCount = Math.max(0, activeTaskCount - 1);
-  }
+  const execute = async () => {
+    try {
+      await task();
+    } catch (error) {
+      const message = formatAIError(error);
+      setStatus(message);
+      if (activeView === 'settings') setSettingsStatus(message);
+      if (activeView === 'ask') {
+        try {
+          await addAskMessage('assistant', message);
+        } catch (persistenceError) {
+          console.error(persistenceError);
+        }
+      }
+      console.error(error);
+    } finally {
+      activeTaskCount = Math.max(0, activeTaskCount - 1);
+    }
+  };
+  const queuedTask = taskQueue.then(execute, execute);
+  taskQueue = queuedTask.catch(() => undefined);
+  return queuedTask;
 }
 
 async function withSharedStateLock(task) {
@@ -4972,12 +6267,60 @@ async function withSharedStateLock(task) {
   return navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
 }
 
-function currentSpace() {
-  return state.spaces.find((space) => space.id === state.activeSpaceId) || state.spaces[0];
+async function withFreshSpaceStateMutation(task) {
+  return withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await loadTabs({ adopt: false });
+    await loadDormantSpaceView(state.activeSpaceId, { force: true });
+    render();
+    return task();
+  });
 }
 
-function currentActiveTab() {
-  return tabs.find((tab) => tab.active) || tabs[0] || {};
+async function refreshOrganizationActionState({ adopt = false } = {}) {
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    await loadTabs({ adopt });
+    await loadDormantSpaceView(state.activeSpaceId, { force: true });
+    render();
+  });
+}
+
+function currentTabForMutation(reference) {
+  const tabId = Number(reference?.id);
+  const current = tabs.find((tab) => Number(tab.id) === tabId);
+  if (!current || String(current.url || '') !== String(reference?.url || '')) {
+    throw new Error('This tab changed in another Space Tabs view. Try the action again.');
+  }
+  return current;
+}
+
+function currentGroupForMutation(reference) {
+  const current = spaceView.find((group) => group.key === reference?.key);
+  if (!current || groupMutationFingerprint(current) !== groupMutationFingerprint(reference)) {
+    throw new Error('This group changed in another Space Tabs view. Try the action again.');
+  }
+  return current;
+}
+
+function groupMutationFingerprint(group = {}) {
+  return JSON.stringify({
+    key: String(group.key || ''),
+    dormant: Boolean(group.dormant),
+    title: groupTitleKey(group.title || group.displayTitle),
+    color: String(group.color || ''),
+    tabs: (group.tabs || []).map((tab) => ({
+      id: String(tab?.id ?? ''),
+      url: snapshotUrlIdentity(tab?.url),
+      dormant: Boolean(tab?.dormant),
+    })).sort((left, right) => (
+      `${left.id}\n${left.url}`.localeCompare(`${right.id}\n${right.url}`)
+    )),
+  });
+}
+
+function currentSpace() {
+  return state.spaces.find((space) => space.id === state.activeSpaceId) || state.spaces[0];
 }
 
 function ensureCurrentAskSession() {
@@ -5283,11 +6626,6 @@ function selectedGroupTitle(selectedTabs) {
   return 'Selected Tabs';
 }
 
-function activePageStatus() {
-  const active = currentActiveTab();
-  return active?.title || 'active page';
-}
-
 function spaceName(spaceId) {
   return state.spaces.find((space) => space.id === spaceId)?.name || 'Space';
 }
@@ -5360,6 +6698,11 @@ function formatArcImportSummary(summary, prefix = 'Arc import') {
   return `${prefix}: ${summary.spaces} Spaces, ${summary.folders} folders, ${summary.tabs} tabs from ${summary.source}.${skippedText}`;
 }
 
+function formatArcConflictSummary(plan) {
+  const count = Array.isArray(plan?.conflicts) ? plan.conflicts.length : 0;
+  return count ? ` ${count} naming ${count === 1 ? 'conflict was' : 'conflicts were'} resolved and shown below.` : '';
+}
+
 function renderAskMessages() {
   const session = ensureCurrentAskSession();
   const signature = askMessagesSignature(session);
@@ -5391,21 +6734,26 @@ function createAskMessageElement(message) {
   return node;
 }
 
-function addAskMessage(role, text, sessionKey = state.activeAskSessionKey) {
+async function addAskMessage(role, text, sessionKey = state.activeAskSessionKey) {
   if (!text) return;
-  const session = ensureAskSessionByKey(sessionKey);
-  const message = appendAskSessionMessage(session, role, text);
-  if (session.key === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  void saveState();
-  return { sessionKey: session.key, messageId: message.id };
+  let messageRef;
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    const session = ensureAskSessionByKey(sessionKey);
+    const message = appendAskSessionMessage(session, role, text);
+    messageRef = { sessionKey: session.key, messageId: message.id };
+    await saveState();
+  });
+  if (messageRef.sessionKey === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
+  return messageRef;
 }
 
-function updateAskMessage(ref, text) {
+async function updateAskMessage(ref, text, options = {}) {
   if (!ref) return;
   const session = ensureAskSessionByKey(ref.sessionKey);
   updateAskSessionMessage(session, ref.messageId, text);
   if (session.key === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  void saveState();
+  if (options.persist !== false) await persistAskMessage(ref, text);
 }
 
 function setStatus(text) {

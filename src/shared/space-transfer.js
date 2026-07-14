@@ -1,8 +1,28 @@
 import { ASK_SESSION_LIMITS } from './ask-session.js';
-import { sanitizeSpaceSnapshot } from './space-snapshot.js';
+import {
+  isUngroupedSnapshotGroup,
+  sanitizeSpaceSnapshot,
+} from './space-snapshot.js';
 
 export const SPACE_BACKUP_FORMAT = 'space-context-workspaces';
 export const SPACE_BACKUP_VERSION = 1;
+export const WORKSPACE_STORAGE_BUDGET_BYTES = 8 * 1024 * 1024;
+
+export function serializedJsonBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+export function assertWorkspaceStorageBudget(value, maxBytes = WORKSPACE_STORAGE_BUDGET_BYTES) {
+  const bytes = serializedJsonBytes(value);
+  if (bytes <= maxBytes) return bytes;
+  const usedMB = (bytes / (1024 * 1024)).toFixed(1);
+  const maxMB = (maxBytes / (1024 * 1024)).toFixed(0);
+  throw new Error(
+    `This workspace would use ${usedMB} MB in Chrome storage, above the safe ${maxMB} MB budget. ` +
+    'Reduce imported Spaces or saved tabs and try again. Nothing was changed.',
+  );
+}
+const PORTABLE_CONTENT_FINGERPRINT_VERSION = 1;
 
 export function createSpaceBackup(state = {}, now = Date.now()) {
   const spaces = normalizeSpaces(state.spaces);
@@ -79,6 +99,54 @@ export function restoreSpaceBackup(state, input) {
   };
 }
 
+/**
+ * Fingerprints the user-authored data a portable restore replaces.
+ *
+ * Selection, collapse state, and timestamps are intentionally excluded: they
+ * can change while someone merely views the restored Spaces and do not carry
+ * user-authored Space, Tag, saved-page, context, or Ask content.
+ */
+export function fingerprintPortableWorkspaceContent(state = {}) {
+  const backup = createSpaceBackup(state, 0);
+  return fingerprintPortableContent('workspace', {
+    spaces: backup.spaces,
+    spaceContexts: backup.spaceContexts,
+    spaceSnapshots: backup.spaceSnapshots,
+    askSessions: portableAskSessionsContent(backup.askSessions),
+  });
+}
+
+/**
+ * Fingerprints one Space's portable content without depending on which Space
+ * is active or on unrelated Spaces. Arc import Undo uses one fingerprint per
+ * imported Space so it cannot delete a Space that has since been edited.
+ */
+export function fingerprintPortableSpaceContent(state = {}, spaceId) {
+  const backup = createSpaceBackup(state, 0);
+  return fingerprintPortableSpaceFromBackup(backup, spaceId);
+}
+
+export function fingerprintPortableSpacesContent(state = {}, spaceIds = []) {
+  const backup = createSpaceBackup(state, 0);
+  const ids = [...new Set((spaceIds || []).map(String).filter(Boolean))];
+  return Object.fromEntries(ids.map((spaceId) => [
+    spaceId,
+    fingerprintPortableSpaceFromBackup(backup, spaceId),
+  ]));
+}
+
+function fingerprintPortableSpaceFromBackup(backup, spaceId) {
+  const id = String(spaceId || '');
+  const space = backup.spaces.find((candidate) => candidate.id === id) || null;
+  const askKey = `space:${id}`;
+  return fingerprintPortableContent('space', {
+    space,
+    context: backup.spaceContexts[id] || '',
+    snapshot: backup.spaceSnapshots[id] || null,
+    askSession: portableAskSessionContent(backup.askSessions[askKey]),
+  });
+}
+
 function normalizeSpaces(spaces) {
   const normalized = [];
   const seen = new Set();
@@ -118,6 +186,7 @@ function normalizeSpaceSnapshots(snapshots, validSpaceIds) {
 }
 
 function portableSnapshot(snapshot) {
+  const preserveGroups = Boolean(snapshot.preserveGroups);
   const groups = (snapshot.groups || []).map((group) => ({
     title: String(group.title || 'Ungrouped'),
     color: String(group.color || 'grey'),
@@ -130,11 +199,14 @@ function portableSnapshot(snapshot) {
         url: String(tab.url || ''),
         ...(tab.panelTitle ? { panelTitle: String(tab.panelTitle) } : {}),
       })),
-  })).filter((group) => group.tabs.length > 0);
+  })).filter((group) => (
+    group.tabs.length > 0 || (preserveGroups && !isUngroupedSnapshotGroup(group))
+  ));
 
   return {
     version: Number(snapshot.version || 1),
     updatedAt: finiteTimestamp(snapshot.updatedAt),
+    ...(preserveGroups ? { preserveGroups: true } : {}),
     groups,
   };
 }
@@ -199,4 +271,52 @@ function isPortableTabUrl(value) {
   } catch {
     return false;
   }
+}
+
+function fingerprintPortableContent(scope, value) {
+  const canonical = stablePortableValue(value);
+  const serialized = JSON.stringify(canonical);
+  return `portable-${scope}-v${PORTABLE_CONTENT_FINGERPRINT_VERSION}-${fnv1a(serialized)}`;
+}
+
+function portableAskSessionsContent(sessions = {}) {
+  return Object.fromEntries(Object.entries(sessions)
+    .map(([key, session]) => [key, portableAskSessionContent(session)])
+    .filter(([, session]) => session));
+}
+
+function portableAskSessionContent(session) {
+  if (!session) return null;
+  const messages = (session.messages || []).map((message) => ({
+    role: message.role === 'user' ? 'user' : 'assistant',
+    text: String(message.text || ''),
+  }));
+  if (messages.length === 0) return null;
+  return {
+    key: String(session.key || ''),
+    spaceId: String(session.spaceId || ''),
+    title: String(session.title || ''),
+    messages,
+  };
+}
+
+function stablePortableValue(value) {
+  if (Array.isArray(value)) return value.map(stablePortableValue);
+  if (!value || typeof value !== 'object') return value;
+
+  const normalized = {};
+  for (const key of Object.keys(value).sort()) {
+    if (['createdAt', 'updatedAt', 'exportedAt', 'collapsed'].includes(key)) continue;
+    normalized[key] = stablePortableValue(value[key]);
+  }
+  return normalized;
+}
+
+function fnv1a(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }

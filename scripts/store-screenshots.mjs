@@ -25,47 +25,47 @@ const shots = [
   {
     id: 'overview',
     file: '01-spaces-overview.png',
-    title: 'Arc-like Spaces',
+    title: 'Your Arc workspace, now in Chrome.',
     kicker: 'One thing. One Space.',
-    description: 'Keep each project, decision, or research thread in its own focused Chrome workspace.',
+    description: 'Keep projects, folders, tab groups, and saved tabs together without switching browsers.',
     activeSpaceId: 'launch',
-    notes: ['Live groups', 'Panel names', 'Space dock'],
+    notes: ['Spaces', 'Folders + saved tabs', 'Chrome-native groups'],
   },
   {
-    id: 'nested-dormant',
+    id: 'arc-import',
     file: '02-nested-folders-dormant-tabs.png',
-    title: 'Nested Folders',
-    kicker: 'Dormant tabs stay unloaded',
-    description: 'Keep deep project folders and saved tabs available without keeping every page open.',
-    activeSpaceId: 'research',
-    notes: ['3-level folders', 'Saved tabs', 'Open on demand'],
-  },
-  {
-    id: 'context-menu',
-    file: '03-tab-context-menu.png',
-    title: 'Tab Actions',
-    kicker: 'Right-click control',
-    description: 'Rename, duplicate, update saved URLs, and move tabs across Spaces from the panel.',
+    title: 'Import Arc Spaces in minutes.',
+    kicker: 'Move from Arc',
+    description: 'Preview Spaces, folders, saved tabs, and conflicts before anything changes.',
     activeSpaceId: 'launch',
-    notes: ['Move to Space', 'Duplicate', 'Rename'],
-  },
-  {
-    id: 'settings',
-    file: '04-settings-arc-import-shortcuts.png',
-    title: 'Settings',
-    kicker: 'Backup, BYOK, and shortcuts',
-    description: 'Keep portable backups and connect only the AI provider you choose.',
-    activeSpaceId: 'launch',
-    notes: ['Portable backup', 'BYOK settings', 'Shortcuts'],
+    notes: ['Real 3-step setup', 'Choose Spaces', 'Undo import'],
   },
   {
     id: 'ask',
     file: '05-ask-page-byok-ai.png',
-    title: 'Ask Space',
-    kicker: 'AI grounded in the active page',
-    description: 'Ask about the page you are using with your own AI provider and key.',
+    title: 'Ask multiple pages with your own AI key.',
+    kicker: 'Ask Space',
+    description: 'Review the provider, sources, and content size before anything is sent.',
     activeSpaceId: 'launch',
-    notes: ['Active page', 'Your API key', 'No account required'],
+    notes: ['Selected or all live pages', 'Clickable citations', 'Stream + Stop'],
+  },
+  {
+    id: 'auto-group',
+    file: '03-tab-context-menu.png',
+    title: 'AI organizes tabs. You approve every change.',
+    kicker: 'Auto Group',
+    description: 'Live and saved tabs enter one proposal. Cancel, apply, or Undo with a visible record.',
+    activeSpaceId: 'launch',
+    notes: ['Live + saved tabs', 'Preview first', 'Undo'],
+  },
+  {
+    id: 'settings',
+    file: '04-settings-arc-import-shortcuts.png',
+    title: 'Local by default. Export anytime.',
+    kicker: 'Your workspace, your data',
+    description: 'No Space Tabs account or server. Export a portable backup whenever you want.',
+    activeSpaceId: 'launch',
+    notes: ['Local workspace data', 'Portable backup', 'BYOK'],
   },
 ];
 
@@ -187,8 +187,8 @@ function storeShotHtml(shot) {
         margin: 0;
         overflow: hidden;
         background:
-          linear-gradient(90deg, rgba(35, 139, 119, 0.16), transparent 42%),
-          linear-gradient(180deg, #191a22 0%, #0f1015 100%);
+          radial-gradient(circle at 18% 20%, rgba(118, 82, 255, 0.24), transparent 34%),
+          linear-gradient(180deg, #191724 0%, #0c0b12 100%);
       }
       .canvas {
         position: relative;
@@ -221,7 +221,7 @@ function storeShotHtml(shot) {
       }
       .kicker {
         margin: 70px 0 12px;
-        color: #77e0c6;
+        color: #b7a5ff;
         font-size: 18px;
         font-weight: 760;
       }
@@ -306,11 +306,11 @@ function storeShotHtml(shot) {
         margin-top: 28px;
       }
       .notes span {
-        border: 1px solid rgba(119, 224, 198, 0.28);
+        border: 1px solid rgba(183, 165, 255, 0.3);
         border-radius: 999px;
         padding: 8px 12px;
         color: rgba(247, 248, 251, 0.82);
-        background: rgba(119, 224, 198, 0.08);
+        background: rgba(118, 82, 255, 0.1);
         font-size: 13px;
         font-weight: 720;
       }
@@ -334,7 +334,7 @@ function storeShotHtml(shot) {
       }
       .workbench-shot .story {
         display: grid;
-        grid-template-columns: 220px minmax(0, 1fr) auto;
+        grid-template-columns: 190px minmax(0, 1fr) auto;
         grid-template-rows: minmax(0, 1fr);
         align-items: center;
         gap: 24px;
@@ -346,12 +346,34 @@ function storeShotHtml(shot) {
         display: none;
       }
       .workbench-shot h1 {
+        position: relative;
         margin: 0;
-        font-size: 42px;
+        font-size: 38px;
         line-height: 1;
       }
       .workbench-shot .story > div:last-child {
         min-width: 0;
+      }
+      .arc-import-shot h1::before,
+      .auto-group-shot h1::before {
+        position: absolute;
+        top: 50%;
+        left: -210px;
+        width: 170px;
+        min-height: 38px;
+        transform: translateY(-50%);
+        padding-left: 48px;
+        background: url('/icons/icon128.png') left center / 38px 38px no-repeat;
+        color: rgba(247, 248, 251, 0.86);
+        content: 'Space Tabs';
+        font-size: 15px;
+        font-weight: 750;
+        line-height: 38px;
+        white-space: nowrap;
+      }
+      .arc-import-shot .brand,
+      .auto-group-shot .brand {
+        visibility: hidden;
       }
       .workbench-shot .notes {
         max-width: 480px;
@@ -382,12 +404,12 @@ function storeShotHtml(shot) {
       }
     </style>
   </head>
-  <body class="${shot.id === 'settings' ? 'workbench-shot' : ''}">
+  <body class="${shot.id === 'overview' ? '' : 'workbench-shot'} ${shot.id}-shot">
     <main class="canvas">
       <section class="story">
         <div class="brand">
           <img src="/icons/icon128.png" alt="">
-          <span>Space for Chrome</span>
+          <span>Space Tabs</span>
         </div>
         <div class="kicker">${escapeHtml(shot.kicker)}</div>
         <h1>${escapeHtml(shot.title)}</h1>
@@ -440,6 +462,10 @@ function storeShotHtml(shot) {
       }, { once: true });
       panel.src = scenario.action === 'settings'
         ? '/sidepanel.html?layout=workbench&view=settings'
+        : scenario.action === 'arc-import'
+        ? '/sidepanel.html?layout=workbench&onboarding=1'
+        : scenario.action === 'auto-group' || scenario.action === 'ask'
+        ? '/sidepanel.html?layout=workbench'
         : '/sidepanel.html';
 
       async function afterPanelLoad(frame, scenario) {
@@ -447,27 +473,52 @@ function storeShotHtml(shot) {
         const doc = frame.contentDocument;
         await waitFor(() => doc.querySelector('#activeSpaceName')?.textContent?.trim().length);
         await waitFor(() => doc.querySelector('#spacesList button'));
-        if (scenario.action === 'context-menu') openContextMenu(doc);
+        if (scenario.action === 'arc-import') openArcImport(doc);
+        if (scenario.action === 'auto-group') await openAutoGroup(doc);
         if (scenario.action === 'settings') openSettings(doc);
         if (scenario.action === 'ask') await openAskPage(doc);
         await wait(240);
         win.dispatchEvent(new Event('resize'));
       }
 
-      function openContextMenu(doc) {
-        const row = [...doc.querySelectorAll('.tab-row')]
-          .find((item) => /Launch brief/i.test(item.textContent)) || doc.querySelector('.tab-row');
-        const rect = row.getBoundingClientRect();
-        row.dispatchEvent(new MouseEvent('contextmenu', {
-          bubbles: true,
-          cancelable: true,
-          view: panel.contentWindow,
-          clientX: rect.left + 26,
-          clientY: rect.top + 18,
-          button: 2,
-        }));
-        const submenu = doc.querySelector('.context-submenu');
-        if (submenu) submenu.classList.add('open');
+      function openArcImport(doc) {
+        doc.querySelector('[data-onboarding-path="arc"]')?.click();
+        const status = doc.querySelector('#onboardingArcStatus');
+        const list = doc.querySelector('#onboardingArcSpaces');
+        const input = doc.querySelector('#onboardingArcInput');
+        const picker = input?.closest('.onboarding-file-picker');
+        if (input && picker) {
+          input.hidden = true;
+          const selectedFile = doc.createElement('div');
+          selectedFile.textContent = 'StorableSidebar.json selected';
+          selectedFile.style.cssText = 'border:1px solid var(--accent-strong);border-radius:8px;padding:12px 14px;background:var(--surface-strong);color:var(--text);font-size:12px;font-weight:750';
+          picker.append(selectedFile);
+        }
+        if (status) {
+          status.textContent = 'Preview: 3 Spaces, 6 folders, 18 saved tabs. 1 name conflict will import as Research (2).';
+        }
+        if (list) {
+          list.innerHTML = [
+            ['Launch', '3 folders · 8 tabs', 'Ready'],
+            ['Research', '2 folders · 6 tabs', 'Will import as Research (2)'],
+            ['Personal', '1 folder · 4 tabs', 'Ready'],
+          ].map(([name, counts, detail], index) => \`
+            <label class="onboarding-space-option">
+              <input type="checkbox" data-arc-space-id="arc-\${index}" checked>
+              <span class="onboarding-space-icon">\${name.slice(0, 1)}</span>
+              <strong>\${name}</strong>
+              <small class="\${index === 1 ? 'conflict' : ''}">\${counts} · \${detail}</small>
+            </label>
+          \`).join('');
+        }
+        const next = doc.querySelector('#onboardingNextButton');
+        if (next) next.disabled = false;
+      }
+
+      async function openAutoGroup(doc) {
+        doc.querySelector('#autoGroupButton')?.click();
+        await waitFor(() => doc.querySelector('#actionDialog')?.open &&
+          /Auto Group Preview/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000);
       }
 
       function openSettings(doc) {
@@ -477,6 +528,8 @@ function storeShotHtml(shot) {
         const backupStatus = doc.querySelector('#spaceBackupStatus');
         const backupInput = doc.querySelector('#spaceBackupInput');
         const backupPicker = backupInput?.closest('.file-picker');
+        const arcInput = doc.querySelector('#arcImportInput');
+        const arcPicker = arcInput?.closest('.file-picker');
         const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
@@ -488,27 +541,50 @@ function storeShotHtml(shot) {
           fakeBackupPicker.innerHTML = '<span class="store-file-button">Choose File</span><span>space-backup-2026-07-12.json</span>';
           backupPicker.append(fakeBackupPicker);
         }
+        if (arcPicker && arcInput && !arcPicker.querySelector('.store-file-row')) {
+          arcInput.hidden = true;
+          const fakeArcPicker = doc.createElement('div');
+          fakeArcPicker.className = 'store-file-row';
+          fakeArcPicker.innerHTML = '<span class="store-file-button">Choose Arc File</span><span>No file selected</span>';
+          arcPicker.append(fakeArcPicker);
+        }
         if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
         if (restoreBackup) restoreBackup.disabled = false;
         if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
         if (dialog?.open && form) {
           const spaceData = doc.querySelector('.space-data-settings');
-          form.scrollTop = Math.max(0, (spaceData?.offsetTop || 0) - 16);
+          form.scrollTop = Math.max(0, (spaceData?.offsetTop || 0) - 92);
         }
       }
 
       async function openAskPage(doc) {
+        const select = (tabId) => doc.querySelector(\`[data-tab-id="\${tabId}"]\`)?.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: panel.contentWindow,
+          ctrlKey: true,
+        }));
+        select(1);
+        await wait(80);
+        select(3);
+        await wait(80);
         doc.querySelector('.ask-space')?.click();
         await waitFor(() => !doc.querySelector('#askPageView')?.hidden);
         const input = doc.querySelector('#askPagePrompt');
-        input.value = 'What should I do next based on this page?';
+        input.value = 'Compare the launch brief with the reviewer notes. What is still missing?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
+        await waitFor(() => doc.querySelector('#actionDialog')?.open &&
+          /Review Ask Space/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000);
+        doc.querySelector('#actionDialogConfirm')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
           .some((node) => /Preview AI response/i.test(node.textContent)), 5000);
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
-          assistant.innerHTML = '<p><strong>Next actions</strong></p><p>Based on the current launch brief: finalize the store copy, verify privacy notes, and package the release.</p>';
+          assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review and package verification <a href="https://docs.example.com/launch-brief">[1]</a>. Reviewer notes also require multi-page Ask and Auto Group Undo checks <a href="https://example.com/reviewer-notes">[2]</a>.</p><p><strong>Sources</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a> · <a href="https://example.com/reviewer-notes">[2] Reviewer notes</a></p>';
+          const messages = doc.querySelector('#askMessages');
+          messages?.replaceChildren(assistant);
+          if (messages) messages.scrollTop = 0;
         }
       }
 
@@ -533,11 +609,24 @@ function storeShotHtml(shot) {
 function scenarioFor(shot) {
   const state = baseState(shot.activeSpaceId);
   const runtime = baseRuntime();
-  if (shot.id === 'nested-dormant') {
-    runtime.tabs = [];
-    runtime.groups = [];
-    runtime.nextId = 1;
-    runtime.nextGroupId = 1;
+  if (shot.id === 'arc-import') state.onboarding = { version: 1, completed: false };
+  if (shot.id === 'auto-group') {
+    state.spaceSnapshots.launch = {
+      version: 1,
+      updatedAt: 1770000000000,
+      preserveGroups: true,
+      groups: [{
+        id: 'arc-history',
+        title: 'Arc History',
+        color: 'orange',
+        collapsed: false,
+        tabs: [
+          { title: 'Arc launch plan', url: 'https://example.com/arc/launch-plan' },
+          { title: 'Historical store copy', url: 'https://example.com/arc/store-copy' },
+        ],
+      }],
+    };
+    state.groupOrder.launch.push('snapshot:0:Arc History');
   }
   return {
     state,
@@ -654,7 +743,7 @@ function baseState(activeSpaceId) {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-5.4-mini',
-      apiKey: 'sk-store-demo',
+      apiKey: '',
       thinking: 'disabled',
       language: 'en',
       temperature: 0.6,

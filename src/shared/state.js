@@ -44,6 +44,7 @@ export function createDefaultState(localConfig = {}) {
       completed: false,
     },
     lastArcImport: null,
+    operationHistory: [],
     shortcuts: mergeShortcuts(),
     ai: {
       provider: normalizedAI.provider,
@@ -91,6 +92,7 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     onboarding: normalizeOnboarding(stored.onboarding, defaults.onboarding),
     lastArcImport: normalizeLastArcImport(stored.lastArcImport),
+    operationHistory: normalizeOperationHistory(stored.operationHistory),
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
     ai: migrateAISettings(stored.ai, defaults.ai, stored.version),
   };
@@ -114,13 +116,41 @@ function normalizeOnboarding(value, fallback = { version: 1, completed: false })
 function normalizeLastArcImport(value) {
   if (!value || typeof value !== 'object') return null;
   const spaceIds = Array.isArray(value.spaceIds)
-    ? [...new Set(value.spaceIds.map(String).filter(Boolean))]
+    ? [...new Set(value.spaceIds.map(String).filter((id) => id && isSafeRecordKey(id)))]
     : [];
   if (spaceIds.length === 0) return null;
-  return {
+  const normalized = {
     spaceIds,
     importedAt: Number(value.importedAt) || 0,
   };
+  const storedFingerprints = value.afterFingerprints && typeof value.afterFingerprints === 'object'
+    ? value.afterFingerprints
+    : {};
+  const afterFingerprints = Object.fromEntries(spaceIds
+    .map((spaceId) => [
+      spaceId,
+      Object.hasOwn(storedFingerprints, spaceId)
+        ? String(storedFingerprints[spaceId] || '').trim().slice(0, 200)
+        : '',
+    ])
+    .filter(([, fingerprint]) => fingerprint));
+  if (Object.keys(afterFingerprints).length > 0) normalized.afterFingerprints = afterFingerprints;
+  return normalized;
+}
+
+function normalizeOperationHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((operation) => operation && typeof operation === 'object')
+    .slice(-10)
+    .map((operation, index) => ({
+      ...operation,
+      id: String(operation.id || `${Number(operation.createdAt) || 0}-${index}`),
+      type: String(operation.type || 'workspace'),
+      summary: String(operation.summary || 'Workspace change').slice(0, 240),
+      createdAt: Number(operation.createdAt) || 0,
+      status: operation.status === 'undone' ? 'undone' : 'applied',
+    }));
 }
 
 function migrateAISettings(storedAI = {}, defaultAI = {}, storedVersion = 0) {
@@ -190,6 +220,10 @@ export function serializeGroup(group) {
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function isSafeRecordKey(value) {
+  return !['__proto__', 'prototype', 'constructor'].includes(String(value));
 }
 
 function validSpaces(spaces, fallback) {

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { access, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,12 +47,21 @@ async function findChromeExecutable() {
   throw new Error('Could not find Chrome. Set CHROME_PATH and rerun npm run e2e:smoke.');
 }
 
-async function createExtensionFixture() {
+async function createExtensionFixture(options = {}) {
   const fixtureDir = await mkdtemp(join(tmpdir(), 'space-extension-files-'));
   for (const entry of runtimeEntries) {
     const destination = join(fixtureDir, entry);
     await mkdir(dirname(destination), { recursive: true });
     await cp(join(repoRoot, entry), destination, { recursive: true });
+  }
+  if (options.hostPermissions?.length) {
+    const manifestPath = join(fixtureDir, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.host_permissions = [...new Set([
+      ...(manifest.host_permissions || []),
+      ...options.hostPermissions,
+    ])];
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   }
   await writeFile(
     join(fixtureDir, 'config.local.js'),
@@ -176,6 +186,284 @@ async function waitFor(client, expression, timeoutMs = 6000) {
   throw new Error(`Timed out waiting for: ${expression}`);
 }
 
+async function waitForJsonDownload(directory, timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const names = await readdir(directory);
+    const completed = names.filter((name) => !name.endsWith('.crdownload'));
+    for (const name of completed) {
+      const path = join(directory, name);
+      const text = await readFile(path, 'utf8').catch(() => '');
+      if (!text) continue;
+      try {
+        return { name, path, text, parsed: JSON.parse(text) };
+      } catch {
+        // Chrome may expose the final filename just before the final write lands.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for a JSON download in ${directory}.`);
+}
+
+async function clickElementWithCDP(client, selector) {
+  const point = await evaluate(client, `(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return null;
+    element.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = element.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  if (!point) throw new Error(`Could not click missing or hidden element: ${selector}`);
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: point.x,
+    y: point.y,
+  });
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    clickCount: 1,
+  });
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    clickCount: 1,
+  });
+}
+
+async function startAskFixtureServer() {
+  const requests = [];
+  const pageHits = [];
+  const sockets = new Set();
+  const timers = new Set();
+  const autoGroupDormantUrl = 'https://example.net/saved-auto-group-e2e';
+  const autoGroupTargetTitle = 'Auto Group E2E Proposal';
+
+  const schedule = (callback, delay) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      callback();
+    }, delay);
+    timer.unref?.();
+    timers.add(timer);
+    return timer;
+  };
+
+  const sourcePages = {
+    '/source-alpha': {
+      title: 'Ask Source Alpha',
+      body: 'ALPHA_E2E_CONTENT: The launch checkpoint is Tuesday and Ada owns the rollout.',
+    },
+    '/source-beta': {
+      title: 'Ask Source Beta',
+      body: 'BETA_E2E_CONTENT: The support review is Thursday and Ben owns the checklist.',
+    },
+  };
+
+  const server = createServer((request, response) => {
+    const url = new URL(request.url || '/', 'http://127.0.0.1');
+    if (request.method === 'GET' && sourcePages[url.pathname]) {
+      const page = sourcePages[url.pathname];
+      pageHits.push({ path: url.pathname, at: Date.now() });
+      response.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      response.end(`<!doctype html><html><head><title>${page.title}</title></head><body><article><h1>${page.title}</h1><p>${page.body}</p></article></body></html>`);
+      return;
+    }
+
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization, content-type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      });
+      response.end();
+      return;
+    }
+
+    if (request.method !== 'POST' || url.pathname !== '/v1/chat/completions') {
+      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Not found');
+      return;
+    }
+
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      let body = {};
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        body = {};
+      }
+      const lastUserMessage = [...(body.messages || [])]
+        .reverse()
+        .find((message) => message?.role === 'user')?.content || '';
+      const systemText = (body.messages || [])
+        .filter((message) => message?.role === 'system')
+        .map((message) => String(message?.content || ''))
+        .join('\n');
+      if (systemText.includes('Group browser tabs into concise topic/work buckets')) {
+        let candidates = [];
+        try {
+          const parsed = JSON.parse(lastUserMessage);
+          candidates = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          candidates = [];
+        }
+        const liveCandidate = candidates.find((candidate) => (
+          String(candidate?.url || '').endsWith('/source-alpha') && candidate?.status === 'live'
+        ));
+        const savedCandidate = candidates.find((candidate) => (
+          candidate?.url === autoGroupDormantUrl && candidate?.status === 'saved'
+        ));
+        const plan = liveCandidate && savedCandidate
+          ? [{
+              title: autoGroupTargetTitle,
+              color: 'green',
+              tabIds: [Number(liveCandidate.id), Number(savedCandidate.id)],
+            }]
+          : [];
+        requests.push({
+          mode: 'auto-group',
+          body,
+          receivedAt: Date.now(),
+          candidates,
+          liveCandidate: liveCandidate || null,
+          savedCandidate: savedCandidate || null,
+          plan,
+        });
+        response.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        });
+        response.end(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(plan) } }],
+        }));
+        return;
+      }
+      const mode = lastUserMessage.includes('E2E stop stream') ? 'stop' : 'complete';
+      const record = {
+        mode,
+        body,
+        receivedAt: Date.now(),
+        sourceCount: (lastUserMessage.match(/^Source \[\d+\]:/gm) || []).length,
+        includesAlpha: lastUserMessage.includes('ALPHA_E2E_CONTENT'),
+        includesBeta: lastUserMessage.includes('BETA_E2E_CONTENT'),
+        historyIncludesCompletedAnswer: (body.messages || []).slice(1, -1).some((message) =>
+          String(message?.content || '').includes('Alpha sets the Tuesday checkpoint')),
+        historyIncludesInlineCitationLink: (body.messages || []).slice(1, -1).some((message) =>
+          /\[\[1\]\]\(http/.test(String(message?.content || ''))),
+        historyIncludesSourcesAppendix: (body.messages || []).slice(1, -1).some((message) =>
+          /### Sources/i.test(String(message?.content || ''))),
+        firstChunkAt: 0,
+        doneSentAt: 0,
+        clientClosedAt: 0,
+        serverEndCalledAt: 0,
+      };
+      requests.push(record);
+
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      response.flushHeaders?.();
+
+      const responseTimers = [];
+      const responseSchedule = (callback, delay) => {
+        const timer = schedule(callback, delay);
+        responseTimers.push(timer);
+        return timer;
+      };
+      response.on('close', () => {
+        record.clientClosedAt = Date.now();
+        for (const timer of responseTimers) {
+          clearTimeout(timer);
+          timers.delete(timer);
+        }
+      });
+      const sendDelta = (text) => {
+        if (response.destroyed || response.writableEnded) return;
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+      };
+
+      record.firstChunkAt = Date.now();
+      if (mode === 'stop') {
+        sendDelta('Partial answer from Alpha [1]');
+        responseSchedule(() => sendDelta(' while the provider is still streaming'), 180);
+        responseSchedule(() => {
+          if (response.destroyed || response.writableEnded) return;
+          record.serverEndCalledAt = Date.now();
+          response.end();
+        }, 30_000);
+        return;
+      }
+
+      sendDelta('Alpha sets the Tuesday checkpoint [1]');
+      responseSchedule(() => sendDelta(' and Beta records the Thursday review [2].'), 80);
+      responseSchedule(() => {
+        if (response.destroyed || response.writableEnded) return;
+        record.doneSentAt = Date.now();
+        response.write('data: [DONE]\n\n');
+      }, 160);
+      responseSchedule(() => {
+        if (response.destroyed || response.writableEnded) return;
+        record.serverEndCalledAt = Date.now();
+        response.end();
+      }, 10_000);
+    });
+  });
+
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  server.unref();
+  const address = server.address();
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  return {
+    origin,
+    baseUrl: `${origin}/v1`,
+    sourceAlphaUrl: `${origin}/source-alpha`,
+    sourceBetaUrl: `${origin}/source-beta`,
+    originPattern: 'http://127.0.0.1/*',
+    autoGroupDormantUrl,
+    autoGroupTargetTitle,
+    requests,
+    pageHits,
+    async close() {
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      for (const socket of sockets) socket.destroy();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 1500);
+        server.close(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        server.closeAllConnections?.();
+      });
+    },
+  };
+}
+
 async function waitForTarget(client, predicate, timeoutMs = 8000) {
   const started = Date.now();
   let lastTargetInfos = [];
@@ -215,8 +503,14 @@ async function createLoadedTarget(client, url, attempts = 3) {
 
 async function main() {
   const progress = (step) => process.stderr.write(`[e2e] ${step}\n`);
+  const arcSidebarFixtureText = await readFile(join(repoRoot, 'tests/fixtures/arc-sidebar.json'), 'utf8');
+  progress('starting local Ask Space pages and OpenAI-compatible SSE fixture');
+  const askFixtureServer = await startAskFixtureServer();
   progress('building an isolated extension fixture without local secrets');
-  const extensionFixture = await createExtensionFixture();
+  const extensionFixture = await createExtensionFixture({
+    hostPermissions: ['https://*/*', 'http://*/*'],
+  });
+  const downloadDir = await mkdtemp(join(tmpdir(), 'space-extension-downloads-'));
   let chrome;
   let client;
   try {
@@ -224,6 +518,11 @@ async function main() {
     chrome = await startChromeWithPipe();
     client = createPipeClient(chrome.pipeWrite, chrome.pipeRead, chrome.child);
     await client.ready;
+    await client.send('Browser.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: downloadDir,
+      eventsEnabled: true,
+    }, '');
     progress('loading the unpacked extension through CDP');
     const { id: extensionId } = await client.send('Extensions.loadUnpacked', { path: extensionFixture.path });
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -263,14 +562,124 @@ async function main() {
     record('unfinished setup remains available after dismissal', true);
     await evaluate(client, `document.querySelector('.setup-space').click()`);
     await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
-    await evaluate(client, `document.querySelector('#skipOnboardingButton').click()`);
-    const skippedSetup = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return stored.spaceTabsState?.onboarding?.completed === true
-        && !document.querySelector('#onboardingDialog')?.open
-        && !document.querySelector('.setup-space');
+    await evaluate(client, `document.querySelector('[data-onboarding-path="arc"]').click()`);
+    await waitFor(client, `!document.querySelector('#onboardingArcStep')?.hidden &&
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
+    await evaluate(client, `(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(
+        [${JSON.stringify(arcSidebarFixtureText)}],
+        'StorableSidebar.json',
+        { type: 'application/json' },
+      ));
+      const input = document.querySelector('#onboardingArcInput');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    record('explicit Skip setup completes onboarding and removes the reminder', Boolean(skippedSetup));
+    const arcPreviewState = await waitFor(client, `(() => {
+      const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
+      const status = document.querySelector('#onboardingArcStatus')?.textContent || '';
+      if (rows.length !== 2 || !status.startsWith('Preview: 2 Spaces, 1 folders, 3 tabs')) return null;
+      return {
+        status,
+        nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
+        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+        rows: rows.map((row) => ({
+          name: row.querySelector('strong')?.textContent || '',
+          detail: row.querySelector('small')?.textContent || '',
+          checked: Boolean(row.querySelector('input')?.checked),
+          conflict: Boolean(row.querySelector('small')?.classList.contains('conflict')),
+        })),
+      };
+    })()`);
+    const arcConflictRow = arcPreviewState.rows.find((row) => row.name === 'Default (Arc)');
+    const arcPersonalRow = arcPreviewState.rows.find((row) => row.name === 'Arc Personal');
+    record(
+      'Arc setup previews per-Space counts and resolved naming conflicts',
+      arcPreviewState.status === 'Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
+        arcPreviewState.nextText === 'Import selected Spaces' &&
+        !arcPreviewState.nextDisabled &&
+        arcConflictRow?.checked === true &&
+        arcConflictRow?.conflict === true &&
+        arcConflictRow?.detail === '1 folders · 2 tabs · Default → Default (Arc)' &&
+        arcPersonalRow?.checked === true &&
+        arcPersonalRow?.detail === '0 folders · 1 tabs',
+      JSON.stringify(arcPreviewState),
+    );
+
+    const arcSelectionState = await evaluate(client, `(() => {
+      const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
+      const personal = rows.find((row) => row.querySelector('strong')?.textContent === 'Arc Personal');
+      personal.querySelector('input').click();
+      return {
+        selected: rows
+          .filter((row) => row.querySelector('input')?.checked)
+          .map((row) => row.querySelector('strong')?.textContent || ''),
+        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+      };
+    })()`);
+    record(
+      'Arc setup lets the user import only selected Spaces',
+      JSON.stringify(arcSelectionState.selected) === JSON.stringify(['Default (Arc)']) &&
+        !arcSelectionState.nextDisabled,
+      JSON.stringify(arcSelectionState),
+    );
+
+    await evaluate(client, `document.querySelector('#onboardingNextButton').click()`);
+    const completedArcSetup = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const imported = (saved.spaces || []).find((space) => space.name === 'Default (Arc)');
+      const snapshot = imported ? saved.spaceSnapshots?.[imported.id] : null;
+      const importedTabs = (snapshot?.groups || [])
+        .reduce((sum, group) => sum + (group.tabs || []).length, 0);
+      if (!imported || document.querySelector('#onboardingFinishStep')?.hidden) return null;
+      return {
+        imported,
+        importedTabs,
+        unselectedImported: (saved.spaces || []).some((space) => space.name === 'Arc Personal'),
+        completed: saved.onboarding?.completed === true,
+        lastArcImport: saved.lastArcImport,
+        finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+        undoVisible: !document.querySelector('#onboardingUndoArcButton')?.hidden,
+      };
+    })()`, 12000);
+    record(
+      'Arc setup persists the selected Space and reaches completion',
+      completedArcSetup.importedTabs === 2 &&
+        !completedArcSetup.unselectedImported &&
+        completedArcSetup.completed &&
+        JSON.stringify(completedArcSetup.lastArcImport?.spaceIds) === JSON.stringify([completedArcSetup.imported.id]) &&
+        completedArcSetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.' &&
+        completedArcSetup.undoVisible,
+      JSON.stringify(completedArcSetup),
+    );
+
+    await evaluate(client, `document.querySelector('#onboardingUndoArcButton').click()`);
+    const undoneArcSetup = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const importedId = ${JSON.stringify(completedArcSetup.imported.id)};
+      const toast = document.querySelector('#workbenchToast')?.textContent || '';
+      if (document.querySelector('#onboardingDialog')?.open || saved.lastArcImport ||
+          (saved.spaces || []).some((space) => space.id === importedId) ||
+          saved.spaceSnapshots?.[importedId] ||
+          !toast.includes('Removed 1 imported Arc Spaces')) return null;
+      return {
+        completed: saved.onboarding?.completed === true,
+        originalDefaultCount: (saved.spaces || []).filter((space) => space.id === 'default' && space.name === 'Default').length,
+        setupReminder: Boolean(document.querySelector('.setup-space')),
+        toast,
+      };
+    })()`, 12000);
+    record(
+      'Arc setup Undo removes only the import and keeps onboarding complete',
+      undoneArcSetup.completed &&
+        undoneArcSetup.originalDefaultCount === 1 &&
+        !undoneArcSetup.setupReminder &&
+        undoneArcSetup.toast === 'Removed 1 imported Arc Spaces. Open tabs were kept.',
+      JSON.stringify(undoneArcSetup),
+    );
 
     const openedWorkbench = await waitFor(client, `(async () => {
       const tabs = await chrome.tabs.query({});
@@ -326,27 +735,64 @@ async function main() {
       JSON.stringify(createdTab),
     );
 
+    await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState;
+      saved.spaceSnapshots = saved.spaceSnapshots || {};
+      const snapshot = saved.spaceSnapshots.default || { version: 1, updatedAt: Date.now(), groups: [] };
+      snapshot.updatedAt = Date.now();
+      snapshot.groups = [
+        ...(snapshot.groups || []).filter((group) => group.title !== 'Historical Tag E2E'),
+        {
+          title: 'Historical Tag E2E',
+          color: 'purple',
+          tabs: [{ title: 'Saved History E2E', url: 'https://example.net/saved-history-e2e' }],
+        },
+      ];
+      saved.spaceSnapshots.default = snapshot;
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    })()`);
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
-    const dormantAutoGroupState = await waitFor(client, `(() => {
-      const message = 'Open saved tabs in this Space first, then run Auto Group.';
+    const dormantAutoGroupState = await waitFor(client, `(async () => {
+      const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
       const status = document.querySelector('#syncStatus')?.textContent || '';
       const toast = document.querySelector('#workbenchToast')?.textContent || '';
       if (status !== message || toast !== message) return null;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
+      const savedGroups = stored.spaceTabsState?.spaceSnapshots?.default?.groups || [];
       return {
         status,
         toast,
         tone: document.querySelector('#workbenchToast')?.dataset?.tone || '',
         previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        liveHttpTabs: (listed.tabs || []).filter((tab) => /^https?:/.test(tab.url || '')).length,
+        savedTagStored: savedGroups.some((group) => group.title === 'Historical Tag E2E' &&
+          (group.tabs || []).some((tab) => tab.url === 'https://example.net/saved-history-e2e')),
       };
     })()`);
     record(
-      'Workbench Auto Group explains that saved tabs must be opened first',
-      dormantAutoGroupState.tone === 'error' && !dormantAutoGroupState.previewOpen,
+      'Workbench Auto Group includes saved historical Tags before checking BYOK',
+      dormantAutoGroupState.tone === 'error' &&
+        dormantAutoGroupState.liveHttpTabs === 0 &&
+        dormantAutoGroupState.savedTagStored &&
+        !dormantAutoGroupState.previewOpen &&
+        !dormantAutoGroupState.status.includes('Open saved tabs'),
       JSON.stringify(dormantAutoGroupState),
     );
+    await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState;
+      const snapshot = saved.spaceSnapshots?.default;
+      if (snapshot) {
+        snapshot.groups = (snapshot.groups || []).filter((group) => group.title !== 'Historical Tag E2E');
+        if (snapshot.groups.length === 0) delete saved.spaceSnapshots.default;
+      }
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    })()`);
 
     const realGroup = await evaluate(client, `(async () => {
-      const first = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://example.com/e2e-one', active: false });
+      const first = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://github.com/openai/codex/pull/123', active: false });
       const second = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://example.org/e2e-two', active: false });
       const grouped = await chrome.runtime.sendMessage({
         type: 'tabs:group',
@@ -421,16 +867,142 @@ async function main() {
     );
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
     const tidyCancelState = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open) return null;
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const duplicates = (listed.tabs || []).filter((tab) =>
-        String(tab.url || '').startsWith('https://example.com/e2e-one'));
-      return duplicates.length >= 2 ? { count: duplicates.length, duplicateId: ${JSON.stringify(tidyDuplicate.id)} } : null;
+      const expectedIds = [${JSON.stringify(realGroup.tabIds[0])}, ${JSON.stringify(tidyDuplicate.id)}];
+      const retainedIds = expectedIds.filter((id) => (listed.tabs || []).some((tab) => Number(tab.id) === id));
+      return retainedIds.length === expectedIds.length
+        ? { count: retainedIds.length, duplicateId: ${JSON.stringify(tidyDuplicate.id)} }
+        : null;
     })()`);
     record(
       'Workbench Tidy Names Cancel leaves real Chrome tabs unchanged',
       tidyCancelState.count >= 2 && Number.isFinite(tidyCancelState.duplicateId),
       JSON.stringify(tidyCancelState),
+    );
+
+    const tidyBeforeApply = await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
+      return {
+        renamedTabs: { ...(stored.spaceTabsState?.renamedTabs || {}) },
+        chromeTabs: Object.fromEntries((listed.tabs || []).map((tab) => [String(tab.id), {
+          title: tab.title || '',
+          url: tab.url || '',
+        }])),
+      };
+    })()`);
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const tidyAppliedState = await waitFor(client, `(async () => {
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const operation = [...(saved.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'tidy-names');
+      const targetIds = Object.keys(operation?.after?.renamedTabs || {});
+      if (operation?.status !== 'applied' || targetIds.length === 0) return null;
+      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
+      const chromeTabs = Object.fromEntries((listed.tabs || [])
+        .filter((tab) => targetIds.includes(String(tab.id)))
+        .map((tab) => [String(tab.id), { title: tab.title || '', url: tab.url || '' }]));
+      const panelNames = Object.fromEntries(targetIds.map((tabId) => [
+        tabId,
+        document.querySelector(\`.tab-row[data-tab-id="\${tabId}"] .tab-title\`)?.textContent || '',
+      ]));
+      const actualNames = Object.fromEntries(targetIds.map((tabId) => [
+        tabId,
+        saved.renamedTabs?.[tabId] || '',
+      ]));
+      if (!targetIds.every((tabId) =>
+        actualNames[tabId] === operation.after.renamedTabs[tabId] &&
+        panelNames[tabId] === operation.after.renamedTabs[tabId])) return null;
+      return {
+        operation,
+        targetIds,
+        actualNames,
+        panelNames,
+        chromeTabs,
+        recordText: document.querySelector('#operationRecordText')?.textContent || '',
+        undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
+        operationRecordHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
+        status: document.querySelector('#syncStatus')?.textContent || '',
+      };
+    })()`, 15000);
+    const tidyExpectedBefore = Object.fromEntries(tidyAppliedState.targetIds.map((tabId) => [
+      tabId,
+      Object.hasOwn(tidyBeforeApply.renamedTabs, tabId)
+        ? tidyBeforeApply.renamedTabs[tabId]
+        : null,
+    ]));
+    const tidyChromeBefore = Object.fromEntries(tidyAppliedState.targetIds.map((tabId) => [
+      tabId,
+      tidyBeforeApply.chromeTabs[tabId],
+    ]));
+    record(
+      'Workbench Tidy Names Apply changes panel-only names and records a reversible operation',
+      JSON.stringify(tidyAppliedState.operation.before?.renamedTabs) === JSON.stringify(tidyExpectedBefore) &&
+        JSON.stringify(tidyAppliedState.chromeTabs) === JSON.stringify(tidyChromeBefore) &&
+        tidyAppliedState.recordText === tidyAppliedState.operation.summary &&
+        tidyAppliedState.undoText === 'Undo' &&
+        !tidyAppliedState.operationRecordHidden &&
+        tidyAppliedState.status.includes('in the panel only'),
+      JSON.stringify({
+        operation: {
+          id: tidyAppliedState.operation.id,
+          status: tidyAppliedState.operation.status,
+          summary: tidyAppliedState.operation.summary,
+        },
+        targetIds: tidyAppliedState.targetIds,
+        actualNames: tidyAppliedState.actualNames,
+        panelNames: tidyAppliedState.panelNames,
+        chromeTabsUnchanged: JSON.stringify(tidyAppliedState.chromeTabs) === JSON.stringify(tidyChromeBefore),
+        status: tidyAppliedState.status,
+      }),
+    );
+
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyUndoneState = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const operation = (saved.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.operation.id)});
+      if (operation?.status !== 'undone') return null;
+      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
+      const targetIds = ${JSON.stringify(tidyAppliedState.targetIds)};
+      return {
+        operation,
+        renamedTabs: { ...(saved.renamedTabs || {}) },
+        chromeTabs: Object.fromEntries((listed.tabs || [])
+          .filter((tab) => targetIds.includes(String(tab.id)))
+          .map((tab) => [String(tab.id), { title: tab.title || '', url: tab.url || '' }])),
+        status: document.querySelector('#syncStatus')?.textContent || '',
+        toast: document.querySelector('#workbenchToast')?.textContent || '',
+        operationRecordText: document.querySelector('#operationRecordText')?.textContent || '',
+        operationRecordHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
+      };
+    })()`, 15000);
+    record(
+      'Workbench Tidy Names Undo restores the exact prior names without changing Chrome tabs',
+      JSON.stringify(tidyUndoneState.renamedTabs) === JSON.stringify(tidyBeforeApply.renamedTabs) &&
+        JSON.stringify(tidyUndoneState.chromeTabs) === JSON.stringify(tidyChromeBefore) &&
+        tidyUndoneState.status === `Undid: ${tidyAppliedState.operation.summary}.` &&
+        tidyUndoneState.toast === `Undid: ${tidyAppliedState.operation.summary}.` &&
+        (tidyUndoneState.operationRecordHidden ||
+          tidyUndoneState.operationRecordText !== tidyAppliedState.operation.summary),
+      JSON.stringify({
+        operationStatus: tidyUndoneState.operation.status,
+        namesRestored: JSON.stringify(tidyUndoneState.renamedTabs) ===
+          JSON.stringify(tidyBeforeApply.renamedTabs),
+        chromeTabsUnchanged: JSON.stringify(tidyUndoneState.chromeTabs) === JSON.stringify(tidyChromeBefore),
+        status: tidyUndoneState.status,
+        toast: tidyUndoneState.toast,
+      }),
     );
 
     await evaluate(client, `document.querySelector('#collapseGroupsButton').click()`);
@@ -507,6 +1079,37 @@ async function main() {
       JSON.stringify(workbenchCreateState),
     );
 
+    const paletteActiveTabBefore = await evaluate(client, `(async () =>
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id || null)()`);
+    await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k', metaKey: true, bubbles: true, cancelable: true,
+    }))`);
+    await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#commandPaletteInput');
+      input.value = 'Remote Current';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    })()`);
+    const paletteSpaceSwitchState = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      if (document.querySelector('#commandPaletteDialog')?.open ||
+          stored.spaceTabsState?.activeSpaceId !== 'remote-current') return null;
+      const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      return {
+        activeSpaceId: stored.spaceTabsState.activeSpaceId,
+        activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+        activeBrowserTabId: activeTab.id,
+      };
+    })()`, 12000);
+    record(
+      'Command Palette keyboard shortcut switches Spaces without stealing browser focus',
+      paletteSpaceSwitchState.activeSpaceName === 'Remote Current' &&
+        paletteSpaceSwitchState.activeBrowserTabId === paletteActiveTabBefore,
+      JSON.stringify(paletteSpaceSwitchState),
+    );
+    progress('Command Palette Space switch passed');
+
     await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
     await waitFor(client, `(async () => {
       const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
@@ -540,7 +1143,16 @@ async function main() {
     }
     let openedRemoteTab = null;
     if (restoredRemoteState.dormantRows > 0) {
-      await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
+      await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'k', metaKey: true, bubbles: true, cancelable: true,
+      }))`);
+      await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
+      await evaluate(client, `(() => {
+        const input = document.querySelector('#commandPaletteInput');
+        input.value = 'Remote Saved Tab';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      })()`);
       openedRemoteTab = await waitFor(client, `(async () => {
         const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
         return (listed.tabs || []).find((tab) =>
@@ -548,7 +1160,7 @@ async function main() {
       })()`, 12000);
     }
     record(
-      'Workbench switching stays active, shows dormant data, and opens it only on user action',
+      'Workbench switching stays active and Command Palette opens a dormant saved tab only on user action',
       restoredRemoteState.activeSpaceName === 'Remote Current' &&
         restoredRemoteState.activeBrowserTab?.id === openedWorkbench.id &&
         restoredRemoteState.visibleText.includes('Remote Saved Tab') &&
@@ -637,7 +1249,16 @@ async function main() {
     })`);
     record('Context and Summary are removed while Ask remains', !reducedAIUI.hasContext && !reducedAIUI.hasSummary && reducedAIUI.hasAsk, JSON.stringify(reducedAIUI));
 
-    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k', metaKey: true, bubbles: true, cancelable: true,
+    }))`);
+    await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#commandPaletteInput');
+      input.value = 'Ask Space';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    })()`);
     const askSpaceState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const activeSpaceId = stored.spaceTabsState?.activeSpaceId || '';
@@ -653,12 +1274,842 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench Ask uses one persisted conversation per active Space',
+      'Command Palette opens one persisted Ask conversation per active Space',
       askSpaceState.sessionKey === `space:${askSpaceState.activeSpaceId}` &&
         askSpaceState.placeholder === 'Ask this Space' &&
         !askSpaceState.scope.includes('Context'),
       JSON.stringify(askSpaceState),
     );
+
+    const originalAskAIState = await evaluate(client, `(async () => {
+      const [stored, secret] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.storage.session.get('spaceTabsSecrets'),
+      ]);
+      return {
+        ai: stored.spaceTabsState?.ai || null,
+        secret: secret.spaceTabsSecrets || null,
+      };
+    })()`);
+    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
+    await waitFor(client, `(async () =>
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
+        ${JSON.stringify(openedWorkbench.id)})()`);
+    const askSourceTabs = await evaluate(client, `(async () => {
+      const alpha = await chrome.runtime.sendMessage({
+        type: 'tabs:create',
+        url: ${JSON.stringify(askFixtureServer.sourceAlphaUrl)},
+        active: false,
+      });
+      const beta = await chrome.runtime.sendMessage({
+        type: 'tabs:create',
+        url: ${JSON.stringify(askFixtureServer.sourceBetaUrl)},
+        active: false,
+      });
+      return { alpha: alpha.tab, beta: beta.tab };
+    })()`);
+    await evaluate(client, `[...document.querySelectorAll('.space')]
+      .find((button) => button.title === 'Default')?.click()`);
+    await waitFor(client, `(async () => {
+      const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}).catch(() => null);
+      const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)}).catch(() => null);
+      const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      return alpha?.status === 'complete' && beta?.status === 'complete' &&
+        document.querySelector('.tab-row[data-tab-id="${askSourceTabs.alpha.id}"]') &&
+        document.querySelector('.tab-row[data-tab-id="${askSourceTabs.beta.id}"]') &&
+        active?.id === ${JSON.stringify(openedWorkbench.id)};
+    })()`, 12000);
+    await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k', metaKey: true, bubbles: true, cancelable: true,
+    }))`);
+    await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#commandPaletteInput');
+      input.value = 'Ask Source Alpha';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    })()`);
+    const paletteLiveTabState = await waitFor(client, `(async () => {
+      const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      if (active.id !== ${JSON.stringify(askSourceTabs.alpha.id)}) return null;
+      return { id: active.id, url: active.url, title: active.title };
+    })()`);
+    record(
+      'Command Palette finds and focuses a live tab by title',
+      paletteLiveTabState.url === askFixtureServer.sourceAlphaUrl,
+      JSON.stringify(paletteLiveTabState),
+    );
+    progress('Command Palette live and dormant tab paths passed');
+    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
+    await waitFor(client, `(async () =>
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
+        ${JSON.stringify(openedWorkbench.id)})()`);
+    await evaluate(client, `(() => {
+      const selectedIds = [...document.querySelectorAll('.tab-row.selected')]
+        .map((row) => row.dataset.tabId)
+        .filter(Boolean);
+      for (const tabId of selectedIds) {
+        document.querySelector('.tab-row[data-tab-id="' + tabId + '"]')?.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+        }));
+      }
+      for (const tabId of [${JSON.stringify(askSourceTabs.alpha.id)}, ${JSON.stringify(askSourceTabs.beta.id)}]) {
+        document.querySelector('.tab-row[data-tab-id="' + tabId + '"]')?.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+        }));
+      }
+    })()`);
+    const selectedAskSources = await waitFor(client, `(() => {
+      const chips = [...document.querySelectorAll('#askSourceList .ask-source-chip')];
+      if (document.querySelector('#askSourceSummary')?.textContent !== '2 live pages' || chips.length !== 2) return null;
+      return {
+        summary: document.querySelector('#askSourceSummary')?.textContent || '',
+        hint: document.querySelector('#askSourceHint')?.textContent || '',
+        chips: chips.map((chip) => chip.textContent || ''),
+        selectedIds: [...document.querySelectorAll('.tab-row.selected')].map((row) => Number(row.dataset.tabId)),
+      };
+    })()`);
+
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `(() => {
+      const provider = document.querySelector('#providerInput');
+      provider.value = 'openai-compatible';
+      provider.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#baseUrlInput').value = ${JSON.stringify(askFixtureServer.baseUrl)};
+      const model = document.querySelector('#modelInput');
+      model.value = '__custom__';
+      model.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#customModelInput').value = 'ask-e2e-model';
+      document.querySelector('#languageInput').value = 'en';
+      document.querySelector('#apiKeyInput').value = '';
+      document.querySelector('#maxTokensInput').value = '10';
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    const configuredAskSettingsState = await waitFor(client, `(async () => {
+      const [stored, secret] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.storage.session.get('spaceTabsSecrets'),
+      ]);
+      const ai = stored.spaceTabsState?.ai || {};
+      if (ai.provider !== 'openai-compatible' ||
+          ai.baseUrl !== ${JSON.stringify(askFixtureServer.baseUrl)} ||
+          ai.model !== 'ask-e2e-model' ||
+          document.querySelector('#settingsStatus')?.textContent !== 'Settings saved.') return null;
+      return {
+        provider: ai.provider,
+        baseUrl: ai.baseUrl,
+        model: ai.model,
+        language: ai.language,
+        sessionKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
+      };
+    })()`);
+    record(
+      'Workbench Settings configures the local Custom OpenAI-compatible Ask endpoint',
+      configuredAskSettingsState.language === 'en' && configuredAskSettingsState.sessionKeyLength === 0,
+      JSON.stringify(configuredAskSettingsState),
+    );
+    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
+      !document.querySelector('#settingsDialog')?.open &&
+      document.querySelector('#askProvider')?.textContent ===
+        'Custom OpenAI-compatible · ask-e2e-model'`);
+    await evaluate(client, `(() => {
+      window.__askE2ECalls = { permissionRequests: 0, pageExtractions: 0 };
+      const requestPermission = chrome.permissions.request;
+      const sendMessage = chrome.runtime.sendMessage;
+      window.__askE2EOriginals = { requestPermission, sendMessage };
+      chrome.permissions.request = (...args) => {
+        window.__askE2ECalls.permissionRequests += 1;
+        return requestPermission.apply(chrome.permissions, args);
+      };
+      chrome.runtime.sendMessage = (message, ...args) => {
+        if (message?.type === 'pages:extract') window.__askE2ECalls.pageExtractions += 1;
+        return sendMessage.call(chrome.runtime, message, ...args);
+      };
+    })()`);
+    const missingKeyBefore = await evaluate(client, `(async () => ({
+      permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
+      messages: document.querySelectorAll('#askMessages .ask-message').length,
+      calls: { ...window.__askE2ECalls },
+    }))()`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#askPagePrompt');
+      input.value = 'E2E missing key must not read sources';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await clickElementWithCDP(client, '#askAIButton');
+    const missingKeyAskState = await waitFor(client, `(async () => {
+      const message = 'AI API key is missing. Add it in Settings before reading page sources.';
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      const toast = document.querySelector('#workbenchToast')?.textContent || '';
+      if (status !== message || toast !== message) return null;
+      return {
+        status,
+        toast,
+        permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
+        messages: document.querySelectorAll('#askMessages .ask-message').length,
+        reviewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        button: document.querySelector('#askAIButton')?.textContent || '',
+        calls: { ...window.__askE2ECalls },
+      };
+    })()`);
+    record(
+      'Ask Space rejects a missing API key before permission, extraction, or provider traffic',
+      missingKeyBefore.permission &&
+        missingKeyAskState.permission &&
+        missingKeyBefore.calls.permissionRequests === 0 &&
+        missingKeyBefore.calls.pageExtractions === 0 &&
+        missingKeyAskState.calls.permissionRequests === 0 &&
+        missingKeyAskState.calls.pageExtractions === 0 &&
+        missingKeyAskState.messages === missingKeyBefore.messages &&
+        !missingKeyAskState.reviewOpen &&
+        missingKeyAskState.button === 'Ask Space' &&
+        askFixtureServer.requests.length === 0,
+      JSON.stringify({ missingKeyBefore, missingKeyAskState, mockRequests: askFixtureServer.requests.length }),
+    );
+
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `(() => {
+      document.querySelector('#apiKeyInput').value = 'ask-e2e-key';
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    await waitFor(client, `(async () => {
+      const secret = await chrome.storage.session.get('spaceTabsSecrets');
+      return secret.spaceTabsSecrets?.ai?.apiKey === 'ask-e2e-key' &&
+        document.querySelector('#settingsStatus')?.textContent === 'Settings saved.';
+    })()`);
+
+    await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = structuredClone(stored.spaceTabsState);
+      const snapshot = saved.spaceSnapshots?.default || {
+        version: 1,
+        updatedAt: Date.now(),
+        groups: [],
+      };
+      snapshot.groups = (snapshot.groups || []).filter((group) =>
+        group.title !== 'Historical Tag E2E' &&
+        group.title !== ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+      snapshot.groups.push({
+        title: 'Historical Tag E2E',
+        color: 'purple',
+        collapsed: false,
+        tabs: [{
+          title: 'Saved Historical Auto Group E2E',
+          url: ${JSON.stringify(askFixtureServer.autoGroupDormantUrl)},
+        }],
+      });
+      saved.spaceSnapshots = saved.spaceSnapshots || {};
+      saved.spaceSnapshots.default = snapshot;
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    })()`);
+    await evaluate(client, `[...document.querySelectorAll('.space')]
+      .find((button) => button.title === 'Default')?.click()`);
+    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
+      !document.querySelector('#askPageView')?.hidden &&
+      [...document.querySelectorAll('.group-header h2')]
+        .some((heading) => heading.textContent === 'Historical Tag E2E')`, 12000);
+    await evaluate(client, `window.__captureAutoGroupE2E = async () => {
+      const [stored, listed] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.runtime.sendMessage({ type: 'tabs:list' }),
+      ]);
+      const saved = structuredClone(stored.spaceTabsState || {});
+      const snapshot = structuredClone(saved.spaceSnapshots?.default || { version: 1, groups: [] });
+      delete snapshot.updatedAt;
+      const tabs = (listed.tabs || [])
+        .map((tab) => ({
+          id: Number(tab.id),
+          title: tab.title || '',
+          url: tab.url || '',
+          groupId: Number(tab.groupId),
+          index: Number(tab.index),
+        }))
+        .sort((left, right) => left.id - right.id);
+      const groups = (listed.groups || [])
+        .map((group) => ({
+          id: Number(group.id),
+          title: group.title || '',
+          color: group.color || '',
+          collapsed: Boolean(group.collapsed),
+        }))
+        .sort((left, right) => left.id - right.id);
+      const semanticGroups = groups.map((group) => ({
+        title: group.title,
+        color: group.color,
+        collapsed: group.collapsed,
+        urls: tabs
+          .filter((tab) => tab.groupId === group.id)
+          .map((tab) => tab.url)
+          .sort(),
+      })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      const validGroupIds = new Set(groups.map((group) => group.id));
+      return {
+        storage: {
+          snapshot,
+          operationHistory: structuredClone(saved.operationHistory || []),
+          groupSpaces: structuredClone(saved.groupSpaces || {}),
+          tabSpaces: structuredClone(saved.tabSpaces || {}),
+          tabGroups: structuredClone(saved.tabGroups || {}),
+          groupOrder: structuredClone(saved.groupOrder || {}),
+          virtualGroups: structuredClone(saved.virtualGroups || {}),
+        },
+        chrome: { tabs, groups },
+        layout: {
+          groups: semanticGroups,
+          ungroupedUrls: tabs
+            .filter((tab) => tab.groupId < 0)
+            .map((tab) => tab.url)
+            .sort(),
+        },
+        orphanGroupSpaceIds: Object.keys(saved.groupSpaces || {})
+          .map(Number)
+          .filter((groupId) => !validGroupIds.has(groupId))
+          .sort((left, right) => left - right),
+      };
+    }`);
+    const autoGroupFixtureBefore = await evaluate(client, `window.__captureAutoGroupE2E()`);
+    const autoGroupRequestsBefore = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group').length;
+    const autoGroupPermissionRequestsBefore = await evaluate(client,
+      `window.__askE2ECalls.permissionRequests`);
+
+    await clickElementWithCDP(client, '#autoGroupButton');
+    const autoGroupSendDisclosure = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !==
+            'Generate Auto Group preview?') return null;
+      const section = document.querySelector('#actionDialogPreview .action-preview-section');
+      const rows = [...(section?.querySelectorAll('.action-preview-item') || [])].map((row) => ({
+        title: row.querySelector('.action-preview-title')?.textContent || '',
+        url: row.querySelector('.action-preview-meta')?.textContent || '',
+        details: row.querySelector('.action-preview-result')?.textContent || '',
+      }));
+      if (rows.length === 0) return null;
+      return {
+        message: document.querySelector('#actionDialogMessage')?.textContent || '',
+        sectionTitle: section?.querySelector('h3 span')?.textContent || '',
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        rows,
+      };
+    })()`, 12000);
+    const disclosureSavedRow = autoGroupSendDisclosure.rows.find((row) =>
+      row.url === askFixtureServer.autoGroupDormantUrl);
+    const disclosureLiveRow = autoGroupSendDisclosure.rows.find((row) =>
+      row.url === askFixtureServer.sourceAlphaUrl);
+    record(
+      'Auto Group discloses provider, model, full candidate data, and live or saved status before sending',
+      autoGroupSendDisclosure.message.includes('Custom OpenAI-compatible') &&
+        autoGroupSendDisclosure.message.includes('ask-e2e-model') &&
+        autoGroupSendDisclosure.message.includes(`${autoGroupSendDisclosure.rows.length} tabs`) &&
+        autoGroupSendDisclosure.message.includes('Nothing is sent until you choose Generate preview') &&
+        autoGroupSendDisclosure.sectionTitle ===
+          'Data sent: title, full URL, domain, current Tag, and live/saved status' &&
+        autoGroupSendDisclosure.confirmText === 'Generate preview' &&
+        autoGroupSendDisclosure.rows.every((row) => /^https?:\/\//.test(row.url)) &&
+        disclosureSavedRow?.title === 'Saved Historical Auto Group E2E' &&
+        disclosureSavedRow?.details === 'example.net · Historical Tag E2E · Saved' &&
+        disclosureLiveRow?.title === 'Ask Source Alpha' &&
+        disclosureLiveRow?.details === '127.0.0.1 · Ungrouped · Live',
+      JSON.stringify(autoGroupSendDisclosure),
+    );
+
+    await clickElementWithCDP(client, '#actionDialogCancel');
+    const autoGroupPreSendCancelledState = await waitFor(client, `(async () => {
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#autoGroupButton')?.disabled) return null;
+      return window.__captureAutoGroupE2E();
+    })()`);
+    const autoGroupRequestsAfterPreSendCancel = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group').length;
+    const autoGroupPermissionRequestsAfterPreSendCancel = await evaluate(client,
+      `window.__askE2ECalls.permissionRequests`);
+    record(
+      'Auto Group pre-send Cancel causes zero permission or provider traffic and no mutation',
+      autoGroupRequestsAfterPreSendCancel === autoGroupRequestsBefore &&
+        autoGroupPermissionRequestsAfterPreSendCancel === autoGroupPermissionRequestsBefore &&
+        JSON.stringify(autoGroupPreSendCancelledState.chrome) === JSON.stringify(autoGroupFixtureBefore.chrome) &&
+        JSON.stringify(autoGroupPreSendCancelledState.storage) === JSON.stringify(autoGroupFixtureBefore.storage),
+      JSON.stringify({
+        providerRequestsBefore: autoGroupRequestsBefore,
+        providerRequestsAfter: autoGroupRequestsAfterPreSendCancel,
+        permissionRequestsBefore: autoGroupPermissionRequestsBefore,
+        permissionRequestsAfter: autoGroupPermissionRequestsAfterPreSendCancel,
+        chromeUnchanged: JSON.stringify(autoGroupPreSendCancelledState.chrome) ===
+          JSON.stringify(autoGroupFixtureBefore.chrome),
+        storageUnchanged: JSON.stringify(autoGroupPreSendCancelledState.storage) ===
+          JSON.stringify(autoGroupFixtureBefore.storage),
+      }),
+    );
+
+    await clickElementWithCDP(client, '#autoGroupButton');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent ===
+        'Generate Auto Group preview?' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
+    let autoGroupMixedPreview;
+    try {
+      autoGroupMixedPreview = await waitFor(client, `(() => {
+        if (!document.querySelector('#actionDialog')?.open ||
+            document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+        const sections = [...document.querySelectorAll('#actionDialogPreview .action-preview-section')]
+          .map((section) => ({
+            title: section.querySelector('h3 span')?.textContent || '',
+            count: section.querySelector('.action-preview-count')?.textContent || '',
+            rows: [...section.querySelectorAll('.action-preview-item')].map((row) => ({
+              title: row.querySelector('.action-preview-title')?.textContent || '',
+              meta: row.querySelector('.action-preview-meta')?.textContent || '',
+              badge: row.querySelector('.action-preview-badge')?.textContent || '',
+              source: row.querySelector('.group-plan-source')?.textContent || '',
+            })),
+          }));
+        const proposal = sections.find((section) =>
+          section.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+        if (!proposal) return null;
+        return {
+          message: document.querySelector('#actionDialogMessage')?.textContent || '',
+          confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+          sections,
+          proposal,
+        };
+      })()`, 12000);
+    } catch (error) {
+      const browserState = await evaluate(client, `({
+        dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        status: document.querySelector('#syncStatus')?.textContent || '',
+        toast: document.querySelector('#workbenchToast')?.textContent || '',
+        calls: { ...window.__askE2ECalls },
+      })`);
+      const providerState = askFixtureServer.requests
+        .filter((request) => request.mode === 'auto-group')
+        .map((request) => ({
+          candidateCount: request.candidates?.length || 0,
+          liveCandidate: request.liveCandidate,
+          savedCandidate: request.savedCandidate,
+          plan: request.plan,
+        }));
+      throw new Error(`${error.message}\nAuto Group debug: ${JSON.stringify({ browserState, providerState })}`);
+    }
+    const autoGroupPreviewRequest = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group')[0];
+    const previewSavedRow = autoGroupMixedPreview.proposal.rows.find((row) =>
+      row.title === 'Saved Historical Auto Group E2E');
+    const previewLiveRow = autoGroupMixedPreview.proposal.rows.find((row) =>
+      row.title === 'Ask Source Alpha');
+    const previewNotSentSection = autoGroupMixedPreview.sections.find((section) =>
+      section.title === 'Not sent · remain untouched');
+    record(
+      'Auto Group proposes one live tab with a dormant saved Tag and labels both origins',
+      autoGroupMixedPreview.message.includes('AI proposal') &&
+        autoGroupMixedPreview.message.includes('2 tabs') &&
+        autoGroupMixedPreview.confirmText === 'Apply groups' &&
+        autoGroupMixedPreview.proposal.rows.length === 2 &&
+        previewSavedRow?.badge === 'Saved' &&
+        previewSavedRow?.source === 'From Historical Tag E2E' &&
+        previewLiveRow?.badge === 'Live' &&
+        previewLiveRow?.source === 'From Ungrouped' &&
+        previewNotSentSection?.rows?.some((row) => row.meta.includes('restricted URL')) &&
+        autoGroupPreviewRequest?.body?.stream === false &&
+        autoGroupPreviewRequest?.liveCandidate?.status === 'live' &&
+        autoGroupPreviewRequest?.savedCandidate?.status === 'saved' &&
+        autoGroupPreviewRequest?.savedCandidate?.currentGroup === 'Historical Tag E2E' &&
+        autoGroupPreviewRequest?.plan?.[0]?.tabIds?.length === 2 &&
+        autoGroupRequestsAfterPreSendCancel === autoGroupRequestsBefore &&
+        (await evaluate(client, `window.__askE2ECalls.permissionRequests`)) ===
+          autoGroupPermissionRequestsBefore + 1,
+      JSON.stringify({ preview: autoGroupMixedPreview, request: {
+        liveCandidate: autoGroupPreviewRequest?.liveCandidate,
+        savedCandidate: autoGroupPreviewRequest?.savedCandidate,
+        plan: autoGroupPreviewRequest?.plan,
+      } }),
+    );
+
+    await clickElementWithCDP(client, '#actionDialogCancel');
+    const autoGroupApplyPreviewCancelledState = await waitFor(client, `(async () => {
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#autoGroupButton')?.disabled) return null;
+      return window.__captureAutoGroupE2E();
+    })()`);
+    record(
+      'Auto Group generated-preview Cancel leaves real Chrome organization and relevant storage unchanged',
+      askFixtureServer.requests.filter((request) => request.mode === 'auto-group').length ===
+          autoGroupRequestsBefore + 1 &&
+        JSON.stringify(autoGroupApplyPreviewCancelledState.chrome) === JSON.stringify(autoGroupFixtureBefore.chrome) &&
+        JSON.stringify(autoGroupApplyPreviewCancelledState.storage) === JSON.stringify(autoGroupFixtureBefore.storage),
+      JSON.stringify({
+        providerRequests: askFixtureServer.requests
+          .filter((request) => request.mode === 'auto-group').length,
+        chromeUnchanged: JSON.stringify(autoGroupApplyPreviewCancelledState.chrome) ===
+          JSON.stringify(autoGroupFixtureBefore.chrome),
+        storageUnchanged: JSON.stringify(autoGroupApplyPreviewCancelledState.storage) ===
+          JSON.stringify(autoGroupFixtureBefore.storage),
+      }),
+    );
+
+    await clickElementWithCDP(client, '#autoGroupButton');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent ===
+        'Generate Auto Group preview?' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Auto Group Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply groups'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
+    const appliedAutoGroupState = await waitFor(client, `(async () => {
+      const captured = await window.__captureAutoGroupE2E();
+      const alpha = captured.chrome.tabs.find((tab) =>
+        tab.id === ${JSON.stringify(askSourceTabs.alpha.id)});
+      const alphaGroup = captured.chrome.groups.find((group) => group.id === alpha?.groupId);
+      const historical = captured.storage.snapshot.groups?.find((group) =>
+        group.title === 'Historical Tag E2E');
+      const target = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+      const operation = [...(captured.storage.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'auto-group');
+      const recordText = document.querySelector('#operationRecordText')?.textContent || '';
+      if (alphaGroup?.title !== ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)} ||
+          !historical || !target || operation?.status !== 'applied' ||
+          document.querySelector('#operationRecord')?.hidden ||
+          recordText !== 'Auto Group organized 2 tabs') return null;
+      return {
+        captured,
+        alphaGroup,
+        historical,
+        target,
+        operation,
+        recordText,
+        undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
+        status: document.querySelector('#syncStatus')?.textContent || '',
+      };
+    })()`, 15000);
+    const appliedSnapshotUrls = (appliedAutoGroupState.captured.storage.snapshot.groups || [])
+      .flatMap((group) => (group.tabs || []).map((tab) => tab.url))
+      .sort();
+    const beforeSnapshotUrls = (autoGroupFixtureBefore.storage.snapshot.groups || [])
+      .flatMap((group) => (group.tabs || []).map((tab) => tab.url))
+      .sort();
+    const autoGroupProviderRequestsAfterApply = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group').length;
+    const autoGroupPermissionRequestsAfterApply = await evaluate(client,
+      `window.__askE2ECalls.permissionRequests`);
+    record(
+      'Auto Group Apply updates real Chrome, preserves the historical Tag, and exposes Undo',
+      appliedAutoGroupState.alphaGroup.color === 'green' &&
+        appliedAutoGroupState.historical.tabs.length === 0 &&
+        appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.sourceAlphaUrl) &&
+        appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.autoGroupDormantUrl) &&
+        JSON.stringify(appliedSnapshotUrls) === JSON.stringify(beforeSnapshotUrls) &&
+        appliedAutoGroupState.operation.spaceId === 'default' &&
+        appliedAutoGroupState.undoText === 'Undo' &&
+        appliedAutoGroupState.status.includes('Auto group updated Default') &&
+        autoGroupProviderRequestsAfterApply === autoGroupRequestsBefore + 2 &&
+        autoGroupPermissionRequestsAfterApply === autoGroupPermissionRequestsBefore + 2,
+      JSON.stringify({
+        alphaGroup: appliedAutoGroupState.alphaGroup,
+        historical: appliedAutoGroupState.historical,
+        target: appliedAutoGroupState.target,
+        operation: {
+          type: appliedAutoGroupState.operation.type,
+          spaceId: appliedAutoGroupState.operation.spaceId,
+          summary: appliedAutoGroupState.operation.summary,
+          status: appliedAutoGroupState.operation.status,
+        },
+        status: appliedAutoGroupState.status,
+        providerRequests: autoGroupProviderRequestsAfterApply,
+        permissionRequests: autoGroupPermissionRequestsAfterApply,
+      }),
+    );
+
+    const appliedAutoGroupId = appliedAutoGroupState.alphaGroup.id;
+    await clickElementWithCDP(client, '#undoOrganizationButton');
+    const undoneAutoGroupState = await waitFor(client, `(async () => {
+      const captured = await window.__captureAutoGroupE2E();
+      const operation = [...(captured.storage.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'auto-group');
+      const historical = captured.storage.snapshot.groups?.find((group) =>
+        group.title === 'Historical Tag E2E');
+      const target = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      if (operation?.status !== 'undone' ||
+          status !== 'Undid: Auto Group organized 2 tabs.' ||
+          !historical) return null;
+      return {
+        captured,
+        operation,
+        historical,
+        target: target || null,
+        status,
+        toast: document.querySelector('#workbenchToast')?.textContent || '',
+        operationRecordHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
+        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
+      };
+    })()`, 15000);
+    const baselineOrphans = new Set(autoGroupFixtureBefore.orphanGroupSpaceIds || []);
+    const newOrphansAfterUndo = (undoneAutoGroupState.captured.orphanGroupSpaceIds || [])
+      .filter((groupId) => !baselineOrphans.has(groupId));
+    record(
+      'Auto Group Undo restores live and saved organization without orphaning or losing Tags',
+      JSON.stringify(undoneAutoGroupState.captured.layout) === JSON.stringify(autoGroupFixtureBefore.layout) &&
+        JSON.stringify(undoneAutoGroupState.captured.storage.snapshot) ===
+          JSON.stringify(autoGroupFixtureBefore.storage.snapshot) &&
+        undoneAutoGroupState.historical.tabs.some((tab) =>
+          tab.url === askFixtureServer.autoGroupDormantUrl) &&
+        !undoneAutoGroupState.target &&
+        !undoneAutoGroupState.captured.chrome.groups.some((group) =>
+          group.id === appliedAutoGroupId || group.title === askFixtureServer.autoGroupTargetTitle) &&
+        !Object.hasOwn(undoneAutoGroupState.captured.storage.groupSpaces, String(appliedAutoGroupId)) &&
+        newOrphansAfterUndo.length === 0 &&
+        undoneAutoGroupState.operationRecordHidden &&
+        undoneAutoGroupState.toast === 'Undid: Auto Group organized 2 tabs.' &&
+        undoneAutoGroupState.sourceSummary === '2 live pages',
+      JSON.stringify({
+        layoutRestored: JSON.stringify(undoneAutoGroupState.captured.layout) ===
+          JSON.stringify(autoGroupFixtureBefore.layout),
+        snapshotRestored: JSON.stringify(undoneAutoGroupState.captured.storage.snapshot) ===
+          JSON.stringify(autoGroupFixtureBefore.storage.snapshot),
+        historical: undoneAutoGroupState.historical,
+        target: undoneAutoGroupState.target,
+        newOrphansAfterUndo,
+        operationStatus: undoneAutoGroupState.operation.status,
+        status: undoneAutoGroupState.status,
+      }),
+    );
+    await evaluate(client, `window.__askE2ECalls = {
+      permissionRequests: 0,
+      pageExtractions: 0,
+    }`);
+
+    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
+      !document.querySelector('#settingsDialog')?.open &&
+      document.querySelector('#askProvider')?.textContent ===
+        'Custom OpenAI-compatible · ask-e2e-model'`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#askPagePrompt');
+      input.value = 'E2E complete stream: summarize both pages';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await clickElementWithCDP(client, '#askAIButton');
+    const askReviewState = await waitFor(client, `(async () => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Space') return null;
+      const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
+      const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)});
+      const firstSection = document.querySelector('#actionDialogPreview .action-preview-section');
+      return {
+        activeTabId: active?.id,
+        sourceTabsActive: [Boolean(alpha.active), Boolean(beta.active)],
+        permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
+        provider: document.querySelector('#askProvider')?.textContent || '',
+        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
+        calls: { ...window.__askE2ECalls },
+        message: document.querySelector('#actionDialogMessage')?.textContent || '',
+        sectionTitle: firstSection?.querySelector('h3 span')?.textContent || '',
+        sourceItems: [...(firstSection?.querySelectorAll('.action-preview-item') || [])].map((item) => ({
+          title: item.querySelector('.action-preview-title')?.textContent || '',
+          chars: item.querySelector('.action-preview-result')?.textContent || '',
+          url: item.querySelector('.action-preview-meta')?.textContent || '',
+        })),
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+      };
+    })()`, 12000);
+    record(
+      'Ask Space reads two non-active sources while Workbench stays active and shows a complete Review',
+      askReviewState.activeTabId === openedWorkbench.id &&
+        askReviewState.sourceTabsActive.every((active) => !active) &&
+        askReviewState.permission &&
+        askReviewState.calls.permissionRequests === 1 &&
+        askReviewState.calls.pageExtractions === 1 &&
+        askReviewState.provider === 'Custom OpenAI-compatible · ask-e2e-model' &&
+        askReviewState.sourceSummary === '2 live pages' &&
+        askReviewState.message.includes('Custom OpenAI-compatible · ask-e2e-model') &&
+        /\d+ chars from 2 of 2 confirmed pages/.test(askReviewState.message) &&
+        askReviewState.sectionTitle === '2 source pages' &&
+        askReviewState.sourceItems.length === 2 &&
+        askReviewState.sourceItems.every((item) => /\d+ chars/.test(item.chars)) &&
+        askReviewState.sourceItems.some((item) => item.url === askFixtureServer.sourceAlphaUrl) &&
+        askReviewState.sourceItems.some((item) => item.url === askFixtureServer.sourceBetaUrl) &&
+        askReviewState.confirmText === 'Send to provider',
+      JSON.stringify({
+        selectedAskSources,
+        askReviewState,
+        permissionFlow: 'trusted CDP pointer click with temporary unpacked-fixture host preauthorization',
+      }),
+    );
+
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const completedAskState = await waitFor(client, `(() => {
+      const messages = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
+      const answer = messages.at(-1);
+      if (!answer?.textContent?.includes('Alpha sets the Tuesday checkpoint') ||
+          !answer.textContent.includes('Beta records the Thursday review') ||
+          document.querySelector('#askAIButton')?.textContent !== 'Ask Space') return null;
+      return {
+        text: answer.textContent || '',
+        links: [...answer.querySelectorAll('a')].map((link) => ({
+          href: link.href,
+          target: link.target,
+          text: link.textContent || '',
+        })),
+        button: document.querySelector('#askAIButton')?.textContent || '',
+      };
+    })()`, 12000);
+    const completedAskAt = Date.now();
+    const completedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'complete');
+    record(
+      'Ask Space streams a cited result and renders clickable Sources',
+      completedAskState.text.includes('Sources') &&
+        completedAskState.links.some((link) => link.href === askFixtureServer.sourceAlphaUrl && link.target === '_blank') &&
+        completedAskState.links.some((link) => link.href === askFixtureServer.sourceBetaUrl && link.target === '_blank') &&
+        completedAskState.button === 'Ask Space',
+      JSON.stringify(completedAskState),
+    );
+    record(
+      'Ask Space sends both confirmed pages to the OpenAI-compatible mock',
+      completedMockRequest?.body?.stream === true &&
+        completedMockRequest.sourceCount === 2 &&
+        completedMockRequest.includesAlpha &&
+        completedMockRequest.includesBeta,
+      JSON.stringify({
+        sourceCount: completedMockRequest?.sourceCount,
+        includesAlpha: completedMockRequest?.includesAlpha,
+        includesBeta: completedMockRequest?.includesBeta,
+        stream: completedMockRequest?.body?.stream,
+      }),
+    );
+    record(
+      'Ask Space finishes on SSE [DONE] without waiting for the held-open connection',
+      completedMockRequest?.doneSentAt > 0 &&
+        completedMockRequest.serverEndCalledAt === 0 &&
+        completedAskAt - completedMockRequest.doneSentAt < 2500,
+      JSON.stringify({
+        doneSentAt: completedMockRequest?.doneSentAt,
+        completedAskAt,
+        elapsedAfterDone: completedMockRequest ? completedAskAt - completedMockRequest.doneSentAt : null,
+        clientClosedAt: completedMockRequest?.clientClosedAt,
+        serverEndCalledAt: completedMockRequest?.serverEndCalledAt,
+      }),
+    );
+
+    const tabsBeforeSourceLink = await evaluate(client, `(async () =>
+      (await chrome.tabs.query({})).map((tab) => tab.id))()`);
+    await clickElementWithCDP(
+      client,
+      `.ask-message.assistant a[href="${askFixtureServer.sourceAlphaUrl}"]`,
+    );
+    const openedSourceLinkTab = await waitFor(client, `(async () => {
+      const previous = new Set(${JSON.stringify(tabsBeforeSourceLink)});
+      return (await chrome.tabs.query({})).find((tab) =>
+        !previous.has(tab.id) && tab.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)}) || null;
+    })()`);
+    record(
+      'Ask Space Sources links open the cited page in a real Chrome tab',
+      Number.isFinite(openedSourceLinkTab?.id),
+      JSON.stringify(openedSourceLinkTab),
+    );
+    await evaluate(client, `(async () => {
+      await chrome.tabs.remove(${JSON.stringify(openedSourceLinkTab.id)});
+      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
+    })()`);
+    await waitFor(client, `(async () =>
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
+        ${JSON.stringify(openedWorkbench.id)})()`);
+
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#askPagePrompt');
+      input.value = 'E2E stop stream: keep sending until stopped';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await clickElementWithCDP(client, '#askAIButton');
+    const stopAskReview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Space') return null;
+      return { message: document.querySelector('#actionDialogMessage')?.textContent || '' };
+    })()`, 12000);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const streamingPartialState = await waitFor(client, `(() => {
+      const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
+      const answer = answers.at(-1)?.textContent || '';
+      return document.querySelector('#askAIButton')?.textContent === 'Stop' &&
+        answer.includes('Partial answer from Alpha')
+        ? { answer, button: 'Stop' }
+        : null;
+    })()`, 12000);
+    await clickElementWithCDP(client, '#askAIButton');
+    const stoppedAskState = await waitFor(client, `(() => {
+      const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
+      const answer = answers.at(-1);
+      const text = answer?.textContent || '';
+      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Space' ||
+          !text.includes('Partial answer from Alpha') ||
+          !text.includes('Request stopped before completion.')) return null;
+      return {
+        text,
+        sourceLinks: [...answer.querySelectorAll('a')].map((link) => link.href),
+        status: document.querySelector('#syncStatus')?.textContent || '',
+      };
+    })()`, 12000);
+    const stoppedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'stop');
+    record(
+      'Ask Space Stop preserves the streamed partial answer and cited Sources',
+      streamingPartialState.button === 'Stop' &&
+        stoppedAskState.status === 'Ask stopped.' &&
+        stoppedAskState.sourceLinks.includes(askFixtureServer.sourceAlphaUrl) &&
+        stoppedAskState.sourceLinks.includes(askFixtureServer.sourceBetaUrl) &&
+        stoppedMockRequest?.sourceCount === 2 &&
+        stopAskReview.message.includes('stored text from 2 recent conversation messages') &&
+        stopAskReview.message.includes('generated Sources appendices excluded') &&
+        stoppedMockRequest.historyIncludesCompletedAnswer &&
+        stoppedMockRequest.historyIncludesInlineCitationLink &&
+        !stoppedMockRequest.historyIncludesSourcesAppendix &&
+        stoppedMockRequest.clientClosedAt > 0 &&
+        stoppedMockRequest.doneSentAt === 0,
+      JSON.stringify({ streamingPartialState, stoppedAskState, stoppedMockRequest: {
+        sourceCount: stoppedMockRequest?.sourceCount,
+        stopAskReview,
+        historyIncludesCompletedAnswer: stoppedMockRequest?.historyIncludesCompletedAnswer,
+        historyIncludesInlineCitationLink: stoppedMockRequest?.historyIncludesInlineCitationLink,
+        historyIncludesSourcesAppendix: stoppedMockRequest?.historyIncludesSourcesAppendix,
+        clientClosedAt: stoppedMockRequest?.clientClosedAt,
+        doneSentAt: stoppedMockRequest?.doneSentAt,
+      } }),
+    );
+
+    await evaluate(client, `(async () => {
+      await chrome.tabs.remove([
+        ${JSON.stringify(askSourceTabs.alpha.id)},
+        ${JSON.stringify(askSourceTabs.beta.id)},
+      ]).catch(() => null);
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      stored.spaceTabsState.ai = ${JSON.stringify(originalAskAIState.ai)};
+      await chrome.storage.local.set({ spaceTabsState: stored.spaceTabsState });
+      const originalSecret = ${JSON.stringify(originalAskAIState.secret)};
+      if (originalSecret) await chrome.storage.session.set({ spaceTabsSecrets: originalSecret });
+      else await chrome.storage.session.remove('spaceTabsSecrets');
+      await chrome.permissions.remove({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }).catch(() => false);
+      if (window.__askE2EOriginals) {
+        chrome.permissions.request = window.__askE2EOriginals.requestPermission;
+        chrome.runtime.sendMessage = window.__askE2EOriginals.sendMessage;
+        delete window.__askE2EOriginals;
+      }
+    })()`);
+    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
+      !document.querySelector('#settingsDialog')?.open &&
+      document.querySelector('#askProvider')?.textContent !==
+        'Custom OpenAI-compatible · ask-e2e-model'`);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
@@ -692,6 +2143,9 @@ async function main() {
       JSON.stringify(invalidMaxTokenState),
     );
     await evaluate(client, `(() => {
+      const provider = document.querySelector('#providerInput');
+      provider.value = 'openai';
+      provider.dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#maxTokensInput').value = '10';
       document.querySelector('#apiKeyInput').value = 'e2e-session-key';
       const input = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
@@ -807,12 +2261,24 @@ async function main() {
         completedSetupState.activeTab?.id === openedWorkbench.id,
       JSON.stringify(completedSetupState),
     );
-    await evaluate(client, `document.querySelector('#onboardingStayButton').click()`);
-    await waitFor(client, `(async () => {
+    await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
+    const completedSetupSurfaceState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
-      return !document.querySelector('#onboardingDialog')?.open &&
-        stored.spaceTabsState?.onboarding?.completed === true;
+      if (document.querySelector('#onboardingDialog')?.open ||
+          stored.spaceTabsState?.onboarding?.completed !== true) return null;
+      return {
+        workbench: new URLSearchParams(location.search).get('layout') === 'workbench',
+        misleadingStayAction: Boolean(document.querySelector('#onboardingStayButton')),
+        activeTabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id || null,
+      };
     })()`);
+    record(
+      'Setup finish starts in Workbench without a misleading side-panel action',
+      completedSetupSurfaceState.workbench &&
+        !completedSetupSurfaceState.misleadingStayAction &&
+        completedSetupSurfaceState.activeTabId === openedWorkbench.id,
+      JSON.stringify(completedSetupSurfaceState),
+    );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
@@ -830,6 +2296,24 @@ async function main() {
       exportFeedbackState.status.includes('API keys were excluded') &&
         exportFeedbackState.toast.includes('API keys were excluded'),
       JSON.stringify(exportFeedbackState),
+    );
+    progress('real backup download started');
+    const downloadedBackup = await waitForJsonDownload(downloadDir);
+    const exportedBackupState = {
+      filename: downloadedBackup.name,
+      format: downloadedBackup.parsed?.format || '',
+      spaces: (downloadedBackup.parsed?.spaces || []).map((space) => space.name),
+      hasAIState: Object.hasOwn(downloadedBackup.parsed || {}, 'ai'),
+      hasApiKeyText: downloadedBackup.text.includes('apiKey'),
+    };
+    record(
+      'Workbench export downloads a parseable portable backup without AI state',
+      exportedBackupState.filename.startsWith('space-backup-') &&
+        exportedBackupState.format === 'space-context-workspaces' &&
+        exportedBackupState.spaces.includes('Setup E2E') &&
+        !exportedBackupState.hasAIState &&
+        !exportedBackupState.hasApiKeyText,
+      JSON.stringify(exportedBackupState),
     );
 
     await evaluate(client, `(() => {
@@ -901,15 +2385,142 @@ async function main() {
       JSON.stringify(restoredBackupState),
     );
 
-    const openUniqueResults = await evaluate(client, `(async () => {
-      const url = chrome.runtime.getURL('sidepanel.html?layout=workbench&view=settings');
-      const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
-      history.replaceState(null, '', url);
-      await chrome.tabs.create({ url: matchUrl, active: false, index: 0 });
-      const first = await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
-      const second = await chrome.runtime.sendMessage({ type: 'tabs:openUnique', url, matchUrl });
-      return { first, second };
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `(() => {
+      const file = new File(
+        [${JSON.stringify(downloadedBackup.text)}],
+        ${JSON.stringify(downloadedBackup.name)},
+        { type: 'application/json' },
+      );
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      const input = document.querySelector('#spaceBackupInput');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
+    await waitFor(client, `!document.querySelector('#restoreSpaceDataButton')?.disabled &&
+      document.querySelector('#spaceBackupStatus')?.textContent.startsWith('Ready to restore ')`);
+    await evaluate(client, `document.querySelector('#restoreSpaceDataButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const exportRoundTripState = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const names = (saved.spaces || []).map((space) => space.name);
+      if (!names.includes('Setup E2E') || names.includes('Backup Restored')) return null;
+      return {
+        activeSpaceId: saved.activeSpaceId,
+        names,
+        maxTokens: saved.ai?.maxTokens,
+        addSpaceShortcut: saved.shortcuts?.addSpace,
+      };
+    })()`, 12000);
+    record(
+      'A real downloaded export restores end-to-end after the workspace was replaced',
+      exportRoundTripState.maxTokens === 10_240 &&
+        exportRoundTripState.addSpaceShortcut === 'Control+Alt+K',
+      JSON.stringify(exportRoundTripState),
+    );
+    progress('real export-to-restore round trip passed');
+
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    const beforeOversizedRestore = await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const relevant = {
+        activeSpaceId: saved.activeSpaceId,
+        spaces: saved.spaces,
+        spaceContexts: saved.spaceContexts,
+        spaceSnapshots: saved.spaceSnapshots,
+        askSessions: saved.askSessions,
+      };
+      return { relevant: JSON.stringify(relevant), bytes: await chrome.storage.local.getBytesInUse() };
+    })()`);
+    await evaluate(client, `(() => {
+      const backup = {
+        format: 'space-context-workspaces',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        activeSpaceId: 'oversized-e2e',
+        spaces: [{ id: 'oversized-e2e', name: 'Oversized E2E', icon: 'O', color: 'red' }],
+        spaceContexts: { 'oversized-e2e': 'x'.repeat(8 * 1024 * 1024) },
+        spaceSnapshots: {},
+        askSessions: {},
+        collapsedSpaceGroups: {},
+      };
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([JSON.stringify(backup)], 'oversized-e2e.json', { type: 'application/json' }));
+      const input = document.querySelector('#spaceBackupInput');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(client, `!document.querySelector('#restoreSpaceDataButton')?.disabled &&
+      document.querySelector('#spaceBackupStatus')?.textContent.startsWith('Ready to restore ')`, 12000);
+    await evaluate(client, `document.querySelector('#restoreSpaceDataButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const oversizedRestoreState = await waitFor(client, `(async () => {
+      const status = document.querySelector('#spaceBackupStatus')?.textContent || '';
+      if (!status.includes('above the safe 8 MB budget')) return null;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const relevant = JSON.stringify({
+        activeSpaceId: saved.activeSpaceId,
+        spaces: saved.spaces,
+        spaceContexts: saved.spaceContexts,
+        spaceSnapshots: saved.spaceSnapshots,
+        askSessions: saved.askSessions,
+      });
+      return {
+        status,
+        relevant,
+        bytes: await chrome.storage.local.getBytesInUse(),
+        restoreStillEnabled: !document.querySelector('#restoreSpaceDataButton')?.disabled,
+      };
+    })()`, 12000);
+    record(
+      'Oversized restore is rejected before persistence and leaves the workspace unchanged',
+      oversizedRestoreState.relevant === beforeOversizedRestore.relevant &&
+        oversizedRestoreState.bytes === beforeOversizedRestore.bytes &&
+        oversizedRestoreState.restoreStillEnabled,
+      JSON.stringify({
+        status: oversizedRestoreState.status,
+        bytesBefore: beforeOversizedRestore.bytes,
+        bytesAfter: oversizedRestoreState.bytes,
+        restoreStillEnabled: oversizedRestoreState.restoreStillEnabled,
+      }),
+    );
+    progress('oversized restore rollback passed');
+    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
+
+    progress('checking Workbench de-duplication');
+    const openUniqueSetup = await evaluate(client, `(async () => {
+      const matchUrl = chrome.runtime.getURL('sidepanel.html?layout=workbench');
+      const current = await chrome.tabs.getCurrent();
+      await chrome.tabs.update(current.id, { active: true });
+      const url = current.url || location.href;
+      const duplicate = await chrome.tabs.create({ url: matchUrl, active: false });
+      return { url, matchUrl, currentTabId: current.id, duplicateId: duplicate.id };
+    })()`);
+    progress('Workbench duplicate created');
+    const firstOpenUnique = await evaluate(client, `(async () => chrome.runtime.sendMessage({
+      type: 'tabs:openUnique',
+      url: ${JSON.stringify(openUniqueSetup.url)},
+      matchUrl: ${JSON.stringify(openUniqueSetup.matchUrl)},
+      preferredTabId: ${JSON.stringify(openUniqueSetup.currentTabId)},
+    }))()`);
+    progress('first Workbench de-duplication request passed');
+    const secondOpenUnique = await evaluate(client, `(async () => chrome.runtime.sendMessage({
+      type: 'tabs:openUnique',
+      url: ${JSON.stringify(openUniqueSetup.url)},
+      matchUrl: ${JSON.stringify(openUniqueSetup.matchUrl)},
+      preferredTabId: ${JSON.stringify(openUniqueSetup.currentTabId)},
+    }))()`);
+    const openUniqueResults = { first: firstOpenUnique, second: secondOpenUnique };
     const workbenchState = await waitFor(client, `(async () => {
       const tabs = (await chrome.tabs.query({}))
         .filter((tab) => String(tab.url || '').includes('sidepanel.html?layout=workbench'));
@@ -935,7 +2546,9 @@ async function main() {
   } finally {
     client?.close();
     await chrome?.close();
+    await askFixtureServer.close();
     await extensionFixture.close();
+    await rm(downloadDir, { recursive: true, force: true });
   }
 }
 

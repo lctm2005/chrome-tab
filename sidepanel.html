@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Space</title>
+    <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=22">
+    <link rel="stylesheet" href="sidepanel.css?v=23">
   </head>
   <body>
     <div class="shell">
@@ -16,7 +16,7 @@
         </div>
         <div class="top-actions" aria-label="Actions">
           <button class="icon-button compact" id="tidyNamesButton" title="Tidy names" aria-label="Tidy Names">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+            <span class="tidy-icon" aria-hidden="true">🧹</span>
           </button>
           <button class="icon-button compact" id="autoGroupButton" title="Auto group" aria-label="Auto Group">
             <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -28,6 +28,9 @@
           <button class="icon-button compact" id="collapseGroupsButton" title="Collapse groups" aria-label="Collapse groups">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
           </button>
+          <button class="icon-button compact" id="commandPaletteButton" title="Command palette" aria-label="Open command palette">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+          </button>
           <button class="icon-button compact" id="openWorkbenchButton" title="Open Workbench" aria-label="Open Workbench">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path><path d="M9 10h12"></path></svg>
           </button>
@@ -37,14 +40,25 @@
         </div>
       </header>
 
+      <div class="operation-record" id="operationRecord" role="status" hidden>
+        <span id="operationRecordText"></span>
+        <button type="button" class="link-button" id="undoOrganizationButton">Undo</button>
+      </div>
+
       <main class="space-view" id="groupsList"></main>
 
       <main class="ask-view" id="askPageView" hidden>
         <div class="ask-scope" id="askScope"></div>
+        <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Space data disclosure">
+          <div><span>Provider</span><strong id="askProvider"></strong></div>
+          <div><span>Sources</span><strong id="askSourceSummary"></strong></div>
+          <p id="askSourceHint">Select live tabs in this Space to narrow the sources.</p>
+          <div class="ask-source-list" id="askSourceList"></div>
+        </section>
         <div class="ask-messages" id="askMessages"></div>
         <textarea id="askPagePrompt" rows="4" placeholder="Ask this Space"></textarea>
         <div class="ai-actions">
-          <button id="askAIButton">Ask</button>
+          <button id="askAIButton">Ask Space</button>
         </div>
       </main>
 
@@ -82,11 +96,11 @@
             <strong>Space</strong>
           </div>
           <div class="onboarding-progress" id="onboardingProgress" aria-label="Setup progress">
-            <span class="active"></span>
-            <span></span>
-            <span></span>
+            <span class="active"><small>Choose</small></span>
+            <span><small>Bring data</small></span>
+            <span><small>Ready</small></span>
           </div>
-          <p>One thing.<br>One Space.<br>All its context.</p>
+          <p>Keep Chrome.<br>Bring your Arc workflow.<br>Add private BYOK AI.</p>
         </aside>
         <section class="onboarding-stage">
           <header class="onboarding-header">
@@ -96,15 +110,15 @@
 
           <section class="onboarding-step" id="onboardingChooseStep">
             <div class="onboarding-copy">
-              <h2>What are you bringing into focus?</h2>
-              <p>Start with a clean Default Space.</p>
+              <h2>How do you want to start?</h2>
+              <p>Create a clean Space or bring selected Arc Spaces into Chrome.</p>
             </div>
             <div class="onboarding-choices">
               <button type="button" class="onboarding-choice" data-onboarding-path="fresh">
                 <span class="onboarding-choice-icon">+</span>
                 <span><strong>Start with one thing</strong><small>Create a focused Space.</small></span>
               </button>
-              <button type="button" class="onboarding-choice" data-onboarding-path="arc" hidden>
+              <button type="button" class="onboarding-choice" data-onboarding-path="arc">
                 <span class="onboarding-choice-icon">A</span>
                 <span><strong>Move from Arc</strong><small>Preview and choose the Spaces to import.</small></span>
               </button>
@@ -125,7 +139,7 @@
           <section class="onboarding-step" id="onboardingArcStep" hidden>
             <div class="onboarding-copy">
               <h2>Choose what comes over from Arc.</h2>
-              <p>Arc import is not available in this release.</p>
+              <p>Select Arc's <code>StorableSidebar.json</code>. Space Tabs previews names, conflicts, folders, and tab counts before importing anything.</p>
             </div>
             <label class="onboarding-file-picker">
               <input id="onboardingArcInput" type="file" accept=".json,application/json">
@@ -140,10 +154,11 @@
               <p id="onboardingFinishMessage">Your first Space is ready.</p>
             </div>
             <div class="onboarding-finish-actions">
-              <button type="button" id="onboardingOpenWorkbenchButton">Open Workbench</button>
-              <button type="button" class="secondary-button" id="onboardingStayButton">Stay in side panel</button>
+              <button type="button" id="onboardingOpenWorkbenchButton">Start using Workbench</button>
+              <button type="button" class="secondary-button" id="onboardingExportButton">Export backup</button>
+              <button type="button" class="link-button danger-link" id="onboardingUndoArcButton" hidden>Undo this import</button>
             </div>
-            <p class="onboarding-privacy">Workspace data stays in Chrome. AI remains optional and uses only the provider you configure.</p>
+            <p class="onboarding-privacy">No account, telemetry, or Space Tabs server. Workspace data stays in Chrome. BYOK content goes only to the provider you choose.</p>
           </section>
 
           <footer class="onboarding-footer" id="onboardingFooter">
@@ -239,9 +254,9 @@
           <button type="button" id="restoreSpaceDataButton" class="secondary-button" disabled>Restore Backup</button>
           <div id="spaceBackupStatus" class="settings-status">No backup selected.</div>
         </section>
-        <section class="arc-import-settings" hidden>
-          <h3>Arc Import</h3>
-          <p>Arc import is not available in this release.</p>
+        <section class="arc-import-settings">
+          <h3>Import from Arc</h3>
+          <p>Choose Arc's <code>StorableSidebar.json</code>. Review the preview before appending imported Spaces; the latest import can be undone.</p>
           <label class="file-picker">
             <input id="arcImportInput" type="file" accept=".json,application/json">
           </label>
@@ -260,7 +275,16 @@
       </form>
     </dialog>
 
+    <dialog id="commandPaletteDialog" class="command-palette-dialog">
+      <form method="dialog" class="command-palette-shell">
+        <label for="commandPaletteInput">Switch Spaces, find tabs, or ask</label>
+        <input id="commandPaletteInput" type="search" autocomplete="off" spellcheck="false" placeholder="Type a Space, tab, or command…">
+        <div id="commandPaletteResults" class="command-palette-results" role="listbox"></div>
+        <p class="command-palette-help">↑↓ navigate · Enter open · Esc close</p>
+      </form>
+    </dialog>
+
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=22"></script>
+    <script type="module" src="sidepanel.js?v=23"></script>
   </body>
 </html>

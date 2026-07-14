@@ -23,6 +23,7 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.spaceContexts, {});
   assert.deepEqual(state.onboarding, { version: 1, completed: false });
   assert.equal(state.lastArcImport, null);
+  assert.deepEqual(state.operationHistory, []);
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
   assert.equal(state.shortcuts.askAbort, 'Control+C');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
@@ -150,6 +151,55 @@ test('preserves completed onboarding and a valid Arc import undo record', () => 
     spaceIds: ['arc-work', 'arc-home'],
     importedAt: 123,
   });
+});
+
+test('normalizes per-Space Arc import safety fingerprints while preserving legacy records', () => {
+  const merged = mergeStoredState({
+    version: 8,
+    lastArcImport: {
+      spaceIds: ['arc-work', 'arc-home', 'arc-work', '__proto__'],
+      importedAt: 456,
+      afterFingerprints: {
+        'arc-work': ' portable-space-v1-12345678 ',
+        'arc-home': 'portable-space-v1-abcdef12',
+        unrelated: 'portable-space-v1-deadbeef',
+      },
+    },
+  }, createDefaultState());
+
+  assert.deepEqual(merged.lastArcImport, {
+    spaceIds: ['arc-work', 'arc-home'],
+    importedAt: 456,
+    afterFingerprints: {
+      'arc-work': 'portable-space-v1-12345678',
+      'arc-home': 'portable-space-v1-abcdef12',
+    },
+  });
+
+  const legacy = mergeStoredState({
+    version: 7,
+    lastArcImport: { spaceIds: ['arc-work'], importedAt: 123 },
+  }, createDefaultState());
+  assert.deepEqual(legacy.lastArcImport, { spaceIds: ['arc-work'], importedAt: 123 });
+});
+
+test('preserves a bounded normalized operation history for Undo', () => {
+  const operationHistory = Array.from({ length: 12 }, (_, index) => ({
+    id: `operation-${index}`,
+    type: index % 2 ? 'auto-group' : 'tidy-names',
+    summary: `Change ${index}`,
+    createdAt: index,
+    status: index === 11 ? 'undone' : 'applied',
+    before: { value: index },
+    after: { fingerprint: `fingerprint-${index}` },
+  }));
+  const merged = mergeStoredState({ version: 8, operationHistory }, createDefaultState());
+
+  assert.equal(merged.operationHistory.length, 10);
+  assert.equal(merged.operationHistory[0].id, 'operation-2');
+  assert.equal(merged.operationHistory.at(-1).status, 'undone');
+  assert.deepEqual(merged.operationHistory[0].before, { value: 2 });
+  assert.deepEqual(merged.operationHistory[0].after, { fingerprint: 'fingerprint-2' });
 });
 
 test('migrates the legacy default Space and max token defaults', () => {

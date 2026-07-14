@@ -256,6 +256,30 @@ export function createPreviewCommandHandler(initialTabs = createPreviewTabs(), i
           },
         };
       }
+      case 'pages:extract': {
+        const ids = new Set((payload.tabIds || []).map(Number));
+        const pages = tabs
+          .filter((tab) => ids.has(Number(tab.id)) && /^https?:/.test(tab.url || ''))
+          .map((tab) => {
+            const text = `Preview content for ${tab.title}. This local preview stands in for page text extracted only after confirmation.`;
+            return {
+              tabId: tab.id,
+              title: tab.title,
+              url: tab.url,
+              text,
+              selection: '',
+              charCount: text.length,
+              originalCharCount: text.length,
+              truncated: false,
+            };
+          });
+        return {
+          pages,
+          failures: [],
+          totalChars: pages.reduce((sum, page) => sum + page.charCount, 0),
+          truncated: false,
+        };
+      }
       case 'ai:chat':
         return {
           text: previewAIText(payload.messages),

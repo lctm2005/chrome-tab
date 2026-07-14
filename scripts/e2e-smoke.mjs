@@ -1131,11 +1131,21 @@ async function main() {
     return rows.length ? { rows } : null;
   })()`);
   record(
-    'activated group tags suppress URL-variant dormant residue',
+    'activated group tags preserve distinct URL-variant history',
     activatedTagResidueState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
-      !activatedTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')),
+      activatedTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')),
     JSON.stringify(activatedTagResidueState)
   );
+  await evaluate(client, `(() => {
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const state = raw.spaceTabsState || {};
+    const group = state.spaceSnapshots?.['drop-demo']?.groups?.find((item) => item.title === 'Research');
+    if (group) {
+      group.tabs = (group.tabs || []).filter((tab) => tab.url !== 'https://example.com/spaces-guide');
+    }
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    return true;
+  })()`);
   const closeGroupTagDispatchState = await evaluate(client, `(() => {
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
@@ -1152,22 +1162,29 @@ async function main() {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
+    if (card?.classList.contains('collapsed')) {
+      card.querySelector('.group-header')?.click();
+      return null;
+    }
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
     }));
     if (rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
+    if (!rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
     const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
       .flatMap((group) => group.tabs || [])
       .map((tab) => tab.url);
     return { rows, snapshotUrls };
   })()`);
   record(
-    'closing a live group tag removes it from snapshots without dormant residue',
+    'closing a live group tag keeps its distinct URL-variant history',
     closeGroupTagDispatchState.clicked &&
-      !closeGroupTagResidueState.rows.some((row) => row.text.includes('Browser Spaces Guide')) &&
+      !closeGroupTagResidueState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      closeGroupTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
       closeGroupTagResidueState.snapshotUrls.includes('https://example.com/drop-saved') &&
-      !closeGroupTagResidueState.snapshotUrls.some((url) => String(url || '').includes('spaces-guide')),
+      closeGroupTagResidueState.snapshotUrls.includes('https://example.com/spaces-guide#stale-dormant-row') &&
+      !closeGroupTagResidueState.snapshotUrls.includes('https://example.com/spaces-guide'),
     JSON.stringify({ closeGroupTagDispatchState, closeGroupTagResidueState })
   );
   await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
@@ -1671,6 +1688,44 @@ async function main() {
 
     await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    const autoGroupDisclosure = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open) return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Generate Auto Group preview?') return null;
+      return {
+        message: document.querySelector('#actionDialogMessage')?.textContent || '',
+        sectionTitle: document.querySelector('#actionDialogPreview h3 span')?.textContent || '',
+        items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => command.type === 'ai:chat').length,
+      };
+    })()`);
+    record(
+      'Auto Group discloses exact metadata before proposal generation',
+      autoGroupDisclosure.message.includes('Nothing is sent until you choose Generate preview') &&
+        autoGroupDisclosure.sectionTitle.includes('title, full URL, domain, current Tag, and live/saved status') &&
+        autoGroupDisclosure.items > 0 &&
+        autoGroupDisclosure.confirmText === 'Generate preview' &&
+        autoGroupDisclosure.providerRequests === 0,
+      JSON.stringify(autoGroupDisclosure)
+    );
+    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+    await waitFor(client, `!document.querySelector('#actionDialog')?.open && !document.querySelector('#autoGroupButton')?.disabled`);
+    const autoGroupPreSendCancel = await evaluate(client, `({
+      providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => command.type === 'ai:chat').length,
+      mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)).length,
+    })`);
+    record(
+      'Auto Group pre-send Cancel has no provider traffic or mutations',
+      autoGroupPreSendCancel.providerRequests === 0 && autoGroupPreSendCancel.mutations === 0,
+      JSON.stringify(autoGroupPreSendCancel)
+    );
+
+    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Generate Auto Group preview?'`);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const groupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
       if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;

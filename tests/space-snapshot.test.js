@@ -12,6 +12,7 @@ import {
   removeSnapshotTab,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
+  snapshotHasPersistentContent,
   snapshotTabCount,
   updateSnapshotTab,
 } from '../src/shared/space-snapshot.js';
@@ -208,6 +209,45 @@ test('open Space snapshots preserve live ungrouped tabs while dropping stored-on
   ]);
 });
 
+test('mergeOpenSpaceSnapshot consumes one exact live row without dropping query/hash history', () => {
+  const snapshot = mergeOpenSpaceSnapshot([{
+    title: 'History',
+    color: 'blue',
+    collapsed: false,
+    tabs: [{
+      id: 2,
+      title: 'Item 2 live',
+      url: 'https://app.test/item?id=2',
+      pinned: false,
+    }],
+  }], {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'History',
+      color: 'blue',
+      collapsed: true,
+      tabs: [
+        { title: 'Item 1 saved', url: 'https://app.test/item?id=1' },
+        { title: 'Item 2 saved', url: 'https://app.test/item?id=2' },
+        { title: 'Third section saved', url: 'https://app.test/item#third' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(snapshot.groups, [{
+    title: 'History',
+    color: 'blue',
+    collapsed: false,
+    tabs: [
+      { title: 'Item 2 live', url: 'https://app.test/item?id=2' },
+      { title: 'Item 1 saved', url: 'https://app.test/item?id=1' },
+      { title: 'Third section saved', url: 'https://app.test/item#third' },
+    ],
+  }]);
+  assert.equal(snapshotTabCount(snapshot), 3);
+});
+
 test('sanitizes invalid and new-tab placeholder rows from stored grouped snapshots', () => {
   const snapshot = {
     version: 1,
@@ -303,26 +343,28 @@ test('removes extension-owned pages from old Space snapshots', () => {
   assert.deepEqual(snapshot.groups, []);
 });
 
-test('deduplicates stored snapshot URL variants within a group', () => {
+test('sanitizing preserves query and hash identities while deduplicating exact URLs', () => {
   const snapshot = sanitizeSpaceSnapshot({
     version: 1,
     updatedAt: 1,
     groups: [
       {
-        title: 'Argos',
+        title: 'History',
         color: 'blue',
         tabs: [
-          { title: 'Latest query', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
-          { title: 'Old query', url: 'https://cloud-boe.bytedance.net/logs?keyword=old' },
-          { title: 'Release', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+          { title: 'Item 1', url: 'https://app.test/item?id=1' },
+          { title: 'Item 2', url: 'https://app.test/item?id=2' },
+          { title: 'Third section', url: 'https://app.test/item#third' },
+          { title: 'Exact duplicate is ignored', url: 'https://app.test/item?id=1' },
         ],
       },
     ],
   });
 
   assert.deepEqual(snapshot.groups[0].tabs, [
-    { title: 'Latest query', url: 'https://cloud-boe.bytedance.net/logs?keyword=new&page=2#result' },
-    { title: 'Release', url: 'https://lark-devops.bytedance.net/releases/42?tab=overview' },
+    { title: 'Item 1', url: 'https://app.test/item?id=1' },
+    { title: 'Item 2', url: 'https://app.test/item?id=2' },
+    { title: 'Third section', url: 'https://app.test/item#third' },
   ]);
 });
 
@@ -391,6 +433,145 @@ test('keeps dormant tabs with a live group after the group is renamed', () => {
   ]);
 });
 
+test('preserveGroups keeps dormant history under its original Tag when a live tab is regrouped', () => {
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'AI Proposal',
+        color: 'purple',
+        tabs: [{ title: 'Current', url: 'https://example.com/current?live=1' }],
+      },
+    ],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Historical Tag',
+        color: 'blue',
+        collapsed: true,
+        custom: 'keep-history-metadata',
+        tabs: [
+          { title: 'Current', url: 'https://example.com/current?stored=1' },
+          { title: 'Saved history', url: 'https://example.com/history' },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(liveSnapshot, storedSnapshot), {
+    version: 1,
+    updatedAt: 2,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Historical Tag',
+        color: 'blue',
+        collapsed: true,
+        custom: 'keep-history-metadata',
+        tabs: [{ title: 'Saved history', url: 'https://example.com/history' }],
+      },
+      {
+        title: 'AI Proposal',
+        color: 'purple',
+        tabs: [{ title: 'Current', url: 'https://example.com/current?live=1' }],
+      },
+    ],
+  });
+});
+
+test('preserveGroups keeps an empty historical Tag beside newly regrouped live tabs', () => {
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: 'New Work',
+        color: 'cyan',
+        tabs: [{ title: 'Current', url: 'https://example.com/current' }],
+      },
+    ],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Historical Tag',
+        color: 'orange',
+        collapsed: true,
+        tabs: [],
+      },
+    ],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(liveSnapshot, storedSnapshot), {
+    version: 1,
+    updatedAt: 2,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Historical Tag',
+        color: 'orange',
+        collapsed: true,
+        tabs: [],
+      },
+      {
+        title: 'New Work',
+        color: 'cyan',
+        tabs: [{ title: 'Current', url: 'https://example.com/current' }],
+      },
+    ],
+  });
+});
+
+test('preserveGroups survives sanitizing and removing the final saved row', () => {
+  const snapshot = {
+    version: 1,
+    preserveGroups: true,
+    groups: [{
+      title: 'Historical Tag',
+      color: 'orange',
+      collapsed: true,
+      custom: 'keep-metadata',
+      tabs: [{ title: 'Last row', url: 'https://example.com/last' }],
+    }],
+  };
+
+  const removed = removeSnapshotTab(snapshot, {
+    groupTitle: 'Historical Tag',
+    groupColor: 'orange',
+    url: 'https://example.com/last',
+  });
+
+  assert.deepEqual(removed.groups, [{
+    title: 'Historical Tag',
+    color: 'orange',
+    collapsed: true,
+    custom: 'keep-metadata',
+    tabs: [],
+  }]);
+  assert.equal(snapshotTabCount(removed), 0);
+  assert.equal(snapshotHasPersistentContent(removed), true);
+  assert.deepEqual(sanitizeSpaceSnapshot(removed), removed);
+});
+
+test('an empty temporary Ungrouped group is not persistent history', () => {
+  const snapshot = {
+    version: 1,
+    preserveGroups: true,
+    groups: [{ title: 'Ungrouped', color: 'grey', restorable: true, tabs: [] }],
+  };
+
+  assert.equal(snapshotHasPersistentContent(snapshot), false);
+  assert.deepEqual(sanitizeSpaceSnapshot(snapshot).groups, []);
+});
+
 test('removes one opened dormant tab from its snapshot group', () => {
   const snapshot = {
     version: 1,
@@ -436,7 +617,7 @@ test('removes one opened dormant tab from its snapshot group', () => {
   });
 });
 
-test('removes only the first matching dormant duplicate from a snapshot group', () => {
+test('removes only the exact dormant URL and preserves query/hash siblings', () => {
   const snapshot = {
     version: 1,
     updatedAt: 1,
@@ -445,8 +626,9 @@ test('removes only the first matching dormant duplicate from a snapshot group', 
         title: 'Docs',
         color: 'blue',
         tabs: [
-          { title: 'Spec A', url: 'https://example.com/spec' },
-          { title: 'Spec B', url: 'https://example.com/spec' },
+          { title: 'Item 1', url: 'https://app.test/item?id=1' },
+          { title: 'Item 2', url: 'https://app.test/item?id=2' },
+          { title: 'Third section', url: 'https://app.test/item#third' },
         ],
       },
     ],
@@ -455,11 +637,43 @@ test('removes only the first matching dormant duplicate from a snapshot group', 
   const result = removeSnapshotTab(snapshot, {
     groupTitle: 'Docs',
     groupColor: 'blue',
-    url: 'https://example.com/spec',
+    url: 'https://app.test/item?id=2',
   });
 
   assert.deepEqual(result.groups[0].tabs, [
-    { title: 'Spec B', url: 'https://example.com/spec' },
+    { title: 'Item 1', url: 'https://app.test/item?id=1' },
+    { title: 'Third section', url: 'https://app.test/item#third' },
+  ]);
+});
+
+test('updates only the exact dormant URL and preserves query/hash siblings', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      tabs: [
+        { title: 'Item 1', url: 'https://app.test/item?id=1' },
+        { title: 'Item 2', url: 'https://app.test/item?id=2' },
+        { title: 'Third section', url: 'https://app.test/item#third' },
+      ],
+    }],
+  };
+
+  const result = updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://app.test/item?id=2',
+  }, {
+    title: 'Item 2 updated',
+    url: 'https://app.test/item?id=2&view=full',
+  });
+
+  assert.deepEqual(result.groups[0].tabs, [
+    { title: 'Item 1', url: 'https://app.test/item?id=1' },
+    { title: 'Item 2 updated', url: 'https://app.test/item?id=2&view=full' },
+    { title: 'Third section', url: 'https://app.test/item#third' },
   ]);
 });
 
@@ -589,6 +803,46 @@ test('removes disappeared live tabs from stored dormant snapshots', () => {
   });
 });
 
+test('bulk snapshot removal is an exact-first one-to-one multiset match', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'History',
+      color: 'blue',
+      tabs: [
+        { title: 'Item 1', url: 'https://app.test/item?id=1' },
+        { title: 'Item 2', url: 'https://app.test/item?id=2' },
+        { title: 'Third section', url: 'https://app.test/item#third' },
+      ],
+    }],
+  };
+
+  const exactOnly = removeSnapshotTabs(snapshot, [
+    { url: 'https://app.test/item?id=2' },
+  ]);
+  assert.deepEqual(exactOnly.groups[0].tabs, [
+    { title: 'Item 1', url: 'https://app.test/item?id=1' },
+    { title: 'Third section', url: 'https://app.test/item#third' },
+  ]);
+
+  const fallbackOnly = removeSnapshotTabs(snapshot, [
+    { url: 'https://app.test/item?id=missing' },
+  ]);
+  assert.deepEqual(fallbackOnly.groups[0].tabs, [
+    { title: 'Item 2', url: 'https://app.test/item?id=2' },
+    { title: 'Third section', url: 'https://app.test/item#third' },
+  ]);
+
+  const exactAndFallback = removeSnapshotTabs(snapshot, [
+    { url: 'https://app.test/item?id=missing' },
+    { url: 'https://app.test/item?id=2' },
+  ]);
+  assert.deepEqual(exactAndFallback.groups[0].tabs, [
+    { title: 'Third section', url: 'https://app.test/item#third' },
+  ]);
+});
+
 test('merges live tabs without dropping dormant snapshot content', () => {
   const stored = {
     version: 1,
@@ -676,7 +930,7 @@ test('keeps stored dormant snapshots when live content is empty', () => {
   assert.equal(mergeSpaceSnapshot(null, { version: 1, updatedAt: 1, groups: [] }), null);
 });
 
-test('treats query and hash changes as the same snapshot page', () => {
+test('uses a query/hash-insensitive URL only as a merge fallback', () => {
   assert.equal(
     comparableSnapshotUrl('https://cloud-boe.bytedance.net/logs?keyword=old#top'),
     'https://cloud-boe.bytedance.net/logs'
@@ -725,4 +979,77 @@ test('treats query and hash changes as the same snapshot page', () => {
       },
     ],
   });
+});
+
+test('merge fallback consumes only one stored base-URL match', () => {
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'History',
+      color: 'blue',
+      tabs: [
+        { title: 'Item 1 saved', url: 'https://app.test/item?id=1' },
+        { title: 'Item 2 saved', url: 'https://app.test/item?id=2' },
+        { title: 'Third section saved', url: 'https://app.test/item#third' },
+      ],
+    }],
+  };
+  const live = {
+    version: 1,
+    updatedAt: 2,
+    groups: [{
+      title: 'History',
+      color: 'blue',
+      tabs: [{ title: 'Current navigation', url: 'https://app.test/item?id=current' }],
+    }],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(live, stored).groups[0].tabs, [
+    { title: 'Current navigation', url: 'https://app.test/item?id=current' },
+    { title: 'Item 2 saved', url: 'https://app.test/item?id=2' },
+    { title: 'Third section saved', url: 'https://app.test/item#third' },
+  ]);
+});
+
+test('merge consumes an exact duplicate from the corresponding group first', () => {
+  const sharedUrl = 'https://app.test/item?id=1';
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Archive',
+        color: 'green',
+        tabs: [{ title: 'Archived copy', url: sharedUrl }],
+      },
+      {
+        title: 'Current',
+        color: 'blue',
+        tabs: [{ title: 'Saved current copy', url: sharedUrl }],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    updatedAt: 2,
+    groups: [{
+      title: 'Current',
+      color: 'blue',
+      tabs: [{ title: 'Live current copy', url: sharedUrl }],
+    }],
+  };
+
+  assert.deepEqual(mergeSpaceSnapshot(live, stored).groups, [
+    {
+      title: 'Archive',
+      color: 'green',
+      tabs: [{ title: 'Archived copy', url: sharedUrl }],
+    },
+    {
+      title: 'Current',
+      color: 'blue',
+      tabs: [{ title: 'Live current copy', url: sharedUrl }],
+    },
+  ]);
 });

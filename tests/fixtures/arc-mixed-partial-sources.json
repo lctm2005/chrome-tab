@@ -1,0 +1,110 @@
+{
+  "firebaseSyncState": {
+    "syncData": {
+      "orderedSpaceIDs": {
+        "value": [
+          "partial-space"
+        ]
+      },
+      "spaceModels": [
+        {
+          "value": {
+            "id": "partial-space",
+            "title": "Partial stale Space",
+            "newContainerIDs": [
+              "missing-container"
+            ]
+          }
+        }
+      ],
+      "items": [
+        {
+          "value": {
+            "id": "unrelated-item",
+            "title": "Unrelated item",
+            "data": {
+              "tab": {
+                "savedURL": "https://example.com/unrelated"
+              }
+            },
+            "childrenIds": []
+          }
+        }
+      ]
+    }
+  },
+  "sidebarSyncState": {
+    "container": {
+      "value": {
+        "orderedSpaceIDs": [
+          "missing-sidebar-sync-space"
+        ]
+      }
+    },
+    "items": [
+      {
+        "value": {
+          "id": "orphan-sidebar-sync-item",
+          "data": {
+            "tab": {
+              "savedURL": "https://example.com/sidebar-sync-orphan"
+            }
+          },
+          "childrenIds": []
+        }
+      }
+    ]
+  },
+  "sidebar": {
+    "containers": [
+      {
+        "spaces": [
+          {
+            "id": "complete-space",
+            "title": "Complete Personal",
+            "newContainerIDs": [
+              "complete-container"
+            ]
+          }
+        ],
+        "items": [
+          {
+            "id": "complete-container",
+            "data": {
+              "itemContainer": {
+                "containerType": {
+                  "spaceItems": {
+                    "_0": "complete-space"
+                  }
+                }
+              }
+            },
+            "childrenIds": [
+              "complete-folder"
+            ]
+          },
+          {
+            "id": "complete-folder",
+            "title": "Reading",
+            "data": {
+              "list": {}
+            },
+            "childrenIds": [
+              "complete-tab"
+            ]
+          },
+          {
+            "id": "complete-tab",
+            "title": "Saved article",
+            "data": {
+              "tab": {
+                "savedURL": "https://example.org/saved-article"
+              }
+            },
+            "childrenIds": []
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -10,7 +10,9 @@ import {
   pruneAskSessions,
   sessionKeyForTab,
   sessionKeyForSpace,
+  updateAskSessionMessage,
 } from '../src/shared/ask-session.js';
+import { appendAskSourceLinks } from '../src/shared/ask-sources.js';
 
 test('normalizes Ask session URLs without fragment-only churn', () => {
   assert.equal(
@@ -78,6 +80,24 @@ test('caps stored Ask messages by count and text length', () => {
   assert.equal(session.messages[1].text, 'last');
 });
 
+test('keeps the Sources appendix when a long assistant answer is truncated', () => {
+  const session = createSpaceAskSession({ id: 'research', name: 'Research' });
+  const message = appendAskSessionMessage(session, 'assistant', 'Thinking...');
+  const answer = appendAskSourceLinks(
+    `Finding [1]. ${'Supporting detail. '.repeat(80)}`,
+    [{ title: 'Primary research', url: 'https://example.com/research' }],
+  );
+
+  const updated = updateAskSessionMessage(session, message.id, answer, {
+    maxMessageChars: 260,
+  });
+
+  assert.ok(updated.text.length < answer.length, 'the fixture must exercise truncation');
+  assert.match(updated.text, /Finding/);
+  assert.match(updated.text, /### Sources/);
+  assert.match(updated.text, /https:\/\/example\.com\/research/);
+});
+
 test('prunes Ask sessions for closed tabs and caps retained sessions', () => {
   const sessions = {
     [sessionKeyForTab({ id: 1, url: 'https://example.com/a' })]: createAskSession({ id: 1, title: 'A', url: 'https://example.com/a' }),
@@ -98,7 +118,7 @@ test('prunes Ask sessions for closed tabs and caps retained sessions', () => {
     'tab:1:https://example.com/a',
     'tab:3:https://example.com/c',
   ]);
-  assert.equal(ASK_SESSION_LIMITS.maxMessageChars <= 6000, true);
+  assert.equal(ASK_SESSION_LIMITS.maxMessageChars, 8000);
 });
 
 test('keeps Ask sessions for existing Spaces and removes deleted Spaces', () => {

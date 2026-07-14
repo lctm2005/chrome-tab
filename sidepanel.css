@@ -239,7 +239,7 @@ button {
 
 .shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
@@ -363,10 +363,39 @@ h1 {
   stroke-width: 2.2;
 }
 
+.tidy-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.operation-record {
+  display: flex;
+  grid-row: 2;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--line));
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  background: color-mix(in srgb, var(--success) 9%, var(--surface));
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.operation-record > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- MAIN LIST --- */
 .space-view {
   display: flex;
-  grid-row: 2;
+  grid-row: 3;
   min-height: 0;
   flex-direction: column;
   gap: 8px;
@@ -883,7 +912,7 @@ h1 {
 /* --- ASK SPACE --- */
 .ask-view {
   display: flex;
-  grid-row: 2;
+  grid-row: 3;
   height: 100%;
   min-height: 0;
   flex-direction: column;
@@ -901,6 +930,72 @@ h1 {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ask-disclosure {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 10px 11px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.ask-disclosure > div:not(.ask-source-list) {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ask-disclosure span,
+.ask-disclosure p {
+  color: var(--muted);
+}
+
+.ask-disclosure strong {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-source-list {
+  display: flex;
+  max-height: 74px;
+  flex-wrap: wrap;
+  gap: 5px;
+  overflow: auto;
+}
+
+.ask-source-chip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: var(--surface-strong);
+  color: var(--text-soft);
+}
+
+.ask-source-chip b {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-source-chip small {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 9px;
 }
 
 .ask-messages {
@@ -1105,7 +1200,7 @@ menu button:disabled,
 .space-dock {
   position: relative;
   display: flex;
-  grid-row: 3;
+  grid-row: 4;
   justify-content: space-between;
   align-items: center;
   min-height: 48px;
@@ -1993,14 +2088,35 @@ menu {
 }
 
 .onboarding-progress span {
+  display: grid;
+  gap: 6px;
+  background: transparent;
+  color: rgba(247, 247, 249, 0.42);
+}
+
+.onboarding-progress span::before {
   height: 3px;
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.16);
+  content: "";
+}
+
+.onboarding-progress span.active::before,
+.onboarding-progress span.complete::before {
+  background: #f7f7f9;
 }
 
 .onboarding-progress span.active,
 .onboarding-progress span.complete {
-  background: #f7f7f9;
+  color: rgba(247, 247, 249, 0.9);
+}
+
+.onboarding-progress small {
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .onboarding-rail p {
@@ -2204,6 +2320,10 @@ menu {
   font-size: 10px;
 }
 
+.onboarding-space-option small.conflict {
+  color: var(--warning);
+}
+
 .onboarding-space-icon {
   display: grid;
   width: 26px;
@@ -2237,6 +2357,13 @@ menu {
   font-weight: 780;
 }
 
+.onboarding-finish-actions .danger-link,
+.onboarding-finish-actions .link-button {
+  background: transparent;
+  box-shadow: none;
+  color: var(--danger);
+}
+
 .onboarding-footer .secondary-button,
 .onboarding-finish-actions .secondary-button {
   border: 1px solid var(--glass-border);
@@ -2253,6 +2380,109 @@ menu {
   padding-top: 14px;
 }
 
+/* --- COMMAND PALETTE --- */
+.command-palette-dialog {
+  width: min(92vw, 620px);
+  margin: min(14vh, 120px) auto auto;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  backdrop-filter: blur(18px);
+}
+
+.command-palette-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.54);
+  backdrop-filter: blur(3px);
+}
+
+.command-palette-shell {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.command-palette-shell > label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.command-palette-shell > input {
+  width: 100%;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 12px 13px;
+  background: var(--surface-strong);
+  color: var(--text);
+  outline: none;
+}
+
+.command-palette-shell > input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.command-palette-results {
+  display: grid;
+  max-height: min(52vh, 420px);
+  gap: 3px;
+  overflow: auto;
+}
+
+.command-palette-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+
+.command-palette-item:hover,
+.command-palette-item.active,
+.command-palette-item:focus-visible {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.command-palette-item > span:first-child {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--surface-strong);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.command-palette-item strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-item small,
+.command-palette-help {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.command-palette-help {
+  text-align: center;
+}
+
 /* --- FULL-PAGE WORKBENCH --- */
 html[data-layout="workbench"] body {
   min-width: 760px;
@@ -2261,7 +2491,7 @@ html[data-layout="workbench"] body {
 
 html[data-layout="workbench"] .shell {
   grid-template-columns: 210px minmax(320px, 410px) minmax(0, 1fr);
-  grid-template-rows: 68px minmax(0, 1fr);
+  grid-template-rows: 68px auto minmax(0, 1fr);
   max-width: 1760px;
   margin: 0 auto;
   padding: 0;
@@ -2282,7 +2512,7 @@ html[data-layout="workbench"] .topbar {
 
 html[data-layout="workbench"] .space-dock {
   grid-column: 1;
-  grid-row: 1 / 3;
+  grid-row: 1 / 4;
   min-height: 0;
   flex-direction: column;
   justify-content: flex-start;
@@ -2351,7 +2581,7 @@ html[data-layout="workbench"] .space.add-space {
 
 html[data-layout="workbench"] .space-view {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 3;
   border-right: 1px solid var(--line);
   padding: 14px 12px 22px;
   background: rgba(0, 0, 0, 0.05);
@@ -2359,13 +2589,19 @@ html[data-layout="workbench"] .space-view {
 
 html[data-layout="workbench"] .ask-view {
   grid-column: 3;
-  grid-row: 2;
+  grid-row: 3;
   padding: 18px 20px 22px;
 }
 
 html[data-layout="workbench"] .ask-messages {
   padding: 20px;
   font-size: 13px;
+}
+
+html[data-layout="workbench"] .operation-record {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  margin: 8px 12px 0;
 }
 
 html[data-layout="workbench"] #openWorkbenchButton {
@@ -2375,7 +2611,7 @@ html[data-layout="workbench"] #openWorkbenchButton {
 html[data-layout="workbench"] #settingsDialog {
   position: static;
   grid-column: 3;
-  grid-row: 2;
+  grid-row: 3;
   width: auto;
   height: 100%;
   max-height: none;

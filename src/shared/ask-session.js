@@ -1,7 +1,7 @@
 export const ASK_SESSION_LIMITS = {
   maxSessions: 24,
   maxMessagesPerSession: 40,
-  maxMessageChars: 4000,
+  maxMessageChars: 8000,
 };
 
 export function normalizeSessionUrl(value) {
@@ -112,5 +112,13 @@ function clampMessageText(text, maxChars) {
   const value = String(text || '');
   const limit = Number(maxChars || ASK_SESSION_LIMITS.maxMessageChars);
   if (value.length <= limit) return value;
+  const sourcesMarker = '\n\n### Sources\n';
+  const sourcesIndex = value.lastIndexOf(sourcesMarker);
+  const suffix = sourcesIndex >= 0 ? value.slice(sourcesIndex) : '';
+  const truncationNotice = '\n\n_Response truncated in saved history._';
+  if (suffix && suffix.length + truncationNotice.length < limit) {
+    const headLength = Math.max(0, limit - suffix.length - truncationNotice.length);
+    return `${value.slice(0, headLength)}${truncationNotice}${suffix}`;
+  }
   return `${value.slice(0, limit)}...`;
 }

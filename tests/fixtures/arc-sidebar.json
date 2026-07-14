@@ -1,0 +1,127 @@
+{
+  "sidebarSyncState": {
+    "container": {
+      "value": {
+        "orderedSpaceIDs": [
+          "conflict-space",
+          "personal-space"
+        ]
+      }
+    },
+    "spaceModels": [
+      {
+        "value": {
+          "id": "conflict-space",
+          "title": "Default",
+          "customInfo": {
+            "iconType": {
+              "emoji_v2": "🧭"
+            }
+          },
+          "newContainerIDs": [
+            "conflict-container"
+          ]
+        }
+      },
+      {
+        "value": {
+          "id": "personal-space",
+          "title": "Arc Personal",
+          "customInfo": {
+            "iconType": {
+              "emoji_v2": "📚"
+            }
+          },
+          "newContainerIDs": [
+            "personal-container"
+          ]
+        }
+      }
+    ],
+    "items": [
+      {
+        "value": {
+          "id": "conflict-container",
+          "data": {
+            "itemContainer": {
+              "containerType": {
+                "spaceItems": {
+                  "_0": "conflict-space"
+                }
+              }
+            }
+          },
+          "childrenIds": [
+            "project-folder",
+            "conflict-root-tab"
+          ]
+        }
+      },
+      {
+        "value": {
+          "id": "project-folder",
+          "title": "Project",
+          "data": {
+            "list": {}
+          },
+          "childrenIds": [
+            "project-tab"
+          ]
+        }
+      },
+      {
+        "value": {
+          "id": "project-tab",
+          "data": {
+            "tab": {
+              "savedTitle": "Arc project spec",
+              "savedURL": "https://example.com/arc-project-spec"
+            }
+          },
+          "childrenIds": []
+        }
+      },
+      {
+        "value": {
+          "id": "conflict-root-tab",
+          "data": {
+            "tab": {
+              "savedTitle": "Arc project inbox",
+              "savedURL": "https://example.com/arc-project-inbox"
+            }
+          },
+          "childrenIds": []
+        }
+      },
+      {
+        "value": {
+          "id": "personal-container",
+          "data": {
+            "itemContainer": {
+              "containerType": {
+                "spaceItems": {
+                  "_0": "personal-space"
+                }
+              }
+            }
+          },
+          "childrenIds": [
+            "personal-tab"
+          ]
+        }
+      },
+      {
+        "value": {
+          "id": "personal-tab",
+          "data": {
+            "tab": {
+              "savedTitle": "Arc reading list",
+              "savedURL": "https://example.org/arc-reading-list"
+            }
+          },
+          "childrenIds": []
+        }
+      }
+    ]
+  }
+}

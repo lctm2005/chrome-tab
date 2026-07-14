@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   appendArcImportPlan,
   createArcImportPlan,
+  selectArcImportPlan,
 } from '../src/shared/arc-import.js';
+
+function readArcFixture(name) {
+  return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+}
 
 test('creates an append-only import plan from Arc Spaces and folders', () => {
   const arcData = {
@@ -154,6 +160,32 @@ test('creates an append-only import plan from Arc Spaces and folders', () => {
       },
     ],
   });
+  assert.deepEqual(plan.spacePreviews, [{
+    spaceId: 'arc-space-a',
+    sourceSpaceId: 'space-a',
+    originalId: 'arc-space-a',
+    resolvedId: 'arc-space-a',
+    originalName: 'Work',
+    resolvedName: 'Work (Arc)',
+    folders: 2,
+    tabs: 4,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 0,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+    conflicts: [{
+      spaceId: 'arc-space-a',
+      sourceSpaceId: 'space-a',
+      field: 'name',
+      original: 'Work',
+      resolved: 'Work (Arc)',
+      reason: 'existing-space',
+    }],
+  }]);
+  assert.deepEqual(plan.conflicts, plan.spacePreviews[0].conflicts);
 });
 
 test('skips Arc-only items and unsafe tab URLs', () => {
@@ -251,6 +283,49 @@ test('can parse Arc sidebar container exports with JSON string records', () => {
   ]);
 });
 
+test('ignores an items-only firebase segment when sidebarSync has importable Spaces', () => {
+  const plan = createArcImportPlan(
+    readArcFixture('arc-mixed-items-only-firebase.json'),
+    { now: 7 },
+  );
+
+  assert.equal(plan.summary.source, 'sidebarSyncState');
+  assert.deepEqual(plan.spaces.map(({ id, name }) => ({ id, name })), [
+    { id: 'arc-sidebar-sync-space', name: 'Recovered Work' },
+  ]);
+  assert.deepEqual(plan.spaceSnapshots['arc-sidebar-sync-space'].groups, [{
+    title: 'Ungrouped',
+    color: 'grey',
+    collapsed: false,
+    tabs: [{ title: 'Recovered tab', url: 'https://example.com/recovered' }],
+  }]);
+});
+
+test('chooses a complete sidebar source over an equally sized partial firebase source', () => {
+  const plan = createArcImportPlan(
+    readArcFixture('arc-mixed-partial-sources.json'),
+    { now: 8 },
+  );
+
+  assert.equal(plan.summary.source, 'sidebar');
+  assert.deepEqual(plan.summary, {
+    source: 'sidebar',
+    spaces: 1,
+    folders: 1,
+    tabs: 1,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 0,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+  });
+  assert.deepEqual(plan.spaces.map(({ id, name }) => ({ id, name })), [
+    { id: 'arc-complete-space', name: 'Complete Personal' },
+  ]);
+});
+
 test('appends imported Spaces without changing the active Space', () => {
   const state = {
     activeSpaceId: 'default',
@@ -273,6 +348,8 @@ test('appends imported Spaces without changing the active Space', () => {
         ],
       },
     },
+    spacePreviews: [{ spaceId: 'arc-work', originalName: 'Work', resolvedName: 'Work' }],
+    conflicts: [{ spaceId: 'arc-work', field: 'name' }],
   };
 
   const result = appendArcImportPlan(state, plan);
@@ -282,7 +359,50 @@ test('appends imported Spaces without changing the active Space', () => {
   assert.deepEqual(result.importedSpaceIds, [plan.spaces[0].id]);
   assert.equal(state.activeSpaceId, 'default');
   assert.deepEqual(state.spaces.map((space) => space.id), ['default', 'arc-work']);
+  assert.deepEqual(state.spaces[1], { id: 'arc-work', name: 'Work', icon: 'W', color: 'green' });
   assert.equal(state.spaceSnapshots['arc-work'].groups[0].tabs[0].title, 'Spec');
+  assert.equal('spacePreviews' in state, false);
+  assert.equal('conflicts' in state, false);
+});
+
+test('rejects a stale import plan before it can overwrite an existing Space snapshot', () => {
+  const state = {
+    activeSpaceId: 'default',
+    spaces: [
+      { id: 'default', name: 'Default', icon: 'D', color: 'blue' },
+      { id: 'arc-work', name: 'Existing Work', icon: 'E', color: 'purple' },
+    ],
+    spaceSnapshots: {
+      'arc-work': {
+        version: 1,
+        updatedAt: 1,
+        groups: [{
+          title: 'Existing',
+          tabs: [{ title: 'Keep', url: 'https://example.com/keep' }],
+        }],
+      },
+    },
+  };
+  const plan = {
+    spaces: [{ id: 'arc-work', name: 'Imported Work', icon: 'I', color: 'green' }],
+    spaceSnapshots: {
+      'arc-work': {
+        version: 1,
+        updatedAt: 2,
+        groups: [{
+          title: 'Imported',
+          tabs: [{ title: 'Replace', url: 'https://example.com/replace' }],
+        }],
+      },
+    },
+  };
+  const before = structuredClone(state);
+
+  assert.throws(
+    () => appendArcImportPlan(state, plan),
+    /id "arc-work" is no longer available.*Preview the file again/,
+  );
+  assert.deepEqual(state, before);
 });
 
 test('deduplicates Arc container references and generated Space ids', () => {
@@ -391,5 +511,216 @@ test('handles missing Arc data as a no-op plan and rejects empty files', () => {
         splitView: 0,
       },
     },
+    spacePreviews: [],
+    conflicts: [],
   });
+});
+
+test('previews conflicts per Space and recomputes selected import metadata', () => {
+  const arcData = {
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['space-a', 'space-b'] } },
+      spaceModels: [
+        {
+          value: {
+            id: 'space-a',
+            title: 'Work',
+            newContainerIDs: ['container-a'],
+          },
+        },
+        {
+          value: {
+            id: 'space-b',
+            title: 'Personal',
+            newContainerIDs: ['container-b'],
+          },
+        },
+      ],
+      items: [
+        {
+          value: {
+            id: 'container-a',
+            data: { itemContainer: { containerType: { spaceItems: { _0: 'space-a' } } } },
+            childrenIds: ['folder-a', 'invalid-a'],
+          },
+        },
+        {
+          value: {
+            id: 'folder-a',
+            title: 'Docs',
+            data: { list: {} },
+            childrenIds: ['tab-a'],
+          },
+        },
+        {
+          value: {
+            id: 'tab-a',
+            title: 'Spec',
+            data: { tab: { savedURL: 'https://example.com/spec' } },
+            childrenIds: [],
+          },
+        },
+        {
+          value: {
+            id: 'invalid-a',
+            title: 'Unsafe',
+            data: { tab: { savedURL: 'arc://settings' } },
+            childrenIds: [],
+          },
+        },
+        {
+          value: {
+            id: 'container-b',
+            data: { itemContainer: { containerType: { spaceItems: { _0: 'space-b' } } } },
+            childrenIds: ['tab-b'],
+          },
+        },
+        {
+          value: {
+            id: 'tab-b',
+            title: 'Home',
+            data: { tab: { savedURL: 'https://example.com/home' } },
+            childrenIds: [],
+          },
+        },
+      ],
+    },
+  };
+  const plan = createArcImportPlan(arcData, {
+    existingSpaces: [{ id: 'arc-space-a', name: 'Work' }],
+    now: 5,
+  });
+
+  assert.deepEqual(plan.spaces.map(({ id, name }) => ({ id, name })), [
+    { id: 'arc-space-a-2', name: 'Work (Arc)' },
+    { id: 'arc-space-b', name: 'Personal' },
+  ]);
+  assert.deepEqual(plan.spacePreviews.map((preview) => ({
+    spaceId: preview.spaceId,
+    folders: preview.folders,
+    tabs: preview.tabs,
+    invalidTabs: preview.skipped.invalidTabs,
+  })), [
+    { spaceId: 'arc-space-a-2', folders: 1, tabs: 1, invalidTabs: 1 },
+    { spaceId: 'arc-space-b', folders: 0, tabs: 1, invalidTabs: 0 },
+  ]);
+  assert.deepEqual(plan.conflicts, [
+    {
+      spaceId: 'arc-space-a-2',
+      sourceSpaceId: 'space-a',
+      field: 'id',
+      original: 'arc-space-a',
+      resolved: 'arc-space-a-2',
+      reason: 'existing-space',
+    },
+    {
+      spaceId: 'arc-space-a-2',
+      sourceSpaceId: 'space-a',
+      field: 'name',
+      original: 'Work',
+      resolved: 'Work (Arc)',
+      reason: 'existing-space',
+    },
+  ]);
+
+  const selected = selectArcImportPlan(plan, new Set(['arc-space-a-2']));
+
+  assert.deepEqual(selected.spaces.map((space) => space.id), ['arc-space-a-2']);
+  assert.deepEqual(Object.keys(selected.spaceSnapshots), ['arc-space-a-2']);
+  assert.deepEqual(selected.summary, {
+    source: 'sidebarSyncState',
+    spaces: 1,
+    folders: 1,
+    tabs: 1,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 1,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+  });
+  assert.deepEqual(selected.spacePreviews.map((preview) => preview.spaceId), ['arc-space-a-2']);
+  assert.deepEqual(selected.conflicts, plan.conflicts);
+  assert.equal(plan.summary.spaces, 2);
+  assert.equal(plan.summary.tabs, 2);
+
+  const personalOnly = selectArcImportPlan(plan, ['arc-space-b', 'missing']);
+  assert.deepEqual(personalOnly.summary, {
+    source: 'sidebarSyncState',
+    spaces: 1,
+    folders: 0,
+    tabs: 1,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 0,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+  });
+  assert.deepEqual(personalOnly.conflicts, []);
+
+  const empty = selectArcImportPlan(plan, []);
+  assert.deepEqual(empty, {
+    spaces: [],
+    spaceSnapshots: {},
+    summary: {
+      source: 'sidebarSyncState',
+      spaces: 0,
+      folders: 0,
+      tabs: 0,
+      skipped: {
+        emptyFolders: 0,
+        invalidTabs: 0,
+        unsupportedItems: 0,
+        easel: 0,
+        splitView: 0,
+      },
+    },
+    spacePreviews: [],
+    conflicts: [],
+  });
+
+  assert.throws(
+    () => selectArcImportPlan({
+      ...plan,
+      spacePreviews: [plan.spacePreviews[0]],
+    }, ['arc-space-b']),
+    /preview metadata is incomplete/,
+  );
+  assert.throws(
+    () => selectArcImportPlan({
+      spaces: plan.spaces,
+      spaceSnapshots: plan.spaceSnapshots,
+      summary: plan.summary,
+    }, ['arc-space-b']),
+    /cannot recalculate a partial selection/,
+  );
+});
+
+test('distinguishes batch, existing, and mixed generated id conflicts', () => {
+  const plan = createArcImportPlan({
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['foo bar', 'foo-bar'] } },
+      spaceModels: [
+        { value: { id: 'foo bar', title: 'Alpha' } },
+        { value: { id: 'foo-bar', title: 'Beta' } },
+      ],
+      items: [],
+    },
+  }, {
+    existingSpaces: [{ id: 'arc-foo-bar-2', name: 'Existing' }],
+    now: 6,
+  });
+
+  assert.deepEqual(plan.spaces.map((space) => space.id), ['arc-foo-bar', 'arc-foo-bar-3']);
+  assert.deepEqual(plan.conflicts, [{
+    spaceId: 'arc-foo-bar-3',
+    sourceSpaceId: 'foo-bar',
+    field: 'id',
+    original: 'arc-foo-bar',
+    resolved: 'arc-foo-bar-3',
+    reason: 'mixed',
+  }]);
 });

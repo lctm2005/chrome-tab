@@ -1,4 +1,9 @@
-import { buildChatCompletionRequest, extractAssistantText, getZaiFallbackBaseUrl } from './src/shared/ai.js';
+import {
+  buildChatCompletionRequest,
+  extractAssistantText,
+  getZaiFallbackBaseUrl,
+  parseChatStreamEvent,
+} from './src/shared/ai.js';
 import { providerRequiresApiKey } from './src/shared/ai-providers.js';
 import { serializeGroup, serializeTab } from './src/shared/state.js';
 
@@ -43,7 +48,11 @@ async function handleMessage(message, sender = {}) {
     case 'tabs:create':
       return createTab(message.url, message.active);
     case 'tabs:openUnique':
-      return openUniqueTab(message.url, message.matchUrl, sender.tab?.id);
+      return openUniqueTab(
+        message.url,
+        message.matchUrl,
+        Number.isFinite(Number(message.preferredTabId)) ? Number(message.preferredTabId) : sender.tab?.id,
+      );
     case 'tabs:focus':
       return focusTab(message.tabId);
     case 'tabs:duplicate':
@@ -64,12 +73,10 @@ async function handleMessage(message, sender = {}) {
       return updateGroup(message.groupId, message.update);
     case 'groups:move':
       return moveGroup(message.groupId, message.index);
-    case 'page:outline':
-      return extractTabOutline(message.tabId);
-    case 'page:extract':
-      return extractActivePage();
+    case 'pages:extract':
+      return extractPages(message.tabIds, message.options);
     case 'ai:chat':
-      return runChatCompletion(message.settings, message.messages, message.requestId);
+      return runChatCompletion(message.settings, message.messages, message.requestId, message.stream);
     case 'ai:abort':
       return abortChatCompletion(message.requestId);
     default:
@@ -324,42 +331,77 @@ function isMissingChromeEntityError(error) {
   return /No (tab|group) with id/i.test(error?.message || String(error));
 }
 
-async function extractActivePage() {
-  const [tab] = await chrome.tabs.query({ currentWindow: true, active: true });
-  if (!tab?.id) throw new Error('No active tab found.');
-  if (!/^https?:|^file:/.test(tab.url || '')) {
-    throw new Error('Chrome does not allow page extraction on this URL.');
+async function extractPages(tabIds = [], options = {}) {
+  const ids = [...new Set((tabIds || []).map(Number).filter(Number.isFinite))].slice(0, 24);
+  const maxCharsPerPage = clampInteger(options?.maxCharsPerPage, 1000, 20000, 12000);
+  const maxTotalChars = clampInteger(options?.maxTotalChars, maxCharsPerPage, 120000, 60000);
+  const pages = [];
+  const failures = [];
+  let remainingChars = maxTotalChars;
+
+  for (const tabId of ids) {
+    if (remainingChars <= 0) {
+      failures.push({
+        tabId,
+        reason: 'content-limit',
+        error: 'Not sent because the Ask Space content limit was reached.',
+      });
+      continue;
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!/^https?:/.test(tabUrl(tab))) throw new Error('Only http(s) tabs can be Ask Space sources.');
+      const limit = Math.min(maxCharsPerPage, remainingChars);
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [limit],
+        func: (textLimit) => {
+          const selection = window.getSelection()?.toString() || '';
+          const article = document.querySelector('article')?.innerText || '';
+          const body = document.body?.innerText || '';
+          const rawText = (selection || article || body).replace(/\s+/g, ' ').trim();
+          const text = rawText.slice(0, textLimit);
+          return {
+            title: document.title,
+            url: location.href,
+            selection: selection.slice(0, textLimit),
+            text,
+            charCount: text.length,
+            originalCharCount: rawText.length,
+            truncated: rawText.length > text.length,
+          };
+        },
+      });
+      const page = result?.result || {
+        title: tab.title,
+        url: tabUrl(tab),
+        text: '',
+        charCount: 0,
+        originalCharCount: 0,
+        truncated: false,
+      };
+      pages.push({ ...page, tabId });
+      remainingChars -= Number(page.charCount) || String(page.text || '').length;
+    } catch (error) {
+      failures.push({ tabId, reason: 'read-failed', error: error?.message || String(error) });
+    }
   }
 
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => {
-      const selection = window.getSelection()?.toString() || '';
-      const article = document.querySelector('article')?.innerText || '';
-      const body = document.body?.innerText || '';
-      const text = (selection || article || body).replace(/\s+/g, ' ').trim().slice(0, 14000);
-      return {
-        title: document.title,
-        url: location.href,
-        selection,
-        text,
-      };
-    },
-  });
-
-  return { page: result?.result || { title: tab.title, url: tab.url, text: '' } };
-}
-
-async function extractTabOutline(tabId) {
-  const tab = await chrome.tabs.get(Number(tabId));
   return {
-    title: tab?.title || '',
-    url: tab?.url || '',
-    headings: [],
+    pages,
+    failures,
+    totalChars: pages.reduce((sum, page) => sum + (Number(page.charCount) || String(page.text || '').length), 0),
+    truncated: pages.some((page) => page.truncated) || pages.length < ids.length - failures.length,
   };
 }
 
-async function runChatCompletion(settings, messages, requestId = '') {
+function clampInteger(value, minimum, maximum, fallback) {
+  const number = Math.floor(Number(value));
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, number));
+}
+
+async function runChatCompletion(settings, messages, requestId = '', stream = false) {
   if (providerRequiresApiKey(settings) && !settings?.apiKey) {
     throw new Error('AI API key is missing. Add it in Settings.');
   }
@@ -367,7 +409,9 @@ async function runChatCompletion(settings, messages, requestId = '') {
   const safeRequestId = requestId || crypto.randomUUID();
   activeAIRequests.set(safeRequestId, controller);
   try {
-    const payload = await fetchChatCompletion(settings, messages, controller.signal);
+    const payload = await fetchChatCompletion(settings, messages, controller.signal, stream
+      ? (text) => notifyAIStream(safeRequestId, text)
+      : null);
     return {
       text: extractAssistantText(payload),
       usage: payload.usage || null,
@@ -378,6 +422,10 @@ async function runChatCompletion(settings, messages, requestId = '') {
   } finally {
     activeAIRequests.delete(safeRequestId);
   }
+}
+
+function notifyAIStream(requestId, text) {
+  chrome.runtime.sendMessage({ type: 'ai:stream', requestId, text }).catch(() => null);
 }
 
 async function abortChatCompletion(requestId = '') {
@@ -393,8 +441,9 @@ async function abortChatCompletion(requestId = '') {
   return { aborted: true };
 }
 
-async function fetchChatCompletion(settings, messages, signal) {
+async function fetchChatCompletion(settings, messages, signal, onStream = null) {
   const request = buildChatCompletionRequest(settings, messages);
+  if (onStream) request.body.stream = true;
   const response = await fetch(request.url, {
     method: request.method,
     headers: request.headers,
@@ -402,17 +451,65 @@ async function fetchChatCompletion(settings, messages, signal) {
     signal,
   });
 
-  const payload = await response.json().catch(async () => ({
-    error: { message: await response.text() },
-  }));
   if (!response.ok) {
+    const rawBody = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      payload = { error: { message: rawBody } };
+    }
     const message = payload?.error?.message || payload?.message || `AI request failed with ${response.status}`;
     const fallbackBaseUrl = getZaiFallbackBaseUrl(settings.baseUrl);
     if (fallbackBaseUrl && /insufficient|balance|quota|余额不足|资源包/i.test(message)) {
-      return fetchChatCompletion({ ...settings, baseUrl: fallbackBaseUrl }, messages, signal);
+      return fetchChatCompletion({ ...settings, baseUrl: fallbackBaseUrl }, messages, signal, onStream);
     }
     throw new Error(message);
   }
 
-  return payload;
+  const contentType = response.headers.get('content-type') || '';
+  if (!onStream || !contentType.includes('text/event-stream') || !response.body) {
+    return response.json();
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let usage = null;
+  let streamDone = false;
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const event = parseChatStreamEvent(line);
+      if (!event) continue;
+      if (event.done) {
+        streamDone = true;
+        break;
+      }
+      if (event.usage) usage = event.usage;
+      if (event.text) {
+        text += event.text;
+        onStream(text);
+      }
+    }
+    if (streamDone) {
+      await reader.cancel().catch(() => null);
+      break;
+    }
+    if (done) break;
+  }
+  const finalEvent = streamDone ? null : parseChatStreamEvent(buffer);
+  if (finalEvent?.text) {
+    text += finalEvent.text;
+    onStream(text);
+  }
+  if (finalEvent?.usage) usage = finalEvent.usage;
+  return {
+    choices: [{ message: { content: text } }],
+    usage,
+  };
 }

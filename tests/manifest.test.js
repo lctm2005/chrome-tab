@@ -6,8 +6,8 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.name, 'Space: Arc-like Workspaces for Chrome');
-  assert.equal(manifest.short_name, 'Space');
+  assert.equal(manifest.name, 'Space Tabs: Arc-like Spaces & BYOK AI');
+  assert.equal(manifest.short_name, 'Space Tabs');
   assert.equal(manifest.version, '0.5.1');
   assert.equal(manifest.name.includes('Arc Sidecar'), false);
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
@@ -16,9 +16,10 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Alt+S');
   assert.equal(manifest.commands._execute_action.description, 'Toggle Space');
   assert.equal(manifest.content_scripts, undefined);
-  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'activeTab', 'favicon']) {
+  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'favicon']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
+  assert.equal(manifest.permissions.includes('activeTab'), false);
   assert.equal(manifest.permissions.includes('bookmarks'), false);
   assert.equal(manifest.permissions.includes('downloads'), false);
   assert.deepEqual(manifest.host_permissions || [], []);
@@ -46,11 +47,32 @@ test('settings expose provider and model selectors without prefilled free text m
 test('sidepanel exposes Ask Space and portable backup controls without Context or Summary UI', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
 
-  for (const id of ['askScope', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
+  for (const id of ['askScope', 'askProvider', 'askSourceSummary', 'askSourceList', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(source, /createPrompt\('ask-space'/);
+  assert.match(source, /startAskFromUserGesture/);
+  assert.match(source, /requestAskPermissionsFromUserGesture/);
+  assert.match(source, /chrome\.permissions\.request\(\{ origins \}\)/);
+  assert.match(source, /send\('pages:extract'/);
+  assert.match(source, /title: 'Confirmed sources not sent'/);
+  assert.match(source, /additional selected[\s\S]*excluded by the 12-page limit/);
+  assert.match(source, /stored text from \$\{history\.length\} recent conversation/);
+  assert.match(source, /generated Sources appendices excluded/);
+  const recentHistorySource = source.slice(
+    source.indexOf('function recentAskHistory'),
+    source.indexOf('async function beginAskTurn'),
+  );
+  assert.match(recentHistorySource, /split\(\/\\n\\n### Sources\\n\/i\)\[0\]/);
+  assert.doesNotMatch(recentHistorySource, /replace\(\/\\\[\\d\+\\\]\//);
+  assert.match(source, /updateAskMessage\(stream\.messageRef, stream\.text \|\| 'Thinking\.\.\.', \{ persist: false \}\)/);
+  assert.match(source, /async function persistAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage/);
+  assert.match(background, /case 'pages:extract'/);
+  assert.doesNotMatch(background, /case 'page:(?:extract|outline)'/);
+  assert.match(background, /reason: 'content-limit'/);
+  assert.match(background, /if \(event\.done\)[\s\S]*reader\.cancel/);
   assert.match(source, /createSpaceBackup\(state\)/);
   assert.match(source, /restoreSpaceBackup\(state, pendingSpaceBackup\)/);
   assert.doesNotMatch(html, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"/);
@@ -66,6 +88,8 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
+  assert.match(html, /id="onboardingOpenWorkbenchButton">Start using Workbench</);
+  assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
   assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);
   assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
@@ -76,7 +100,10 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
   assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
   assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
-  assert.match(html, /class="arc-import-settings" hidden/);
+  assert.match(html, /class="arc-import-settings"/);
+  assert.match(html, /data-onboarding-path="arc"/);
+  assert.doesNotMatch(html, /data-onboarding-path="arc" hidden/);
+  assert.doesNotMatch(html, /Arc import is not available/i);
   assert.doesNotMatch(html, /Cross-Space Search/i);
   assert.doesNotMatch(source, /workspace-search/);
 });
@@ -124,9 +151,22 @@ test('opening a dormant tab preserves its panel-only name on the new live tab', 
 test('sidepanel prunes saved snapshot entries for closed or navigated live tabs', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /removeStaleActiveSpaceTabsFromSnapshot\(previousTabs, contentTabs\)/);
-  assert.match(source, /oldUrlKey && oldUrlKey !== nextUrlKey/);
-  assert.match(source, /!currentUrlKeys\.has\(oldUrlKey\)/);
+  assert.match(source, /removeStaleActiveSpaceTabsFromSnapshot\(previousTabs, contentTabs, \{\s*skipTabIds: skipSnapshotCleanupForTabIds/);
+  assert.match(source, /Reserve surviving browser-tab identities before matching duplicate URLs/);
+  assert.match(source, /Number\(current\.tab\.id\) === Number\(previous\.tab\.id\)/);
+  assert.match(source, /current\.urlIdentity === previous\.urlIdentity/);
+  assert.match(source, /groupTitle: previousGroup\?\.title/);
+  assert.match(source, /function matchDormantTabsToLiveTabs[\s\S]*\['exact', 'recently-opened', 'navigation-fallback'\]/);
+  assert.match(source, /if \(entry\.consumed\) return false/);
+  assert.match(source, /function removeDormantSnapshotTabsForOpenTabs[\s\S]*removeSnapshotTabs\(snapshot, targets\)/);
+  assert.match(source, /const navigationUrlKeys = uniqueKeys\(recentlyOpenedUrlIdentities\.map\(comparableSnapshotUrl\)\)/);
+  assert.match(source, /skipSnapshotCleanupForTabIds: \[tab\.id\]/);
+  const closeSource = source.slice(
+    source.indexOf('async function closeTab('),
+    source.indexOf('async function removeDormantTab('),
+  );
+  assert.ok(closeSource.indexOf("await send('tabs:close'") < closeSource.indexOf('removeClosedTabFromSnapshot'));
+  assert.match(source, /function snapshotUrlIdentity\(url\)[\s\S]*String\(url \|\| ''\)\.trim\(\)/);
 });
 
 test('tabs list requests are scoped to the side panel window when possible', async () => {
@@ -136,7 +176,7 @@ test('tabs list requests are scoped to the side panel window when possible', asy
   assert.match(sidepanel, /panelWindowId\s*=\s*await currentPanelWindowId\(\)/);
   assert.match(sidepanel, /type === 'tabs:list'[\s\S]*windowId: panelWindowId/);
   assert.match(background, /case 'tabs:list':\s*return listTabs\(message\.windowId\)/);
-  assert.match(background, /openUniqueTab\(message\.url, message\.matchUrl, sender\.tab\?\.id\)/);
+  assert.match(background, /message\.preferredTabId[\s\S]*sender\.tab\?\.id/);
   assert.match(background, /chrome\.tabs\.query\(query\)/);
   assert.match(background, /ownExtensionPrefix = chrome\.runtime\.getURL\(''\)/);
   assert.match(background, /tabUrl\(tab\)\.startsWith\(ownExtensionPrefix\)/);
@@ -150,8 +190,16 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /setInterval\(\(\) => void refreshSharedState\(\), 2500\)/);
   assert.match(source, /async function refreshSharedState\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\)[\s\S]*refreshTabs\(\{ adopt: true \}\)/);
   assert.match(source, /navigator\.locks\.request\(SHARED_STATE_LOCK_NAME/);
+  assert.match(source, /async function withFreshSpaceStateMutation\(task\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\)[\s\S]*loadTabs\(\{ adopt: false \}\)[\s\S]*loadDormantSpaceView/);
+  assert.match(source, /async function focusTab\(tab, options = \{\}\)[\s\S]*withFreshSpaceStateMutation/);
   assert.match(source, /async function addSpace\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\)[\s\S]*state\.spaces\.push\(space\)[\s\S]*await saveState\(\)[\s\S]*activateSpace\(space\.id, \{ stateLocked: true \}\)/);
-  assert.match(source, /async function runTask\(task\)[\s\S]*if \(extensionRuntime\) await syncStateFromStorage\(\)/);
+  assert.match(source, /let taskQueue = Promise\.resolve\(\)/);
+  assert.match(source, /function runTask\(task\)[\s\S]*activeTaskCount \+= 1[\s\S]*taskQueue\.then\(execute, execute\)[\s\S]*taskQueue = queuedTask\.catch/);
+  assert.doesNotMatch(source, /function runTask\(task\)[\s\S]*syncStateFromStorage\(\)[\s\S]*function withSharedStateLock/);
+  assert.match(source, /async function init\(\)[\s\S]*withSharedStateLock\(async \(\) => \{[\s\S]*loadState\(\{ stateLocked: true \}\)[\s\S]*refreshTabs\(\{ adopt: true \}\)/);
+  assert.match(source, /async function addAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*await saveState/);
+  assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
+  assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
   assert.match(source, /async function tidyTabNames\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
   assert.match(source, /async function autoGroupTabs\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
   assert.match(source, /async function importArcFile\(\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
@@ -160,7 +208,7 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
 test('folder drag before or after reparents groups beside the target', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /moveGroupBlockBesideContext\(sourceKeys, targetContext, intent\)/);
+  assert.match(source, /moveGroupBlockBesideContext\(sourceKeys, targetContext, intent, moveOptions\)/);
   assert.match(source, /targetPathForSiblingMove\(targetContext\)/);
   assert.match(source, /movedGroupTitleForFolderDrop\(/);
 });
@@ -179,7 +227,7 @@ test('single tab context menu can update the saved URL for a persistent tab', as
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(source, /menuAction\('Update Saved URL', \(\) => updateSavedTabUrl\(tab\)\)/);
-  assert.match(source, /function updateSavedTabUrl\(tab\)/);
+  assert.match(source, /function updateSavedTabUrl\(tab, options = \{\}\)/);
   assert.match(source, /updateSnapshotTab\(/);
 });
 
@@ -188,7 +236,7 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
 
   assert.match(source, /parseTidyNames/);
   assert.match(source, /createPrompt\('tidy-names'/);
-  assert.match(source, /state\.ai\.apiKey/);
+  assert.match(source, /const aiSettings = structuredClone\(state\.ai\)/);
   assert.match(source, /existingNames:\s*state\.renamedTabs/);
   assert.match(source, /preserveExisting:\s*true/);
 });
@@ -197,20 +245,99 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(source, /title: 'Preview Tidy Names'/);
-  assert.match(source, /if \(!confirmed\) return;[\s\S]*for \(const tabId of duplicateTabIds\)/);
-  assert.match(source, /tabBelongsToSpace\(tab, state\.activeSpaceId\)/);
+  assert.match(source, /No tabs will close or move/);
+  assert.match(source, /type: 'tidy-names'/);
+  assert.doesNotMatch(source, /duplicateTabIds/);
+  assert.match(source, /buildOrganizationCandidates/);
   assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
-  assert.match(source, /const regroupedCount = countPlannedRegroups\(plannedGroups, candidates, groups\)/);
+  assert.match(source, /candidate\.currentGroup\?\.title/);
   assert.match(source, /title: 'Auto Group Preview'/);
-  assert.match(source, /source: regroup \? liveGroupsById\.get/);
+  assert.match(source, /title: 'Remain untouched'/);
+  assert.match(source, /title: 'Not sent · remain untouched'/);
   assert.match(source, /variant: 'groups'/);
   assert.match(source, /AI returned no valid groups/);
-  assert.match(source, /Open saved tabs in this Space first, then run Auto Group\.[\s\S]*showStatusToast\(message, 'error'\)/);
+  assert.match(source, /applyOrganizationPlanToSnapshot/);
+  assert.match(source, /type: 'auto-group'/);
+  assert.match(source, /No live or saved http\(s\) tabs are available to organize/);
   assert.match(source, /extensionRuntime && candidates\.length > 0 && providerRequiresApiKey/);
-  assert.match(source, /async function autoGroupTabs\(\) \{\s*await syncAISettingsFromStorage\(\)/);
+  assert.match(source, /async function autoGroupTabs\(\) \{\s*await refreshOrganizationActionState\(\{ adopt: true \}\);\s*const aiSettings = structuredClone\(state\.ai\)/);
+  assert.match(source, /async function refreshOrganizationActionState[\s\S]*await syncStateFromStorage\(\);[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
   assert.match(source, /showStatusToast\(message, 'error'\)/);
   assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
   assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
+});
+
+test('Tidy Names and Auto Group disclose metadata and ask permission before provider traffic', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const tidySource = source.slice(
+    source.indexOf('async function tidyTabNames()'),
+    source.indexOf('async function tidyTabNamesWithAI'),
+  );
+  const autoSource = source.slice(
+    source.indexOf('async function autoGroupTabs()'),
+    source.indexOf('function activeChromeGroupsByTitle'),
+  );
+
+  assert.match(source, /title: `Generate \$\{action\} preview\?`/);
+  assert.match(source, /confirmText: 'Generate preview'/);
+  assert.match(source, /onConfirm: \(\) => \{[\s\S]*requestAIHostPermissionFromUserGesture\(settings\)/);
+  assert.match(tidySource, /fields: 'title, full URL, and domain'/);
+  assert.match(tidySource, /confirmAIProposalGeneration\(\{[\s\S]*settings: aiSettings[\s\S]*tidyTabNamesWithAI\(aiCandidates, \{ permissionRequest, settings: aiSettings \}\)/);
+  assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
+  assert.match(autoSource, /fields: 'title, full URL, domain, current Tag, and live\/saved status'/);
+  assert.match(autoSource, /settings: aiSettings/);
+  assert.ok(autoSource.indexOf('confirmAIProposalGeneration({') < autoSource.indexOf("send('ai:chat'"));
+});
+
+test('organization commits validate freshness and record Undo only after the applied state refreshes', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const tidySource = source.slice(
+    source.indexOf('async function tidyTabNames()'),
+    source.indexOf('async function tidyTabNamesWithAI'),
+  );
+  const autoSource = source.slice(
+    source.indexOf('async function autoGroupTabs()'),
+    source.indexOf('function activeChromeGroupsByTitle'),
+  );
+
+  assert.match(tidySource, /fingerprintTidyNameTargets\(currentTargets, state\.renamedTabs\)/);
+  assert.ok(tidySource.indexOf('await refreshTabs();') < tidySource.indexOf('const operation = recordOperation({'));
+  assert.ok(autoSource.indexOf('await refreshTabs({ reloadDormant: true });') < autoSource.indexOf('const operation = recordOperation({'));
+  assert.match(autoSource, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
+  assert.match(autoSource, /Chrome could not (?:apply|create) the proposed group/);
+  assert.match(autoSource, /removeOperationRecord\(operationId\)/);
+  assert.match(autoSource, /rollbackFailureError\(error, rollbackFailures\)/);
+  assert.match(source, /await assertOperationUndoIsFresh\(operation\)/);
+  assert.match(source, /type: 'restore-backup'[\s\S]*after: \{ portableFingerprint: fingerprintPortableWorkspaceContent\(state\) \}/);
+  assert.match(source, /operation\?\.type === 'restore-backup'[\s\S]*fingerprintPortableWorkspaceContent\(state\) !== expectedFingerprint/);
+  assert.match(source, /afterFingerprints: fingerprintPortableSpacesContent\(state, ids\)/);
+  assert.match(source, /assertArcImportUndoIsFresh\(state\.lastArcImport\)/);
+  assert.match(source, /snapshotHasPersistentContent\(snapshot\)/);
+  assert.match(source, /function currentGroupForMutation[\s\S]*groupMutationFingerprint\(current\) !== groupMutationFingerprint\(reference\)/);
+  assert.match(source, /function groupMutationFingerprint[\s\S]*url: snapshotUrlIdentity\(tab\?\.url\)/);
+  assert.match(source, /currentContext\.fingerprint !== folderContext\.fingerprint/);
+});
+
+test('Arc import and backup restore preflight Chrome storage and restore memory on failure', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const restoreSource = source.slice(
+    source.indexOf('async function restoreSpaceData()'),
+    source.indexOf('function formatSpaceBackupSummary'),
+  );
+  const arcSource = source.slice(
+    source.indexOf('async function applyArcOnboarding()'),
+    source.indexOf('async function finishOnboarding'),
+  ) + source.slice(
+    source.indexOf('async function importArcFile()'),
+    source.indexOf('function rememberArcImport'),
+  );
+
+  assert.match(source, /function assertCurrentStateFitsStorage[\s\S]*assertWorkspaceStorageBudget/);
+  assert.match(restoreSource, /const beforeState = structuredClone\(state\)/);
+  assert.ok(restoreSource.indexOf('assertCurrentStateFitsStorage();') < restoreSource.indexOf('await saveState();'));
+  assert.match(restoreSource, /catch \(error\)[\s\S]*restoreFailedWorkspaceMutation\(beforeState\)/);
+  assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 2);
+  assert.equal((arcSource.match(/restoreFailedWorkspaceMutation\(beforeState\)/g) || []).length, 2);
 });
 
 test('Move to context actions render as a right-side submenu', async () => {
@@ -239,11 +366,11 @@ test('tab selection participates in the groups render signature', async () => {
 test('moving tabs to another Space activates the target Space', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*removeTabsFromSpaceSnapshot\(sourceSpaceId, movedTabs\)/);
-  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId\)[\s\S]*await finishMoveToSpace\(spaceId\);\s*return movedTabs\.length/);
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId, options = \{\}\)[\s\S]*removeTabsFromSpaceSnapshot\(sourceSpaceId, movedTabs\)/);
+  assert.match(source, /async function moveTabsToSpace\(tabIds, spaceId, options = \{\}\)[\s\S]*await finishMoveToSpace\(spaceId, \{ stateLocked: true \}\);\s*return movedTabs\.length/);
   assert.match(source, /async function moveSelectedTabsToSpace\(tabIds, spaceId\)[\s\S]*setStatus\(`Moved \$\{moved\} selected tabs to \$\{spaceName\(spaceId\)\}\.`\)/);
-  assert.match(source, /async function moveGroupToSpace\(group, spaceId\)[\s\S]*moveGroupsWithoutSaving\(\[group\], spaceId\);\s*await finishMoveToSpace\(spaceId\);\s*setStatus\(`Moved group/);
-  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId\)[\s\S]*moveGroupsWithoutSaving\(groups, spaceId\);\s*await finishMoveToSpace\(spaceId\);\s*setStatus\(`Moved group/);
+  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*moveGroupsWithoutSaving\(\[group\], spaceId\);\s*await finishMoveToSpace\(spaceId, \{ stateLocked: true \}\);\s*setStatus\(`Moved group/);
+  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId, options = \{\}\)[\s\S]*moveGroupsWithoutSaving\(groups, spaceId\);\s*await finishMoveToSpace\(spaceId, \{ stateLocked: true \}\);\s*setStatus\(`Moved group/);
 });
 
 test('open Space snapshots are merged from the full live view including ungrouped tabs', async () => {

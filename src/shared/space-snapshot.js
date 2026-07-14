@@ -23,6 +23,21 @@ export function snapshotTabCount(snapshot = {}) {
   return (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
+export function snapshotGroupShouldPersist(snapshot = {}, group = {}) {
+  return (group.tabs || []).length > 0 || Boolean(
+    snapshot?.preserveGroups && !isUngroupedSnapshotGroup(group)
+  );
+}
+
+export function snapshotHasPersistentContent(snapshot = {}) {
+  return snapshotTabCount(snapshot) > 0 || Boolean(
+    snapshot?.preserveGroups &&
+    (snapshot.groups || []).some((group) => !isUngroupedSnapshotGroup(group))
+  );
+}
+
+// Query/hash-insensitive fallback for navigation matching. Persisted rows use the
+// complete trimmed URL as their identity and must never be deduplicated by this key.
 export function comparableSnapshotUrl(url) {
   const raw = String(url || '').trim();
   if (!raw) return '';
@@ -48,7 +63,7 @@ export function dropTemporarySnapshotGroups(snapshot) {
 export function removeSnapshotTab(snapshot, target = {}) {
   snapshot = sanitizeSpaceSnapshot(snapshot);
   if (!snapshot) return null;
-  const targetUrl = String(target.url || '');
+  const targetUrl = snapshotUrlIdentity(target.url);
   const targetGroupTitle = String(target.groupTitle || '');
   const targetGroupColor = String(target.groupColor || '');
   let removed = false;
@@ -61,13 +76,14 @@ export function removeSnapshotTab(snapshot, target = {}) {
     );
     const tabs = [];
     for (const tab of group.tabs || []) {
-      if (!removed && groupMatches && targetUrl && tab.url === targetUrl) {
+      if (!removed && groupMatches && targetUrl && snapshotUrlIdentity(tab.url) === targetUrl) {
         removed = true;
         continue;
       }
       tabs.push(tab);
     }
-    if (tabs.length > 0) groups.push({ ...group, tabs });
+    const nextGroup = { ...group, tabs };
+    if (snapshotGroupShouldPersist(snapshot, nextGroup)) groups.push(nextGroup);
   }
 
   return { ...snapshot, groups };
@@ -77,32 +93,28 @@ export function removeSnapshotTabs(snapshot, targets = []) {
   snapshot = sanitizeSpaceSnapshot(snapshot);
   if (!snapshot) return null;
 
-  const remainingUrlMatches = new Map();
-  for (const target of targets || []) {
-    const key = comparableSnapshotUrl(target?.url);
-    if (!key) continue;
-    remainingUrlMatches.set(key, (remainingUrlMatches.get(key) || 0) + 1);
-  }
-  if (remainingUrlMatches.size === 0) return snapshot;
+  const consumers = (targets || [])
+    .filter((target) => snapshotUrlIdentity(target?.url))
+    .map((target) => ({
+      tab: target,
+      groupKey: targetSnapshotGroupKey(target),
+    }));
+  if (consumers.length === 0) return snapshot;
 
-  let changed = false;
+  const { consumedTabs } = matchSnapshotTabs(
+    consumers,
+    snapshotTabEntries(snapshot),
+  );
+  if (consumedTabs.size === 0) return snapshot;
+
   const groups = [];
   for (const group of snapshot.groups || []) {
-    const tabs = [];
-    for (const tab of group.tabs || []) {
-      const key = comparableSnapshotUrl(tab.url);
-      const remaining = remainingUrlMatches.get(key) || 0;
-      if (key && remaining > 0) {
-        remainingUrlMatches.set(key, remaining - 1);
-        changed = true;
-        continue;
-      }
-      tabs.push(tab);
-    }
-    if (tabs.length > 0) groups.push({ ...group, tabs });
+    const tabs = (group.tabs || []).filter((tab) => !consumedTabs.has(tab));
+    const nextGroup = { ...group, tabs };
+    if (snapshotGroupShouldPersist(snapshot, nextGroup)) groups.push(nextGroup);
   }
 
-  return changed ? { ...snapshot, groups } : snapshot;
+  return { ...snapshot, groups };
 }
 
 export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
@@ -110,7 +122,7 @@ export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
   const replacementTab = sanitizeReplacementTab(replacement);
   if (!snapshot || !replacementTab) return snapshot;
 
-  const targetUrl = String(target.url || '');
+  const targetUrl = snapshotUrlIdentity(target.url);
   const targetGroupTitle = String(target.groupTitle || '');
   const targetGroupColor = String(target.groupColor || '');
   let changed = false;
@@ -131,7 +143,7 @@ export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
     let replaced = false;
     const tabs = [];
     for (const tab of group.tabs || []) {
-      if (!replaced && targetUrl && tab.url === targetUrl) {
+      if (!replaced && targetUrl && snapshotUrlIdentity(tab.url) === targetUrl) {
         tabs.push(replacementTab);
         replaced = true;
         changed = true;
@@ -161,33 +173,38 @@ export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   liveSnapshot = sanitizeSpaceSnapshot(liveSnapshot);
   storedSnapshot = sanitizeSpaceSnapshot(storedSnapshot);
-  if (!storedSnapshot || snapshotTabCount(storedSnapshot) === 0) return liveSnapshot || null;
+  if (
+    !storedSnapshot ||
+    !snapshotHasPersistentContent(storedSnapshot)
+  ) return liveSnapshot || null;
   if (!liveSnapshot || snapshotTabCount(liveSnapshot) === 0) return storedSnapshot;
 
-  const liveUrls = new Set(snapshotTabs(liveSnapshot)
-    .map((tab) => comparableSnapshotUrl(tab.url))
-    .filter(Boolean));
+  const { consumedTabs: liveStoredMatches } = matchSnapshotTabs(
+    snapshotTabEntries(liveSnapshot),
+    snapshotTabEntries(storedSnapshot),
+  );
   const liveGroupsByKey = new Map((liveSnapshot.groups || []).map((group) => [snapshotGroupKey(group), group]));
+  const storedGroupKeys = new Set((storedSnapshot.groups || []).map(snapshotGroupKey));
   const mergedGroups = [];
 
   for (const storedGroup of storedSnapshot.groups || []) {
     const key = snapshotGroupKey(storedGroup);
     let liveGroup = liveGroupsByKey.get(key);
     let liveKey = key;
-    if (!liveGroup) {
-      const overlapMatch = liveGroupMatchByUrlOverlap(storedGroup, liveGroupsByKey);
+    if (!liveGroup && !storedSnapshot.preserveGroups) {
+      const overlapMatch = liveGroupMatchByUrlOverlap(storedGroup, liveGroupsByKey, storedGroupKeys);
       liveGroup = overlapMatch?.group;
       liveKey = overlapMatch?.key || key;
     }
     const dormantTabs = (storedGroup.tabs || [])
-      .filter((tab) => !liveUrls.has(comparableSnapshotUrl(tab.url)));
+      .filter((tab) => !liveStoredMatches.has(tab));
     if (liveGroup) {
       mergedGroups.push({
         ...liveGroup,
         tabs: [...(liveGroup.tabs || []), ...dormantTabs],
       });
       liveGroupsByKey.delete(liveKey);
-    } else if (dormantTabs.length > 0) {
+    } else if (snapshotGroupShouldPersist(storedSnapshot, { ...storedGroup, tabs: dormantTabs })) {
       mergedGroups.push({
         ...storedGroup,
         tabs: dormantTabs,
@@ -202,7 +219,10 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   return {
     version: liveSnapshot.version || storedSnapshot.version || 1,
     updatedAt: liveSnapshot.updatedAt || Date.now(),
-    groups: mergedGroups.filter((group) => (group.tabs || []).length > 0),
+    ...(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups ? { preserveGroups: true } : {}),
+    groups: mergedGroups.filter((group) => snapshotGroupShouldPersist({
+      preserveGroups: Boolean(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups),
+    }, group)),
   };
 }
 
@@ -230,7 +250,7 @@ export function sanitizeSpaceSnapshot(snapshot) {
           .map(sanitizeSnapshotTab)),
       };
     })
-    .filter((group) => group.tabs.length > 0);
+    .filter((group) => snapshotGroupShouldPersist(snapshot, group));
   return { ...snapshot, groups };
 }
 
@@ -274,42 +294,45 @@ function cleanPanelTitle(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-function snapshotTabs(snapshot = {}) {
-  return (snapshot.groups || []).flatMap((group) => group.tabs || []);
-}
-
-function liveGroupMatchByUrlOverlap(storedGroup = {}, liveGroupsByKey = new Map()) {
-  const storedUrls = new Set((storedGroup.tabs || [])
-    .map((tab) => comparableSnapshotUrl(tab.url))
-    .filter(Boolean));
-  if (storedUrls.size === 0) return null;
+function liveGroupMatchByUrlOverlap(
+  storedGroup = {},
+  liveGroupsByKey = new Map(),
+  reservedGroupKeys = new Set(),
+) {
+  if (!(storedGroup.tabs || []).some((tab) => snapshotUrlIdentity(tab.url))) return null;
 
   let best = null;
-  let bestOverlap = 0;
+  let bestScore = { exactCount: 0, totalCount: 0 };
   let tied = false;
   for (const [key, group] of liveGroupsByKey) {
-    const overlap = countUrlOverlap(storedUrls, group.tabs || []);
-    if (overlap > bestOverlap) {
+    if (reservedGroupKeys.has(key)) continue;
+    const score = urlOverlapScore(storedGroup.tabs || [], group.tabs || []);
+    const comparison = compareUrlOverlapScores(score, bestScore);
+    if (comparison > 0) {
       best = { key, group };
-      bestOverlap = overlap;
+      bestScore = score;
       tied = false;
-    } else if (overlap > 0 && overlap === bestOverlap) {
+    } else if (score.totalCount > 0 && comparison === 0) {
       tied = true;
     }
   }
-  return bestOverlap > 0 && !tied ? best : null;
+  return bestScore.totalCount > 0 && !tied ? best : null;
 }
 
-function countUrlOverlap(urls, tabs = []) {
-  const seen = new Set();
-  let count = 0;
-  for (const tab of tabs) {
-    const key = comparableSnapshotUrl(tab.url);
-    if (!key || seen.has(key) || !urls.has(key)) continue;
-    seen.add(key);
-    count += 1;
+function urlOverlapScore(leftTabs = [], rightTabs = []) {
+  const { exactCount, totalCount } = matchSnapshotTabs(
+    leftTabs.map((tab) => ({ tab })),
+    rightTabs.map((tab) => ({ tab })),
+    { preferSameGroup: false },
+  );
+  return { exactCount, totalCount };
+}
+
+function compareUrlOverlapScores(left, right) {
+  if (left.exactCount !== right.exactCount) {
+    return left.exactCount - right.exactCount;
   }
-  return count;
+  return left.totalCount - right.totalCount;
 }
 
 function sanitizeReplacementTab(tab = {}) {
@@ -322,17 +345,78 @@ function sanitizeReplacementTab(tab = {}) {
 }
 
 function dedupeSnapshotTabs(tabs = []) {
-  const firstUrlByKey = new Map();
+  const seenUrls = new Set();
   const deduped = [];
   for (const tab of tabs) {
-    const url = String(tab.url || '');
-    const key = comparableSnapshotUrl(tab.url) || String(tab.url || '');
-    const firstUrl = firstUrlByKey.get(key);
-    if (key && firstUrl !== undefined && firstUrl !== url) continue;
-    if (key && firstUrl === undefined) firstUrlByKey.set(key, url);
+    const url = snapshotUrlIdentity(tab.url);
+    if (seenUrls.has(url)) continue;
+    seenUrls.add(url);
     deduped.push(tab);
   }
   return deduped;
+}
+
+function snapshotUrlIdentity(url) {
+  return String(url || '').trim();
+}
+
+function snapshotTabEntries(snapshot = {}) {
+  return (snapshot.groups || []).flatMap((group) => {
+    const groupKey = snapshotGroupKey(group);
+    return (group.tabs || []).map((tab) => ({ tab, groupKey }));
+  });
+}
+
+function targetSnapshotGroupKey(target = {}) {
+  const title = String(target.groupTitle || '');
+  const color = String(target.groupColor || '');
+  if (!title && !color) return '';
+  return snapshotGroupKey({
+    title: title || 'Ungrouped',
+    color: color || (title === 'Ungrouped' ? 'grey' : 'blue'),
+  });
+}
+
+function matchSnapshotTabs(consumers = [], candidates = [], { preferSameGroup = true } = {}) {
+  const consumedTabs = new Set();
+  const matchedConsumers = new Set();
+  let exactCount = 0;
+
+  const matchPass = (exact) => {
+    for (let consumerIndex = 0; consumerIndex < consumers.length; consumerIndex += 1) {
+      if (matchedConsumers.has(consumerIndex)) continue;
+      const consumer = consumers[consumerIndex];
+      const consumerUrl = snapshotUrlIdentity(consumer?.tab?.url);
+      if (!consumerUrl) continue;
+      const fallbackKey = exact ? '' : comparableSnapshotUrl(consumerUrl);
+      if (!exact && !fallbackKey) continue;
+
+      const matches = (candidate) => {
+        if (consumedTabs.has(candidate.tab)) return false;
+        const candidateUrl = snapshotUrlIdentity(candidate?.tab?.url);
+        return exact
+          ? candidateUrl === consumerUrl
+          : comparableSnapshotUrl(candidateUrl) === fallbackKey;
+      };
+      const sameGroupMatch = preferSameGroup && consumer.groupKey
+        ? candidates.find((candidate) => candidate.groupKey === consumer.groupKey && matches(candidate))
+        : null;
+      const match = sameGroupMatch || candidates.find(matches);
+      if (!match) continue;
+
+      consumedTabs.add(match.tab);
+      matchedConsumers.add(consumerIndex);
+      if (exact) exactCount += 1;
+    }
+  };
+
+  matchPass(true);
+  matchPass(false);
+  return {
+    consumedTabs,
+    exactCount,
+    totalCount: matchedConsumers.size,
+  };
 }
 
 function snapshotGroupKey(group = {}) {

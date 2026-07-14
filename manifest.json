@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Space: Arc-like Workspaces for Chrome",
-  "short_name": "Space",
-  "description": "Arc-like workspaces for Chrome: organize one thing per Space, keep tabs focused, and use private BYOK AI.",
+  "name": "Space Tabs: Arc-like Spaces & BYOK AI",
+  "short_name": "Space Tabs",
+  "description": "Move your Arc workspace into Chrome. Organize Spaces, ask pages with your own AI key, and keep workspace data local.",
   "version": "0.5.1",
   "minimum_chrome_version": "116",
   "action": {
-    "default_title": "Open Space",
+    "default_title": "Open Space Tabs",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -37,7 +37,6 @@
     "default_path": "sidepanel.html"
   },
   "permissions": [
-    "activeTab",
     "favicon",
     "scripting",
     "sidePanel",
