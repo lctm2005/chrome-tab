@@ -37,8 +37,9 @@ export function createDefaultState(localConfig = {}) {
     spaceContexts: {},
     spaceSnapshots: {},
     onboarding: {
-      version: 1,
+      version: 2,
       completed: false,
+      stage: 'choose',
     },
     lastArcImport: null,
     operationHistory: [],
@@ -101,11 +102,16 @@ function normalizeDefaultSpace(spaces, storedVersion = 0) {
     : space);
 }
 
-function normalizeOnboarding(value, fallback = { version: 1, completed: false }) {
+function normalizeOnboarding(value, fallback = { version: 2, completed: false, stage: 'choose' }) {
   if (!value || typeof value !== 'object') return { ...fallback };
+  const completed = value.completed === true;
+  const stage = completed
+    ? 'done'
+    : value.stage === 'ai' ? 'ai' : 'choose';
   return {
-    version: Number(value.version) || Number(fallback.version) || 1,
-    completed: value.completed === true,
+    version: 2,
+    completed,
+    stage,
   };
 }
 

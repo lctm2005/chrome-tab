@@ -1659,13 +1659,26 @@ async function main() {
       return true;
     })()`);
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' && document.querySelectorAll('.tab-row').length >= 2`);
-    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `(() => {
+      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+      window.__tidyPreviewTitles = [];
+      window.__tidyPreviewObserver?.disconnect();
+      const title = document.querySelector('#actionDialogTitle');
+      window.__tidyPreviewObserver = new MutationObserver(() => {
+        const value = title?.textContent || '';
+        if (value) window.__tidyPreviewTitles.push(value);
+      });
+      window.__tidyPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
+    })()`);
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
     const tidyPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
       if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Tidy Names') return null;
       return {
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
+        message: document.querySelector('#actionDialogMessage')?.textContent || '',
+        titles: [...new Set(window.__tidyPreviewTitles || [])],
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
         commands: window.__SPACE_TABS_PREVIEW_COMMANDS__ || [],
       };
     })()`);
@@ -1680,51 +1693,102 @@ async function main() {
       };
     })()`);
     record(
-      'Tidy Names previews before mutation and Cancel has no side effects',
-      tidyPreview.items > 0 && tidyCancelState.mutations.length === 0 && Object.keys(tidyCancelState.renamedTabs).length === 0,
+      'Tidy Names directly opens one concise final preview and Cancel has no side effects',
+      tidyPreview.items > 0 &&
+        tidyPreview.confirmText === 'Apply tidy' &&
+        /^\d+ names? · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
+        !tidyPreview.titles.includes('Generate Tidy Names preview?') &&
+        tidyCancelState.mutations.length === 0 &&
+        Object.keys(tidyCancelState.renamedTabs).length === 0,
       JSON.stringify({ tidyPreview, tidyCancelState })
     );
 
-    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `(() => {
+      const STORAGE_KEY = 'spaceTabsState';
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const state = stored[STORAGE_KEY] || {};
+      const snapshot = state.spaceSnapshots?.['move-target'];
+      if (snapshot) {
+        snapshot.preserveGroups = true;
+        snapshot.groups = (snapshot.groups || []).filter((group) => group.title !== 'Planning');
+        snapshot.groups.push(
+          { title: 'Planning', color: 'cyan', collapsed: false, tabs: [] },
+          { title: 'Planning', color: 'cyan', collapsed: false, tabs: [] },
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      }
+      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+      window.__autoGroupPreviewTitles = [];
+      window.__autoGroupPreviewObserver?.disconnect();
+      const title = document.querySelector('#actionDialogTitle');
+      window.__autoGroupPreviewObserver = new MutationObserver(() => {
+        const value = title?.textContent || '';
+        if (value) window.__autoGroupPreviewTitles.push(value);
+      });
+      window.__autoGroupPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
+    })()`);
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
-    const autoGroupDisclosure = await waitFor(client, `(() => {
+    const autoGroupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Generate Auto Group preview?') return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+      const dialog = document.querySelector('#actionDialog');
+      const form = dialog?.querySelector('.action-form');
+      const preview = document.querySelector('#actionDialogPreview');
       return {
         message: document.querySelector('#actionDialogMessage')?.textContent || '',
-        sectionTitle: document.querySelector('#actionDialogPreview h3 span')?.textContent || '',
+        titles: [...new Set(window.__autoGroupPreviewTitles || [])],
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
+        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        disclosure: document.querySelector('#autoGroupButton')?.getAttribute('aria-label') || '',
+        scroll: {
+          dialogOverflowY: dialog ? getComputedStyle(dialog).overflowY : '',
+          formOverflowY: form ? getComputedStyle(form).overflowY : '',
+          previewOverflowY: preview ? getComputedStyle(preview).overflowY : '',
+        },
         providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => command.type === 'ai:chat').length,
+        mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)),
       };
     })()`);
     record(
-      'Auto Group discloses exact metadata before proposal generation',
-      autoGroupDisclosure.message.includes('Nothing is sent until you choose Generate preview') &&
-        autoGroupDisclosure.sectionTitle.includes('title, full URL, domain, current Tag, and live/saved status') &&
-        autoGroupDisclosure.items > 0 &&
-        autoGroupDisclosure.confirmText === 'Generate preview' &&
-        autoGroupDisclosure.providerRequests === 0,
-      JSON.stringify(autoGroupDisclosure)
+      'Auto Group directly opens one concise final preview with one scroll region',
+      autoGroupPreview.message.includes('2 tabs → 1 group') &&
+        autoGroupPreview.message.length <= 72 &&
+        /(?:\d+ ms|\d+(?:\.\d+)? s)$/.test(autoGroupPreview.message) &&
+        !autoGroupPreview.message.includes('AI proposal') &&
+        !autoGroupPreview.message.includes('sent ') &&
+        !autoGroupPreview.message.includes('generated in') &&
+        !autoGroupPreview.titles.includes('Generate Auto Group preview?') &&
+        autoGroupPreview.items > 0 &&
+        autoGroupPreview.sourceLabels > 0 &&
+        autoGroupPreview.groupCards > 0 &&
+        autoGroupPreview.confirmText === 'Apply groups' &&
+        autoGroupPreview.disclosure.includes('titles, simplified URLs, domains, current Tags, and live/saved status') &&
+        autoGroupPreview.scroll.dialogOverflowY === 'hidden' &&
+        autoGroupPreview.scroll.formOverflowY === 'hidden' &&
+        autoGroupPreview.scroll.previewOverflowY === 'auto' &&
+        autoGroupPreview.providerRequests === 1 &&
+        autoGroupPreview.mutations.length === 0,
+      JSON.stringify(autoGroupPreview)
     );
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
     await waitFor(client, `!document.querySelector('#actionDialog')?.open && !document.querySelector('#autoGroupButton')?.disabled`);
-    const autoGroupPreSendCancel = await evaluate(client, `({
+    const autoGroupFinalCancel = await evaluate(client, `({
       providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => command.type === 'ai:chat').length,
       mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)).length,
     })`);
     record(
-      'Auto Group pre-send Cancel has no provider traffic or mutations',
-      autoGroupPreSendCancel.providerRequests === 0 && autoGroupPreSendCancel.mutations === 0,
-      JSON.stringify(autoGroupPreSendCancel)
+      'Auto Group final-preview Cancel leaves organization unchanged',
+      autoGroupFinalCancel.providerRequests === 1 && autoGroupFinalCancel.mutations === 0,
+      JSON.stringify(autoGroupFinalCancel)
     );
 
     await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Generate Auto Group preview?'`);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const groupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
       if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
@@ -1746,11 +1810,27 @@ async function main() {
       if (document.querySelector('#actionDialog')?.open) return null;
       const mutations = (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => ['tabs:group', 'tabs:groupExisting'].includes(command.type));
-      return mutations.length > 0 ? { mutations } : null;
+      const matchingCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Planning')
+        .map((card) => ({
+          key: card.dataset.groupKey || '',
+          rows: card.querySelectorAll('.tab-row').length,
+        }));
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .filter((group) => group.title === 'Planning')
+        .map((group) => ({ tabs: (group.tabs || []).length }));
+      return mutations.length > 0 && matchingCards.length > 0
+        ? { mutations, matchingCards, planningSnapshotGroups }
+        : null;
     })()`);
     record(
-      'Auto Group applies only after preview confirmation',
-      groupApplyState.mutations.length > 0,
+      'Auto Group applies only after confirmation without rendering an empty same-name shadow',
+      groupApplyState.mutations.length > 0 &&
+        groupApplyState.planningSnapshotGroups.length === 2 &&
+        groupApplyState.planningSnapshotGroups.filter((group) => group.tabs === 0).length === 1 &&
+        groupApplyState.matchingCards.length === 1 &&
+        groupApplyState.matchingCards[0].rows === 2,
       JSON.stringify(groupApplyState)
     );
   }

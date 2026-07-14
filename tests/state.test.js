@@ -21,7 +21,7 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.collapsedSpaceGroups, {});
   assert.deepEqual(state.askSessions, {});
   assert.deepEqual(state.spaceContexts, {});
-  assert.deepEqual(state.onboarding, { version: 1, completed: false });
+  assert.deepEqual(state.onboarding, { version: 2, completed: false, stage: 'choose' });
   assert.equal(state.lastArcImport, null);
   assert.deepEqual(state.operationHistory, []);
   assert.equal(state.shortcuts.askSubmit, 'Meta+Enter');
@@ -138,7 +138,7 @@ test('migrates v4 Space ownership into v8 without resetting shortcuts', () => {
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
   assert.equal(merged.spaceContexts.work, '# Launch\nShip the store update.');
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
-  assert.deepEqual(merged.onboarding, { version: 1, completed: false });
+  assert.deepEqual(merged.onboarding, { version: 2, completed: false, stage: 'choose' });
 });
 
 test('preserves completed onboarding and a valid Arc import undo record', () => {
@@ -148,11 +148,30 @@ test('preserves completed onboarding and a valid Arc import undo record', () => 
     lastArcImport: { spaceIds: ['arc-work', 'arc-work', 'arc-home'], importedAt: 123 },
   }, createDefaultState());
 
-  assert.deepEqual(merged.onboarding, { version: 1, completed: true });
+  assert.deepEqual(merged.onboarding, { version: 2, completed: true, stage: 'done' });
   assert.deepEqual(merged.lastArcImport, {
     spaceIds: ['arc-work', 'arc-home'],
     importedAt: 123,
   });
+});
+
+test('normalizes onboarding v2 to choose, AI, or done stages', () => {
+  const choose = mergeStoredState({
+    version: 8,
+    onboarding: { version: 2, completed: false, stage: 'unexpected' },
+  }, createDefaultState());
+  const ai = mergeStoredState({
+    version: 8,
+    onboarding: { version: 2, completed: false, stage: 'ai' },
+  }, createDefaultState());
+  const done = mergeStoredState({
+    version: 8,
+    onboarding: { version: 2, completed: true, stage: 'choose' },
+  }, createDefaultState());
+
+  assert.deepEqual(choose.onboarding, { version: 2, completed: false, stage: 'choose' });
+  assert.deepEqual(ai.onboarding, { version: 2, completed: false, stage: 'ai' });
+  assert.deepEqual(done.onboarding, { version: 2, completed: true, stage: 'done' });
 });
 
 test('normalizes per-Space Arc import safety fingerprints while preserving legacy records', () => {

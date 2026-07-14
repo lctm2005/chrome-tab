@@ -14,7 +14,7 @@ import {
 test('release allowlist contains only explicit runtime files and the generated empty config', () => {
   assert.doesNotThrow(() => assertSafeReleaseEntries(RELEASE_FILES));
   assert.ok(RELEASE_FILES.includes('src/shared/space-transfer.js'));
-  assert.ok(RELEASE_FILES.includes('src/shared/arc-file-access.js'));
+  assert.equal(RELEASE_FILES.includes('src/shared/arc-file-access.js'), false);
   assert.ok(RELEASE_FILES.includes(GENERATED_CONFIG_PATH));
   assert.equal(GENERATED_CONFIG_CONTENT.includes('SPACE_TABS_CONFIG'), true);
   assert.equal(findSecret(GENERATED_CONFIG_CONTENT), '');

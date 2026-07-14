@@ -4,11 +4,12 @@ import { access, readFile } from 'node:fs/promises';
 
 test('declares the Chrome MV3 side panel extension surface', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.name, 'Space Tabs: Arc-like Spaces & BYOK AI');
   assert.equal(manifest.short_name, 'Space Tabs');
-  assert.equal(manifest.version, '0.5.2');
+  assert.equal(manifest.version, packageJson.version);
   assert.equal(manifest.name.includes('Arc Sidecar'), false);
   assert.equal(manifest.action.default_title.includes('Arc Sidecar'), false);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -89,15 +90,22 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
     'onboardingDialog',
     'onboardingArcInput',
     'onboardingArcChooseButton',
-    'arcImportUseButton',
     'arcImportChooseButton',
     'undoArcImportButton',
+    'onboardingProviderInput',
+    'onboardingBaseUrlInput',
+    'onboardingModelInput',
+    'onboardingCustomModelInput',
+    'onboardingApiKeyInput',
+    'onboardingThinkingInput',
+    'onboardingTestAIButton',
+    'onboardingSkipAIButton',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.doesNotMatch(html, /id="maxTokensInput"|Max output/i);
+  assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
-  assert.match(html, /id="onboardingOpenWorkbenchButton">Start using Workbench</);
+  assert.match(html, /id="onboardingOpenWorkbenchButton" disabled>Save AI &amp; start</);
   assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
   assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);
@@ -113,11 +121,29 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(html, /data-onboarding-path="arc"/);
   assert.doesNotMatch(html, /data-onboarding-path="arc" hidden/);
   assert.doesNotMatch(html, /Arc import is not available/i);
-  assert.match(source, /window\.showOpenFilePicker/);
-  assert.match(source, /rememberArcFileHandle\(handle\)/);
-  assert.match(source, /previewRememberedArcFileIfGranted\('settings'\)/);
+  assert.match(html, /id="onboardingArcInput" type="file"/);
+  assert.match(html, /id="arcImportInput" type="file"/);
+  assert.match(source, /function startArcFileSelectionFromUserGesture\(target\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);
+  assert.doesNotMatch(source, /showOpenFilePicker|rememberArcFileHandle|loadRememberedArcFileHandle|rememberedArcFileHandle/);
+  assert.doesNotMatch(source, /indexedDB(?:\?\.|\.)open(?:\?\.)?\(/);
+  assert.match(source, /clearLegacyArcFileHandleStorage[\s\S]*deleteDatabase\?\.\('space-tabs-local-files'\)/);
+  assert.doesNotMatch(html, /arcImportUseButton|authorized Arc file|Authorize Arc file/i);
   assert.match(source, /onboardingArcInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
+  assert.match(source, /arcImportInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
   assert.match(source, /if \(event\.target !== event\.currentTarget\) return/);
+  assert.match(source, /async function previewOnboardingArcFile[\s\S]*selectionGeneration !== onboardingArcSelectionGeneration[\s\S]*onboardingStep !== 1 \|\| onboardingPath !== 'arc'/);
+  assert.match(source, /async function previewArcImportFile[\s\S]*selectionGeneration !== arcImportSelectionGeneration/);
+  assert.match(source, /function clearOnboardingArcSelection[\s\S]*pendingOnboardingArcText = '';[\s\S]*onboardingArcInput\.value = '';[\s\S]*onboardingArcSpaces\.replaceChildren\(\)/);
+  assert.match(source, /function chooseOnboardingPath\(path\)[\s\S]*path === 'fresh'[\s\S]*clearOnboardingArcSelection\(\)/);
+  assert.match(source, /function goBackOnboarding\(\)[\s\S]*onboardingPath === 'arc'[\s\S]*clearOnboardingArcSelection\(\)/);
+  assert.match(source, /async function applyArcOnboarding[\s\S]*finally \{[\s\S]*clearOnboardingArcSelection\(\{ preserveStatus: true \}\)/);
+  assert.match(source, /async function finishOnboarding[\s\S]*clearOnboardingArcSelection\(\);[\s\S]*onboardingApiKeyInput\.value = '';/);
+  assert.match(source, /function arcPlanResolutionSignature[\s\S]*preview\.sourceSpaceId,[\s\S]*preview\.resolvedId,[\s\S]*preview\.resolvedName/);
+  assert.match(source, /async function importArcFile[\s\S]*arcPlanResolutionSignature\(pendingArcImportPlan\) !== arcPlanResolutionSignature\(latestPlan\)[\s\S]*previewInvalidated = true/);
+  assert.match(source, /state\.onboarding = \{ version: 2, completed: false, stage: 'ai' \}/);
+  assert.match(source, /state\.onboarding = \{ version: 2, completed: true, stage: 'done' \}/);
+  assert.match(source, /saveOnboardingAIAndFinish[\s\S]*secretSet\(\{ \[SECRET_STORAGE_KEY\]: \{ ai: \{ apiKey: state\.ai\.apiKey \} \} \}\)/);
+  assert.match(source, /function stateForStorage\(\)[\s\S]*apiKey: ''/);
   assert.doesNotMatch(html, /Cross-Space Search/i);
   assert.doesNotMatch(source, /workspace-search/);
 });
@@ -125,7 +151,7 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
 test('Workbench setup and Space switching preserve the Workbench surface', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\)/);
+  assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
   assert.match(source, /async function switchSpace\(spaceId\)[\s\S]*preserveBrowserFocus = workbenchMode/);
   assert.match(source, /ensureSwitchKeepAliveTab\(spaceId, previousSpaceId, \{ preserveBrowserFocus \}\)/);
   assert.match(source, /if \(!preserveBrowserFocus\) \{[\s\S]*focusFirstTabInSpace/);
@@ -214,7 +240,7 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function addAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*await saveState/);
   assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
   assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
-  assert.match(source, /async function tidyTabNames\(\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
+  assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
   assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*Tabs changed while Auto Group was open/);
   assert.match(source, /async function importArcFile\(\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
@@ -260,7 +286,7 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
 
   assert.match(source, /const TIDY_NAMES_ICON = `[\s\S]*🧹[\s\S]*`;/);
   assert.match(source, /title: 'Preview Tidy Names'/);
-  assert.match(source, /No tabs will close or move/);
+  assert.match(source, /title: 'Rename in panel'/);
   assert.match(source, /type: 'tidy-names'/);
   assert.doesNotMatch(source, /duplicateTabIds/);
   assert.match(source, /buildOrganizationCandidates/);
@@ -268,7 +294,7 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /candidate\.currentGroup\?\.title/);
   assert.match(source, /title: 'Auto Group Preview'/);
   assert.match(source, /title: 'Remain untouched'/);
-  assert.match(source, /title: 'Not sent · remain untouched'/);
+  assert.match(source, /title: 'Untouched'/);
   assert.match(source, /variant: 'groups'/);
   assert.match(source, /AI returned no valid groups/);
   assert.match(source, /applyOrganizationPlanToSnapshot/);
@@ -282,10 +308,10 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
 });
 
-test('Tidy Names confirms before sending while Auto Group goes directly to its final preview', async () => {
+test('Tidy Names and Auto Group generate first and open only their final previews', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames()'),
+    source.indexOf('async function tidyTabNames(options = {})'),
     source.indexOf('async function tidyTabNamesWithAI'),
   );
   const autoSource = source.slice(
@@ -293,29 +319,66 @@ test('Tidy Names confirms before sending while Auto Group goes directly to its f
     source.indexOf('function activeChromeGroupsByTitle'),
   );
 
-  assert.match(source, /title: `Generate \$\{action\} preview\?`/);
-  assert.match(source, /confirmText: 'Generate preview'/);
-  assert.match(source, /onConfirm: \(\) => \{[\s\S]*requestAIHostPermissionFromUserGesture\(settings\)/);
-  assert.match(tidySource, /fields: 'title, simplified URL, and domain'/);
-  assert.match(tidySource, /itemMeta: \(tab\) => compactTabForAI\(tab\)\.url/);
-  assert.match(tidySource, /confirmAIProposalGeneration\(\{[\s\S]*settings: aiSettings[\s\S]*tidyTabNamesWithAI\(aiCandidates, \{ permissionRequest, settings: aiSettings \}\)/);
+  assert.doesNotMatch(source, /confirmAIProposalGeneration|confirmText: 'Generate preview'|Generate \$\{action\} preview\?/);
+  assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyNamesRequestFromUserGesture\(\)[\s\S]*tidyTabNames\(request\)/);
+  assert.match(tidySource, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
+  assert.match(tidySource, /tidyTabNamesWithAI\([\s\S]*showPlanPreview\(\{/);
+  assert.match(tidySource, /title: 'Preview Tidy Names'/);
+  assert.match(tidySource, /message: `\$\{renameItems\.length\} [\s\S]*formatPreviewDuration/);
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
-  assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*hasCurrentAutoGroupAICandidates\(\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
+  assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentAutoGroupAICandidates\)/);
+  assert.match(source, /function prepareOrganizationAIRequestFromUserGesture\(candidateProbe\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
   assert.match(source, /permissionRequest\.catch\(\(\) => null\)/);
   assert.match(autoSource, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
-  assert.doesNotMatch(autoSource, /confirmAIProposalGeneration/);
   assert.match(autoSource, /purpose: 'auto-group'/);
   assert.match(autoSource, /itemCount: candidates\.length/);
   assert.match(autoSource, /title: 'Auto Group Preview'/);
-  assert.match(autoSource, /sent \$\{candidates\.length\} tab titles, simplified URLs, domains, current Tags, and live\/saved status/);
-  assert.match(source, /function updateAutoGroupDisclosure\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
+  assert.match(autoSource, /message: previewSummary\.join\(' · '\)/);
+  assert.doesNotMatch(autoSource, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
+  assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
   assert.ok(autoSource.indexOf("send('ai:chat'") < autoSource.indexOf("title: 'Auto Group Preview'"));
+});
+
+test('organization previews have one bounded scroll area and fixed actions', async () => {
+  const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+
+  assert.match(styles, /#actionDialog\s*\{[\s\S]*?overflow: hidden;/);
+  assert.match(styles, /#actionDialog \.action-form\s*\{[\s\S]*?max-height:[\s\S]*?overflow: hidden;/);
+  assert.match(styles, /\.action-preview\s*\{[\s\S]*?flex: 1 1 auto;[\s\S]*?overflow-y: auto;/);
+  assert.match(styles, /\.action-preview\.group-plan-preview\s*\{[\s\S]*?max-height: none;/);
+  assert.match(styles, /\.action-buttons\s*\{[\s\S]*?flex: 0 0 auto;/);
+});
+
+test('merged Space view hides only empty snapshot shadows of live groups', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const mergeSource = source.slice(
+    source.indexOf('function mergeDormantSpaceView(liveView, dormantView)'),
+    source.indexOf('function matchDormantTabsToLiveTabs'),
+  );
+
+  assert.match(mergeSource, /const liveGroupsByTitle = new Map\(\)/);
+  assert.match(mergeSource, /const matchingLiveGroup = liveGroupsByTitle\.get\(groupTitleKey\(group\.title\)\)/);
+  assert.match(mergeSource, /if \(dormantGroup\.tabs\.length === 0\)[\s\S]*if \(!matchingLiveGroup && !isUngroupedSnapshotGroup\(dormantGroup\)\)[\s\S]*dormantGroups\.push\(dormantGroup\)/);
+  assert.match(mergeSource, /if \(matchingLiveGroup\) \{\s*matchingLiveGroup\.tabs\.push\(\.\.\.dormantGroup\.tabs\)/);
+});
+
+test('organization Undo banner expires after ten seconds without deleting history', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const renderSource = source.slice(
+    source.indexOf('function renderOperationRecord()'),
+    source.indexOf('function recordOperation('),
+  );
+
+  assert.match(source, /const OPERATION_UNDO_VISIBLE_MS = 10_000;/);
+  assert.match(renderSource, /isOperationUndoVisible\(operation, now, OPERATION_UNDO_VISIBLE_MS\)/);
+  assert.match(renderSource, /setTimeout\(\(\) => \{[\s\S]*els\.operationRecord\.hidden = true;[\s\S]*\}, remaining\)/);
+  assert.doesNotMatch(renderSource, /operationHistory\s*=|removeOperationRecord/);
 });
 
 test('organization commits validate freshness and record Undo only after the applied state refreshes', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames()'),
+    source.indexOf('async function tidyTabNames(options = {})'),
     source.indexOf('async function tidyTabNamesWithAI'),
   );
   const autoSource = source.slice(

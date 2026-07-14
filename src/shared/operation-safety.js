@@ -1,5 +1,18 @@
 const TIDY_TARGET_FINGERPRINT_VERSION = 1;
 
+export function isOperationUndoVisible(operation, now = Date.now(), visibleForMs = 10_000) {
+  if (!operation || operation.status === 'undone') return false;
+  const createdAt = Number(operation.createdAt);
+  const currentTime = Number(now);
+  const lifetime = Number(visibleForMs);
+  if (
+    !Number.isFinite(createdAt) || createdAt <= 0 ||
+    !Number.isFinite(currentTime) || currentTime < createdAt ||
+    !Number.isFinite(lifetime) || lifetime <= 0
+  ) return false;
+  return currentTime - createdAt < lifetime;
+}
+
 /**
  * Identifies the exact live rows a Tidy Names preview was based on.
  *

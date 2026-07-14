@@ -6,7 +6,7 @@ const promises = [
   {
     number: "01",
     title: "Bring selected Arc Spaces over",
-    copy: "Preview every Space, folder, saved tab, and naming conflict before anything is imported.",
+    copy: "Choose StorableSidebar.json for each import. Space Tabs reads it locally, never modifies it, and previews everything before import.",
   },
   {
     number: "02",
@@ -81,13 +81,13 @@ export default function Home() {
           <div className="section-heading">
             <p className="eyebrow"><span /> Migration without the leap of faith</p>
             <h2>Your Arc workspace,<br />now in Chrome.</h2>
-            <p>Import is a visible three-step setup, not a hidden append button. You choose what crosses over and see conflicts before committing.</p>
+            <p>Import is a visible three-step setup: choose a path, create or import a workspace, then configure optional AI or skip it. You choose what crosses over and see conflicts before committing.</p>
           </div>
           <div className="feature-stack">
             <ProductScreenshot
               src="/screenshots/02-nested-folders-dormant-tabs.png"
               alt="Current Space Tabs three-step Arc import preview with selectable Spaces and conflict details"
-              caption="Real setup flow · Choose, Bring data, Ready"
+              caption="Real setup flow · Choose, Space, AI & ready"
             />
             <div className="promise-list">
               {promises.map((item) => (
@@ -109,7 +109,7 @@ export default function Home() {
           <div className="section-heading right-copy">
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
-            <p>Tidy Names shows the provider, exact tabs, simplified URLs, and metadata fields before generation. Auto Group produces its final preview in one click, then reports the provider, fields, tab count, timing, and exactly what will move, merge, or remain untouched. Nothing changes until you approve, and every applied change creates a visible operation record with one-click Undo.</p>
+            <p>Clicking Tidy Names or Auto Group sends the relevant tab metadata to your configured provider and generates one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
             <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Space uses up to 12 confirmed live HTTP(S) pages, prioritizes pages you select, and shows the provider, sources, extracted content size, and whether stored text from recent conversation messages will be included. Nothing is sent until you confirm. Generated-response Sources appendices stay out of the context sent to your provider.</span></div>
           </div>
         </section>

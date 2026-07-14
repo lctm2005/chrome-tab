@@ -9,15 +9,15 @@ what data is involved and what will change before anything is applied.
 ## Features
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
-- Arc migration: authorize `StorableSidebar.json` once, reuse that local file for later previews, import selected Spaces, review conflicts and counts, and undo the latest import.
+- Arc migration: choose `StorableSidebar.json` for each import, preview selected Spaces, review conflicts and counts, and undo the latest import. Space Tabs reads the chosen file locally and never modifies it.
 - Ask Space: ask across up to 12 confirmed live HTTP(S) pages in a Space, prioritizing pages you select, with disclosure of the provider, sources, content size, and stored text from recent conversation messages, plus streaming, Stop, and clickable citations.
 - Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
 - Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Tidy Names and Auto Group: Tidy confirms tab metadata before generation; Auto Group generates its final reviewable preview in one click and reports the provider, fields, tab count, and timing there. Nothing is applied without a separate review. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
-- Recovery: use the operation record to undo the latest Tidy, Auto Group, or restore action; Arc import has a dedicated visible Undo. Undo stops safely if the affected portable content changed afterward.
+- Tidy Names and Auto Group: clicking either action sends the relevant tab metadata to the configured provider and generates one final, reviewable preview. Nothing is applied until you choose Apply. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
+- Recovery: use the 10-second Undo prompt after Tidy, Auto Group, or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
 - Command palette: switch Spaces, find tabs, and open Ask with `Cmd/Ctrl+K`.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
@@ -68,9 +68,10 @@ After updating the source files, reload the unpacked extension from `chrome://ex
 
 ## AI Setup
 
-AI features are optional and use your own API key.
+AI features are optional and use your own API key. Configure them in the third
+step of first-run setup, or skip that step and configure them later in Settings.
 
-Click `Settings` in the side panel to open the full-page Workbench, then configure:
+The setup step and full-page Workbench Settings use the same provider options:
 
 - `Provider`: choose `Z.ai / GLM`, `OpenAI`, `Google Gemini`, `DeepSeek`,
   `Ollama (Local)`, or `Custom OpenAI-compatible`.

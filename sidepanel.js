@@ -28,12 +28,6 @@ import {
   createArcImportPlan,
   selectArcImportPlan,
 } from './src/shared/arc-import.js';
-import {
-  forgetRememberedArcFileHandle,
-  isFilePickerCancellation,
-  loadRememberedArcFileHandle,
-  rememberArcFileHandle,
-} from './src/shared/arc-file-access.js';
 import { buildCommandPaletteItems } from './src/shared/command-palette.js';
 import {
   createFolderTree,
@@ -46,7 +40,10 @@ import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
 } from './src/shared/organization-plan.js';
-import { fingerprintTidyNameTargets } from './src/shared/operation-safety.js';
+import {
+  fingerprintTidyNameTargets,
+  isOperationUndoVisible,
+} from './src/shared/operation-safety.js';
 import { createPreviewCommandHandler, isExtensionRuntime } from './src/shared/preview-runtime.js';
 import {
   findShortcutConflict,
@@ -130,6 +127,7 @@ const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
+const OPERATION_UNDO_VISIBLE_MS = 10_000;
 const TIDY_NAMES_ICON = `
   <span class="tidy-icon" aria-hidden="true">🧹</span>
 `;
@@ -162,10 +160,11 @@ let selectedTabIds = new Set();
 let selectionAnchorTabId = null;
 let pendingArcImportText = '';
 let pendingArcImportPlan = null;
+let arcImportSelectionGeneration = 0;
 let pendingSpaceBackup = null;
 let pendingOnboardingArcPlan = null;
 let pendingOnboardingArcText = '';
-let rememberedArcFileHandle = null;
+let onboardingArcSelectionGeneration = 0;
 let onboardingStep = 0;
 let onboardingPath = '';
 let onboardingResult = '';
@@ -184,6 +183,7 @@ let groupPreviewOpenTimer = 0;
 let groupPreviewCloseTimer = 0;
 let workbenchToastTimer = 0;
 let workbenchToastHideTimer = 0;
+let operationRecordHideTimer = 0;
 let activeTaskCount = 0;
 let taskQueue = Promise.resolve();
 let sharedRefreshRunning = false;
@@ -215,7 +215,6 @@ const els = {
   testAIButton: document.querySelector('#testAIButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
   arcImportInput: document.querySelector('#arcImportInput'),
-  arcImportUseButton: document.querySelector('#arcImportUseButton'),
   arcImportChooseButton: document.querySelector('#arcImportChooseButton'),
   importArcButton: document.querySelector('#importArcButton'),
   undoArcImportButton: document.querySelector('#undoArcImportButton'),
@@ -256,6 +255,16 @@ const els = {
   onboardingArcStatus: document.querySelector('#onboardingArcStatus'),
   onboardingArcSpaces: document.querySelector('#onboardingArcSpaces'),
   onboardingFinishMessage: document.querySelector('#onboardingFinishMessage'),
+  onboardingProviderInput: document.querySelector('#onboardingProviderInput'),
+  onboardingBaseUrlInput: document.querySelector('#onboardingBaseUrlInput'),
+  onboardingModelInput: document.querySelector('#onboardingModelInput'),
+  onboardingCustomModelLabel: document.querySelector('#onboardingCustomModelLabel'),
+  onboardingCustomModelInput: document.querySelector('#onboardingCustomModelInput'),
+  onboardingApiKeyInput: document.querySelector('#onboardingApiKeyInput'),
+  onboardingThinkingInput: document.querySelector('#onboardingThinkingInput'),
+  onboardingTestAIButton: document.querySelector('#onboardingTestAIButton'),
+  onboardingAIStatus: document.querySelector('#onboardingAIStatus'),
+  onboardingSkipAIButton: document.querySelector('#onboardingSkipAIButton'),
   onboardingBackButton: document.querySelector('#onboardingBackButton'),
   onboardingNextButton: document.querySelector('#onboardingNextButton'),
   skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
@@ -286,11 +295,8 @@ init();
 
 async function init() {
   try {
+    clearLegacyArcFileHandleStorage();
     panelWindowId = await currentPanelWindowId();
-    rememberedArcFileHandle = await loadRememberedArcFileHandle().catch((error) => {
-      console.warn('Could not restore Arc file access.', error);
-      return null;
-    });
     if (!workbenchMode) connectPanelPort();
     await withSharedStateLock(async () => {
       await loadState({ stateLocked: true });
@@ -298,7 +304,6 @@ async function init() {
     });
     bindEvents();
     renderSettings();
-    if (activeView === 'settings') await previewRememberedArcFileIfGranted('settings');
     await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
@@ -311,6 +316,15 @@ async function init() {
       }
     }
     console.error(error);
+  }
+}
+
+function clearLegacyArcFileHandleStorage() {
+  try {
+    window.indexedDB?.deleteDatabase?.('space-tabs-local-files');
+  } catch {
+    // Older builds stored a FileSystemFileHandle here. It is obsolete because
+    // Chromium blocks that API from choosing Arc's file under macOS ~/Library.
   }
 }
 
@@ -424,7 +438,6 @@ function bindEvents() {
     renderSettings();
     activeView = 'settings';
     render();
-    await previewRememberedArcFileIfGranted('settings');
   }));
   els.openWorkbenchButton.addEventListener('click', () => runTask(openWorkbench));
   els.commandPaletteButton.addEventListener('click', openCommandPalette);
@@ -434,20 +447,19 @@ function bindEvents() {
     els.settingsDialog.close();
     activeView = workbenchMode ? 'ask' : 'space';
     render();
-    openOnboarding();
+    openOnboarding({ restart: true });
   });
-  els.tidyNamesButton.addEventListener('click', () => runTask(tidyTabNames));
+  els.tidyNamesButton.addEventListener('click', startTidyNamesFromUserGesture);
   els.autoGroupButton.addEventListener('click', startAutoGroupFromUserGesture);
   els.collapseGroupsButton.addEventListener('click', () => runTask(toggleSpaceGroups));
   els.askAIButton.addEventListener('click', startAskFromUserGesture);
-  els.testAIButton.addEventListener('click', startTestAIFromUserGesture);
+  els.testAIButton.addEventListener('click', () => startTestAIFromUserGesture(settingsAIControls()));
   els.clearApiKeyButton.addEventListener('click', () => runTask(clearApiKey));
   els.providerInput.addEventListener('change', () => renderAIProviderFields(settingsFromProviderSelection()));
   els.modelInput.addEventListener('change', () => updateCustomModelVisibility());
   els.arcImportInput.addEventListener('change', () => runTask(previewArcImportFile));
   els.arcImportInput.addEventListener('cancel', (event) => event.stopPropagation());
-  els.arcImportUseButton.addEventListener('click', () => startArcFileAccessFromUserGesture('settings'));
-  els.arcImportChooseButton.addEventListener('click', () => startArcFileAccessFromUserGesture('settings', { forcePicker: true }));
+  els.arcImportChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('settings'));
   els.importArcButton.addEventListener('click', () => runTask(importArcFile));
   els.undoArcImportButton.addEventListener('click', () => runTask(undoLastArcImport));
   els.exportSpaceDataButton.addEventListener('click', () => runTask(exportSpaceData));
@@ -462,27 +474,46 @@ function bindEvents() {
     button.addEventListener('click', () => {
       const path = button.dataset.onboardingPath;
       chooseOnboardingPath(path);
-      if (path === 'arc') startArcFileAccessFromUserGesture('onboarding');
+      if (path === 'arc') startArcFileSelectionFromUserGesture('onboarding');
     });
   }
   els.onboardingArcInput.addEventListener('change', () => runTask(previewOnboardingArcFile));
   els.onboardingArcInput.addEventListener('cancel', (event) => event.stopPropagation());
-  els.onboardingArcChooseButton.addEventListener('click', () => startArcFileAccessFromUserGesture('onboarding', {
-    forcePicker: Boolean(pendingOnboardingArcPlan),
-  }));
+  els.onboardingArcChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('onboarding'));
   els.onboardingArcSpaces.addEventListener('change', renderOnboarding);
+  els.onboardingProviderInput.addEventListener('change', () => {
+    renderAIProviderFields(
+      settingsFromProviderSelection(onboardingAIControls()),
+      onboardingAIControls(),
+    );
+    renderOnboarding();
+  });
+  els.onboardingModelInput.addEventListener('change', () => {
+    updateCustomModelVisibility(onboardingAIControls());
+    renderOnboarding();
+  });
+  els.onboardingCustomModelInput.addEventListener('input', renderOnboarding);
+  els.onboardingBaseUrlInput.addEventListener('input', renderOnboarding);
+  els.onboardingApiKeyInput.addEventListener('input', renderOnboarding);
+  els.onboardingThinkingInput.addEventListener('change', renderOnboarding);
+  els.onboardingTestAIButton.addEventListener('click', () => startTestAIFromUserGesture(onboardingAIControls()));
+  els.onboardingSkipAIButton.addEventListener('click', () => runTask(() => finishOnboarding(true)));
   els.onboardingBackButton.addEventListener('click', goBackOnboarding);
   els.onboardingNextButton.addEventListener('click', () => runTask(continueOnboarding));
   els.skipOnboardingButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
-  els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask(() => finishOnboarding(true)));
+  els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask(saveOnboardingAIAndFinish));
   els.onboardingExportButton.addEventListener('click', () => runTask(exportSpaceData));
   els.onboardingUndoArcButton.addEventListener('click', () => runTask(async () => {
+    clearOnboardingArcSelection();
+    els.onboardingApiKeyInput.value = '';
     els.onboardingDialog.close();
     await undoLastArcImport({ confirm: false });
   }));
   els.onboardingDialog.addEventListener('cancel', (event) => {
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
+    clearOnboardingArcSelection();
+    els.onboardingApiKeyInput.value = '';
     els.onboardingDialog.close();
     render();
   });
@@ -498,6 +529,7 @@ function bindEvents() {
   });
 
   els.settingsDialog.addEventListener('close', () => {
+    clearSettingsArcSelection();
     if (state.tempTheme) {
       applyTheme(state.theme);
       delete state.tempTheme;
@@ -516,7 +548,8 @@ function bindEvents() {
     const button = event.target.closest('[data-command-index]');
     if (!button) return;
     commandPaletteIndex = Number(button.dataset.commandIndex) || 0;
-    void runTask(runSelectedCommandPaletteItem);
+    const prepared = prepareSelectedCommandPaletteItemFromUserGesture();
+    void runTask(() => runSelectedCommandPaletteItem(prepared));
   });
   els.commandPaletteDialog.addEventListener('keydown', handleCommandPaletteKeydown);
   els.commandPaletteDialog.addEventListener('close', () => {
@@ -593,7 +626,8 @@ function handleDocumentKeydown(event) {
   if (!action) return;
   event.preventDefault();
   event.stopPropagation();
-  void runTask(() => runShortcutAction(action));
+  const organizationRequest = prepareOrganizationRequestForAction(action);
+  void runTask(() => runShortcutAction(action, organizationRequest));
 }
 
 function captureShortcutInput(event, input) {
@@ -666,12 +700,27 @@ function handleCommandPaletteKeydown(event) {
   }
   if (event.key === 'Enter' && event.target === els.commandPaletteInput) {
     event.preventDefault();
-    void runTask(runSelectedCommandPaletteItem);
+    const prepared = prepareSelectedCommandPaletteItemFromUserGesture();
+    void runTask(() => runSelectedCommandPaletteItem(prepared));
   }
 }
 
-async function runSelectedCommandPaletteItem() {
-  const item = commandPaletteItems[commandPaletteIndex];
+function prepareOrganizationRequestForAction(action) {
+  if (action === 'tidy' || action === 'tidyNames') return prepareTidyNamesRequestFromUserGesture();
+  if (action === 'auto-group' || action === 'autoGroup') return prepareAutoGroupRequestFromUserGesture();
+  return null;
+}
+
+function prepareSelectedCommandPaletteItemFromUserGesture() {
+  const item = commandPaletteItems[commandPaletteIndex] || null;
+  return {
+    item,
+    organizationRequest: prepareOrganizationRequestForAction(item?.action),
+  };
+}
+
+async function runSelectedCommandPaletteItem(prepared = {}) {
+  const item = prepared.item || commandPaletteItems[commandPaletteIndex];
   if (!item) return;
   if (els.commandPaletteDialog.open) els.commandPaletteDialog.close();
   if (item.kind === 'space') {
@@ -684,14 +733,13 @@ async function runSelectedCommandPaletteItem() {
     return;
   }
   if (item.action === 'ask') await openAskPage();
-  else if (item.action === 'tidy') await tidyTabNames();
-  else if (item.action === 'auto-group') await autoGroupTabs(prepareAutoGroupRequestFromUserGesture());
+  else if (item.action === 'tidy') await tidyTabNames(prepared.organizationRequest || {});
+  else if (item.action === 'auto-group') await autoGroupTabs(prepared.organizationRequest || {});
   else if (item.action === 'settings') {
     if (!workbenchMode) await openWorkbench({ view: 'settings' });
     else {
       activeView = 'settings';
       render();
-      await previewRememberedArcFileIfGranted('settings');
     }
   }
 }
@@ -701,17 +749,17 @@ function isEditableTarget(target) {
   return Boolean(node);
 }
 
-async function runShortcutAction(action) {
+async function runShortcutAction(action, organizationRequest = null) {
   if (action === 'openAsk') {
     await openAskPage();
     return;
   }
   if (action === 'tidyNames') {
-    await tidyTabNames();
+    await tidyTabNames(organizationRequest || {});
     return;
   }
   if (action === 'autoGroup') {
-    await autoGroupTabs(prepareAutoGroupRequestFromUserGesture());
+    await autoGroupTabs(organizationRequest || {});
     return;
   }
   if (action === 'addSpace') {
@@ -963,13 +1011,16 @@ function render() {
   renderSpaces();
   renderOperationRecord();
   updateAIRequestUI();
-  updateAutoGroupDisclosure();
+  updateOrganizationActionDisclosures();
   updatePanelActionUI();
 }
 
-function updateAutoGroupDisclosure() {
+function updateOrganizationActionDisclosures() {
   const provider = providerById(state.ai.provider);
-  const disclosure = `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status, then opens a preview before applying.`;
+  const tidyDisclosure = `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains, then opens one preview before applying.`;
+  els.tidyNamesButton.title = tidyDisclosure;
+  els.tidyNamesButton.setAttribute('aria-label', tidyDisclosure);
+  const disclosure = `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status, then opens one preview before applying.`;
   els.autoGroupButton.title = disclosure;
   els.autoGroupButton.setAttribute('aria-label', disclosure);
 }
@@ -981,12 +1032,23 @@ function latestAppliedOperation() {
 }
 
 function renderOperationRecord() {
+  if (operationRecordHideTimer) {
+    clearTimeout(operationRecordHideTimer);
+    operationRecordHideTimer = 0;
+  }
   const operation = latestAppliedOperation();
-  els.operationRecord.hidden = !operation;
-  if (!operation) return;
+  const now = Date.now();
+  const visible = isOperationUndoVisible(operation, now, OPERATION_UNDO_VISIBLE_MS);
+  els.operationRecord.hidden = !visible;
+  if (!visible) return;
   els.operationRecordText.textContent = operation.summary || 'Workspace change applied';
   els.undoOrganizationButton.disabled = false;
   els.undoOrganizationButton.textContent = 'Undo';
+  const remaining = Math.max(1, operation.createdAt + OPERATION_UNDO_VISIBLE_MS - now);
+  operationRecordHideTimer = setTimeout(() => {
+    operationRecordHideTimer = 0;
+    els.operationRecord.hidden = true;
+  }, remaining);
 }
 
 function recordOperation({ type, spaceId, summary, before, after }) {
@@ -1234,7 +1296,13 @@ function mergeDormantSpaceView(liveView, dormantView) {
       tabs: group.tabs.filter((tab) => !openDormantTabs.has(tab)),
     };
     if (dormantGroup.tabs.length === 0) {
-      if (!isUngroupedSnapshotGroup(dormantGroup)) dormantGroups.push(dormantGroup);
+      // A persisted copy of an open group becomes empty after its live tabs
+      // are matched above. Rendering that snapshot shadow creates a duplicate
+      // card that reappears after every refresh. Distinct historical Tags still
+      // render when no same-named live group exists.
+      if (!matchingLiveGroup && !isUngroupedSnapshotGroup(dormantGroup)) {
+        dormantGroups.push(dormantGroup);
+      }
       continue;
     }
 
@@ -2140,134 +2208,41 @@ async function maybeShowOnboarding() {
   openOnboarding();
 }
 
-function startArcFileAccessFromUserGesture(target, options = {}) {
+function startArcFileSelectionFromUserGesture(target) {
   const input = target === 'onboarding' ? els.onboardingArcInput : els.arcImportInput;
-  const useRemembered = !options.forcePicker && rememberedArcFileHandle;
-  let access;
-  try {
-    if (useRemembered) {
-      const permission = typeof rememberedArcFileHandle.requestPermission === 'function'
-        ? rememberedArcFileHandle.requestPermission({ mode: 'read' })
-        : Promise.resolve('granted');
-      access = { kind: 'remembered', handle: rememberedArcFileHandle, permission };
-    } else if (typeof window.showOpenFilePicker === 'function') {
-      access = {
-        kind: 'picker',
-        selection: window.showOpenFilePicker({
-          id: 'space-tabs-arc-sidebar',
-          multiple: false,
-          types: [{
-            description: 'Arc StorableSidebar.json',
-            accept: { 'application/json': ['.json'] },
-          }],
-        }),
-      };
-    } else {
-      input.click();
-      return;
-    }
-  } catch (error) {
-    setArcFileAccessStatus(target, `Could not open the Arc file picker: ${error.message || String(error)}`);
-    return;
-  }
-  void runTask(() => finishArcFileAccess(target, access));
+  // File System Access API pickers reject Arc's file under macOS ~/Library as
+  // a sensitive system location. A native file input can read the exact file
+  // the user explicitly chooses, so Arc import must always use this path.
+  input.value = '';
+  input.click();
 }
 
-async function finishArcFileAccess(target, access) {
-  try {
-    let handle = access.handle || null;
-    if (access.kind === 'remembered') {
-      const permission = await access.permission;
-      if (permission !== 'granted') {
-        rememberedArcFileHandle = null;
-        await forgetRememberedArcFileHandle().catch(() => null);
-        if (target === 'onboarding') els.onboardingArcChooseButton.textContent = 'Authorize Arc file';
-        else renderArcFileAccessControls();
-        setArcFileAccessStatus(target, target === 'onboarding'
-          ? 'Arc file access was not granted. Choose the file to continue; the setup stays open.'
-          : 'Arc file access was not granted. Choose the Arc file again to continue.');
-        return;
-      }
-    } else {
-      [handle] = await access.selection;
-      if (!handle) return;
-      rememberedArcFileHandle = handle;
-      await rememberArcFileHandle(handle).catch((error) => {
-        console.warn('Could not remember Arc file access.', error);
-      });
-      renderArcFileAccessControls();
-    }
-    const file = await handle.getFile();
-    if (target === 'onboarding') await previewOnboardingArcFile(file);
-    else await previewArcImportFile(file);
-  } catch (error) {
-    if (isFilePickerCancellation(error)) {
-      setArcFileAccessStatus(target, target === 'onboarding'
-        ? 'File selection cancelled. You are still on this step; choose Arc data whenever you are ready.'
-        : 'File selection cancelled. The current workspace was not changed.');
-      return;
-    }
-    if (access.kind === 'remembered') {
-      rememberedArcFileHandle = null;
-      await forgetRememberedArcFileHandle().catch(() => null);
-      renderArcFileAccessControls();
-    }
-    setArcFileAccessStatus(target, `Cannot read the authorized Arc file: ${error.message || String(error)}`);
-  }
-}
-
-function renderArcFileAccessControls() {
-  els.arcImportUseButton.hidden = !rememberedArcFileHandle;
-}
-
-function setArcFileAccessStatus(target, message) {
-  if (target === 'onboarding') {
-    els.onboardingArcStatus.textContent = message;
-    renderOnboarding();
-  } else {
-    setArcImportStatus(message);
-  }
-}
-
-async function previewRememberedArcFileIfGranted(target) {
-  if (!rememberedArcFileHandle) return false;
-  try {
-    const permission = typeof rememberedArcFileHandle.queryPermission === 'function'
-      ? await rememberedArcFileHandle.queryPermission({ mode: 'read' })
-      : 'granted';
-    if (permission !== 'granted') return false;
-    const file = await rememberedArcFileHandle.getFile();
-    if (target === 'onboarding') await previewOnboardingArcFile(file);
-    else await previewArcImportFile(file);
-    return true;
-  } catch (error) {
-    rememberedArcFileHandle = null;
-    await forgetRememberedArcFileHandle().catch(() => null);
-    renderArcFileAccessControls();
-    setArcFileAccessStatus(target, `The saved Arc file is no longer available: ${error.message || String(error)}`);
-    return false;
-  }
-}
-
-function openOnboarding() {
-  onboardingStep = 0;
-  onboardingPath = '';
-  onboardingResult = '';
+function clearOnboardingArcSelection({ preserveStatus = false } = {}) {
+  onboardingArcSelectionGeneration += 1;
   pendingOnboardingArcPlan = null;
   pendingOnboardingArcText = '';
   els.onboardingArcInput.value = '';
-  els.onboardingArcChooseButton.textContent = rememberedArcFileHandle ? 'Use authorized Arc file' : 'Authorize Arc file';
-  els.onboardingArcStatus.textContent = rememberedArcFileHandle
-    ? 'A previously authorized Arc file is ready. Choose Move from Arc to load it automatically.'
-    : 'Arc file access has not been granted.';
+  els.onboardingArcChooseButton.textContent = 'Choose Arc file';
   els.onboardingArcSpaces.replaceChildren();
+  if (!preserveStatus) els.onboardingArcStatus.textContent = 'No Arc file selected.';
+}
+
+function openOnboarding(options = {}) {
+  const resumeAI = options.restart !== true &&
+    !state.onboarding?.completed && state.onboarding?.stage === 'ai';
+  onboardingStep = resumeAI ? 2 : 0;
+  onboardingPath = '';
+  onboardingResult = resumeAI ? 'Your workspace is ready.' : '';
+  clearOnboardingArcSelection();
   els.onboardingSpaceNameInput.value = currentSpace()?.id === 'default' ? 'Default' : 'New Space';
+  renderOnboardingAISettings();
   renderOnboarding();
   if (!els.onboardingDialog.open) els.onboardingDialog.showModal();
 }
 
 function chooseOnboardingPath(path) {
   if (path !== 'fresh' && path !== 'arc') return;
+  if (path === 'fresh') clearOnboardingArcSelection();
   onboardingPath = path;
   onboardingStep = 1;
   renderOnboarding();
@@ -2279,6 +2254,7 @@ function chooseOnboardingPath(path) {
 
 function goBackOnboarding() {
   if (onboardingStep <= 0) return;
+  if (onboardingStep === 1 && onboardingPath === 'arc') clearOnboardingArcSelection();
   onboardingStep -= 1;
   if (onboardingStep === 0) onboardingPath = '';
   renderOnboarding();
@@ -2295,9 +2271,10 @@ function renderOnboarding() {
   els.onboardingFooter.hidden = isFinish;
   els.onboardingFooter.classList.toggle('single-action', isChoose);
   els.onboardingBackButton.hidden = isChoose;
+  els.skipOnboardingButton.hidden = isFinish;
   els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
   els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
-  els.onboardingUndoArcButton.hidden = !(isFinish && onboardingPath === 'arc' && state.lastArcImport?.spaceIds?.length);
+  els.onboardingUndoArcButton.hidden = !(isFinish && state.lastArcImport?.spaceIds?.length);
 
   const progress = [...els.onboardingProgress.querySelectorAll('span')];
   progress.forEach((item, index) => {
@@ -2318,6 +2295,7 @@ function renderOnboarding() {
     els.onboardingNextButton.textContent = 'Import selected Spaces';
     els.onboardingNextButton.disabled = selectedOnboardingArcSpaceIds().length === 0;
   }
+  if (isFinish) updateOnboardingAIActionState();
 }
 
 async function continueOnboarding() {
@@ -2331,6 +2309,7 @@ async function continueOnboarding() {
   if (onboardingPath === 'fresh') await applyFreshOnboarding();
   else await applyArcOnboarding();
   onboardingStep = 2;
+  renderOnboardingAISettings();
   renderOnboarding();
 }
 
@@ -2361,7 +2340,7 @@ async function applyFreshOnboardingFromCurrentState(name) {
     await switchSpace(targetSpace.id);
   }
   state.activeSpaceId = targetSpace.id;
-  state.onboarding = { version: 1, completed: true };
+  state.onboarding = { version: 2, completed: false, stage: 'ai' };
   activeView = workbenchMode ? 'ask' : 'space';
   lastRenderedSpacesSignature = '';
   await saveState();
@@ -2370,29 +2349,44 @@ async function applyFreshOnboardingFromCurrentState(name) {
 }
 
 async function previewOnboardingArcFile(selectedFile = null) {
+  const selectionGeneration = ++onboardingArcSelectionGeneration;
   pendingOnboardingArcPlan = null;
   pendingOnboardingArcText = '';
   els.onboardingArcSpaces.replaceChildren();
   const file = selectedFile || els.onboardingArcInput.files?.[0];
   if (!file) {
-    els.onboardingArcStatus.textContent = 'Arc file access has not been granted.';
+    els.onboardingArcStatus.textContent = 'No Arc file selected.';
     renderOnboarding();
     return;
   }
   if (file.size > 20 * 1024 * 1024) {
+    els.onboardingArcInput.value = '';
     els.onboardingArcStatus.textContent = 'This Arc file is too large to import safely.';
     renderOnboarding();
     return;
   }
 
+  els.onboardingArcStatus.textContent = `Reading ${file.name || 'StorableSidebar.json'}...`;
+  renderOnboarding();
+
   try {
-    pendingOnboardingArcText = await file.text();
-    pendingOnboardingArcPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
+    const text = await file.text();
+    if (
+      selectionGeneration !== onboardingArcSelectionGeneration ||
+      onboardingStep !== 1 || onboardingPath !== 'arc'
+    ) return;
+    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
+    pendingOnboardingArcText = text;
+    pendingOnboardingArcPlan = plan;
     els.onboardingArcChooseButton.textContent = 'Choose another Arc file';
-    els.onboardingArcStatus.textContent = `${file.name || 'StorableSidebar.json'} · ${formatArcImportSummary(pendingOnboardingArcPlan.summary, 'Preview')}${formatArcConflictSummary(pendingOnboardingArcPlan)}`;
-    renderOnboardingArcSpaces(pendingOnboardingArcPlan);
+    els.onboardingArcStatus.textContent = `${file.name || 'StorableSidebar.json'} · ${formatArcImportSummary(plan.summary, 'Preview')}${formatArcConflictSummary(plan)}`;
+    renderOnboardingArcSpaces(plan);
   } catch (error) {
+    if (selectionGeneration !== onboardingArcSelectionGeneration) return;
+    clearOnboardingArcSelection();
     els.onboardingArcStatus.textContent = `Cannot read Arc file: ${error.message || String(error)}`;
+    renderOnboarding();
+    return;
   }
   renderOnboarding();
 }
@@ -2434,54 +2428,101 @@ function selectedOnboardingArcPlan() {
   return selectArcImportPlan(pendingOnboardingArcPlan, selectedOnboardingArcSpaceIds());
 }
 
+function arcPlanResolutionSignature(plan) {
+  return JSON.stringify((plan?.spacePreviews || []).map((preview) => [
+    preview.sourceSpaceId,
+    preview.resolvedId,
+    preview.resolvedName,
+  ]));
+}
+
 async function applyArcOnboarding() {
   const previewPlan = selectedOnboardingArcPlan();
   if (previewPlan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
   const selectedSourceIds = new Set((previewPlan.spacePreviews || []).map((preview) => preview.sourceSpaceId));
   let result;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    const latestPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
-    const latestResolvedIds = (latestPlan.spacePreviews || [])
-      .filter((preview) => selectedSourceIds.has(preview.sourceSpaceId))
-      .map((preview) => preview.spaceId);
-    const plan = selectArcImportPlan(latestPlan, latestResolvedIds);
-    const resolution = (selection) => (selection.spacePreviews || []).map((preview) => [
-      preview.sourceSpaceId,
-      preview.resolvedId,
-      preview.resolvedName,
-    ]);
-    if (JSON.stringify(resolution(previewPlan)) !== JSON.stringify(resolution(plan))) {
-      throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
-    }
-    const beforeState = structuredClone(state);
-    try {
-      result = appendArcImportPlan(state, plan);
-      rememberArcImport(result.importedSpaceIds);
-      state.onboarding = { version: 1, completed: true };
-      assertCurrentStateFitsStorage();
-      lastRenderedSpacesSignature = '';
-      await saveState();
-      render();
-      renderSettings();
-    } catch (error) {
-      restoreFailedWorkspaceMutation(beforeState);
-      els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
-      throw error;
-    }
-  });
-  onboardingResult = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
+  try {
+    await withSharedStateLock(async () => {
+      await syncStateFromStorage();
+      const latestPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
+      const latestResolvedIds = (latestPlan.spacePreviews || [])
+        .filter((preview) => selectedSourceIds.has(preview.sourceSpaceId))
+        .map((preview) => preview.spaceId);
+      const plan = selectArcImportPlan(latestPlan, latestResolvedIds);
+      if (arcPlanResolutionSignature(previewPlan) !== arcPlanResolutionSignature(plan)) {
+        throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
+      }
+      const beforeState = structuredClone(state);
+      try {
+        result = appendArcImportPlan(state, plan);
+        rememberArcImport(result.importedSpaceIds);
+        state.onboarding = { version: 2, completed: false, stage: 'ai' };
+        assertCurrentStateFitsStorage();
+        lastRenderedSpacesSignature = '';
+        await saveState();
+        render();
+        renderSettings();
+      } catch (error) {
+        restoreFailedWorkspaceMutation(beforeState);
+        els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
+        throw error;
+      }
+    });
+    onboardingResult = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
+  } catch (error) {
+    els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
+    els.onboardingArcChooseButton.textContent = 'Choose Arc file';
+    throw error;
+  } finally {
+    // The imported snapshot is now in extension state. Do not retain the raw
+    // Arc sidebar export (which can be large and sensitive) in memory or input.
+    clearOnboardingArcSelection({ preserveStatus: true });
+    renderOnboarding();
+  }
 }
 
 async function finishOnboarding(openWorkbenchAfter) {
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
-    state.onboarding = { version: 1, completed: true };
+    state.onboarding = { version: 2, completed: true, stage: 'done' };
     await saveState();
   });
+  clearOnboardingArcSelection();
+  els.onboardingApiKeyInput.value = '';
   if (els.onboardingDialog.open) els.onboardingDialog.close();
   render();
   if (openWorkbenchAfter) await openWorkbench();
+}
+
+async function saveOnboardingAIAndFinish() {
+  let aiSettings;
+  try {
+    aiSettings = currentAISettingsFromControls(onboardingAIControls());
+    if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
+      throw new Error('Add an API key, or choose Not now.');
+    }
+  } catch (error) {
+    setAIControlsStatus(onboardingAIControls(), error.message || String(error));
+    return;
+  }
+
+  await withSharedStateLock(async () => {
+    await syncStateFromStorage();
+    state.ai = aiSettings;
+    state.onboarding = { version: 2, completed: true, stage: 'done' };
+    if (state.ai.apiKey) {
+      await secretSet({ [SECRET_STORAGE_KEY]: { ai: { apiKey: state.ai.apiKey } } });
+    } else {
+      await secretRemove(SECRET_STORAGE_KEY);
+    }
+    await saveState();
+  });
+  clearOnboardingArcSelection();
+  els.onboardingApiKeyInput.value = '';
+  if (els.onboardingDialog.open) els.onboardingDialog.close();
+  renderSettings();
+  render();
+  await openWorkbench();
 }
 
 async function addSpace() {
@@ -4488,70 +4529,65 @@ function clearDragState(event) {
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
 
-async function confirmAIProposalGeneration({
-  action,
-  settings,
-  candidates = [],
-  fields,
-  itemResult,
-  itemMeta = (candidate) => candidate.url,
-}) {
-  const provider = providerById(settings.provider);
+function prepareOrganizationAIRequestFromUserGesture(candidateProbe) {
+  const aiSettings = structuredClone(state.ai);
   let permissionRequest = Promise.resolve(true);
-  const confirmed = await openActionDialog({
-    title: `Generate ${action} preview?`,
-    message: `${provider.label} · ${settings.model || 'configured model'} · ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}. Nothing is sent until you choose Generate preview.`,
-    confirmText: 'Generate preview',
-    previewSections: [{
-      title: `Data sent: ${fields}`,
-      items: candidates.map((candidate) => ({
-        title: candidate.displayTitle || candidate.title || candidate.url || 'Untitled',
-        meta: itemMeta(candidate),
-        result: itemResult(candidate),
-      })),
-    }],
-    onConfirm: () => {
-      try {
-        permissionRequest = requestAIHostPermissionFromUserGesture(settings);
-      } catch (error) {
-        permissionRequest = Promise.reject(error);
-        permissionRequest.catch(() => null);
-      }
-    },
-  });
-  return { confirmed: confirmed === true, permissionRequest };
+  let permissionRequested = false;
+  if (
+    candidateProbe() &&
+    (!providerRequiresApiKey(aiSettings) || aiSettings.apiKey)
+  ) {
+    try {
+      permissionRequest = requestAIHostPermissionFromUserGesture(aiSettings);
+    } catch (error) {
+      permissionRequest = Promise.reject(error);
+    }
+    permissionRequested = true;
+  }
+  permissionRequest.catch(() => null);
+  return { aiSettings, permissionRequest, permissionRequested };
 }
 
-async function tidyTabNames() {
-  await refreshOrganizationActionState({ adopt: false });
-  const sourceSpaceId = state.activeSpaceId;
-  const aiSettings = structuredClone(state.ai);
-  const visibleTabs = spaceView
-    .flatMap((group) => group.tabs)
-    .filter((tab) => (
-      !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
-    ));
-  if (visibleTabs.length === 0) {
-    setStatus('No tabs in this Space to rename.');
-    return;
-  }
+function hasCurrentTidyNamesAICandidates() {
+  return spaceView.some((group) => (group.tabs || []).some((tab) => (
+    !tab.dormant && !hasManualPanelName(tab.id) &&
+    Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
+  )));
+}
 
+function prepareTidyNamesRequestFromUserGesture() {
+  return prepareOrganizationAIRequestFromUserGesture(hasCurrentTidyNamesAICandidates);
+}
+
+function startTidyNamesFromUserGesture() {
+  const request = prepareTidyNamesRequestFromUserGesture();
+  void runTask(() => tidyTabNames(request));
+}
+
+async function tidyTabNames(options = {}) {
+  const startedAt = performance.now();
+  const aiSettings = options.aiSettings || structuredClone(state.ai);
+  const permissionRequest = options.permissionRequest || Promise.resolve(true);
+  const permissionRequested = options.permissionRequested === true;
   beginPanelAction('tidyNames');
   try {
+    await refreshOrganizationActionState({ adopt: false });
+    const sourceSpaceId = state.activeSpaceId;
+    const visibleTabs = spaceView
+      .flatMap((group) => group.tabs)
+      .filter((tab) => (
+        !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
+      ));
+    if (visibleTabs.length === 0) {
+      setStatus('No tabs in this Space to rename.');
+      return;
+    }
+
     const aiCandidates = visibleTabs.filter((tab) => !hasManualPanelName(tab.id));
     const useAI = aiCandidates.length > 0 && (!providerRequiresApiKey(aiSettings) || Boolean(aiSettings.apiKey));
-    let permissionRequest = null;
     if (useAI) {
-      const approval = await confirmAIProposalGeneration({
-        action: 'Tidy Names',
-        settings: aiSettings,
-        candidates: aiCandidates,
-        fields: 'title, simplified URL, and domain',
-        itemMeta: (tab) => compactTabForAI(tab).url,
-        itemResult: (tab) => domainFromUrl(tab.url),
-      });
-      if (!approval.confirmed) return;
-      permissionRequest = approval.permissionRequest;
+      const provider = providerById(aiSettings.provider);
+      setStatus(`Generating Tidy Names preview with ${provider.label} for ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'}...`);
     }
 
     const localNames = planTidyTabNames(visibleTabs, {
@@ -4559,7 +4595,10 @@ async function tidyTabNames() {
       preserveExisting: true,
     });
     const aiNames = useAI
-      ? await tidyTabNamesWithAI(aiCandidates, { permissionRequest, settings: aiSettings })
+      ? await tidyTabNamesWithAI(aiCandidates, {
+        permissionRequest: permissionRequested ? permissionRequest : null,
+        settings: aiSettings,
+      })
       : {};
     const plannedNames = { ...localNames, ...aiNames };
     const renameItems = visibleTabs
@@ -4589,7 +4628,7 @@ async function tidyTabNames() {
 
     const confirmed = await showPlanPreview({
       title: 'Preview Tidy Names',
-      message: `${renameItems.length} panel-only names will change. No tabs will close or move.`,
+      message: `${renameItems.length} ${renameItems.length === 1 ? 'name' : 'names'} · ${formatPreviewDuration(performance.now() - startedAt)}`,
       confirmText: 'Apply tidy',
       sections: [
         { title: 'Rename in panel', items: renameItems },
@@ -4693,23 +4732,7 @@ function hasManualPanelName(tabId) {
 }
 
 function prepareAutoGroupRequestFromUserGesture() {
-  const aiSettings = structuredClone(state.ai);
-  let permissionRequest = Promise.resolve(true);
-  let permissionRequested = false;
-  if (
-    hasCurrentAutoGroupAICandidates() &&
-    (!providerRequiresApiKey(aiSettings) || aiSettings.apiKey)
-  ) {
-    try {
-      permissionRequest = requestAIHostPermissionFromUserGesture(aiSettings);
-      permissionRequested = true;
-    } catch (error) {
-      permissionRequest = Promise.reject(error);
-      permissionRequested = true;
-    }
-  }
-  permissionRequest.catch(() => null);
-  return { aiSettings, permissionRequest, permissionRequested };
+  return prepareOrganizationAIRequestFromUserGesture(hasCurrentAutoGroupAICandidates);
 }
 
 function hasCurrentAutoGroupAICandidates() {
@@ -4846,7 +4869,7 @@ async function autoGroupTabs(options = {}) {
     ));
     if (notSentCandidates.length > 0 || emptyHistoricalTags.length > 0) {
       previewSections.push({
-        title: 'Not sent · remain untouched',
+        title: 'Untouched',
         color: 'grey',
         kind: 'notice',
         items: [
@@ -4879,22 +4902,16 @@ async function autoGroupTabs(options = {}) {
     }
     const previewSummary = [];
     if (plannedGroups.length > 0) {
-      previewSummary.push(
-        'AI proposal',
-        `${plannedGroups.length} proposed ${plannedGroups.length === 1 ? 'group' : 'groups'}`,
-        `${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}`,
-      );
+      previewSummary.push(`${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'} → ${plannedGroups.length} ${plannedGroups.length === 1 ? 'group' : 'groups'}`);
     }
-    if (regroupedCount > 0) previewSummary.push(`${regroupedCount} will move`);
+    if (regroupedCount > 0) previewSummary.push(`${regroupedCount} moving`);
     if (duplicateGroupCount > 0) {
-      previewSummary.push(`${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'group' : 'groups'} to merge`);
+      previewSummary.push(`${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'merge' : 'merges'}`);
     }
-    const previewDisclosure = candidates.length > 0
-      ? `${providerById(aiSettings.provider).label} · ${aiSettings.model || 'configured model'} · sent ${candidates.length} tab titles, simplified URLs, domains, current Tags, and live/saved status`
-      : 'Local duplicate-group check · no data sent to AI';
+    previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
     const confirmed = await showPlanPreview({
       title: 'Auto Group Preview',
-      message: `${previewDisclosure} · ${previewSummary.join(' \u2022 ')} · generated in ${formatPreviewDuration(performance.now() - startedAt)}`,
+      message: previewSummary.join(' · '),
       confirmText: 'Apply groups',
       sections: previewSections,
       variant: 'groups',
@@ -5419,7 +5436,7 @@ function formatCharacterCount(value) {
   return count >= 1000 ? `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}K chars` : `${count} chars`;
 }
 
-function startTestAIFromUserGesture() {
+function startTestAIFromUserGesture(controls = settingsAIControls()) {
   if (activeAIRequestId) {
     void abortActiveAIRequest();
     return;
@@ -5427,20 +5444,20 @@ function startTestAIFromUserGesture() {
   let settings;
   let permissionRequest;
   try {
-    settings = currentAISettingsFromForm();
+    settings = currentAISettingsFromControls(controls);
     if (providerRequiresApiKey(settings) && !settings.apiKey) {
       throw new Error('AI API key is missing. Add it in Settings.');
     }
     permissionRequest = requestAIHostPermissionFromUserGesture(settings);
   } catch (error) {
-    setSettingsStatus(formatAIError(error));
+    setAIControlsStatus(controls, formatAIError(error));
     return;
   }
-  void runTask(() => testAI({ settings, permissionRequest }));
+  void runTask(() => testAI({ settings, permissionRequest, controls }));
 }
 
-async function testAI({ settings = currentAISettingsFromForm(), permissionRequest } = {}) {
-  setSettingsStatus('Testing AI configuration...');
+async function testAI({ settings = currentAISettingsFromForm(), permissionRequest, controls = settingsAIControls() } = {}) {
+  setAIControlsStatus(controls, 'Testing AI configuration...');
   const requestId = beginAIRequest();
   try {
     if (providerRequiresApiKey(settings) && !settings.apiKey) {
@@ -5455,12 +5472,13 @@ async function testAI({ settings = currentAISettingsFromForm(), permissionReques
     });
     if (finishReason === 'length') throw new Error('AI connection test reached its output limit.');
     const message = text || 'AI request returned no text.';
-    setSettingsStatus(message);
+    setAIControlsStatus(controls, message);
   } catch (error) {
     const message = formatAIError(error);
-    setSettingsStatus(message);
+    setAIControlsStatus(controls, message);
   } finally {
     endAIRequest(requestId);
+    updateOnboardingAIActionState();
   }
 }
 
@@ -5582,29 +5600,45 @@ function formatSpaceBackupSummary(backup) {
   return `${backup.spaces.length} Spaces and ${savedTabs} saved tabs.`;
 }
 
+function clearSettingsArcSelection({ preserveStatus = false } = {}) {
+  arcImportSelectionGeneration += 1;
+  pendingArcImportText = '';
+  pendingArcImportPlan = null;
+  els.arcImportInput.value = '';
+  els.importArcButton.disabled = true;
+  if (!preserveStatus) setArcImportStatus('No Arc file selected.');
+}
+
 async function previewArcImportFile(selectedFile = null) {
+  const selectionGeneration = ++arcImportSelectionGeneration;
   const file = selectedFile || els.arcImportInput.files?.[0];
   pendingArcImportText = '';
   pendingArcImportPlan = null;
   els.importArcButton.disabled = true;
   if (!file) {
-    setArcImportStatus('Arc file access has not been granted.');
+    setArcImportStatus('No Arc file selected.');
     return;
   }
 
   if (file.size > 20 * 1024 * 1024) {
+    els.arcImportInput.value = '';
     setArcImportStatus('This file is too large to import safely. Select Arc StorableSidebar.json.');
     return;
   }
 
+  setArcImportStatus(`Reading ${file.name || 'StorableSidebar.json'}...`);
+
   try {
     const text = await file.text();
+    if (selectionGeneration !== arcImportSelectionGeneration) return;
     const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
     pendingArcImportText = text;
     pendingArcImportPlan = plan;
     els.importArcButton.disabled = plan.spaces.length === 0;
     setArcImportStatus(`${file.name || 'StorableSidebar.json'} · ${formatArcImportSummary(plan.summary, 'Ready to append')}${formatArcConflictSummary(plan)}`);
   } catch (error) {
+    if (selectionGeneration !== arcImportSelectionGeneration) return;
+    clearSettingsArcSelection();
     setArcImportStatus(`Cannot read Arc file: ${error.message || String(error)}`);
   }
 }
@@ -5615,6 +5649,7 @@ async function importArcFile() {
     return;
   }
 
+  let previewInvalidated = false;
   try {
     const previewById = new Map((pendingArcImportPlan.spacePreviews || []).map((preview) => [preview.spaceId, preview]));
     const confirmed = await showPlanPreview({
@@ -5638,6 +5673,10 @@ async function importArcFile() {
     await withSharedStateLock(async () => {
       await syncStateFromStorage();
       const latestPlan = createArcImportPlan(pendingArcImportText, { existingSpaces: state.spaces });
+      if (arcPlanResolutionSignature(pendingArcImportPlan) !== arcPlanResolutionSignature(latestPlan)) {
+        previewInvalidated = true;
+        throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
+      }
       const beforeState = structuredClone(state);
       try {
         result = appendArcImportPlan(state, latestPlan);
@@ -5651,14 +5690,14 @@ async function importArcFile() {
         throw error;
       }
     });
-    pendingArcImportText = '';
-    pendingArcImportPlan = null;
-    els.arcImportInput.value = '';
-    els.importArcButton.disabled = true;
+    clearSettingsArcSelection({ preserveStatus: true });
     const message = `Imported ${result.importedSpaces} Spaces and ${result.importedTabs} tabs. Current Space stayed active.`;
     setArcImportStatus(message);
     setSettingsStatus(message);
   } catch (error) {
+    if (previewInvalidated) {
+      clearSettingsArcSelection({ preserveStatus: true });
+    }
     setArcImportStatus(`Import failed: ${error.message || String(error)}`);
   }
 }
@@ -5932,7 +5971,6 @@ function openActionDialog({
   withInput = false,
   previewSections = [],
   previewVariant = 'changes',
-  onConfirm = null,
 }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -5951,7 +5989,6 @@ function openActionDialog({
 
     const onSubmit = (event) => {
       event.preventDefault();
-      if (onConfirm) onConfirm();
       finish(withInput ? els.actionDialogInput.value.trim() : true);
     };
     const onCancel = () => finish(null);
@@ -6080,11 +6117,12 @@ function renderActionDialogPreview(sections = [], variant = 'changes') {
 }
 
 function renderSettings() {
-  renderProviderOptions();
-  renderAIProviderFields(normalizeAIProviderSettings(state.ai));
-  els.languageInput.value = state.ai.language || 'zh-CN';
-  els.apiKeyInput.value = state.ai.apiKey;
-  els.apiKeyInput.placeholder = state.ai.apiKey
+  const controls = settingsAIControls();
+  renderProviderOptions(controls);
+  renderAIProviderFields(normalizeAIProviderSettings(state.ai), controls);
+  controls.languageInput.value = state.ai.language || 'zh-CN';
+  controls.apiKeyInput.value = state.ai.apiKey;
+  controls.apiKeyInput.placeholder = state.ai.apiKey
     ? 'API key configured'
     : providerRequiresApiKey(state.ai) ? 'Paste API key' : 'Not required for Ollama';
   const statusText = apiKeyStatusText();
@@ -6093,7 +6131,6 @@ function renderSettings() {
   els.clearApiKeyButton.hidden = !state.ai.apiKey || Boolean(localConfig.ai?.apiKey);
   els.clearApiKeyButton.disabled = Boolean(localConfig.ai?.apiKey);
   els.thinkingInput.value = state.ai.thinking;
-  renderArcFileAccessControls();
   els.undoArcImportButton.disabled = !(state.lastArcImport?.spaceIds || [])
     .some((spaceId) => state.spaces.some((space) => space.id === spaceId));
 
@@ -6105,29 +6142,94 @@ function renderSettings() {
   renderShortcutSettings();
 }
 
-function renderProviderOptions() {
-  if (els.providerInput.options.length === AI_PROVIDER_CATALOG.length) return;
-  const options = AI_PROVIDER_CATALOG.map((provider) => {
+function settingsAIControls() {
+  return {
+    providerInput: els.providerInput,
+    baseUrlInput: els.baseUrlInput,
+    modelInput: els.modelInput,
+    customModelLabel: els.customModelLabel,
+    customModelInput: els.customModelInput,
+    apiKeyInput: els.apiKeyInput,
+    thinkingInput: els.thinkingInput,
+    languageInput: els.languageInput,
+    testButton: els.testAIButton,
+    statusTarget: els.settingsStatus,
+  };
+}
+
+function onboardingAIControls() {
+  return {
+    providerInput: els.onboardingProviderInput,
+    baseUrlInput: els.onboardingBaseUrlInput,
+    modelInput: els.onboardingModelInput,
+    customModelLabel: els.onboardingCustomModelLabel,
+    customModelInput: els.onboardingCustomModelInput,
+    apiKeyInput: els.onboardingApiKeyInput,
+    thinkingInput: els.onboardingThinkingInput,
+    languageInput: null,
+    testButton: els.onboardingTestAIButton,
+    statusTarget: els.onboardingAIStatus,
+  };
+}
+
+function renderOnboardingAISettings() {
+  const controls = onboardingAIControls();
+  const configured = Boolean(String(state.ai?.baseUrl || '').trim() && String(state.ai?.model || '').trim());
+  renderProviderOptions(controls, { placeholder: true });
+  controls.apiKeyInput.value = state.ai?.apiKey || '';
+  controls.thinkingInput.value = state.ai?.thinking || 'disabled';
+  if (configured) {
+    renderAIProviderFields(normalizeAIProviderSettings(state.ai), controls);
+    controls.apiKeyInput.value = state.ai?.apiKey || '';
+    setAIControlsStatus(controls, 'Review the provider, test it, or continue without AI.');
+  } else {
+    controls.providerInput.value = '';
+    controls.baseUrlInput.value = '';
+    controls.baseUrlInput.disabled = true;
+    controls.modelInput.replaceChildren();
+    controls.modelInput.disabled = true;
+    controls.apiKeyInput.disabled = true;
+    controls.thinkingInput.disabled = true;
+    controls.customModelLabel.hidden = true;
+    controls.customModelInput.required = false;
+    setAIControlsStatus(controls, 'Choose a provider or continue without AI.');
+  }
+  updateOnboardingAIActionState();
+}
+
+function renderProviderOptions(controls = settingsAIControls(), config = {}) {
+  const providerOptions = AI_PROVIDER_CATALOG.map((provider) => {
     const option = document.createElement('option');
     option.value = provider.id;
     option.textContent = provider.label;
     return option;
   });
-  els.providerInput.replaceChildren(...options);
+  if (config.placeholder) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Choose a provider';
+    placeholder.disabled = true;
+    providerOptions.unshift(placeholder);
+  }
+  controls.providerInput.replaceChildren(...providerOptions);
 }
 
-function renderAIProviderFields(settings) {
+function renderAIProviderFields(settings, controls = settingsAIControls()) {
   const normalized = normalizeAIProviderSettings(settings);
-  els.providerInput.value = normalized.provider;
+  controls.providerInput.value = normalized.provider;
   const provider = providerById(normalized.provider);
-  els.baseUrlInput.value = normalized.provider === CUSTOM_AI_PROVIDER_ID ? normalized.baseUrl : provider.baseUrl;
-  els.baseUrlInput.readOnly = !provider.editableBaseUrl;
-  els.baseUrlInput.classList.toggle('readonly', els.baseUrlInput.readOnly);
-  els.apiKeyInput.placeholder = provider.requiresApiKey === false ? 'Not required for Ollama' : 'Paste API key';
-  renderModelOptions(provider, normalized.model);
+  controls.baseUrlInput.disabled = false;
+  controls.modelInput.disabled = false;
+  controls.apiKeyInput.disabled = false;
+  controls.thinkingInput.disabled = false;
+  controls.baseUrlInput.value = normalized.provider === CUSTOM_AI_PROVIDER_ID ? normalized.baseUrl : provider.baseUrl;
+  controls.baseUrlInput.readOnly = !provider.editableBaseUrl;
+  controls.baseUrlInput.classList.toggle('readonly', controls.baseUrlInput.readOnly);
+  controls.apiKeyInput.placeholder = provider.requiresApiKey === false ? 'Not required for Ollama' : 'Paste API key';
+  renderModelOptions(provider, normalized.model, controls);
 }
 
-function renderModelOptions(provider, selectedModel = '') {
+function renderModelOptions(provider, selectedModel = '', controls = settingsAIControls()) {
   const customOption = document.createElement('option');
   customOption.value = CUSTOM_MODEL_VALUE;
   customOption.textContent = 'Custom model...';
@@ -6138,22 +6240,22 @@ function renderModelOptions(provider, selectedModel = '') {
     return option;
   });
   options.push(customOption);
-  els.modelInput.replaceChildren(...options);
+  controls.modelInput.replaceChildren(...options);
 
   const hasBuiltInModel = provider.models.some((model) => model.id === selectedModel);
-  els.modelInput.value = hasBuiltInModel ? selectedModel : CUSTOM_MODEL_VALUE;
-  els.customModelInput.value = hasBuiltInModel ? '' : selectedModel;
-  updateCustomModelVisibility();
+  controls.modelInput.value = hasBuiltInModel ? selectedModel : CUSTOM_MODEL_VALUE;
+  controls.customModelInput.value = hasBuiltInModel ? '' : selectedModel;
+  updateCustomModelVisibility(controls);
 }
 
-function updateCustomModelVisibility() {
-  const custom = els.modelInput.value === CUSTOM_MODEL_VALUE;
-  els.customModelLabel.hidden = !custom;
-  els.customModelInput.required = custom;
+function updateCustomModelVisibility(controls = settingsAIControls()) {
+  const custom = controls.modelInput.value === CUSTOM_MODEL_VALUE;
+  controls.customModelLabel.hidden = !custom;
+  controls.customModelInput.required = custom;
 }
 
-function settingsFromProviderSelection() {
-  const provider = providerById(els.providerInput.value);
+function settingsFromProviderSelection(controls = settingsAIControls()) {
+  const provider = providerById(controls.providerInput.value);
   const isCurrentCustom = state.ai.provider === CUSTOM_AI_PROVIDER_ID;
   return {
     ...state.ai,
@@ -6247,17 +6349,21 @@ async function clearApiKey() {
 }
 
 function currentAISettingsFromForm() {
-  const provider = providerById(els.providerInput.value);
+  return currentAISettingsFromControls(settingsAIControls());
+}
+
+function currentAISettingsFromControls(controls) {
+  const provider = providerById(controls.providerInput.value);
   const settings = {
     ...normalizeAIProviderSettings({
       ...state.ai,
       provider: provider.id,
-      baseUrl: provider.editableBaseUrl ? els.baseUrlInput.value.trim().replace(/\/+$/, '') : provider.baseUrl,
-      model: selectedModelFromForm(),
+      baseUrl: provider.editableBaseUrl ? controls.baseUrlInput.value.trim().replace(/\/+$/, '') : provider.baseUrl,
+      model: selectedModelFromControls(controls),
     }),
-    language: els.languageInput.value || 'zh-CN',
-    apiKey: els.apiKeyInput.value.trim(),
-    thinking: els.thinkingInput.value,
+    language: controls.languageInput?.value || state.ai.language || 'zh-CN',
+    apiKey: controls.apiKeyInput.value.trim(),
+    thinking: controls.thinkingInput.value,
   };
   let url;
   try {
@@ -6273,8 +6379,31 @@ function currentAISettingsFromForm() {
 }
 
 function selectedModelFromForm() {
-  if (els.modelInput.value === CUSTOM_MODEL_VALUE) return els.customModelInput.value.trim();
-  return els.modelInput.value;
+  return selectedModelFromControls(settingsAIControls());
+}
+
+function selectedModelFromControls(controls) {
+  if (controls.modelInput.value === CUSTOM_MODEL_VALUE) return controls.customModelInput.value.trim();
+  return controls.modelInput.value;
+}
+
+function updateOnboardingAIActionState() {
+  const controls = onboardingAIControls();
+  let valid = false;
+  if (controls.providerInput.value) {
+    try {
+      const settings = currentAISettingsFromControls(controls);
+      valid = !providerRequiresApiKey(settings) || Boolean(settings.apiKey);
+    } catch {
+      valid = false;
+    }
+  }
+  els.onboardingOpenWorkbenchButton.disabled = !valid;
+  controls.testButton.disabled = !valid || Boolean(activeAIRequestId);
+}
+
+function setAIControlsStatus(controls, message) {
+  controls.statusTarget.textContent = message;
 }
 
 function currentShortcutsFromForm() {
@@ -6356,6 +6485,8 @@ function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
   els.askAIButton.textContent = busy ? 'Stop' : 'Ask Space';
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
+  els.onboardingTestAIButton.textContent = busy ? 'Stop request' : 'Test AI';
+  updateOnboardingAIActionState();
 }
 
 async function storageGet() {

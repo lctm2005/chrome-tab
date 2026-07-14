@@ -1,7 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fingerprintTidyNameTargets } from '../src/shared/operation-safety.js';
+import {
+  fingerprintTidyNameTargets,
+  isOperationUndoVisible,
+} from '../src/shared/operation-safety.js';
+
+test('Undo is visible for ten seconds after an applied operation, then expires', () => {
+  const operation = { createdAt: 1_000, status: 'applied' };
+
+  assert.equal(isOperationUndoVisible(operation, 1_000), true);
+  assert.equal(isOperationUndoVisible(operation, 10_999), true);
+  assert.equal(isOperationUndoVisible(operation, 11_000), false);
+  assert.equal(isOperationUndoVisible({ ...operation, status: 'undone' }, 1_001), false);
+});
+
+test('Undo visibility rejects invalid timestamps and configurable non-positive windows', () => {
+  assert.equal(isOperationUndoVisible(null, 1_000), false);
+  assert.equal(isOperationUndoVisible({ createdAt: 0, status: 'applied' }, 1_000), false);
+  assert.equal(isOperationUndoVisible({ createdAt: 2_000, status: 'applied' }, 1_000), false);
+  assert.equal(isOperationUndoVisible({ createdAt: 1_000, status: 'applied' }, 1_001, 0), false);
+});
 
 test('Tidy target fingerprints include URL, page title, and current panel name', () => {
   const tabs = [{

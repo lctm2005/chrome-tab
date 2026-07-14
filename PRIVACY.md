@@ -7,12 +7,14 @@ tabs, and optional BYOK AI.
 
 ## Data Space Handles
 
-Space may handle:
+Space Tabs may handle:
 
 - Tab titles, URLs, favicons, Chrome tab IDs, and tab group metadata.
 - User-created Spaces, folders, ordering, panel-only tab names, Ask history,
   collapsed state, shortcuts, and preferences.
 - Space backup files when the user explicitly exports or restores one.
+- Arc `StorableSidebar.json` files when the user explicitly selects one for an
+  import. Space Tabs reads the selected file locally and never modifies it.
 - Titles, URLs, selected text, and page text from up to 12 confirmed live
   HTTP(S) source tabs only when the user starts Ask Space. Ask prioritizes the
   pages the user selects.
@@ -34,6 +36,9 @@ declare a persistent content script that runs on every website.
 Exported backups can contain Ask history, tab titles, and URLs.
 The user chooses where those files are stored and shared.
 
+Space Tabs does not persist an Arc source file or a reusable file handle. The
+user selects `StorableSidebar.json` again for each import.
+
 ## Network Requests
 
 Core Space, Arc import, folder, shortcut, export, restore, and tab management
@@ -44,11 +49,10 @@ source pages, extracted character count, truncation state, whether stored text
 from recent conversation messages will be included, and any confirmed sources
 that could not be read or fit within the content limit. Generated-response
 Sources appendices are not included in the conversation context sent to the AI
-provider. Tidy Names shows the provider, model, exact tabs, simplified URLs,
-and fields before generating a proposal. Auto Group starts generation from
-the user's explicit action and shows the provider, model, sent fields, tab
-count, and elapsed time in the resulting preview. A separate review controls
-whether either proposal is applied. Space Tabs sends
+provider. Starting Tidy Names or Auto Group sends the disclosed tab metadata
+directly to the configured provider and generates one final preview. Neither
+workflow changes tabs or Tags until the user reviews that preview and chooses
+Apply. Space Tabs sends
 the confirmed prompt, source content, stored text from recent conversation
 messages, or tab metadata directly to the AI endpoint configured by the user.
 The API key is sent to that provider as an authorization credential.
@@ -70,7 +74,8 @@ Space Tabs requests Chrome permissions to:
 ## User Control
 
 Users can clear an AI API key in Settings, export their Space data, restore a
-chosen backup, and undo supported import or organization operations. Users can
+chosen backup, select a local Arc file for each import, and undo supported
+import or organization operations. Users can
 remove all local extension data by uninstalling Space Tabs or clearing its Chrome extension
 storage. Leaving AI unconfigured prevents AI network requests.
 

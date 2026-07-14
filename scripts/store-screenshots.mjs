@@ -38,7 +38,7 @@ const shots = [
     kicker: 'Move from Arc',
     description: 'Preview Spaces, folders, saved tabs, and conflicts before anything changes.',
     activeSpaceId: 'launch',
-    notes: ['Real 3-step setup', 'Choose Spaces', 'Undo import'],
+    notes: ['3-step setup with AI', 'Choose Spaces', 'Undo import'],
   },
   {
     id: 'ask',
@@ -478,19 +478,13 @@ function storeShotHtml(shot) {
       }
 
       function openArcImport(doc) {
-        doc.defaultView.showOpenFilePicker = () => new Promise(() => {});
+        const input = doc.querySelector('#onboardingArcInput');
+        if (input) input.click = () => {};
         doc.querySelector('[data-onboarding-path="arc"]')?.click();
         const status = doc.querySelector('#onboardingArcStatus');
         const list = doc.querySelector('#onboardingArcSpaces');
-        const input = doc.querySelector('#onboardingArcInput');
-        const picker = input?.closest('.onboarding-file-picker');
-        if (input && picker) {
-          input.hidden = true;
-          const selectedFile = doc.createElement('div');
-          selectedFile.textContent = 'StorableSidebar.json selected';
-          selectedFile.style.cssText = 'border:1px solid var(--accent-strong);border-radius:8px;padding:12px 14px;background:var(--surface-strong);color:var(--text);font-size:12px;font-weight:750';
-          picker.append(selectedFile);
-        }
+        const choose = doc.querySelector('#onboardingArcChooseButton');
+        if (choose) choose.textContent = 'Choose another Arc file';
         if (status) {
           status.textContent = 'Preview: 3 Spaces, 6 folders, 18 saved tabs. 1 name conflict will import as Research (2).';
         }
@@ -516,6 +510,14 @@ function storeShotHtml(shot) {
         doc.querySelector('#autoGroupButton')?.click();
         await waitFor(() => doc.querySelector('#actionDialog')?.open &&
           /Auto Group Preview/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000);
+        const dialog = doc.querySelector('#actionDialog');
+        const preview = doc.querySelector('#actionDialogPreview');
+        const form = dialog?.querySelector('.action-form');
+        if (!dialog || !preview || !form || dialog.scrollHeight > dialog.clientHeight + 1 ||
+            doc.defaultView.getComputedStyle(preview).overflowY !== 'auto' ||
+            doc.defaultView.getComputedStyle(form).overflow !== 'hidden') {
+          throw new Error('Auto Group preview must use one internal scroll region.');
+        }
       }
 
       function openSettings(doc) {
@@ -526,8 +528,6 @@ function storeShotHtml(shot) {
         const backupInput = doc.querySelector('#spaceBackupInput');
         const backupPicker = backupInput?.closest('.file-picker');
         const arcInput = doc.querySelector('#arcImportInput');
-        const arcPicker = arcInput?.closest('.file-picker');
-        const arcUse = doc.querySelector('#arcImportUseButton');
         const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
@@ -539,14 +539,7 @@ function storeShotHtml(shot) {
           fakeBackupPicker.innerHTML = '<span class="store-file-button">Choose File</span><span>space-backup-2026-07-12.json</span>';
           backupPicker.append(fakeBackupPicker);
         }
-        if (arcPicker && arcInput && !arcPicker.querySelector('.store-file-row')) {
-          arcInput.hidden = true;
-          const fakeArcPicker = doc.createElement('div');
-          fakeArcPicker.className = 'store-file-row';
-          fakeArcPicker.innerHTML = '<span class="store-file-button">Choose Arc File</span><span>No file selected</span>';
-          arcPicker.append(fakeArcPicker);
-        }
-        if (arcUse) arcUse.hidden = false;
+        if (arcInput) arcInput.hidden = true;
         if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
         if (restoreBackup) restoreBackup.disabled = false;
         if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
@@ -608,7 +601,7 @@ function storeShotHtml(shot) {
 function scenarioFor(shot) {
   const state = baseState(shot.activeSpaceId);
   const runtime = baseRuntime();
-  if (shot.id === 'arc-import') state.onboarding = { version: 1, completed: false };
+  if (shot.id === 'arc-import') state.onboarding = { version: 2, completed: false, stage: 'choose' };
   if (shot.id === 'ask') state.ai.apiKey = 'store-preview-fixture-key';
   if (shot.id === 'auto-group') {
     state.spaceSnapshots.launch = {
@@ -727,7 +720,7 @@ function baseState(activeSpaceId) {
         ],
       },
     },
-    onboarding: { version: 1, completed: true },
+    onboarding: { version: 2, completed: true, stage: 'done' },
     shortcuts: {
       togglePanel: 'Alt+S',
       askSubmit: 'Meta+Enter',

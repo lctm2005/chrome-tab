@@ -237,6 +237,21 @@ async function clickElementWithCDP(client, selector) {
   });
 }
 
+async function setFileInputWithCDP(client, selector, filePath) {
+  const { root } = await client.send('DOM.getDocument', { depth: 0, pierce: true });
+  const { nodeId } = await client.send('DOM.querySelector', {
+    nodeId: root.nodeId,
+    selector,
+  });
+  if (!nodeId) throw new Error(`Could not find file input: ${selector}`);
+  await client.send('DOM.setFileInputFiles', {
+    nodeId,
+    files: [filePath],
+  });
+  await evaluate(client, `document.querySelector(${JSON.stringify(selector)})
+    ?.dispatchEvent(new Event('change', { bubbles: true }))`);
+}
+
 async function startAskFixtureServer() {
   const requests = [];
   const pageHits = [];
@@ -244,6 +259,8 @@ async function startAskFixtureServer() {
   const timers = new Set();
   const autoGroupDormantUrl = 'https://example.net/saved-auto-group-e2e';
   const autoGroupTargetTitle = 'Auto Group E2E Proposal';
+  const tidyPrimaryTitle = 'Tidy Names E2E planning document with a deliberately long stable title';
+  const tidySecondaryTitle = 'Tidy Names E2E companion reference with another deliberately long stable title';
 
   const schedule = (callback, delay) => {
     const timer = setTimeout(() => {
@@ -263,6 +280,14 @@ async function startAskFixtureServer() {
     '/source-beta': {
       title: 'Ask Source Beta',
       body: 'BETA_E2E_CONTENT: The support review is Thursday and Ben owns the checklist.',
+    },
+    '/tidy-primary': {
+      title: tidyPrimaryTitle,
+      body: 'A deterministic local page used to keep Tidy Names title fingerprints stable.',
+    },
+    '/tidy-secondary': {
+      title: tidySecondaryTitle,
+      body: 'A second deterministic local page for the real Chrome grouping fixture.',
     },
   };
 
@@ -487,6 +512,10 @@ async function startAskFixtureServer() {
     baseUrl: `${origin}/v1`,
     sourceAlphaUrl: `${origin}/source-alpha`,
     sourceBetaUrl: `${origin}/source-beta`,
+    tidyPrimaryUrl: `${origin}/tidy-primary`,
+    tidySecondaryUrl: `${origin}/tidy-secondary`,
+    tidyPrimaryTitle,
+    tidySecondaryTitle,
     originPattern: 'http://127.0.0.1/*',
     autoGroupDormantUrl,
     autoGroupTargetTitle,
@@ -548,7 +577,7 @@ async function createLoadedTarget(client, url, attempts = 3) {
 
 async function main() {
   const progress = (step) => process.stderr.write(`[e2e] ${step}\n`);
-  const arcSidebarFixtureText = await readFile(join(repoRoot, 'tests/fixtures/arc-sidebar.json'), 'utf8');
+  const arcSidebarFixturePath = join(repoRoot, 'tests/fixtures/arc-sidebar.json');
   progress('starting local Ask Space pages and OpenAI-compatible SSE fixture');
   const askFixtureServer = await startAskFixtureServer();
   progress('building an isolated extension fixture without local secrets');
@@ -612,9 +641,18 @@ async function main() {
       document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
     const arcPickerCancelState = await evaluate(client, `(async () => {
       const input = document.querySelector('#onboardingArcInput');
-      input.dispatchEvent(new Event('cancel', { bubbles: true }));
+      let nativeInputClicks = 0;
+      input.click = () => {
+        nativeInputClicks += 1;
+        input.dispatchEvent(new Event('cancel', { bubbles: true }));
+      };
+      document.querySelector('#onboardingArcChooseButton').click();
+      await Promise.resolve();
       const stored = await chrome.storage.local.get('spaceTabsState');
       return {
+        nativeInputClicks,
+        isFileInput: input instanceof HTMLInputElement && input.type === 'file',
+        acceptsJson: input.accept.includes('.json'),
         dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
         arcStepVisible: !document.querySelector('#onboardingArcStep')?.hidden,
         stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
@@ -623,25 +661,18 @@ async function main() {
       };
     })()`);
     record(
-      'Arc file picker Cancel bubbles without dismissing or completing setup',
-      arcPickerCancelState.dialogOpen &&
+      'Arc uses the native file input and Cancel does not dismiss or complete setup',
+      arcPickerCancelState.nativeInputClicks === 1 &&
+        arcPickerCancelState.isFileInput &&
+        arcPickerCancelState.acceptsJson &&
+        arcPickerCancelState.dialogOpen &&
         arcPickerCancelState.arcStepVisible &&
         arcPickerCancelState.stepLabel === 'Step 2 of 3' &&
         !arcPickerCancelState.completed &&
         arcPickerCancelState.nextDisabled,
       JSON.stringify(arcPickerCancelState),
     );
-    await evaluate(client, `(() => {
-      const transfer = new DataTransfer();
-      transfer.items.add(new File(
-        [${JSON.stringify(arcSidebarFixtureText)}],
-        'StorableSidebar.json',
-        { type: 'application/json' },
-      ));
-      const input = document.querySelector('#onboardingArcInput');
-      input.files = transfer.files;
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
+    await setFileInputWithCDP(client, '#onboardingArcInput', arcSidebarFixturePath);
     const arcPreviewState = await waitFor(client, `(() => {
       const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
       const status = document.querySelector('#onboardingArcStatus')?.textContent || '';
@@ -662,7 +693,7 @@ async function main() {
     const arcPersonalRow = arcPreviewState.rows.find((row) => row.name === 'Arc Personal');
     record(
       'Arc setup previews per-Space counts and resolved naming conflicts',
-      arcPreviewState.status === 'StorableSidebar.json · Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
+      arcPreviewState.status === 'arc-sidebar.json · Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
         arcPreviewState.nextText === 'Import selected Spaces' &&
         !arcPreviewState.nextDisabled &&
         arcConflictRow?.checked === true &&
@@ -672,6 +703,35 @@ async function main() {
         arcPersonalRow?.detail === '0 folders · 1 tabs',
       JSON.stringify(arcPreviewState),
     );
+
+    await evaluate(client, `document.querySelector('#onboardingBackButton').click()`);
+    await waitFor(client, `!document.querySelector('#onboardingChooseStep')?.hidden &&
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 3'`);
+    await evaluate(client, `document.querySelector('[data-onboarding-path="arc"]').click()`);
+    const clearedArcPreviewState = await waitFor(client, `(() => {
+      const input = document.querySelector('#onboardingArcInput');
+      if (document.querySelector('#onboardingArcStep')?.hidden ||
+          document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 2 of 3') return null;
+      return {
+        status: document.querySelector('#onboardingArcStatus')?.textContent || '',
+        rows: document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option').length,
+        selectedFiles: input?.files?.length || 0,
+        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+        chooseText: document.querySelector('#onboardingArcChooseButton')?.textContent || '',
+      };
+    })()`);
+    record(
+      'Arc Back clears the valid preview before the user re-enters the import step',
+      clearedArcPreviewState.status === 'No Arc file selected.' &&
+        clearedArcPreviewState.rows === 0 &&
+        clearedArcPreviewState.selectedFiles === 0 &&
+        clearedArcPreviewState.nextDisabled &&
+        clearedArcPreviewState.chooseText === 'Choose Arc file',
+      JSON.stringify(clearedArcPreviewState),
+    );
+    await setFileInputWithCDP(client, '#onboardingArcInput', arcSidebarFixturePath);
+    await waitFor(client, `document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option').length === 2 &&
+      document.querySelector('#onboardingArcStatus')?.textContent.includes('Preview: 2 Spaces, 1 folders, 3 tabs')`);
 
     const arcSelectionState = await evaluate(client, `(() => {
       const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
@@ -692,7 +752,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#onboardingNextButton').click()`);
-    const completedArcSetup = await waitFor(client, `(async () => {
+    const pendingArcAISetup = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
       const imported = (saved.spaces || []).find((space) => space.name === 'Default (Arc)');
@@ -705,29 +765,69 @@ async function main() {
         importedTabs,
         unselectedImported: (saved.spaces || []).some((space) => space.name === 'Arc Personal'),
         completed: saved.onboarding?.completed === true,
+        onboardingStage: saved.onboarding?.stage || '',
+        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
         lastArcImport: saved.lastArcImport,
         finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
         undoVisible: !document.querySelector('#onboardingUndoArcButton')?.hidden,
+        aiStepVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
+        providerOptions: document.querySelector('#onboardingProviderInput')?.options.length || 0,
+        skipText: document.querySelector('#onboardingSkipAIButton')?.textContent || '',
+        saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
       };
     })()`, 12000);
     record(
-      'Arc setup imports the fixture successfully after file picker Cancel',
-      completedArcSetup.importedTabs === 2 &&
-        !completedArcSetup.unselectedImported &&
-        completedArcSetup.completed &&
-        JSON.stringify(completedArcSetup.lastArcImport?.spaceIds) === JSON.stringify([completedArcSetup.imported.id]) &&
-        completedArcSetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.' &&
-        completedArcSetup.undoVisible,
+      'Arc import reaches optional AI step without completing onboarding early',
+      pendingArcAISetup.importedTabs === 2 &&
+        !pendingArcAISetup.unselectedImported &&
+        !pendingArcAISetup.completed &&
+        pendingArcAISetup.onboardingStage === 'ai' &&
+        pendingArcAISetup.stepLabel === 'Step 3 of 3' &&
+        pendingArcAISetup.aiStepVisible &&
+        pendingArcAISetup.providerOptions > 1 &&
+        pendingArcAISetup.skipText === 'Not now' &&
+        pendingArcAISetup.saveDisabled &&
+        JSON.stringify(pendingArcAISetup.lastArcImport?.spaceIds) === JSON.stringify([pendingArcAISetup.imported.id]) &&
+        pendingArcAISetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.' &&
+        pendingArcAISetup.undoVisible,
+      JSON.stringify(pendingArcAISetup),
+    );
+
+    await evaluate(client, `document.querySelector('#onboardingSkipAIButton').click()`);
+    const completedArcSetup = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      if (document.querySelector('#onboardingDialog')?.open ||
+          saved.onboarding?.completed !== true || saved.onboarding?.stage !== 'done') return null;
+      return {
+        completed: saved.onboarding.completed,
+        stage: saved.onboarding.stage,
+        importedPresent: (saved.spaces || []).some((space) =>
+          space.id === ${JSON.stringify(pendingArcAISetup.imported.id)}),
+        setupReminder: Boolean(document.querySelector('.setup-space')),
+      };
+    })()`);
+    record(
+      'Optional AI can be skipped and only then completes onboarding',
+      completedArcSetup.completed && completedArcSetup.stage === 'done' &&
+        completedArcSetup.importedPresent && !completedArcSetup.setupReminder,
       JSON.stringify(completedArcSetup),
     );
 
-    await evaluate(client, `document.querySelector('#onboardingUndoArcButton').click()`);
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsDialog')?.open &&
+      !document.querySelector('#undoArcImportButton')?.disabled`);
+    await evaluate(client, `document.querySelector('#undoArcImportButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Undo Arc Import' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Undo Import'`);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const undoneArcSetup = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const importedId = ${JSON.stringify(completedArcSetup.imported.id)};
+      const importedId = ${JSON.stringify(pendingArcAISetup.imported.id)};
       const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      if (document.querySelector('#onboardingDialog')?.open || saved.lastArcImport ||
+      if (saved.lastArcImport ||
           (saved.spaces || []).some((space) => space.id === importedId) ||
           saved.spaceSnapshots?.[importedId] ||
           !toast.includes('Removed 1 imported Arc Spaces')) return null;
@@ -746,6 +846,8 @@ async function main() {
         undoneArcSetup.toast === 'Removed 1 imported Arc Spaces. Open tabs were kept.',
       JSON.stringify(undoneArcSetup),
     );
+    await evaluate(client, `document.querySelector('#settingsDialog button[value="cancel"]').click()`);
+    await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
 
     const openedWorkbench = await waitFor(client, `(async () => {
       const tabs = await chrome.tabs.query({});
@@ -858,21 +960,44 @@ async function main() {
     })()`);
 
     const realGroup = await evaluate(client, `(async () => {
-      const first = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://github.com/openai/codex/pull/123', active: false });
-      const second = await chrome.runtime.sendMessage({ type: 'tabs:create', url: 'https://example.org/e2e-two', active: false });
+      const fixtures = [
+        { url: ${JSON.stringify(askFixtureServer.tidyPrimaryUrl)}, title: ${JSON.stringify(askFixtureServer.tidyPrimaryTitle)} },
+        { url: ${JSON.stringify(askFixtureServer.tidySecondaryUrl)}, title: ${JSON.stringify(askFixtureServer.tidySecondaryTitle)} },
+      ];
+      const first = await chrome.runtime.sendMessage({ type: 'tabs:create', url: fixtures[0].url, active: false });
+      const second = await chrome.runtime.sendMessage({ type: 'tabs:create', url: fixtures[1].url, active: false });
+      const createdIds = [first.tab.id, second.tab.id];
+      const startedAt = Date.now();
+      let stableTabs = [];
+      while (Date.now() - startedAt < 10000) {
+        stableTabs = await Promise.all(createdIds.map((tabId) => chrome.tabs.get(tabId)));
+        if (stableTabs.every((tab, index) =>
+          tab.status === 'complete' && tab.url === fixtures[index].url && tab.title === fixtures[index].title)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!stableTabs.every((tab, index) =>
+        tab.status === 'complete' && tab.url === fixtures[index].url && tab.title === fixtures[index].title)) {
+        throw new Error('Local Tidy fixture tabs did not reach a stable title and URL.');
+      }
       const grouped = await chrome.runtime.sendMessage({
         type: 'tabs:group',
-        tabIds: [first.tab.id, second.tab.id],
+        tabIds: createdIds,
         title: 'E2E Group',
         color: 'blue',
       });
       const group = await chrome.tabGroups.get(grouped.groupId);
       const tabs = await chrome.tabs.query({ groupId: grouped.groupId });
-      return { group, tabIds: tabs.map((tab) => tab.id) };
+      return {
+        group,
+        tabIds: tabs.map((tab) => tab.id),
+        primaryTabId: first.tab.id,
+        fixtures: stableTabs.map((tab) => ({ id: tab.id, status: tab.status, title: tab.title, url: tab.url })),
+      };
     })()`);
     record(
       'background grouping mutates real Chrome tab groups',
-      realGroup.group?.title === 'E2E Group' && realGroup.tabIds.length === 2,
+      realGroup.group?.title === 'E2E Group' && realGroup.tabIds.length === 2 &&
+        realGroup.fixtures.every((tab) => tab.status === 'complete'),
       JSON.stringify(realGroup),
     );
 
@@ -913,11 +1038,26 @@ async function main() {
     const tidyDuplicate = await evaluate(client, `(async () => {
       const duplicated = await chrome.runtime.sendMessage({
         type: 'tabs:duplicate',
-        tabId: ${JSON.stringify(realGroup.tabIds[0])},
+        tabId: ${JSON.stringify(realGroup.primaryTabId)},
       });
       return duplicated.tab;
     })()`);
-    await waitFor(client, `document.querySelector('.tab-row[data-tab-id="${tidyDuplicate.id}"]')`, 10000);
+    const stableTidyDuplicate = await waitFor(client, `(async () => {
+      const tab = await chrome.tabs.get(${JSON.stringify(tidyDuplicate.id)});
+      const row = document.querySelector('.tab-row[data-tab-id="${tidyDuplicate.id}"]');
+      if (tab.status !== 'complete' ||
+          tab.url !== ${JSON.stringify(askFixtureServer.tidyPrimaryUrl)} ||
+          tab.title !== ${JSON.stringify(askFixtureServer.tidyPrimaryTitle)} ||
+          row?.querySelector('.tab-title')?.textContent !== ${JSON.stringify(askFixtureServer.tidyPrimaryTitle)}) return null;
+      return { id: tab.id, status: tab.status, title: tab.title, url: tab.url };
+    })()`, 12000);
+    record(
+      'Tidy Names duplicate reaches a stable local title and URL before preview',
+      stableTidyDuplicate.status === 'complete' &&
+        stableTidyDuplicate.url === askFixtureServer.tidyPrimaryUrl &&
+        stableTidyDuplicate.title === askFixtureServer.tidyPrimaryTitle,
+      JSON.stringify(stableTidyDuplicate),
+    );
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names'`, 12000);
@@ -936,7 +1076,7 @@ async function main() {
       if (document.querySelector('#actionDialog')?.open ||
           document.querySelector('#tidyNamesButton')?.disabled) return null;
       const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const expectedIds = [${JSON.stringify(realGroup.tabIds[0])}, ${JSON.stringify(tidyDuplicate.id)}];
+      const expectedIds = [${JSON.stringify(realGroup.primaryTabId)}, ${JSON.stringify(tidyDuplicate.id)}];
       const retainedIds = expectedIds.filter((id) => (listed.tabs || []).some((tab) => Number(tab.id) === id));
       return retainedIds.length === expectedIds.length
         ? { count: retainedIds.length, duplicateId: ${JSON.stringify(tidyDuplicate.id)} }
@@ -1032,7 +1172,45 @@ async function main() {
       }),
     );
 
-    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const expiredTidyUndoState = await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const operation = (stored.spaceTabsState?.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.operation.id)});
+      const elapsedMs = Date.now() - Number(operation?.createdAt || 0);
+      if (operation?.status !== 'applied' || elapsedMs < 9_800 ||
+          !document.querySelector('#operationRecord')?.hidden) return null;
+      return {
+        elapsedMs,
+        operationStatus: operation.status,
+        operationStillStored: true,
+        bannerHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
+      };
+    })()`, 13000);
+    record(
+      'Undo banner expires after 10 seconds while the operation record remains stored',
+      expiredTidyUndoState.elapsedMs >= 9_800 &&
+        expiredTidyUndoState.elapsedMs < 13_000 &&
+        expiredTidyUndoState.operationStatus === 'applied' &&
+        expiredTidyUndoState.operationStillStored &&
+        expiredTidyUndoState.bannerHidden,
+      JSON.stringify(expiredTidyUndoState),
+    );
+
+    // Re-age the persisted record only for the independent Undo-path check.
+    // The expiry assertion above already exercised the real 10-second timer;
+    // clicking a control inside a hidden banner is intentionally unsupported.
+    await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = stored.spaceTabsState || {};
+      const operation = (saved.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.operation.id)});
+      if (operation) operation.createdAt = Date.now();
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    })()`);
+    await waitFor(client, `!document.querySelector('#operationRecord')?.hidden &&
+      document.querySelector('#operationRecordText')?.textContent ===
+        ${JSON.stringify(tidyAppliedState.operation.summary)}`, 6000);
+    await clickElementWithCDP(client, '#undoOrganizationButton');
     const tidyUndoneState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
@@ -1119,10 +1297,17 @@ async function main() {
       document.querySelector('#actionDialogInput').value = 'Workbench E2E';
       document.querySelector('#actionDialogConfirm').click();
     })()`);
-    await new Promise((resolve) => setTimeout(resolve, 4000));
-    const workbenchCreateState = await evaluate(client, `(async () => {
+    const workbenchCreateState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
+      const activeSpaceName = document.querySelector('#activeSpaceName')?.textContent || '';
+      const visibleSpaces = [...document.querySelectorAll('.space')].map((button) => button.title);
+      const locks = await navigator.locks.query();
+      if (document.querySelector('#actionDialog')?.open ||
+          activeSpaceName !== 'Workbench E2E' ||
+          saved.activeSpaceId !== 'workbench-e2e' ||
+          !visibleSpaces.includes('Remote Current') ||
+          locks.held.some((lock) => lock.name === 'space-tabs-shared-state')) return null;
       return {
         activeSpaceId: saved.activeSpaceId || '',
         spaces: (saved.spaces || []).map((space) => ({ id: space.id, name: space.name })),
@@ -1130,10 +1315,10 @@ async function main() {
           .flatMap((group) => (group.tabs || []).map((tab) => tab.url)),
         remoteUrls: (saved.spaceSnapshots?.['remote-current']?.groups || [])
           .flatMap((group) => (group.tabs || []).map((tab) => tab.url)),
-        activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-        visibleSpaces: [...document.querySelectorAll('.space')].map((button) => button.title),
+        activeSpaceName,
+        visibleSpaces,
       };
-    })()`);
+    })()`, 15000);
     record(
       'Workbench creates a persistent Space without losing the current Space snapshot',
       workbenchCreateState.spaces.some((space) => space.name === 'Workbench E2E') &&
@@ -1145,18 +1330,37 @@ async function main() {
       JSON.stringify(workbenchCreateState),
     );
 
-    const paletteActiveTabBefore = await evaluate(client, `(async () =>
-      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id || null)()`);
+    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
+    const paletteActiveTabBefore = await waitFor(client, `(async () => {
+      const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+      return active.id === ${JSON.stringify(openedWorkbench.id)} ? active.id : null;
+    })()`);
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'k', metaKey: true, bubbles: true, cancelable: true,
     }))`);
     await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
     await evaluate(client, `(() => {
       const input = document.querySelector('#commandPaletteInput');
-      input.value = 'Remote Current';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      input.value = '';
+      input.focus();
     })()`);
+    await client.send('Input.insertText', { text: 'Remote Current' });
+    await waitFor(client, `(() => {
+      const first = document.querySelector('#commandPaletteResults [data-command-index="0"]');
+      return document.activeElement === document.querySelector('#commandPaletteInput') &&
+        first?.querySelector('strong')?.textContent === 'Remote Current' &&
+        first?.getAttribute('aria-selected') === 'true';
+    })()`);
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+    });
     const paletteSpaceSwitchState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       if (document.querySelector('#commandPaletteDialog')?.open ||
@@ -1167,7 +1371,7 @@ async function main() {
         activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
         activeBrowserTabId: activeTab.id,
       };
-    })()`, 12000);
+    })()`, 20000);
     record(
       'Command Palette keyboard shortcut switches Spaces without stealing browser focus',
       paletteSpaceSwitchState.activeSpaceName === 'Remote Current' &&
@@ -1599,6 +1803,22 @@ async function main() {
           url: ${JSON.stringify(askFixtureServer.autoGroupDormantUrl)},
         }],
       });
+      // Two same-named empty historical Tags recreate the persisted shadow
+      // that used to render beside the real group created by Auto Group.
+      snapshot.groups.push(
+        {
+          title: ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)},
+          color: 'green',
+          collapsed: false,
+          tabs: [],
+        },
+        {
+          title: ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)},
+          color: 'green',
+          collapsed: false,
+          tabs: [],
+        },
+      );
       saved.spaceSnapshots = saved.spaceSnapshots || {};
       saved.spaceSnapshots.default = snapshot;
       await chrome.storage.local.set({ spaceTabsState: saved });
@@ -1675,6 +1895,16 @@ async function main() {
     const autoGroupPermissionRequestsBefore = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
 
+    await evaluate(client, `(() => {
+      window.__autoGroupPreviewTitles = [];
+      window.__autoGroupPreviewObserver?.disconnect();
+      const title = document.querySelector('#actionDialogTitle');
+      window.__autoGroupPreviewObserver = new MutationObserver(() => {
+        const value = title?.textContent || '';
+        if (value) window.__autoGroupPreviewTitles.push(value);
+      });
+      window.__autoGroupPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
+    })()`);
     await clickElementWithCDP(client, '#autoGroupButton');
     let autoGroupMixedPreview;
     try {
@@ -1695,9 +1925,23 @@ async function main() {
         const proposal = sections.find((section) =>
           section.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
         if (!proposal) return null;
+        const dialog = document.querySelector('#actionDialog');
+        const form = dialog?.querySelector('.action-form');
+        const preview = document.querySelector('#actionDialogPreview');
         return {
           message: document.querySelector('#actionDialogMessage')?.textContent || '',
           confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+          titles: [...new Set(window.__autoGroupPreviewTitles || [])],
+          disclosure: document.querySelector('#autoGroupButton')?.getAttribute('aria-label') || '',
+          scroll: {
+            dialogOverflowY: dialog ? getComputedStyle(dialog).overflowY : '',
+            formOverflowY: form ? getComputedStyle(form).overflowY : '',
+            previewOverflowY: preview ? getComputedStyle(preview).overflowY : '',
+            dialogScrollable: Boolean(dialog && dialog.scrollHeight > dialog.clientHeight + 1 &&
+              /^(auto|scroll)$/.test(getComputedStyle(dialog).overflowY)),
+            formScrollable: Boolean(form && form.scrollHeight > form.clientHeight + 1 &&
+              /^(auto|scroll)$/.test(getComputedStyle(form).overflowY)),
+          },
           sections,
           proposal,
         };
@@ -1730,18 +1974,24 @@ async function main() {
     const previewLiveRow = autoGroupMixedPreview.proposal.rows.find((row) =>
       row.title === 'Ask Source Alpha');
     const previewNotSentSection = autoGroupMixedPreview.sections.find((section) =>
-      section.title === 'Not sent · remain untouched');
+      section.title === 'Untouched');
     record(
-      'Auto Group directly opens the final disclosed preview with a purpose-sized budget',
-      autoGroupMixedPreview.message.includes('AI proposal') &&
-        autoGroupMixedPreview.message.includes('2 tabs') &&
-        autoGroupMixedPreview.message.includes('Custom OpenAI-compatible') &&
-        autoGroupMixedPreview.message.includes('ask-e2e-model') &&
-        autoGroupMixedPreview.message.includes(
-          `sent ${autoGroupChat?.itemCount} tab titles, simplified URLs, domains, current Tags, and live/saved status`,
-        ) &&
-        autoGroupMixedPreview.message.includes('generated in') &&
+      'Auto Group directly opens one concise final preview with a single scroll region',
+      autoGroupMixedPreview.message.includes('2 tabs → 1 group') &&
+        autoGroupMixedPreview.message.length <= 72 &&
+        /(?:\d+ ms|\d+(?:\.\d+)? s)$/.test(autoGroupMixedPreview.message) &&
+        !autoGroupMixedPreview.message.includes('AI proposal') &&
+        !autoGroupMixedPreview.message.includes('Custom OpenAI-compatible') &&
+        !autoGroupMixedPreview.message.includes('sent ') &&
+        !autoGroupMixedPreview.message.includes('generated in') &&
         !autoGroupMixedPreview.message.includes('Nothing is sent until you choose Generate preview') &&
+        !autoGroupMixedPreview.titles.includes('Generate Auto Group preview?') &&
+        autoGroupMixedPreview.disclosure.includes('titles, simplified URLs, domains, current Tags, and live/saved status') &&
+        autoGroupMixedPreview.scroll.dialogOverflowY === 'hidden' &&
+        autoGroupMixedPreview.scroll.formOverflowY === 'hidden' &&
+        autoGroupMixedPreview.scroll.previewOverflowY === 'auto' &&
+        !autoGroupMixedPreview.scroll.dialogScrollable &&
+        !autoGroupMixedPreview.scroll.formScrollable &&
         autoGroupMixedPreview.confirmText === 'Apply groups' &&
         autoGroupMixedPreview.proposal.rows.length === 2 &&
         previewSavedRow?.badge === 'Saved' &&
@@ -1812,8 +2062,12 @@ async function main() {
       const operation = [...(captured.storage.operationHistory || [])].reverse()
         .find((item) => item?.type === 'auto-group');
       const recordText = document.querySelector('#operationRecordText')?.textContent || '';
+      const matchingCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
       if (alphaGroup?.title !== ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)} ||
           !historical || !target || operation?.status !== 'applied' ||
+          matchingCards.length === 0 ||
           document.querySelector('#operationRecord')?.hidden ||
           recordText !== 'Auto Group organized 2 tabs') return null;
       return {
@@ -1823,6 +2077,10 @@ async function main() {
         target,
         operation,
         recordText,
+        matchingCards: matchingCards.map((card) => ({
+          key: card.dataset.groupKey || '',
+          rows: card.querySelectorAll('.tab-row').length,
+        })),
         undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
         status: document.querySelector('#syncStatus')?.textContent || '',
       };
@@ -1843,11 +2101,13 @@ async function main() {
     const autoGroupPermissionRequestsAfterApply = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
     record(
-      'Auto Group Apply updates real Chrome, preserves the historical Tag, and exposes Undo',
+      'Auto Group Apply preserves history without rendering a same-name empty shadow and exposes Undo',
       appliedAutoGroupState.alphaGroup.color === 'green' &&
         appliedAutoGroupState.historical.tabs.length === 0 &&
         appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.sourceAlphaUrl) &&
         appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.autoGroupDormantUrl) &&
+        appliedAutoGroupState.matchingCards.length === 1 &&
+        appliedAutoGroupState.matchingCards[0].rows === 2 &&
         JSON.stringify(appliedSnapshotUrls) === JSON.stringify(beforeSnapshotUrls) &&
         appliedAutoGroupState.operation.spaceId === 'default' &&
         appliedAutoGroupState.undoText === 'Undo' &&
@@ -1864,6 +2124,7 @@ async function main() {
         alphaGroup: appliedAutoGroupState.alphaGroup,
         historical: appliedAutoGroupState.historical,
         target: appliedAutoGroupState.target,
+        matchingCards: appliedAutoGroupState.matchingCards,
         operation: {
           type: appliedAutoGroupState.operation.type,
           spaceId: appliedAutoGroupState.operation.spaceId,
@@ -1937,11 +2198,17 @@ async function main() {
 
     const tidyAIRequestsBefore = askFixtureServer.requests
       .filter((request) => request.mode === 'tidy-names').length;
+    await evaluate(client, `(() => {
+      window.__tidyPreviewTitles = [];
+      window.__tidyPreviewObserver?.disconnect();
+      const title = document.querySelector('#actionDialogTitle');
+      window.__tidyPreviewObserver = new MutationObserver(() => {
+        const value = title?.textContent || '';
+        if (value) window.__tidyPreviewTitles.push(value);
+      });
+      window.__tidyPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
+    })()`);
     await clickElementWithCDP(client, '#tidyNamesButton');
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Generate Tidy Names preview?' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Generate preview'`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
       document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
@@ -1949,19 +2216,27 @@ async function main() {
       .filter((request) => request.mode === 'tidy-names')[tidyAIRequestsBefore];
     const tidyAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
       .filter((request) => request.purpose === 'tidy-names').at(-1)`);
+    const tidyDirectPreviewState = await evaluate(client, `({
+      titles: [...new Set(window.__tidyPreviewTitles || [])],
+      message: document.querySelector('#actionDialogMessage')?.textContent || '',
+      confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+    })`);
     record(
-      'Tidy Names uses its fixed small-batch 8K output budget',
+      'Tidy Names directly opens one concise final preview with its fixed 8K budget',
       tidyAIRequest?.body?.stream === false &&
         tidyAIRequest?.body?.max_tokens === 8_192 &&
         tidyAIChat?.purpose === 'tidy-names' &&
         tidyAIChat?.itemCount === tidyAIRequest?.candidates?.length &&
         tidyAIChat.itemCount > 0 &&
-        tidyAIChat.itemCount <= 80,
+        tidyAIChat.itemCount <= 80 &&
+        tidyDirectPreviewState.confirmText === 'Apply tidy' &&
+        /^\d+ names? · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyDirectPreviewState.message) &&
+        !tidyDirectPreviewState.titles.includes('Generate Tidy Names preview?'),
       JSON.stringify({ request: {
         stream: tidyAIRequest?.body?.stream,
         maxTokens: tidyAIRequest?.body?.max_tokens,
         candidateCount: tidyAIRequest?.candidates?.length,
-      }, chat: tidyAIChat }),
+      }, chat: tidyAIChat, preview: tidyDirectPreviewState }),
     );
     await clickElementWithCDP(client, '#actionDialogCancel');
     await waitFor(client, `!document.querySelector('#actionDialog')?.open &&
@@ -2324,7 +2599,7 @@ async function main() {
       input.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#onboardingNextButton').click();
     })()`);
-    const completedSetupState = await waitFor(client, `(async () => {
+    const pendingFreshAISetup = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
       const setupSpace = (stored.spaceTabsState?.spaces || []).find((space) => space.name === 'Setup E2E');
@@ -2332,33 +2607,67 @@ async function main() {
       return {
         setupSpace,
         activeSpaceId: stored.spaceTabsState?.activeSpaceId || '',
+        completed: stored.spaceTabsState?.onboarding?.completed === true,
+        onboardingStage: stored.spaceTabsState?.onboarding?.stage || '',
+        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
         finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+        provider: document.querySelector('#onboardingProviderInput')?.value || '',
+        model: document.querySelector('#onboardingModelInput')?.value || '',
+        customModel: document.querySelector('#onboardingCustomModelInput')?.value || '',
+        apiKeyLength: document.querySelector('#onboardingApiKeyInput')?.value?.length || 0,
+        saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
         activeTab,
       };
     })()`, 12000);
     record(
-      'Workbench Run Setup completes the Fresh flow without leaving Workbench',
-      completedSetupState.activeSpaceId === completedSetupState.setupSpace.id &&
-        completedSetupState.finishMessage === 'Setup E2E is ready.' &&
-        completedSetupState.activeTab?.id === openedWorkbench.id,
-      JSON.stringify(completedSetupState),
+      'Fresh setup reaches the optional AI third step before completion',
+      pendingFreshAISetup.activeSpaceId === pendingFreshAISetup.setupSpace.id &&
+        !pendingFreshAISetup.completed &&
+        pendingFreshAISetup.onboardingStage === 'ai' &&
+        pendingFreshAISetup.stepLabel === 'Step 3 of 3' &&
+        pendingFreshAISetup.finishMessage === 'Setup E2E is ready.' &&
+        pendingFreshAISetup.provider === 'openai' &&
+        pendingFreshAISetup.model.length > 0 &&
+        pendingFreshAISetup.apiKeyLength === 0 &&
+        pendingFreshAISetup.saveDisabled &&
+        pendingFreshAISetup.activeTab?.id === openedWorkbench.id,
+      JSON.stringify(pendingFreshAISetup),
     );
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#onboardingApiKeyInput');
+      input.value = 'setup-e2e-key';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(client, `!document.querySelector('#onboardingOpenWorkbenchButton')?.disabled`);
     await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
     const completedSetupSurfaceState = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
+      const [stored, session] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.storage.session.get('spaceTabsSecrets'),
+      ]);
       if (document.querySelector('#onboardingDialog')?.open ||
-          stored.spaceTabsState?.onboarding?.completed !== true) return null;
+          stored.spaceTabsState?.onboarding?.completed !== true ||
+          stored.spaceTabsState?.onboarding?.stage !== 'done' ||
+          session.spaceTabsSecrets?.ai?.apiKey !== 'setup-e2e-key') return null;
       return {
         workbench: new URLSearchParams(location.search).get('layout') === 'workbench',
         misleadingStayAction: Boolean(document.querySelector('#onboardingStayButton')),
         activeTabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id || null,
+        completed: stored.spaceTabsState.onboarding.completed,
+        stage: stored.spaceTabsState.onboarding.stage,
+        localApiKeyLength: String(stored.spaceTabsState?.ai?.apiKey || '').length,
+        sessionKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
       };
     })()`);
     record(
-      'Setup finish starts in Workbench without a misleading side-panel action',
+      'Saving onboarding AI completes setup, keeps the key session-only, and stays in Workbench',
       completedSetupSurfaceState.workbench &&
         !completedSetupSurfaceState.misleadingStayAction &&
-        completedSetupSurfaceState.activeTabId === openedWorkbench.id,
+        completedSetupSurfaceState.activeTabId === openedWorkbench.id &&
+        completedSetupSurfaceState.completed &&
+        completedSetupSurfaceState.stage === 'done' &&
+        completedSetupSurfaceState.localApiKeyLength === 0 &&
+        completedSetupSurfaceState.sessionKeyLength === 'setup-e2e-key'.length,
       JSON.stringify(completedSetupSurfaceState),
     );
 
@@ -2512,6 +2821,13 @@ async function main() {
     const beforeOversizedRestore = await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
+      const withoutVolatileTimestamps = (value) => {
+        if (Array.isArray(value)) return value.map(withoutVolatileTimestamps);
+        if (!value || typeof value !== 'object') return value;
+        return Object.fromEntries(Object.entries(value)
+          .filter(([key]) => key !== 'updatedAt')
+          .map(([key, entry]) => [key, withoutVolatileTimestamps(entry)]));
+      };
       const relevant = {
         activeSpaceId: saved.activeSpaceId,
         spaces: saved.spaces,
@@ -2519,7 +2835,10 @@ async function main() {
         spaceSnapshots: saved.spaceSnapshots,
         askSessions: saved.askSessions,
       };
-      return { relevant: JSON.stringify(relevant), bytes: await chrome.storage.local.getBytesInUse() };
+      return {
+        relevant: JSON.stringify(withoutVolatileTimestamps(relevant)),
+        bytes: await chrome.storage.local.getBytesInUse(),
+      };
     })()`);
     await evaluate(client, `(() => {
       const backup = {
@@ -2550,29 +2869,41 @@ async function main() {
       if (!status.includes('above the safe 8 MB budget')) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const relevant = JSON.stringify({
+      const withoutVolatileTimestamps = (value) => {
+        if (Array.isArray(value)) return value.map(withoutVolatileTimestamps);
+        if (!value || typeof value !== 'object') return value;
+        return Object.fromEntries(Object.entries(value)
+          .filter(([key]) => key !== 'updatedAt')
+          .map(([key, entry]) => [key, withoutVolatileTimestamps(entry)]));
+      };
+      const relevant = JSON.stringify(withoutVolatileTimestamps({
         activeSpaceId: saved.activeSpaceId,
         spaces: saved.spaces,
         spaceContexts: saved.spaceContexts,
         spaceSnapshots: saved.spaceSnapshots,
         askSessions: saved.askSessions,
-      });
+      }));
       return {
         status,
         relevant,
         bytes: await chrome.storage.local.getBytesInUse(),
+        oversizedPersisted: (saved.spaces || []).some((space) => space.id === 'oversized-e2e') ||
+          Object.hasOwn(saved.spaceContexts || {}, 'oversized-e2e') ||
+          Object.hasOwn(saved.spaceSnapshots || {}, 'oversized-e2e'),
         restoreStillEnabled: !document.querySelector('#restoreSpaceDataButton')?.disabled,
       };
     })()`, 12000);
     record(
       'Oversized restore is rejected before persistence and leaves the workspace unchanged',
       oversizedRestoreState.relevant === beforeOversizedRestore.relevant &&
-        oversizedRestoreState.bytes === beforeOversizedRestore.bytes &&
+        !oversizedRestoreState.oversizedPersisted &&
         oversizedRestoreState.restoreStillEnabled,
       JSON.stringify({
         status: oversizedRestoreState.status,
+        workspaceUnchanged: oversizedRestoreState.relevant === beforeOversizedRestore.relevant,
         bytesBefore: beforeOversizedRestore.bytes,
         bytesAfter: oversizedRestoreState.bytes,
+        oversizedPersisted: oversizedRestoreState.oversizedPersisted,
         restoreStillEnabled: oversizedRestoreState.restoreStillEnabled,
       }),
     );

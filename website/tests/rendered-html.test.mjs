@@ -27,6 +27,11 @@ test("renders the Arc migration and controlled-AI product promise", async () => 
   assert.match(html, /Add private BYOK AI\./);
   assert.match(html, /Selectable Arc import/);
   assert.match(html, /Preview · Confirm · Undo/);
+  assert.match(html, /Choose StorableSidebar\.json for each import/i);
+  assert.match(html, /configure optional AI or skip it/i);
+  assert.match(html, /Clicking Tidy Names or Auto Group/i);
+  assert.match(html, /one final preview/i);
+  assert.match(html, /tabs and Tags do not change until you choose Apply/i);
   assert.match(html, /Nothing is sent until you confirm/);
   assert.match(html, /uses up to 12 confirmed live HTTP\(S\) pages/i);
   assert.match(html, /Sources appendices stay out of the context sent to your provider/i);
@@ -44,6 +49,7 @@ test("renders the Arc migration and controlled-AI product promise", async () => 
     assert.match(html, new RegExp(`/screenshots/${screenshot.replaceAll(".", "\\.")}`, "i"));
   }
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton|Space Tags|\bbeta\b|waitlist/i);
+  assert.doesNotMatch(html, /authorize (?:an )?Arc file once|remembers? the (?:approved )?(?:local )?file|reuse(?:s|d)? (?:that|the) (?:local )?file/i);
 });
 
 test("renders a privacy page that matches the extension data path", async () => {
@@ -55,6 +61,10 @@ test("renders a privacy page that matches the extension data path", async () => 
   assert.match(html, /Sources appendices are excluded from that conversation context/i);
   assert.match(html, /Chrome session storage/);
   assert.match(html, /does not require an account, collect telemetry/i);
+  assert.match(html, /manually choose StorableSidebar\.json/i);
+  assert.match(html, /does not persist the source file or a reusable file handle/i);
+  assert.match(html, /Clicking Tidy Names or Auto Group/i);
+  assert.match(html, /until you review that preview and choose Apply/i);
 });
 
 test("renders support for Arc setup, Ask Space, and historical Tags", async () => {
@@ -62,11 +72,15 @@ test("renders support for Arc setup, Ask Space, and historical Tags", async () =
   assert.match(html, /<title>Support · Space Tabs<\/title>/i);
   assert.match(html, /Why are there three setup steps/);
   assert.match(html, /StorableSidebar\.json/);
+  assert.match(html, /configure optional BYOK AI or choose Not now/i);
+  assert.match(html, /for each import/i);
+  assert.match(html, /does not persist a reusable file handle/i);
   assert.match(html, /Why can’t Ask Space read a page/);
   assert.match(html, /up to 12 confirmed live HTTP\(S\) pages/i);
   assert.match(html, /Sources appendices are not sent as conversation context/i);
   assert.match(html, /Will Auto Group erase old Tags/);
   assert.match(html, /8 MB Chrome-storage safety budget/);
+  assert.match(html, /there is no intermediate confirmation/i);
   assert.match(html, /mailto:lctm2005@gmail.com\?subject=Space%20Tabs%20support/);
 });
 

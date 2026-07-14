@@ -1740,6 +1740,10 @@ dialog::backdrop {
   line-height: 1.5;
 }
 
+#actionDialog {
+  overflow: hidden;
+}
+
 #actionDialog.plan-dialog {
   width: min(94vw, 620px);
 }
@@ -1748,11 +1752,21 @@ dialog::backdrop {
   width: min(94vw, 680px);
 }
 
+#actionDialog .action-form {
+  max-height: calc(min(88vh, 720px) - 2px);
+  min-height: 0;
+  overflow: hidden;
+}
+
 .action-preview {
   display: grid;
+  min-height: 0;
   gap: 14px;
-  max-height: min(56vh, 460px);
-  overflow: auto;
+  max-height: none;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 4px;
 }
 
@@ -1839,9 +1853,11 @@ dialog::backdrop {
 
 .action-preview.group-plan-preview {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: max-content;
+  align-content: start;
   align-items: stretch;
   gap: 10px;
-  max-height: min(60vh, 500px);
+  max-height: none;
   padding: 2px 5px 2px 0;
 }
 
@@ -1923,6 +1939,7 @@ dialog::backdrop {
 
 .action-buttons {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-top: 6px;
@@ -2225,6 +2242,7 @@ menu {
 }
 
 .onboarding-field input,
+.onboarding-field select,
 .onboarding-field textarea {
   width: 100%;
   border: 1px solid var(--glass-border);
@@ -2236,9 +2254,33 @@ menu {
 }
 
 .onboarding-field input:focus,
+.onboarding-field select:focus,
 .onboarding-field textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.onboarding-field input:disabled,
+.onboarding-field select:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.onboarding-ai-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.onboarding-ai-actions {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-ai-actions .settings-status {
+  min-height: 0;
 }
 
 .arc-file-button {
@@ -2341,6 +2383,10 @@ menu {
   color: var(--danger);
 }
 
+.onboarding-finish-actions > :nth-child(n + 3) {
+  min-height: 28px;
+}
+
 .onboarding-footer .secondary-button,
 .onboarding-finish-actions .secondary-button {
   border: 1px solid var(--glass-border);
@@ -2349,7 +2395,7 @@ menu {
 }
 
 .onboarding-finish {
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .onboarding-privacy {
@@ -2802,10 +2848,17 @@ html[data-layout="workbench"] #settingsDialog menu {
 
   .onboarding-step,
   .onboarding-choices,
-  .onboarding-choice {
+  .onboarding-choice,
+  .onboarding-ai-grid,
+  .onboarding-ai-actions {
     width: 100%;
     min-width: 0;
     max-width: 100%;
+  }
+
+  .onboarding-ai-grid,
+  .onboarding-ai-actions {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .onboarding-copy h2 {

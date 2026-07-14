@@ -1,6 +1,6 @@
 {
   "name": "space-tabs",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "e2e:smoke": "node scripts/e2e-extension-smoke.mjs",
     "e2e:preview": "node --experimental-websocket scripts/e2e-smoke.mjs",
     "screenshots:store": "node scripts/store-screenshots.mjs",
-    "check": "node --check background.js && node --check sidepanel.js && node --check scripts/e2e-smoke.mjs && node --check scripts/e2e-extension-smoke.mjs && node --check scripts/package-release.mjs && node --check scripts/release-files.mjs && node --check scripts/store-screenshots.mjs && node --check scripts/verify-package.mjs && node --check src/shared/ai.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-file-access.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/ask-sources.js && node --check src/shared/command-palette.js && node --check src/shared/folder-tree.js && node --check src/shared/markdown.js && node --check src/shared/operation-safety.js && node --check src/shared/organization-plan.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/space-transfer.js && node --check src/shared/state.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
+    "check": "node --check background.js && node --check sidepanel.js && node --check scripts/e2e-smoke.mjs && node --check scripts/e2e-extension-smoke.mjs && node --check scripts/package-release.mjs && node --check scripts/release-files.mjs && node --check scripts/store-screenshots.mjs && node --check scripts/verify-package.mjs && node --check src/shared/ai.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/ask-sources.js && node --check src/shared/command-palette.js && node --check src/shared/folder-tree.js && node --check src/shared/markdown.js && node --check src/shared/operation-safety.js && node --check src/shared/organization-plan.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/space-transfer.js && node --check src/shared/state.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
     "package": "node scripts/package-release.mjs",
     "verify:package": "node scripts/verify-package.mjs"
   }

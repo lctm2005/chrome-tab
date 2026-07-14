@@ -1,6 +1,6 @@
 # Space Tabs Commercialization Plan
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ## Positioning
 
@@ -34,7 +34,7 @@ Free release:
 - Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
-- Tidy Names and Auto Group proposals with confirmation and Undo.
+- Tidy Names and Auto Group actions that generate one final preview, require Apply before changing tabs or Tags, and support Undo.
 - BYOK Ask Space grounded in up to 12 confirmed live HTTP(S) pages, prioritizing selected pages, with disclosure,
   streaming, Stop, and citations.
 
@@ -58,7 +58,7 @@ The first store release should not require sign-in.
 
 ## Launch Sequence
 
-1. Publish an unlisted beta build and invite a small group of tab-heavy Chrome
+1. Publish an unlisted first release and invite a small group of tab-heavy Chrome
    users.
 2. Watch support issues, uninstall reasons, reviews, and qualitative feedback.
 3. Publish a public free release once onboarding, privacy copy, screenshots,
