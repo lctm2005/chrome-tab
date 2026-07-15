@@ -75,6 +75,7 @@ import {
   mergeOpenSpaceSnapshot,
   removeSnapshotTabs,
   removeSnapshotTab,
+  retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotGroupShouldPersist,
@@ -2868,15 +2869,18 @@ async function renameGroup(group) {
       if (tabIds.length === 0) return;
       await createChromeGroup(tabIds, { title: clean, color: nextGroupColor() });
     } else if (isVirtualGroupKey(current.key)) {
+      const actualTitle = String(clean || 'Group').slice(0, 32);
+      retitleActiveSpaceSnapshotGroup(current, actualTitle);
       state.virtualGroups[current.key] = {
         ...(state.virtualGroups[current.key] || {}),
         id: current.key,
-        title: clean,
+        title: actualTitle,
         color: current.color || state.virtualGroups[current.key]?.color || 'blue',
         spaceId: state.activeSpaceId,
       };
     } else {
-      await send('groups:update', { groupId: current.id, update: { title: clean } });
+      const result = await send('groups:update', { groupId: current.id, update: { title: clean } });
+      if (result.group?.title) retitleActiveSpaceSnapshotGroup(current, result.group.title);
       bindChromeGroup(current.id, state.activeSpaceId);
     }
 
@@ -4050,10 +4054,12 @@ function groupTitleForNestedMove(group, sourceContext, targetPath) {
 
 async function retitleGroupForNestedMove(group, title) {
   if (isVirtualGroupKey(group.key)) {
+    const actualTitle = String(title || 'Group').slice(0, 32);
+    retitleActiveSpaceSnapshotGroup(group, actualTitle);
     state.virtualGroups[group.key] = {
       ...(state.virtualGroups[group.key] || {}),
       id: group.key,
-      title,
+      title: actualTitle,
       color: group.color || state.virtualGroups[group.key]?.color || 'blue',
       spaceId: state.activeSpaceId,
       collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
@@ -4063,7 +4069,8 @@ async function retitleGroupForNestedMove(group, title) {
 
   const groupId = groupIdFromKey(group.key);
   if (groupId !== null) {
-    await send('groups:update', { groupId, update: { title } });
+    const result = await send('groups:update', { groupId, update: { title } });
+    if (result.group?.title) retitleActiveSpaceSnapshotGroup(group, result.group.title);
     bindChromeGroup(groupId, state.activeSpaceId);
     return group.key;
   }
@@ -4075,6 +4082,26 @@ async function retitleGroupForNestedMove(group, title) {
     state.tabGroups[tab.id] = groupKey;
   }
   return groupKey;
+}
+
+function retitleActiveSpaceSnapshotGroup(group, title) {
+  const snapshot = activeSpaceSnapshot();
+  if (!snapshot) return;
+  const nextSnapshot = retitleSnapshotGroup(snapshot, group, title);
+  const replacements = new Map();
+  for (let index = 0; index < (snapshot.groups || []).length; index += 1) {
+    const previousGroup = snapshot.groups[index];
+    const nextGroup = nextSnapshot?.groups?.[index];
+    if (!nextGroup || previousGroup.title === nextGroup.title) continue;
+    replacements.set(
+      snapshotGroupKey(index, previousGroup),
+      snapshotGroupKey(index, nextGroup),
+    );
+  }
+  if (nextSnapshot) state.spaceSnapshots[state.activeSpaceId] = nextSnapshot;
+  replaceGroupOrderKeys(replacements);
+  dormantSpaceViewSpaceId = '';
+  lastRenderedGroupsSignature = '';
 }
 
 function reorderDormantSnapshotGroups(orderedKeys) {

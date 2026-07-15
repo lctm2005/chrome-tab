@@ -2355,6 +2355,290 @@ async function main() {
       }),
     );
 
+    const renameGroupOldTitle = 'Rename Source Group E2E';
+    const renameGroupRequestedTitle =
+      'Renamed Group E2E with a deliberately overlong requested title';
+    const renameGroupExpectedTitle = renameGroupRequestedTitle.slice(0, 32);
+    const renameGroupPreservedEmptyTitle = 'Rename Preserved Empty E2E';
+    const renameGroupDormantUrl = 'https://example.net/rename-group-dormant-e2e';
+    const renameGroupLiveFixtures = [
+      {
+        url: `${askFixtureServer.sourceAlphaUrl}?fixture=rename-group-alpha`,
+        title: 'Ask Source Alpha',
+      },
+      {
+        url: `${askFixtureServer.sourceBetaUrl}?fixture=rename-group-beta`,
+        title: 'Ask Source Beta',
+      },
+    ];
+    const renameGroupFixture = await evaluate(client, `(async () => {
+      const fixtures = ${JSON.stringify(renameGroupLiveFixtures)};
+      const created = [];
+      for (const fixture of fixtures) {
+        const result = await chrome.runtime.sendMessage({
+          type: 'tabs:create',
+          url: fixture.url,
+          active: false,
+        });
+        created.push(result.tab);
+      }
+      const tabIds = created.map((tab) => tab.id);
+      const startedAt = Date.now();
+      let stableTabs = [];
+      while (Date.now() - startedAt < 10000) {
+        stableTabs = await Promise.all(tabIds.map((tabId) => chrome.tabs.get(tabId)));
+        if (stableTabs.every((tab, index) =>
+          tab.status === 'complete' && tab.url === fixtures[index].url)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!stableTabs.every((tab, index) =>
+        tab.status === 'complete' && tab.url === fixtures[index].url)) {
+        throw new Error('Rename Group fixture tabs did not reach stable URLs.');
+      }
+      const grouped = await chrome.runtime.sendMessage({
+        type: 'tabs:group',
+        tabIds,
+        title: ${JSON.stringify(renameGroupOldTitle)},
+        color: 'cyan',
+      });
+      const group = await chrome.tabGroups.get(grouped.groupId);
+
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = structuredClone(stored.spaceTabsState || {});
+      saved.groupSpaces = saved.groupSpaces || {};
+      saved.groupSpaces[String(group.id)] = 'default';
+      saved.spaceSnapshots = saved.spaceSnapshots || {};
+      const snapshot = structuredClone(saved.spaceSnapshots.default || {
+        version: 1,
+        updatedAt: Date.now(),
+        groups: [],
+      });
+      snapshot.preserveGroups = true;
+      snapshot.updatedAt = Date.now();
+      snapshot.groups = (snapshot.groups || []).filter((item) => ![
+        ${JSON.stringify(renameGroupOldTitle)},
+        ${JSON.stringify(renameGroupExpectedTitle)},
+        ${JSON.stringify(renameGroupRequestedTitle)},
+        ${JSON.stringify(renameGroupPreservedEmptyTitle)},
+      ].includes(item.title));
+      snapshot.groups.push(
+        {
+          title: ${JSON.stringify(renameGroupOldTitle)},
+          color: 'cyan',
+          collapsed: false,
+          tabs: [
+            ...stableTabs.map((tab, index) => ({
+              title: tab.title || fixtures[index].title,
+              url: tab.url,
+            })),
+            {
+              title: 'Rename Group saved history E2E',
+              url: ${JSON.stringify(renameGroupDormantUrl)},
+              custom: 'rename-dormant-metadata-e2e',
+            },
+          ],
+        },
+        {
+          title: ${JSON.stringify(renameGroupPreservedEmptyTitle)},
+          color: 'orange',
+          collapsed: true,
+          custom: 'rename-preserved-empty-metadata-e2e',
+          tabs: [],
+        },
+      );
+      saved.spaceSnapshots.default = snapshot;
+      await chrome.storage.local.set({ spaceTabsState: saved });
+      const chromeGroups = await chrome.tabGroups.query({});
+      return {
+        groupId: group.id,
+        chromeGroupCount: chromeGroups.length,
+        tabIds,
+        liveUrls: stableTabs.map((tab) => tab.url).sort(),
+        snapshotUrls: snapshot.groups
+          .flatMap((item) => (item.tabs || []).map((tab) => tab.url))
+          .sort(),
+      };
+    })()`);
+
+    await evaluate(client, `[...document.querySelectorAll('.space')]
+      .find((button) => button.title === 'Default')?.click()`);
+    const renameGroupBefore = await waitFor(client, `(async () => {
+      const captured = await window.__captureAutoGroupE2E();
+      const source = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(renameGroupOldTitle)});
+      const preservedEmpty = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(renameGroupPreservedEmptyTitle)});
+      const sourceCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(renameGroupOldTitle)});
+      if (!source || !preservedEmpty || sourceCards.length !== 1 ||
+          sourceCards[0].querySelectorAll('.tab-row').length !== 3 ||
+          (source.tabs || []).length !== 3) return null;
+      return {
+        source,
+        preservedEmpty,
+        sourceCards: sourceCards.map((card) => ({
+          rows: card.querySelectorAll('.tab-row').length,
+        })),
+      };
+    })()`, 15000);
+    if (
+      renameGroupBefore.source.tabs.filter((tab) =>
+        renameGroupFixture.liveUrls.includes(tab.url)).length !== 2 ||
+      !renameGroupBefore.source.tabs.some((tab) =>
+        tab.url === renameGroupDormantUrl &&
+        tab.custom === 'rename-dormant-metadata-e2e') ||
+      renameGroupBefore.preservedEmpty.tabs.length !== 0
+    ) {
+      throw new Error(`Rename Group E2E fixture was not established: ${JSON.stringify(renameGroupBefore)}`);
+    }
+
+    await evaluate(client, `(() => {
+      const header = [...document.querySelectorAll('#groupsList .group-header')]
+        .find((item) => item.querySelector('h2')?.textContent ===
+          ${JSON.stringify(renameGroupOldTitle)});
+      header?.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 24,
+        clientY: 24,
+      }));
+    })()`);
+    await waitFor(client, `!document.querySelector('#contextMenu')?.hidden &&
+      [...document.querySelectorAll('#contextMenu button')]
+        .some((button) => button.textContent === 'Rename')`);
+    await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
+      .find((button) => button.textContent === 'Rename')?.click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Rename Group' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Save'`);
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#actionDialogInput');
+      input.value = ${JSON.stringify(renameGroupRequestedTitle)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#actionDialogConfirm').click();
+    })()`);
+
+    const captureRenamedGroupStateExpression = `(async () => {
+      const captured = await window.__captureAutoGroupE2E();
+      const chromeGroup = captured.chrome.groups.find((group) =>
+        group.id === ${JSON.stringify(renameGroupFixture.groupId)});
+      const oldSnapshotGroups = captured.storage.snapshot.groups?.filter((group) =>
+        group.title === ${JSON.stringify(renameGroupOldTitle)}) || [];
+      const requestedSnapshotGroups = captured.storage.snapshot.groups?.filter((group) =>
+        group.title === ${JSON.stringify(renameGroupRequestedTitle)}) || [];
+      const renamedSnapshotGroups = captured.storage.snapshot.groups?.filter((group) =>
+        group.title === ${JSON.stringify(renameGroupExpectedTitle)}) || [];
+      const preservedEmptyGroups = captured.storage.snapshot.groups?.filter((group) =>
+        group.title === ${JSON.stringify(renameGroupPreservedEmptyTitle)}) || [];
+      const oldCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(renameGroupOldTitle)});
+      const requestedCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(renameGroupRequestedTitle)});
+      const renamedCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(renameGroupExpectedTitle)});
+      if (!chromeGroup || renamedSnapshotGroups.length !== 1 ||
+          preservedEmptyGroups.length !== 1 || renamedCards.length !== 1 ||
+          document.querySelector('#actionDialog')?.open) return null;
+      return {
+        chromeGroup,
+        chromeGroupCount: captured.chrome.groups.length,
+        oldSnapshotGroups,
+        requestedSnapshotGroups,
+        renamedSnapshotGroup: renamedSnapshotGroups[0],
+        preservedEmpty: preservedEmptyGroups[0],
+        snapshotUrls: captured.storage.snapshot.groups
+          .flatMap((group) => (group.tabs || []).map((tab) => tab.url))
+          .sort(),
+        oldCards: oldCards.length,
+        requestedCards: requestedCards.length,
+        renamedCards: renamedCards.map((card) => ({
+          rows: card.querySelectorAll('.tab-row').length,
+        })),
+      };
+    })()`;
+    const renamedGroupState = await waitFor(client, captureRenamedGroupStateExpression, 15000);
+    const renameGroupStateIsCorrect = (value) => (
+      value.chromeGroup.id === renameGroupFixture.groupId &&
+      value.chromeGroup.title === renameGroupExpectedTitle &&
+      value.chromeGroupCount === renameGroupFixture.chromeGroupCount &&
+      value.oldSnapshotGroups.length === 0 &&
+      value.requestedSnapshotGroups.length === 0 &&
+      value.renamedSnapshotGroup.title === renameGroupExpectedTitle &&
+      value.renamedSnapshotGroup.color === 'cyan' &&
+      value.renamedSnapshotGroup.tabs.length === 3 &&
+      value.renamedSnapshotGroup.tabs.filter((tab) =>
+        renameGroupFixture.liveUrls.includes(tab.url)).length === 2 &&
+      value.renamedSnapshotGroup.tabs.some((tab) =>
+        tab.url === renameGroupDormantUrl &&
+        tab.custom === 'rename-dormant-metadata-e2e') &&
+      value.preservedEmpty.color === 'orange' &&
+      value.preservedEmpty.collapsed === true &&
+      value.preservedEmpty.custom === 'rename-preserved-empty-metadata-e2e' &&
+      value.preservedEmpty.tabs.length === 0 &&
+      value.oldCards === 0 &&
+      value.requestedCards === 0 &&
+      value.renamedCards.length === 1 &&
+      value.renamedCards[0].rows === 3 &&
+      JSON.stringify(value.snapshotUrls) === JSON.stringify(renameGroupFixture.snapshotUrls)
+    );
+
+    const renameRefreshStartedAt = await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return Number(stored.spaceTabsState?.spaceSnapshots?.default?.updatedAt || 0);
+    })()`);
+    await evaluate(client, `[...document.querySelectorAll('.space')]
+      .find((button) => button.title === 'Default')?.click()`);
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return Number(stored.spaceTabsState?.spaceSnapshots?.default?.updatedAt || 0) >
+        ${JSON.stringify(renameRefreshStartedAt)};
+    })()`, 15000);
+    const renamedGroupAfterRefresh = await waitFor(
+      client,
+      captureRenamedGroupStateExpression,
+      15000,
+    );
+    record(
+      'Rename Group retitles the existing Chrome group and its complete saved Tag without leaving an old empty group',
+      renameGroupRequestedTitle.length > 32 &&
+        renameGroupExpectedTitle === renameGroupRequestedTitle.slice(0, 32) &&
+        renameGroupStateIsCorrect(renamedGroupState) &&
+        renameGroupStateIsCorrect(renamedGroupAfterRefresh),
+      JSON.stringify({
+        requestedTitle: renameGroupRequestedTitle,
+        expectedChromeTitle: renameGroupExpectedTitle,
+        groupIdBefore: renameGroupFixture.groupId,
+        immediate: renamedGroupState,
+        afterRefresh: renamedGroupAfterRefresh,
+      }),
+    );
+
+    await evaluate(client, `(async () => {
+      await chrome.tabs.remove(${JSON.stringify(renameGroupFixture.tabIds)}).catch(() => null);
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = structuredClone(stored.spaceTabsState || {});
+      const snapshot = saved.spaceSnapshots?.default;
+      if (snapshot) {
+        snapshot.groups = (snapshot.groups || []).filter((group) => ![
+          ${JSON.stringify(renameGroupOldTitle)},
+          ${JSON.stringify(renameGroupExpectedTitle)},
+          ${JSON.stringify(renameGroupRequestedTitle)},
+          ${JSON.stringify(renameGroupPreservedEmptyTitle)},
+        ].includes(group.title));
+      }
+      delete saved.groupSpaces?.[String(${JSON.stringify(renameGroupFixture.groupId)})];
+      for (const tabId of ${JSON.stringify(renameGroupFixture.tabIds)}) {
+        delete saved.tabSpaces?.[String(tabId)];
+        delete saved.tabGroups?.[String(tabId)];
+        delete saved.renamedTabs?.[String(tabId)];
+      }
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    })()`);
+
     const tidyAIRequestsBefore = askFixtureServer.requests
       .filter((request) => request.mode === 'tidy-names').length;
     await evaluate(client, `(() => {

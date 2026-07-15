@@ -170,6 +170,66 @@ export function updateSnapshotTab(snapshot, target = {}, replacement = {}) {
   return changed ? sanitizeSpaceSnapshot({ ...snapshot, groups }) : snapshot;
 }
 
+/**
+ * Retitles the one stored group represented by an explicit live-group rename.
+ * This is intentionally action-specific: a generic
+ * snapshot merge cannot distinguish a rename from an Auto Group move when
+ * historical Tags are preserved.
+ */
+export function retitleSnapshotGroup(
+  snapshot,
+  sourceGroup = {},
+  nextTitle = '',
+  now = Date.now(),
+) {
+  snapshot = sanitizeSpaceSnapshot(snapshot);
+  if (!snapshot) return null;
+
+  const sourceTitle = String(sourceGroup.title || '').trim();
+  const cleanTitle = String(nextTitle || '').trim();
+  const sourceColor = String(
+    sourceGroup.color || (sourceTitle === 'Ungrouped' ? 'grey' : 'blue'),
+  );
+  if (!sourceTitle || !cleanTitle || sourceTitle === cleanTitle) return snapshot;
+
+  const candidateIndexes = (snapshot.groups || [])
+    .map((group, index) => ({ group, index }))
+    .filter(({ group }) => (
+      group.title === sourceTitle &&
+      (group.color || 'grey') === sourceColor
+    ));
+  if (candidateIndexes.length === 0) return snapshot;
+
+  let targetIndex = -1;
+  let bestScore = { exactCount: 0, totalCount: 0 };
+  let tied = false;
+  for (const candidate of candidateIndexes) {
+    const score = urlOverlapScore(candidate.group.tabs || [], sourceGroup.tabs || []);
+    const comparison = compareUrlOverlapScores(score, bestScore);
+    if (comparison > 0) {
+      targetIndex = candidate.index;
+      bestScore = score;
+      tied = false;
+    } else if (score.totalCount > 0 && comparison === 0) {
+      tied = true;
+    }
+  }
+
+  if (tied || bestScore.totalCount === 0) targetIndex = -1;
+  if (targetIndex < 0 && candidateIndexes.length === 1) {
+    targetIndex = candidateIndexes[0].index;
+  }
+  if (targetIndex < 0) return snapshot;
+
+  return {
+    ...snapshot,
+    updatedAt: Number.isFinite(Number(now)) ? Number(now) : snapshot.updatedAt,
+    groups: snapshot.groups.map((group, index) => (
+      index === targetIndex ? { ...group, title: cleanTitle } : group
+    )),
+  };
+}
+
 export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   liveSnapshot = sanitizeSpaceSnapshot(liveSnapshot);
   storedSnapshot = sanitizeSpaceSnapshot(storedSnapshot);

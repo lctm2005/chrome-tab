@@ -10,6 +10,7 @@ import {
   mergeSpaceSnapshot,
   removeSnapshotTabs,
   removeSnapshotTab,
+  retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotHasPersistentContent,
@@ -431,6 +432,156 @@ test('keeps dormant tabs with a live group after the group is renamed', () => {
       ],
     },
   ]);
+});
+
+test('explicitly retitles preserved snapshot history with its live Chrome group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Research',
+        color: 'blue',
+        collapsed: true,
+        custom: 'keep-source-metadata',
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Archive', url: 'https://example.com/archive' },
+        ],
+      },
+      {
+        title: 'Preserved Empty',
+        color: 'orange',
+        collapsed: true,
+        custom: 'unrelated-history',
+        tabs: [],
+      },
+    ],
+  };
+  const original = structuredClone(snapshot);
+  const renamed = retitleSnapshotGroup(snapshot, {
+    title: 'Research',
+    color: 'blue',
+    tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+  }, 'Deep Work', 2);
+
+  assert.deepEqual(renamed, {
+    version: 1,
+    updatedAt: 2,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Deep Work',
+        color: 'blue',
+        collapsed: true,
+        custom: 'keep-source-metadata',
+        tabs: [
+          { title: 'Spec', url: 'https://example.com/spec' },
+          { title: 'Archive', url: 'https://example.com/archive' },
+        ],
+      },
+      {
+        title: 'Preserved Empty',
+        color: 'orange',
+        collapsed: true,
+        custom: 'unrelated-history',
+        tabs: [],
+      },
+    ],
+  });
+  assert.equal(snapshotTabCount(renamed), snapshotTabCount(snapshot));
+  assert.deepEqual(snapshot, original);
+
+  const merged = mergeOpenSpaceSnapshot([{
+    title: 'Deep Work',
+    color: 'blue',
+    tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+  }], renamed);
+  assert.equal(merged.preserveGroups, true);
+  assert.equal(merged.groups.some((group) => group.title === 'Research'), false);
+  assert.deepEqual(merged.groups, [
+    {
+      title: 'Deep Work',
+      color: 'blue',
+      collapsed: false,
+      tabs: [
+        { title: 'Spec', url: 'https://example.com/spec' },
+        { title: 'Archive', url: 'https://example.com/archive' },
+      ],
+    },
+    {
+      title: 'Preserved Empty',
+      color: 'orange',
+      collapsed: true,
+      custom: 'unrelated-history',
+      tabs: [],
+    },
+  ]);
+});
+
+test('retitles only the unique stored group matching the live group URLs', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Same Name',
+        color: 'blue',
+        tabs: [{ title: 'Alpha', url: 'https://example.com/alpha' }],
+      },
+      {
+        title: 'Same Name',
+        color: 'blue',
+        tabs: [{ title: 'Beta', url: 'https://example.com/beta' }],
+      },
+    ],
+  };
+
+  const renamed = retitleSnapshotGroup(snapshot, {
+    title: 'Same Name',
+    color: 'blue',
+    tabs: [{ title: 'Beta live', url: 'https://example.com/beta' }],
+  }, 'Beta Renamed', 2);
+
+  assert.deepEqual(renamed.groups.map((group) => ({
+    title: group.title,
+    urls: group.tabs.map((tab) => tab.url),
+  })), [
+    { title: 'Same Name', urls: ['https://example.com/alpha'] },
+    { title: 'Beta Renamed', urls: ['https://example.com/beta'] },
+  ]);
+});
+
+test('does not guess when duplicate stored groups match the same live URL equally', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Ambiguous',
+        color: 'blue',
+        custom: 'first',
+        tabs: [{ title: 'Shared A', url: 'https://example.com/shared' }],
+      },
+      {
+        title: 'Ambiguous',
+        color: 'blue',
+        custom: 'second',
+        tabs: [{ title: 'Shared B', url: 'https://example.com/shared' }],
+      },
+    ],
+  };
+
+  const result = retitleSnapshotGroup(snapshot, {
+    title: 'Ambiguous',
+    color: 'blue',
+    tabs: [{ title: 'Shared live', url: 'https://example.com/shared' }],
+  }, 'Must Not Guess', 2);
+
+  assert.deepEqual(result, snapshot);
 });
 
 test('preserveGroups keeps dormant history under its original Tag when a live tab is regrouped', () => {
