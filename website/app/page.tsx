@@ -81,7 +81,7 @@ export default function Home() {
           <div className="section-heading">
             <p className="eyebrow"><span /> Migration without the leap of faith</p>
             <h2>Your Arc workspace,<br />now in Chrome.</h2>
-            <p>Import is a visible three-step setup: choose a path, create or import a workspace, then configure optional AI or skip it. You choose what crosses over and see conflicts before committing.</p>
+            <p>Import is a visible three-step setup: choose a path, create or import a workspace, then review optional AI settings. The final step has one Save action: leave the provider unselected to continue without AI, or complete the provider settings to save them. You choose what crosses over and see conflicts before committing.</p>
           </div>
           <div className="feature-stack">
             <ProductScreenshot
@@ -110,7 +110,7 @@ export default function Home() {
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
             <p>Clicking Tidy Names or Auto Group sends the relevant tab metadata to your configured provider and generates one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Space uses up to 12 confirmed live HTTP(S) pages, prioritizes pages you select, and shows the provider, sources, extracted content size, and whether stored text from recent conversation messages will be included. Nothing is sent until you confirm. Generated-response Sources appendices stay out of the context sent to your provider.</span></div>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Page reads only the current HTTP(S) page when you send. Before anything goes to your provider, it shows the provider, exact page, extracted character count, and whether stored text from recent conversation messages will be included. Responses stream, can be stopped, and include a clickable link to the single source page.</span></div>
           </div>
         </section>
 
@@ -123,8 +123,8 @@ export default function Home() {
           <div className="screenshot-grid" id="product">
             <ProductScreenshot
               src="/screenshots/05-ask-page-byok-ai.png"
-              alt="Current Space Tabs Ask Space view comparing two selected live pages with cited sources"
-              caption="Ask Space · confirmed sources, BYOK provider, citations, streaming, and Stop"
+              alt="Current Space Tabs Ask Page view using the active page with a clickable source"
+              caption="Ask Page · current page, BYOK provider, single-source citation, streaming, and Stop"
             />
             <ProductScreenshot
               src="/screenshots/04-settings-arc-import-shortcuts.png"
@@ -134,7 +134,7 @@ export default function Home() {
           </div>
           <div className="surface-grid">
             <article><span className="surface-kicker">SIDE PANEL</span><h3>Switch, find, drag</h3><p>Keep daily retrieval close to the page you are using. Open dormant tabs only when you need them.</p><b>Command palette included →</b></article>
-            <article><span className="surface-kicker">WORKBENCH</span><h3>Migrate, back up, ask</h3><p>Give multi-tab AI, migration previews, recovery, and settings the space they deserve.</p><b>Full-page context →</b></article>
+            <article><span className="surface-kicker">WORKBENCH</span><h3>Migrate, back up, ask</h3><p>Give Ask Page, AI organization, migration previews, recovery, and settings the space they deserve.</p><b>Full-page context →</b></article>
           </div>
         </section>
 

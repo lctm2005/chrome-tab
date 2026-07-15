@@ -8,7 +8,7 @@ controlled BYOK AI, and local-first workspace data.
 
 - `/` — product positioning, migration, controlled AI, and current extension screenshots
 - `/privacy` — data handling, permissions, network requests, and user control
-- `/support` — setup, Arc import, Ask Space, Auto Group, backup, and contact
+- `/support` — setup, Arc import, Ask Page, Auto Group, backup, and contact
 
 ## Development
 

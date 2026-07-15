@@ -110,7 +110,7 @@ test('selects bounded output budgets from the purpose and item count whitelist',
   assert.equal(outputTokenBudgetForPurpose('auto-group', 200), 32_768);
   assert.equal(outputTokenBudgetForPurpose('auto-group', 201), 65_536);
 
-  assert.equal(outputTokenBudgetForPurpose('ask-space'), 32_768);
+  assert.equal(outputTokenBudgetForPurpose('ask-page'), 32_768);
   assert.equal(outputTokenBudgetForPurpose('test-ai'), 1_024);
   assert.throws(
     () => outputTokenBudgetForPurpose('tidy-names'),
@@ -119,6 +119,10 @@ test('selects bounded output budgets from the purpose and item count whitelist',
   assert.throws(
     () => outputTokenBudgetForPurpose('unknown', 1),
     /Unsupported AI purpose: unknown/i,
+  );
+  assert.throws(
+    () => outputTokenBudgetForPurpose('ask-space'),
+    /Unsupported AI purpose: ask-space/i,
   );
 });
 
@@ -168,56 +172,58 @@ test('adds language instructions to AI prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
-test('keeps the legacy single-page Ask Space prompt compatible', () => {
-  const prompt = createPrompt('ask-space', {
-    spaceName: 'Store launch',
+test('grounds Ask Page in exactly one page and preserves conversation history', () => {
+  const prompt = createPrompt('ask-page', {
     page: {
       title: 'Competitor listing',
       url: 'https://example.com/competitor',
       text: 'Vertical tabs and workspaces.',
     },
-    question: 'What should we emphasize?',
-    language: 'en',
-  });
-
-  assert.match(prompt[0].content, /focused work Space/);
-  assert.match(prompt[0].content, /reference data/);
-  assert.match(prompt[0].content, /Cite every factual claim/);
-  assert.match(prompt[1].content, /Store launch/);
-  assert.match(prompt[1].content, /Source \[1\]/);
-  assert.match(prompt[1].content, /Competitor listing/);
-  assert.match(prompt[1].content, /What should we emphasize/);
-});
-
-test('numbers multiple Ask Space sources and restricts citations to them', () => {
-  const prompt = createPrompt('ask-space', {
-    spaceName: 'Launch research',
-    pages: [
-      {
-        title: 'Chrome listing',
-        url: 'https://example.com/chrome',
-        text: 'Chrome users value familiar workflows.',
-      },
-      {
-        title: 'Arc notes',
-        url: 'https://example.net/arc',
-        text: 'Arc users value Spaces.',
-      },
+    pages: [{
+      title: 'Must be ignored',
+      url: 'https://example.net/other',
+      text: 'This is not the active page.',
+    }],
+    history: [
+      { role: 'user', text: 'What does this page cover?' },
+      { role: 'assistant', text: 'It covers browser workflows [1].' },
     ],
-    history: [{ role: 'user', text: 'Compare the audiences.' }],
-    question: 'What overlaps?',
+    question: 'What should we emphasize?',
     language: 'en',
   });
 
   const system = prompt[0].content;
   const user = prompt.at(-1).content;
-  assert.match(system, /Cite every factual claim[\s\S]*such as \[1\] or \[2\]/);
-  assert.match(system, /Use only citation numbers shown in the provided source list/);
-  assert.match(system, /never invent sources or citations/);
-  assert.match(user, /Source \[1\]:\nTitle: Chrome listing/);
-  assert.match(user, /Source \[2\]:\nTitle: Arc notes/);
-  assert.ok(user.indexOf('Source [1]') < user.indexOf('Source [2]'));
-  assert.match(user, /Question:\nWhat overlaps\?/);
+  assert.match(system, /one browser page/);
+  assert.match(system, /reference data/);
+  assert.match(system, /Cite every factual claim[\s\S]*\[1\]/);
+  assert.match(system, /Use only citation \[1\]/);
+  assert.doesNotMatch(system, /focused work Space|\[2\]/);
+  assert.deepEqual(prompt.slice(1, -1), [
+    { role: 'user', content: 'What does this page cover?' },
+    { role: 'assistant', content: 'It covers browser workflows [1].' },
+  ]);
+  assert.match(user, /Source \[1\]:\nTitle: Competitor listing/);
+  assert.match(user, /URL: https:\/\/example\.com\/competitor/);
+  assert.match(user, /What should we emphasize/);
+  assert.doesNotMatch(user, /Space:|Must be ignored|example\.net\/other/);
+});
+
+test('rejects Ask Page prompts without one explicit page and the legacy Ask Space kind', () => {
+  assert.throws(
+    () => createPrompt('ask-page', { question: 'What is here?' }),
+    /Ask Page prompts require one page/i,
+  );
+  assert.throws(
+    () => createPrompt('ask-page', { page: [], question: 'What is here?' }),
+    /Ask Page prompts require one page/i,
+  );
+  assert.throws(
+    () => createPrompt('ask-space', {
+      page: { title: 'Old scope', url: 'https://example.com', text: 'Legacy' },
+    }),
+    /Unsupported AI prompt kind: ask-space/i,
+  );
 });
 
 test('asks tidy-tabs AI to cluster by topic instead of domain', () => {

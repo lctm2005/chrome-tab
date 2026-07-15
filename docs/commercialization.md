@@ -1,6 +1,6 @@
 # Space Tabs Commercialization Plan
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## Positioning
 
@@ -35,8 +35,9 @@ Free release:
 - Portable local backup and restore.
 - Panel shortcuts.
 - Tidy Names and Auto Group actions that generate one final preview, require Apply before changing tabs or Tags, and support Undo.
-- BYOK Ask Space grounded in up to 12 confirmed live HTTP(S) pages, prioritizing selected pages, with disclosure,
-  streaming, Stop, and citations.
+- BYOK Ask Page grounded in the current HTTP(S) page, with provider, page,
+  character-count, and conversation-context disclosure, plus streaming, Stop,
+  and a clickable single-source citation.
 
 Future Pro tier:
 
@@ -45,6 +46,10 @@ Future Pro tier:
 - Advanced AI synthesis, planning, and workspace cleanup.
 - Shareable export packs for research sessions.
 - Team-shared Space templates and onboarding packs.
+
+Multi-page Ask Space remains deferred until its use case, source-selection
+model, and user experience are defined. It is not part of the free release or a
+committed Pro feature.
 
 ## Pricing Hypotheses
 
@@ -72,8 +77,8 @@ The first store release should not require sign-in.
 
 - Keep the core local-first and usable without AI.
 - Request optional host permissions at the moment of need, not during install.
-- Keep AI scoped to an explicit user action and the confirmed source pages or
-  tab metadata shown in a proposal.
+- Keep AI scoped to an explicit user action and the current page or tab
+  metadata shown before sending.
 - Charge for durable value such as sync, templates, and team reuse.
 - Avoid ads and affiliate links. Trust is a more important asset for this
   category than short-term revenue.

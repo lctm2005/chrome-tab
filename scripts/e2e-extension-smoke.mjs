@@ -481,7 +481,6 @@ async function startAskFixtureServer() {
       }
 
       sendDelta('Alpha sets the Tuesday checkpoint [1]');
-      responseSchedule(() => sendDelta(' and Beta records the Thursday review [2].'), 80);
       responseSchedule(() => {
         if (response.destroyed || response.writableEnded) return;
         record.doneSentAt = Date.now();
@@ -578,7 +577,7 @@ async function createLoadedTarget(client, url, attempts = 3) {
 async function main() {
   const progress = (step) => process.stderr.write(`[e2e] ${step}\n`);
   const arcSidebarFixturePath = join(repoRoot, 'tests/fixtures/arc-sidebar.json');
-  progress('starting local Ask Space pages and OpenAI-compatible SSE fixture');
+  progress('starting local Ask Page fixtures and OpenAI-compatible SSE fixture');
   const askFixtureServer = await startAskFixtureServer();
   progress('building an isolated extension fixture without local secrets');
   const extensionFixture = await createExtensionFixture({
@@ -769,10 +768,14 @@ async function main() {
         stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
         lastArcImport: saved.lastArcImport,
         finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-        undoVisible: !document.querySelector('#onboardingUndoArcButton')?.hidden,
         aiStepVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
         providerOptions: document.querySelector('#onboardingProviderInput')?.options.length || 0,
-        skipText: document.querySelector('#onboardingSkipAIButton')?.textContent || '',
+        removedControlsAbsent: [
+          '#onboardingSkipAIButton',
+          '#onboardingExportButton',
+          '#onboardingUndoArcButton',
+        ].every((selector) => !document.querySelector(selector)),
+        saveText: document.querySelector('#onboardingOpenWorkbenchButton')?.textContent || '',
         saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
       };
     })()`, 12000);
@@ -785,17 +788,20 @@ async function main() {
         pendingArcAISetup.stepLabel === 'Step 3 of 3' &&
         pendingArcAISetup.aiStepVisible &&
         pendingArcAISetup.providerOptions > 1 &&
-        pendingArcAISetup.skipText === 'Not now' &&
-        pendingArcAISetup.saveDisabled &&
+        pendingArcAISetup.removedControlsAbsent &&
+        pendingArcAISetup.saveText === 'Save' &&
+        !pendingArcAISetup.saveDisabled &&
         JSON.stringify(pendingArcAISetup.lastArcImport?.spaceIds) === JSON.stringify([pendingArcAISetup.imported.id]) &&
-        pendingArcAISetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.' &&
-        pendingArcAISetup.undoVisible,
+        pendingArcAISetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.',
       JSON.stringify(pendingArcAISetup),
     );
 
-    await evaluate(client, `document.querySelector('#onboardingSkipAIButton').click()`);
+    await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
     const completedArcSetup = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
+      const [stored, secret] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.storage.session.get('spaceTabsSecrets'),
+      ]);
       const saved = stored.spaceTabsState || {};
       if (document.querySelector('#onboardingDialog')?.open ||
           saved.onboarding?.completed !== true || saved.onboarding?.stage !== 'done') return null;
@@ -805,12 +811,16 @@ async function main() {
         importedPresent: (saved.spaces || []).some((space) =>
           space.id === ${JSON.stringify(pendingArcAISetup.imported.id)}),
         setupReminder: Boolean(document.querySelector('.setup-space')),
+        aiBaseUrl: saved.ai?.baseUrl || '',
+        aiModel: saved.ai?.model || '',
+        sessionKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
       };
     })()`);
     record(
-      'Optional AI can be skipped and only then completes onboarding',
+      'The sole Save action completes optional AI setup without a provider',
       completedArcSetup.completed && completedArcSetup.stage === 'done' &&
-        completedArcSetup.importedPresent && !completedArcSetup.setupReminder,
+        completedArcSetup.importedPresent && !completedArcSetup.setupReminder &&
+        !completedArcSetup.aiBaseUrl && !completedArcSetup.aiModel && completedArcSetup.sessionKeyLength === 0,
       JSON.stringify(completedArcSetup),
     );
 
@@ -1511,13 +1521,20 @@ async function main() {
       JSON.stringify(deletedSpaceState),
     );
 
-    await waitFor(client, `document.querySelector('.ask-space')`);
+    await waitFor(client, `document.querySelector('.ask-page')`);
     const reducedAIUI = await evaluate(client, `({
       hasContext: Boolean(document.querySelector('#contextView, .context-space')),
       hasSummary: Boolean(document.querySelector('#summarizePageButton')),
-      hasAsk: Boolean(document.querySelector('.ask-space')),
+      hasAsk: Boolean(document.querySelector('.ask-page')),
     })`);
     record('Context and Summary are removed while Ask remains', !reducedAIUI.hasContext && !reducedAIUI.hasSummary && reducedAIUI.hasAsk, JSON.stringify(reducedAIUI));
+
+    const restrictedAskTab = await evaluate(client, `(async () => {
+      const tab = await chrome.tabs.create({ url: 'chrome://newtab', active: true });
+      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
+      return { id: tab.id, url: tab.url || tab.pendingUrl || '' };
+    })()`);
+    await waitFor(client, `document.querySelector('#askSourceSummary')?.textContent === 'No readable page'`, 12000);
 
     await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'k', metaKey: true, bubbles: true, cancelable: true,
@@ -1525,31 +1542,60 @@ async function main() {
     await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
     await evaluate(client, `(() => {
       const input = document.querySelector('#commandPaletteInput');
-      input.value = 'Ask Space';
+      input.value = 'Ask Page';
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     })()`);
-    const askSpaceState = await waitFor(client, `(async () => {
+    const askPageState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
-      const activeSpaceId = stored.spaceTabsState?.activeSpaceId || '';
-      const sessionKey = \`space:\${activeSpaceId}\`;
+      const sessionKey = stored.spaceTabsState?.activeAskSessionKey || '';
+      const session = stored.spaceTabsState?.askSessions?.[sessionKey];
       if (document.querySelector('#askPageView')?.hidden ||
-          stored.spaceTabsState?.activeAskSessionKey !== sessionKey ||
-          !stored.spaceTabsState?.askSessions?.[sessionKey]) return null;
+          !session || session.tabId !== ${JSON.stringify(restrictedAskTab.id)}) return null;
       return {
-        activeSpaceId,
         sessionKey,
+        tabId: session.tabId,
+        url: session.url,
         scope: document.querySelector('#askScope')?.textContent || '',
         placeholder: document.querySelector('#askPagePrompt')?.placeholder || '',
+        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
       };
     })()`);
     record(
-      'Command Palette opens one persisted Ask conversation per active Space',
-      askSpaceState.sessionKey === `space:${askSpaceState.activeSpaceId}` &&
-        askSpaceState.placeholder === 'Ask this Space' &&
-        !askSpaceState.scope.includes('Context'),
-      JSON.stringify(askSpaceState),
+      'Command Palette opens a tab-and-URL-scoped Ask Page conversation',
+      askPageState.sessionKey.startsWith(`tab:${restrictedAskTab.id}:chrome://newtab`) &&
+        askPageState.placeholder === 'Ask about the current page' &&
+        askPageState.sourceSummary === 'No readable page' &&
+        !askPageState.scope.includes('Context'),
+      JSON.stringify(askPageState),
     );
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#askPagePrompt');
+      input.value = 'Restricted pages must not be read';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#askAIButton').click();
+    })()`);
+    const restrictedAskState = await waitFor(client, `(() => {
+      const message = 'Switch to an http or https page before using Ask Page.';
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      const toast = document.querySelector('#workbenchToast')?.textContent || '';
+      if (status !== message || toast !== message) return null;
+      return {
+        status,
+        toast,
+        reviewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        button: document.querySelector('#askAIButton')?.textContent || '',
+      };
+    })()`);
+    record(
+      'Ask Page rejects a restricted current page before reading or sending content',
+      !restrictedAskState.reviewOpen && restrictedAskState.button === 'Ask Page' && askFixtureServer.requests.length === 0,
+      JSON.stringify(restrictedAskState),
+    );
+    await evaluate(client, `(async () => {
+      document.querySelector('#askPagePrompt').value = '';
+      await chrome.tabs.remove(${JSON.stringify(restrictedAskTab.id)});
+    })()`);
 
     const originalAskAIState = await evaluate(client, `(async () => {
       const [stored, secret] = await Promise.all([
@@ -1633,9 +1679,9 @@ async function main() {
         }));
       }
     })()`);
-    const selectedAskSources = await waitFor(client, `(() => {
+    const askPageDisclosure = await waitFor(client, `(() => {
       const chips = [...document.querySelectorAll('#askSourceList .ask-source-chip')];
-      if (document.querySelector('#askSourceSummary')?.textContent !== '2 live pages' || chips.length !== 2) return null;
+      if (document.querySelector('#askSourceSummary')?.textContent !== 'Current page' || chips.length !== 1) return null;
       return {
         summary: document.querySelector('#askSourceSummary')?.textContent || '',
         hint: document.querySelector('#askSourceHint')?.textContent || '',
@@ -1682,7 +1728,17 @@ async function main() {
       configuredAskSettingsState.language === 'en' && configuredAskSettingsState.sessionKeyLength === 0,
       JSON.stringify(configuredAskSettingsState),
     );
-    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    record(
+      'Ask Page ignores selected rows and discloses only the previously active current page',
+      askPageDisclosure.hint === 'Only this current page will be read after confirmation.' &&
+        askPageDisclosure.chips.length === 1 &&
+        askPageDisclosure.chips[0].includes('Ask Source Alpha') &&
+        askPageDisclosure.selectedIds.includes(askSourceTabs.alpha.id) &&
+        askPageDisclosure.selectedIds.includes(askSourceTabs.beta.id),
+      JSON.stringify(askPageDisclosure),
+    );
+
+    await evaluate(client, `document.querySelector('.ask-page').click()`);
     await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
       !document.querySelector('#settingsDialog')?.open &&
       document.querySelector('#askProvider')?.textContent ===
@@ -1720,7 +1776,7 @@ async function main() {
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
     const missingKeyAskState = await waitFor(client, `(async () => {
-      const message = 'AI API key is missing. Add it in Settings before reading page sources.';
+      const message = 'AI API key is missing. Add it in Settings before reading the current page.';
       const status = document.querySelector('#syncStatus')?.textContent || '';
       const toast = document.querySelector('#workbenchToast')?.textContent || '';
       if (status !== message || toast !== message) return null;
@@ -1735,7 +1791,7 @@ async function main() {
       };
     })()`);
     record(
-      'Ask Space rejects a missing API key before permission, extraction, or provider traffic',
+      'Ask Page rejects a missing API key before permission, extraction, or provider traffic',
       missingKeyBefore.permission &&
         missingKeyAskState.permission &&
         missingKeyBefore.calls.permissionRequests === 0 &&
@@ -1744,7 +1800,7 @@ async function main() {
         missingKeyAskState.calls.pageExtractions === 0 &&
         missingKeyAskState.messages === missingKeyBefore.messages &&
         !missingKeyAskState.reviewOpen &&
-        missingKeyAskState.button === 'Ask Space' &&
+        missingKeyAskState.button === 'Ask Page' &&
         askFixtureServer.requests.length === 0,
       JSON.stringify({ missingKeyBefore, missingKeyAskState, mockRequests: askFixtureServer.requests.length }),
     );
@@ -2204,7 +2260,7 @@ async function main() {
         newOrphansAfterUndo.length === 0 &&
         undoneAutoGroupState.operationRecordHidden &&
         undoneAutoGroupState.toast === 'Undid: Auto Group organized 2 tabs.' &&
-        undoneAutoGroupState.sourceSummary === '2 live pages',
+        undoneAutoGroupState.sourceSummary === 'Current page',
       JSON.stringify({
         layoutRestored: JSON.stringify(undoneAutoGroupState.captured.layout) ===
           JSON.stringify(autoGroupFixtureBefore.layout),
@@ -2270,23 +2326,24 @@ async function main() {
       aiChats: [],
     }`);
 
-    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await evaluate(client, `document.querySelector('.ask-page').click()`);
     await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
       !document.querySelector('#settingsDialog')?.open &&
       document.querySelector('#askProvider')?.textContent ===
         'Custom OpenAI-compatible · ask-e2e-model'`);
     await evaluate(client, `(() => {
       const input = document.querySelector('#askPagePrompt');
-      input.value = 'E2E complete stream: summarize both pages';
+      input.value = 'E2E complete stream: summarize this page';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
     const askReviewState = await waitFor(client, `(async () => {
       if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Space') return null;
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
       const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
       const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
       const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)});
+      const stored = await chrome.storage.local.get('spaceTabsState');
       const firstSection = document.querySelector('#actionDialogPreview .action-preview-section');
       return {
         activeTabId: active?.id,
@@ -2294,6 +2351,7 @@ async function main() {
         permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
         provider: document.querySelector('#askProvider')?.textContent || '',
         sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
+        sessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
         calls: { ...window.__askE2ECalls },
         message: document.querySelector('#actionDialogMessage')?.textContent || '',
         sectionTitle: firstSection?.querySelector('h3 span')?.textContent || '',
@@ -2306,24 +2364,24 @@ async function main() {
       };
     })()`, 12000);
     record(
-      'Ask Space reads two non-active sources while Workbench stays active and shows a complete Review',
+      'Ask Page reads only the previously active page while Workbench stays active and shows a complete Review',
       askReviewState.activeTabId === openedWorkbench.id &&
         askReviewState.sourceTabsActive.every((active) => !active) &&
         askReviewState.permission &&
         askReviewState.calls.permissionRequests === 1 &&
         askReviewState.calls.pageExtractions === 1 &&
         askReviewState.provider === 'Custom OpenAI-compatible · ask-e2e-model' &&
-        askReviewState.sourceSummary === '2 live pages' &&
+        askReviewState.sourceSummary === 'Current page' &&
+        askReviewState.sessionKey.startsWith(`tab:${askSourceTabs.alpha.id}:${askFixtureServer.sourceAlphaUrl}`) &&
         askReviewState.message.includes('Custom OpenAI-compatible · ask-e2e-model') &&
-        /\d+ chars from 2 of 2 confirmed pages/.test(askReviewState.message) &&
-        askReviewState.sectionTitle === '2 source pages' &&
-        askReviewState.sourceItems.length === 2 &&
+        /\d+ chars from the current page/.test(askReviewState.message) &&
+        askReviewState.sectionTitle === 'Current page' &&
+        askReviewState.sourceItems.length === 1 &&
         askReviewState.sourceItems.every((item) => /\d+ chars/.test(item.chars)) &&
-        askReviewState.sourceItems.some((item) => item.url === askFixtureServer.sourceAlphaUrl) &&
-        askReviewState.sourceItems.some((item) => item.url === askFixtureServer.sourceBetaUrl) &&
+        askReviewState.sourceItems[0]?.url === askFixtureServer.sourceAlphaUrl &&
         askReviewState.confirmText === 'Send to provider',
       JSON.stringify({
-        selectedAskSources,
+        askPageDisclosure,
         askReviewState,
         permissionFlow: 'trusted CDP pointer click with temporary unpacked-fixture host preauthorization',
       }),
@@ -2334,8 +2392,7 @@ async function main() {
       const messages = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
       const answer = messages.at(-1);
       if (!answer?.textContent?.includes('Alpha sets the Tuesday checkpoint') ||
-          !answer.textContent.includes('Beta records the Thursday review') ||
-          document.querySelector('#askAIButton')?.textContent !== 'Ask Space') return null;
+          document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
       return {
         text: answer.textContent || '',
         links: [...answer.querySelectorAll('a')].map((link) => ({
@@ -2349,23 +2406,23 @@ async function main() {
     const completedAskAt = Date.now();
     const completedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'complete');
     const completedAskChat = await evaluate(client, `window.__askE2ECalls.aiChats
-      .filter((request) => request.purpose === 'ask-space').at(-1)`);
+      .filter((request) => request.purpose === 'ask-page').at(-1)`);
     record(
-      'Ask Space streams a cited result and renders clickable Sources',
+      'Ask Page streams a cited result and renders one clickable Source',
       completedAskState.text.includes('Sources') &&
         completedAskState.links.some((link) => link.href === askFixtureServer.sourceAlphaUrl && link.target === '_blank') &&
-        completedAskState.links.some((link) => link.href === askFixtureServer.sourceBetaUrl && link.target === '_blank') &&
-        completedAskState.button === 'Ask Space',
+        !completedAskState.links.some((link) => link.href === askFixtureServer.sourceBetaUrl) &&
+        completedAskState.button === 'Ask Page',
       JSON.stringify(completedAskState),
     );
     record(
-      'Ask Space sends both confirmed pages to the OpenAI-compatible mock',
+      'Ask Page sends only the current page to the OpenAI-compatible mock',
       completedMockRequest?.body?.stream === true &&
         completedMockRequest?.body?.max_tokens === 32_768 &&
-        completedMockRequest.sourceCount === 2 &&
+        completedMockRequest.sourceCount === 1 &&
         completedMockRequest.includesAlpha &&
-        completedMockRequest.includesBeta &&
-        completedAskChat?.purpose === 'ask-space' &&
+        !completedMockRequest.includesBeta &&
+        completedAskChat?.purpose === 'ask-page' &&
         completedAskChat?.itemCount === null,
       JSON.stringify({
         sourceCount: completedMockRequest?.sourceCount,
@@ -2377,7 +2434,7 @@ async function main() {
       }),
     );
     record(
-      'Ask Space finishes on SSE [DONE] without waiting for the held-open connection',
+      'Ask Page finishes on SSE [DONE] without waiting for the held-open connection',
       completedMockRequest?.doneSentAt > 0 &&
         completedMockRequest.serverEndCalledAt === 0 &&
         completedAskAt - completedMockRequest.doneSentAt < 2500,
@@ -2402,7 +2459,7 @@ async function main() {
         !previous.has(tab.id) && tab.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)}) || null;
     })()`);
     record(
-      'Ask Space Sources links open the cited page in a real Chrome tab',
+      'Ask Page source links open the cited page in a real Chrome tab',
       Number.isFinite(openedSourceLinkTab?.id),
       JSON.stringify(openedSourceLinkTab),
     );
@@ -2422,7 +2479,7 @@ async function main() {
     await clickElementWithCDP(client, '#askAIButton');
     const stopAskReview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Space') return null;
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
       return { message: document.querySelector('#actionDialogMessage')?.textContent || '' };
     })()`, 12000);
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
@@ -2439,7 +2496,7 @@ async function main() {
       const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
       const answer = answers.at(-1);
       const text = answer?.textContent || '';
-      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Space' ||
+      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page' ||
           !text.includes('Partial answer from Alpha') ||
           !text.includes('Request stopped before completion.')) return null;
       return {
@@ -2450,14 +2507,14 @@ async function main() {
     })()`, 12000);
     const stoppedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'stop');
     record(
-      'Ask Space Stop preserves the streamed partial answer and cited Sources',
+      'Ask Page Stop preserves the streamed partial answer and cited Source',
       streamingPartialState.button === 'Stop' &&
         stoppedAskState.status === 'Ask stopped.' &&
         stoppedAskState.sourceLinks.includes(askFixtureServer.sourceAlphaUrl) &&
-        stoppedAskState.sourceLinks.includes(askFixtureServer.sourceBetaUrl) &&
-        stoppedMockRequest?.sourceCount === 2 &&
+        !stoppedAskState.sourceLinks.includes(askFixtureServer.sourceBetaUrl) &&
+        stoppedMockRequest?.sourceCount === 1 &&
         stopAskReview.message.includes('stored text from 2 recent conversation messages') &&
-        stopAskReview.message.includes('generated Sources appendices excluded') &&
+        stopAskReview.message.includes('generated Sources appendix excluded') &&
         stoppedMockRequest.historyIncludesCompletedAnswer &&
         stoppedMockRequest.historyIncludesInlineCitationLink &&
         !stoppedMockRequest.historyIncludesSourcesAppendix &&
@@ -2492,7 +2549,7 @@ async function main() {
         delete window.__askE2EOriginals;
       }
     })()`);
-    await evaluate(client, `document.querySelector('.ask-space').click()`);
+    await evaluate(client, `document.querySelector('.ask-page').click()`);
     await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
       !document.querySelector('#settingsDialog')?.open &&
       document.querySelector('#askProvider')?.textContent !==
@@ -2637,6 +2694,12 @@ async function main() {
         model: document.querySelector('#onboardingModelInput')?.value || '',
         customModel: document.querySelector('#onboardingCustomModelInput')?.value || '',
         apiKeyLength: document.querySelector('#onboardingApiKeyInput')?.value?.length || 0,
+        saveText: document.querySelector('#onboardingOpenWorkbenchButton')?.textContent || '',
+        removedControlsAbsent: [
+          '#onboardingSkipAIButton',
+          '#onboardingExportButton',
+          '#onboardingUndoArcButton',
+        ].every((selector) => !document.querySelector(selector)),
         saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
         activeTab,
       };
@@ -2651,6 +2714,8 @@ async function main() {
         pendingFreshAISetup.provider === 'openai' &&
         pendingFreshAISetup.model.length > 0 &&
         pendingFreshAISetup.apiKeyLength === 0 &&
+        pendingFreshAISetup.saveText === 'Save' &&
+        pendingFreshAISetup.removedControlsAbsent &&
         pendingFreshAISetup.saveDisabled &&
         pendingFreshAISetup.activeTab?.id === openedWorkbench.id,
       JSON.stringify(pendingFreshAISetup),

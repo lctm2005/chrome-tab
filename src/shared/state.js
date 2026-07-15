@@ -202,6 +202,7 @@ export function serializeTab(tab) {
     index: tab.index ?? 0,
     windowId: tab.windowId,
     audible: Boolean(tab.audible),
+    lastAccessed: Number(tab.lastAccessed) || 0,
   };
 }
 

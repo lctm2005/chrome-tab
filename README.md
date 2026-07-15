@@ -10,7 +10,7 @@ what data is involved and what will change before anything is applied.
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
 - Arc migration: choose `StorableSidebar.json` for each import, preview selected Spaces, review conflicts and counts, and undo the latest import. Space Tabs reads the chosen file locally and never modifies it.
-- Ask Space: ask across up to 12 confirmed live HTTP(S) pages in a Space, prioritizing pages you select, with disclosure of the provider, sources, content size, and stored text from recent conversation messages, plus streaming, Stop, and clickable citations.
+- Ask Page: ask about the current HTTP(S) page when you send a question. Before anything goes to the provider, Space Tabs shows the provider, page, extracted character count, and stored text from recent conversation messages. Responses stream, can be stopped, and include a clickable link to the single source page.
 - Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
 - Folders: show locally stored nested folders, up to three levels deep.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
@@ -68,8 +68,10 @@ After updating the source files, reload the unpacked extension from `chrome://ex
 
 ## AI Setup
 
-AI features are optional and use your own API key. Configure them in the third
-step of first-run setup, or skip that step and configure them later in Settings.
+AI features are optional and use your own API key. The third step of first-run
+setup always ends with one `Save` action. Leave the provider unselected to
+finish without configuring AI, or complete the provider settings to save them.
+You can configure or change AI later in Settings.
 
 The setup step and full-page Workbench Settings use the same provider options:
 
@@ -81,7 +83,7 @@ The setup step and full-page Workbench Settings use the same provider options:
   endpoints and local Ollama models.
 - `API Key`: stored locally by Chrome for the current extension session; Ollama
   runs locally and does not require one.
-- `Language`: controls Ask Space output language.
+- `Language`: controls Ask Page output language.
 
 If no API key is configured, normal Space, folder, and tab management features continue to work.
 
@@ -108,7 +110,7 @@ Default bindings:
 | Toggle panel | `Alt+S` |
 | Ask submit | `Cmd+Enter` |
 | Abort Ask | `Ctrl+C` |
-| Open Ask Space | `Alt+A` |
+| Open Ask Page | `Alt+A` |
 | Tidy names | `Ctrl+Alt+T` |
 | Auto group | `Ctrl+Alt+G` |
 | Add Space | `Ctrl+Alt+N` |
@@ -117,3 +119,7 @@ Default bindings:
 
 `Alt+S` is the global Chrome action shortcut. The other bindings apply while
 the side panel is focused and can be edited in `Settings`.
+
+Multi-page Ask Space is intentionally deferred until its product scope and
+source-selection model are defined. Selecting tab rows does not broaden Ask
+Page beyond the current page.

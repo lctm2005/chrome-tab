@@ -49,16 +49,16 @@
 
       <main class="ask-view" id="askPageView" hidden>
         <div class="ask-scope" id="askScope"></div>
-        <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Space data disclosure">
+        <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Page data disclosure">
           <div><span>Provider</span><strong id="askProvider"></strong></div>
-          <div><span>Sources</span><strong id="askSourceSummary"></strong></div>
-          <p id="askSourceHint">Select live tabs in this Space to narrow the sources.</p>
+          <div><span>Page</span><strong id="askSourceSummary"></strong></div>
+          <p id="askSourceHint">Only the current page is read after confirmation.</p>
           <div class="ask-source-list" id="askSourceList"></div>
         </section>
         <div class="ask-messages" id="askMessages"></div>
-        <textarea id="askPagePrompt" rows="4" placeholder="Ask this Space"></textarea>
+        <textarea id="askPagePrompt" rows="4" placeholder="Ask about the current page"></textarea>
         <div class="ai-actions">
-          <button id="askAIButton">Ask Space</button>
+          <button id="askAIButton">Ask Page</button>
         </div>
       </main>
 
@@ -158,7 +158,7 @@
               <label class="onboarding-field">
                 Provider
                 <select id="onboardingProviderInput">
-                  <option value="" disabled selected>Choose a provider</option>
+                  <option value="" selected>No provider</option>
                 </select>
               </label>
               <label class="onboarding-field">
@@ -187,13 +187,10 @@
             </div>
             <div class="onboarding-ai-actions">
               <button type="button" class="secondary-button" id="onboardingTestAIButton" disabled>Test AI</button>
-              <div id="onboardingAIStatus" class="settings-status">Choose a provider or continue without AI.</div>
+              <div id="onboardingAIStatus" class="settings-status">Choose a provider, or Save without AI.</div>
             </div>
             <div class="onboarding-finish-actions">
-              <button type="button" class="secondary-button" id="onboardingSkipAIButton">Not now</button>
-              <button type="button" id="onboardingOpenWorkbenchButton" disabled>Save AI &amp; start</button>
-              <button type="button" class="secondary-button" id="onboardingExportButton">Export backup</button>
-              <button type="button" class="link-button danger-link" id="onboardingUndoArcButton" hidden>Undo this import</button>
+              <button type="button" id="onboardingOpenWorkbenchButton">Save</button>
             </div>
             <p class="onboarding-privacy">No account, telemetry, or Space Tabs server. Workspace data stays in Chrome. BYOK content goes only to the provider you choose.</p>
           </section>

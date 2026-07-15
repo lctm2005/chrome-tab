@@ -1,6 +1,6 @@
 # Space Tabs Chrome Web Store Listing
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## English (United States)
 
@@ -29,7 +29,7 @@ Keep Chrome. Bring your Arc workflow. Add private BYOK AI.
 
 Space Tabs helps people returning from Arc move selected Spaces into Chrome in minutes. Choose Arc's StorableSidebar.json for each import; Space Tabs reads it locally and never modifies it. Review names, conflicts, folders, and tab counts before import, then undo the latest import if it is not right. Saved pages stay dormant until opened, and a portable JSON backup gives you an escape hatch at any time.
 
-Use the compact side panel for quick switching, finding, and dragging tabs. Open the full-page Workbench for migration, backup, multi-page Ask, and AI organization.
+Use the compact side panel for quick switching, finding, and dragging tabs. Open the full-page Workbench for migration, backup, Ask Page, and AI organization.
 
 Features:
 
@@ -37,7 +37,7 @@ Features:
 - Selectable Arc import with conflict preview and Undo.
 - Nested folders and Chrome tab group integration.
 - Dormant saved tabs that stay unloaded until opened.
-- Ask Space across up to 12 confirmed live HTTP(S) pages, prioritizing selected pages, with numbered sources.
+- Ask Page for the current HTTP(S) page, with review before sending, streaming, Stop, and a clickable source link.
 - Optional BYOK AI with built-in and OpenAI-compatible providers.
 - Tidy Names and Auto Group proposals that require confirmation and support Undo.
 - A command palette for switching Spaces, finding tabs, and opening Ask.
@@ -45,7 +45,7 @@ Features:
 
 Space Tabs is local-first. Core organization works without an account or AI key. There is no telemetry, Space Tabs server, hosted sync service, or persistent script running on every website.
 
-Before Ask sends anything, Space Tabs shows the selected provider, source pages, extracted content size, and whether stored text from recent conversation messages is included. Generated-response Sources appendices are not sent as conversation context. Clicking Tidy Names or Auto Group sends the relevant tab metadata to the provider you configured and generates one final preview. No tab or Tag changes until you review that preview and choose Apply. API keys are kept in Chrome session storage and are excluded from workspace data, backups, and release packages.
+Before Ask Page sends anything, Space Tabs shows the selected provider, the current page, extracted character count, and whether stored text from recent conversation messages is included. Generated-response source links are not sent as conversation context. Clicking Tidy Names or Auto Group sends the relevant tab metadata to the provider you configured and generates one final preview. No tab or Tag changes until you review that preview and choose Apply. API keys are kept in Chrome session storage and are excluded from workspace data, backups, and release packages.
 ```
 
 ## 中文（简体）
@@ -59,7 +59,7 @@ Space Tabs
 简短说明：
 
 ```text
-把 Arc 工作空间带回 Chrome。迁移 Spaces，用自己的 AI 密钥询问多个页面，工作区数据默认保存在本地。
+把 Arc 工作空间带回 Chrome。迁移 Spaces，用自己的 AI 密钥询问当前页面，工作区数据默认保存在本地。
 ```
 
 详细说明：
@@ -69,9 +69,9 @@ Space Tabs
 
 每次导入时，由你手动选择 Arc 的 StorableSidebar.json；Space Tabs 只在本地读取，绝不会修改原文件。随后可预览并选择要导入的 Arc Spaces，提前查看命名冲突、文件夹和标签页数量，导入后也可以一键撤销。保存的页面默认休眠，需要时再打开，并可随时导出便携备份。
 
-侧边栏用于快速切换、查找和拖动标签页；全屏 Workbench 用于迁移、备份、多页面 Ask 和 AI 整理。
+侧边栏用于快速切换、查找和拖动标签页；全屏 Workbench 用于迁移、备份、Ask Page 和 AI 整理。
 
-Ask Space 最多读取 12 个用户确认的、当前打开的 HTTP(S) 页面，并优先使用你选择的页面。发送前会明确显示 AI 提供商、来源页面、内容大小，以及是否包含近期对话中已存储的消息文本；生成回复中的 Sources 附录不会作为对话上下文发送。点击 Tidy Names 或 Auto Group 后，相关标签页元数据会直接发送给你配置的 AI 提供商，并生成唯一的最终预览；只有在预览中点击 Apply，才会修改标签页或 Tag。应用后支持撤销。
+Ask Page 只读取你点击发送时的当前 HTTP(S) 页面。发送前会明确显示 AI 提供商、当前页面、提取的字符数，以及是否包含近期对话中已存储的消息文本；生成回复中的来源链接不会作为对话上下文发送。回答支持流式输出、Stop 和可点击的单一来源链接。点击 Tidy Names 或 Auto Group 后，相关标签页元数据会直接发送给你配置的 AI 提供商，并生成唯一的最终预览；只有在预览中点击 Apply，才会修改标签页或 Tag。应用后支持撤销。
 
 无需账号、无遥测、没有 Space Tabs 中转服务器。工作区数据默认保存在 Chrome 本地；只有当你主动发起 AI 操作时，相关内容才会直接发送给你选择的 AI 提供商。API Key 保存在 Chrome 会话存储中，不会进入普通工作区数据、备份或发布包。
 ```
@@ -91,13 +91,13 @@ Creates, renames, recolors, collapses, moves, and restores Chrome tab groups.
 Stores local Spaces, folders, dormant tabs, Ask history, operation records, shortcuts, and preferences.
 
 `scripting`:
-Extracts only the confirmed Ask source pages after the user starts Ask Space.
+Extracts only the current HTTP(S) page after the user sends a question with Ask Page.
 
 `favicon`:
 Shows page icons in the side panel.
 
 Optional host permissions:
-Requested only for Ask source origins and the user-selected AI provider endpoint at the explicit action that needs them.
+Requested only for the current Ask Page origin and the user-selected AI provider endpoint at the explicit action that needs them.
 
 ## Privacy Practices Copy
 
@@ -106,7 +106,7 @@ Space Tabs stores workspace data locally in Chrome extension storage. This can i
 
 Space Tabs does not sell user data, require an account, collect telemetry, or operate a hosted sync or proxy service. It does not run a persistent content script on every website.
 
-AI is optional. Ask uses up to 12 confirmed live HTTP(S) pages, prioritizing pages the user selects. Before Ask, Space Tabs shows the provider, source pages, content size, and whether stored text from recent conversation messages will be included; generated-response Sources appendices are excluded from the conversation context. Clicking Tidy Names or Auto Group sends the relevant tab metadata directly to the configured provider and generates one final preview. No tab or Tag changes until the user chooses Apply. The API key stays in Chrome session storage and is excluded from workspace state, backups, and release packages.
+AI is optional. Ask Page uses only the current HTTP(S) page captured when the user sends a question. Before sending, Space Tabs shows the provider, page, extracted character count, and whether stored text from recent conversation messages will be included; generated-response source links are excluded from the conversation context. Responses stream, can be stopped, and include a clickable link to the single source page. Clicking Tidy Names or Auto Group sends the relevant tab metadata directly to the configured provider and generates one final preview. No tab or Tag changes until the user chooses Apply. The API key stays in Chrome session storage and is excluded from workspace state, backups, and release packages.
 ```
 
 ## Reviewer Notes
@@ -116,14 +116,14 @@ Core features do not require an account or AI API key.
 
 Suggested review flow:
 
-1. Install Space Tabs and choose Start fresh or Move from Arc in the visible three-stage setup: Choose, Space, then optional AI & ready.
+1. Install Space Tabs and choose Start fresh or Move from Arc in the visible three-stage setup: Choose, Space, then AI & ready.
 2. For Arc, manually select a StorableSidebar.json fixture, review conflicts and counts, select Spaces, import, and use Undo. Start another import and verify that the file must be selected again.
 3. Create or switch a Space, open several pages, and use the command palette, folders, tab groups, and dormant tabs.
-4. Configure or skip BYOK AI in setup step three, then open Workbench Settings to review backup, restore, BYOK settings, and shortcuts.
-5. With a test AI provider configured, select two live tabs, ask a comparison, review provider/sources/size, confirm, observe streaming, and Stop if desired.
+4. In setup step three, leave the provider unselected and choose Save to finish without AI. Repeat with complete provider settings and verify that Save stores them. The setup footer has no Not now, export, or import-Undo actions. Then open Workbench Settings to review backup, restore, BYOK settings, and shortcuts.
+5. With a test AI provider configured, make an HTTP(S) page active and ask about it. Review the provider, exact current page, extracted character count, and conversation context; confirm, observe streaming and the clickable single-source link, and Stop if desired. Verify that selected or background tabs are not sent.
 6. Run Tidy Names and verify one click generates its single final preview without an intermediate confirmation; cancel it and verify nothing changes. Do the same for Auto Group, then run it again, apply, and use the 10-second Undo prompt.
 
-Space Tabs has no persistent content script. Source text is extracted only after a user starts Ask Space and grants the requested source origins.
+Space Tabs has no persistent content script. Source text is extracted only from the current HTTP(S) page after the user sends with Ask Page and grants access to that page's origin.
 ```
 
 ## Screenshot Plan
@@ -132,7 +132,7 @@ Generate 1280x800 screenshots with `npm run screenshots:store` and upload them i
 
 1. `01-spaces-overview.png`: Your Arc workspace, now in Chrome.
 2. `02-nested-folders-dormant-tabs.png`: Import Arc Spaces in minutes.
-3. `05-ask-page-byok-ai.png`: Ask multiple pages with your own AI key.
+3. `05-ask-page-byok-ai.png`: Ask the current page with your own AI key.
 4. `03-tab-context-menu.png`: AI organizes tabs; you approve every change.
 5. `04-settings-arc-import-shortcuts.png`: Local by default; export anytime.
 

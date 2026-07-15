@@ -1,6 +1,6 @@
 # Space Tabs Privacy Policy
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 Space Tabs is a Chrome extension for Arc-like browser workspaces, dormant saved
 tabs, and optional BYOK AI.
@@ -15,9 +15,8 @@ Space Tabs may handle:
 - Space backup files when the user explicitly exports or restores one.
 - Arc `StorableSidebar.json` files when the user explicitly selects one for an
   import. Space Tabs reads the selected file locally and never modifies it.
-- Titles, URLs, selected text, and page text from up to 12 confirmed live
-  HTTP(S) source tabs only when the user starts Ask Space. Ask prioritizes the
-  pages the user selects.
+- The title, URL, selected text, and page text from the current HTTP(S) page
+  only when the user sends a question with Ask Page.
 - Tab titles, simplified URLs without query strings or fragments, domains,
   and—for Auto Group—current Tag and live/saved status, only when the user
   starts a Tidy Names or Auto Group proposal.
@@ -44,11 +43,10 @@ user selects `StorableSidebar.json` again for each import.
 Core Space, Arc import, folder, shortcut, export, restore, and tab management
 features work locally.
 
-Before Ask Space sends anything, it shows the selected provider, successful
-source pages, extracted character count, truncation state, whether stored text
-from recent conversation messages will be included, and any confirmed sources
-that could not be read or fit within the content limit. Generated-response
-Sources appendices are not included in the conversation context sent to the AI
+Before Ask Page sends anything, it shows the selected provider, the single
+current page, extracted character count, truncation state, and whether stored
+text from recent conversation messages will be included. Generated-response
+source links are not included in the conversation context sent to the AI
 provider. Starting Tidy Names or Auto Group sends the disclosed tab metadata
 directly to the configured provider and generates one final preview. Neither
 workflow changes tabs or Tags until the user reviews that preview and chooses
@@ -67,9 +65,10 @@ Space Tabs requests Chrome permissions to:
 - Show the extension in Chrome's side panel.
 - Read and manage tabs and Chrome tab groups for the active browser window.
 - Store local Space data and preferences.
-- Read only confirmed live source pages after a user starts Ask Space.
-- Request access to confirmed Ask source origins and the selected AI provider
-  endpoint at the explicit action that needs it.
+- Read only the current HTTP(S) page after a user sends a question with Ask
+  Page.
+- Request access only to that current page's origin and the selected AI
+  provider endpoint at the explicit action that needs them.
 
 ## User Control
 

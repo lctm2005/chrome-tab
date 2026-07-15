@@ -353,13 +353,13 @@ async function extractPages(tabIds = [], options = {}) {
       failures.push({
         tabId,
         reason: 'content-limit',
-        error: 'Not sent because the Ask Space content limit was reached.',
+        error: 'Not sent because the Ask Page content limit was reached.',
       });
       continue;
     }
     try {
       const tab = await chrome.tabs.get(tabId);
-      if (!/^https?:/.test(tabUrl(tab))) throw new Error('Only http(s) tabs can be Ask Space sources.');
+      if (!/^https?:/.test(tabUrl(tab))) throw new Error('Only an http(s) current page can be read by Ask Page.');
       const limit = Math.min(maxCharsPerPage, remainingChars);
       const [result] = await chrome.scripting.executeScript({
         target: { tabId },

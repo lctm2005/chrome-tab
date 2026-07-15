@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createDefaultState, mergeStoredState, STORAGE_KEY } from '../src/shared/state.js';
+import { createDefaultState, mergeStoredState, serializeTab, STORAGE_KEY } from '../src/shared/state.js';
+
+test('serializes the numeric last-accessed time used to resolve the current page', () => {
+  assert.equal(serializeTab({ id: 1, lastAccessed: 1_726_000_123_456 }).lastAccessed, 1_726_000_123_456);
+  assert.equal(serializeTab({ id: 2, lastAccessed: '1726000123456' }).lastAccessed, 1_726_000_123_456);
+  assert.equal(serializeTab({ id: 3 }).lastAccessed, 0);
+});
 
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();

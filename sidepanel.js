@@ -14,14 +14,15 @@ import {
 } from './src/shared/ai-providers.js';
 import {
   appendAskSessionMessage,
-  createSpaceAskSession,
+  createAskSession,
+  normalizeSessionUrl,
   pruneAskSessions,
-  sessionKeyForSpace,
+  sessionKeyForTab,
+  tabIdFromSessionKey,
   updateAskSessionMessage,
 } from './src/shared/ask-session.js';
 import {
-  appendAskSourceLinks,
-  selectAskSpaceSources,
+  appendAskSourceLink,
 } from './src/shared/ask-sources.js';
 import {
   appendArcImportPlan,
@@ -190,6 +191,7 @@ let operationRecordHideTimer = 0;
 let activeTaskCount = 0;
 let taskQueue = Promise.resolve();
 let sharedRefreshRunning = false;
+let lastActivatedAskPageTab = null;
 let commandPaletteItems = [];
 let commandPaletteIndex = 0;
 const activeAskStreams = new Map();
@@ -267,13 +269,10 @@ const els = {
   onboardingThinkingInput: document.querySelector('#onboardingThinkingInput'),
   onboardingTestAIButton: document.querySelector('#onboardingTestAIButton'),
   onboardingAIStatus: document.querySelector('#onboardingAIStatus'),
-  onboardingSkipAIButton: document.querySelector('#onboardingSkipAIButton'),
   onboardingBackButton: document.querySelector('#onboardingBackButton'),
   onboardingNextButton: document.querySelector('#onboardingNextButton'),
   skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
   onboardingOpenWorkbenchButton: document.querySelector('#onboardingOpenWorkbenchButton'),
-  onboardingExportButton: document.querySelector('#onboardingExportButton'),
-  onboardingUndoArcButton: document.querySelector('#onboardingUndoArcButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
@@ -432,6 +431,11 @@ function bindEvents() {
   if (extensionRuntime && chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener(handleRuntimeEvent);
   }
+  if (extensionRuntime && chrome.tabs?.onActivated) {
+    chrome.tabs.onActivated.addListener(handleChromeTabActivated);
+    chrome.tabs.onUpdated.addListener(handleChromeTabUpdated);
+    chrome.tabs.onRemoved.addListener(handleChromeTabRemoved);
+  }
   els.settingsButton.addEventListener('click', () => runTask(async () => {
     if (!workbenchMode) {
       await openWorkbench({ view: 'settings' });
@@ -485,6 +489,11 @@ function bindEvents() {
   els.onboardingArcChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('onboarding'));
   els.onboardingArcSpaces.addEventListener('change', renderOnboarding);
   els.onboardingProviderInput.addEventListener('change', () => {
+    if (!els.onboardingProviderInput.value) {
+      renderOnboardingAISettings({ selectNoProvider: true });
+      renderOnboarding();
+      return;
+    }
     renderAIProviderFields(
       settingsFromProviderSelection(onboardingAIControls()),
       onboardingAIControls(),
@@ -500,18 +509,10 @@ function bindEvents() {
   els.onboardingApiKeyInput.addEventListener('input', renderOnboarding);
   els.onboardingThinkingInput.addEventListener('change', renderOnboarding);
   els.onboardingTestAIButton.addEventListener('click', () => startTestAIFromUserGesture(onboardingAIControls()));
-  els.onboardingSkipAIButton.addEventListener('click', () => runTask(() => finishOnboarding(true)));
   els.onboardingBackButton.addEventListener('click', goBackOnboarding);
   els.onboardingNextButton.addEventListener('click', () => runTask(continueOnboarding));
   els.skipOnboardingButton.addEventListener('click', () => runTask(() => finishOnboarding(false)));
   els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask(saveOnboardingAIAndFinish));
-  els.onboardingExportButton.addEventListener('click', () => runTask(exportSpaceData));
-  els.onboardingUndoArcButton.addEventListener('click', () => runTask(async () => {
-    clearOnboardingArcSelection();
-    els.onboardingApiKeyInput.value = '';
-    els.onboardingDialog.close();
-    await undoLastArcImport({ confirm: false });
-  }));
   els.onboardingDialog.addEventListener('cancel', (event) => {
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
@@ -976,12 +977,11 @@ function render() {
   const isSettingsView = activeView === 'settings';
   const showSources = workbenchMode || isSpaceView;
   const groupsCollapsed = showSources && isSpaceGroupsCollapsed();
-  if (isAskView) ensureCurrentAskSession();
   els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
     ? panelActionStatus(activePanelAction)
     : isAskView
-    ? 'Ask Space'
+    ? activeAskPageStatus()
     : isSettingsView
     ? 'Settings'
     : '';
@@ -1006,11 +1006,7 @@ function render() {
   els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
-  if (isAskView) {
-    els.askScope.textContent = `${activeSpace.name} · sources stay local until you confirm an Ask`;
-    renderAskDisclosure();
-    renderAskMessages();
-  }
+  if (isAskView) refreshAskPageTargetUI();
   renderSpaces();
   renderOperationRecord();
   updateAIRequestUI();
@@ -1231,37 +1227,95 @@ async function undoLastOperation() {
   showStatusToast(message, 'success');
 }
 
-function currentAskSources() {
-  return selectAskSpaceSources(spaceView, selectedTabIds);
+function currentAskPageTab() {
+  if (lastActivatedAskPageTab) {
+    const refreshed = tabs.find((tab) => Number(tab.id) === Number(lastActivatedAskPageTab.id));
+    return refreshed
+      ? { ...refreshed, ...lastActivatedAskPageTab, active: false }
+      : lastActivatedAskPageTab;
+  }
+  const activeTab = tabs.find((tab) => tab.active);
+  if (activeTab) return activeTab;
+  return [...tabs]
+    .filter((tab) => Number.isFinite(Number(tab.lastAccessed)) && Number(tab.lastAccessed) > 0)
+    .sort((left, right) => Number(right.lastAccessed) - Number(left.lastAccessed))[0] || null;
+}
+
+async function handleChromeTabActivated(activeInfo = {}) {
+  if (Number.isFinite(panelWindowId) && Number(activeInfo.windowId) !== Number(panelWindowId)) return;
+  const cached = tabs.find((tab) => Number(tab.id) === Number(activeInfo.tabId));
+  if (cached) {
+    lastActivatedAskPageTab = { ...cached, active: false, lastAccessed: Date.now() };
+    refreshAskPageTargetUI();
+  }
+  try {
+    const tab = await chrome.tabs.get(Number(activeInfo.tabId));
+    rememberAskPageTab(tab);
+  } catch {
+    // A tab can close between onActivated and tabs.get. The next activation or
+    // normal refresh will resolve the current page.
+  }
+}
+
+function handleChromeTabUpdated(tabId, changeInfo, tab) {
+  if (Number(tabId) !== Number(lastActivatedAskPageTab?.id)) return;
+  if (!changeInfo.url && !changeInfo.title && !changeInfo.status) return;
+  rememberAskPageTab(tab);
+}
+
+function handleChromeTabRemoved(tabId) {
+  if (Number(tabId) !== Number(lastActivatedAskPageTab?.id)) return;
+  lastActivatedAskPageTab = null;
+  refreshAskPageTargetUI();
+}
+
+function rememberAskPageTab(tab = {}) {
+  const url = String(tab.pendingUrl || tab.url || '');
+  if (!url || url.startsWith(chrome.runtime.getURL(''))) return;
+  lastActivatedAskPageTab = decorateTabs([{ ...tab, url, active: false }], state)[0];
+  refreshAskPageTargetUI();
+}
+
+function refreshAskPageTargetUI() {
+  if (activeView !== 'ask') return;
+  ensureCurrentAskSession();
+  const sourceTab = currentAskPageTab();
+  els.askScope.textContent = sourceTab
+    ? `${sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page'} · stays local until you confirm`
+    : 'Current page · stays local until you confirm';
+  renderAskDisclosure();
+  renderAskMessages();
+}
+
+function readableAskPageTab() {
+  const tab = currentAskPageTab();
+  return tab && isPageShortcutCapableUrl(tab.url) ? tab : null;
+}
+
+function activeAskPageStatus() {
+  return readableAskPageTab() ? 'Current page' : 'Switch to http(s)';
 }
 
 function renderAskDisclosure() {
-  const selection = currentAskSources();
+  const tab = currentAskPageTab();
+  const readableTab = readableAskPageTab();
   const provider = providerById(state.ai.provider);
   els.askProvider.textContent = [provider.label, state.ai.model].filter(Boolean).join(' · ');
-  els.askSourceSummary.textContent = `${selection.count} live ${selection.count === 1 ? 'page' : 'pages'}`;
-  if (selection.mode === 'selected') {
-    const limited = selection.truncated
-      ? ` ${selection.counts.limited} additional selected ${selection.counts.limited === 1 ? 'page is' : 'pages are'} excluded by the 12-page limit.`
-      : '';
-    els.askSourceHint.textContent = selection.count
-      ? `${selection.count} selected ${selection.count === 1 ? 'source' : 'sources'} will be read after confirmation.${limited}`
-      : 'The selected rows are saved or restricted. Select at least one live http(s) tab.';
-  } else {
-    const limited = selection.truncated ? ` Limited to ${selection.count} of ${selection.counts.requested} readable pages.` : '';
-    els.askSourceHint.textContent = `No tabs selected, so Ask uses live pages in this Space.${limited}`;
-  }
-  const chips = selection.tabs.map((tab, index) => {
+  els.askSourceSummary.textContent = readableTab ? 'Current page' : 'No readable page';
+  els.askSourceHint.textContent = readableTab
+    ? 'Only this current page will be read after confirmation.'
+    : 'Switch to an http or https page before using Ask Page.';
+  const chips = tab ? [tab].map((sourceTab) => {
     const chip = document.createElement('span');
     chip.className = 'ask-source-chip';
-    chip.title = tab.url;
+    chip.title = sourceTab.url;
     const number = document.createElement('small');
-    number.textContent = `[${index + 1}]`;
+    number.textContent = '[1]';
     const title = document.createElement('b');
-    title.textContent = tab.displayTitle || tab.title || tab.url;
+    title.textContent = sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page';
     chip.append(number, title);
     return chip;
-  });
+  }) : [];
   els.askSourceList.replaceChildren(...chips);
 }
 
@@ -2117,13 +2171,13 @@ function renderSpaces() {
   });
 
   const askButton = document.createElement('button');
-  askButton.className = `space ask-space${activeView === 'ask' ? ' active' : ''}`;
+  askButton.className = `space ask-page${activeView === 'ask' ? ' active' : ''}`;
   askButton.type = 'button';
-  askButton.title = 'Ask Space';
-  askButton.setAttribute('aria-label', 'Ask Space');
+  askButton.title = 'Ask Page';
+  askButton.setAttribute('aria-label', 'Ask Page');
   askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v14"/><path d="M12 12h6"/><path d="M12 12H6"/></svg>`;
   askButton.querySelector('svg').classList.add('space-mark');
-  askButton.append(spaceButtonLabel('Ask Space'));
+  askButton.append(spaceButtonLabel('Ask Page'));
   askButton.addEventListener('click', () => runTask(openAskPage));
 
   const setupButton = document.createElement('button');
@@ -2277,7 +2331,6 @@ function renderOnboarding() {
   els.skipOnboardingButton.hidden = isFinish;
   els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
   els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
-  els.onboardingUndoArcButton.hidden = !(isFinish && state.lastArcImport?.spaceIds?.length);
 
   const progress = [...els.onboardingProgress.querySelectorAll('span')];
   progress.forEach((item, index) => {
@@ -2484,9 +2537,19 @@ async function applyArcOnboarding() {
   }
 }
 
-async function finishOnboarding(openWorkbenchAfter) {
+async function finishOnboarding(openWorkbenchAfter, options = {}) {
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
+    if (options.clearAI) {
+      state.ai = normalizeAIProviderSettings({
+        ...state.ai,
+        provider: CUSTOM_AI_PROVIDER_ID,
+        baseUrl: '',
+        model: '',
+        apiKey: '',
+      });
+      await secretRemove(SECRET_STORAGE_KEY);
+    }
     state.onboarding = { version: 2, completed: true, stage: 'done' };
     await saveState();
   });
@@ -2498,11 +2561,15 @@ async function finishOnboarding(openWorkbenchAfter) {
 }
 
 async function saveOnboardingAIAndFinish() {
+  if (!onboardingAIControls().providerInput.value) {
+    await finishOnboarding(true, { clearAI: true });
+    return;
+  }
   let aiSettings;
   try {
     aiSettings = currentAISettingsFromControls(onboardingAIControls());
     if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-      throw new Error('Add an API key, or choose Not now.');
+      throw new Error('Add an API key, or choose No provider.');
     }
   } catch (error) {
     setAIControlsStatus(onboardingAIControls(), error.message || String(error));
@@ -5224,51 +5291,48 @@ function startAskFromUserGesture() {
   }
   const prompt = els.askPagePrompt.value.trim();
   if (!prompt) return;
-  const sourceSpaceId = state.activeSpaceId;
-  const sourceSelection = currentAskSources();
-  if (sourceSelection.count === 0) {
-    const message = sourceSelection.mode === 'selected'
-      ? 'The selected rows cannot be read. Select at least one live http(s) tab in this Space.'
-      : 'Open at least one http(s) page in this Space before asking it.';
-    reportAskStartError(message);
+  const currentTab = currentAskPageTab();
+  if (!currentTab || !isPageShortcutCapableUrl(currentTab.url)) {
+    reportAskStartError('Switch to an http or https page before using Ask Page.');
     return;
   }
+  const sourceTab = {
+    id: Number(currentTab.id),
+    title: currentTab.displayTitle || currentTab.title || currentTab.url || 'Current page',
+    url: currentTab.url,
+  };
   const aiSettings = structuredClone(state.ai);
   if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-    reportAskStartError('AI API key is missing. Add it in Settings before reading page sources.');
+    reportAskStartError('AI API key is missing. Add it in Settings before reading the current page.');
     return;
   }
   let permissionRequest;
   try {
-    permissionRequest = requestAskPermissionsFromUserGesture(sourceSelection.tabs, aiSettings);
+    permissionRequest = requestAskPermissionsFromUserGesture(sourceTab, aiSettings);
   } catch (error) {
     reportAskStartError(formatAIError(error));
     return;
   }
   void runTask(() => askCustomPrompt({
     prompt,
-    sourceSpaceId,
-    sourceSelection,
+    sourceTab,
     aiSettings,
     permissionRequest,
   }));
 }
 
-function requestAskPermissionsFromUserGesture(sourceTabs = [], aiSettings = state.ai) {
+function requestAskPermissionsFromUserGesture(sourceTab, aiSettings = state.ai) {
   if (!extensionRuntime) return Promise.resolve(true);
+  if (!sourceTab || !isPageShortcutCapableUrl(sourceTab.url)) {
+    throw new Error('Switch to an http or https page before using Ask Page.');
+  }
   const origins = [...new Set([
-    ...(sourceTabs || [])
-      .map((tab) => tab?.url)
-      .filter((url) => /^https?:/.test(url || ''))
-      .map((url) => getOriginPattern(url)),
+    getOriginPattern(sourceTab.url),
     getOriginPattern(aiSettings.baseUrl),
   ])];
-  if (origins.length < 2 && sourceTabs.length === 0) {
-    throw new Error('Select at least one live http(s) page for Ask Space.');
-  }
   return chrome.permissions.request({ origins }).then((granted) => {
     if (!granted) {
-      throw new Error('Ask Space permission was not granted. No page content was read or sent.');
+      throw new Error('Ask Page permission was not granted. No page content was read or sent.');
     }
     return true;
   });
@@ -5281,70 +5345,55 @@ function reportAskStartError(message) {
 
 async function askCustomPrompt({
   prompt,
-  sourceSpaceId,
-  sourceSelection,
+  sourceTab,
   aiSettings,
   permissionRequest,
 } = {}) {
   activeView = 'ask';
   render();
-  if (state.activeSpaceId !== sourceSpaceId) {
-    throw new Error('The active Space changed before Ask started. Review the current sources and try again.');
-  }
-  const session = ensureCurrentAskSession();
+  const session = ensureAskSessionByKey(sessionKeyForTab(sourceTab), sourceTab);
+  state.activeAskSessionKey = session.key;
   const history = recentAskHistory(session.messages);
-  const sourceSpaceName = currentSpace().name;
   const requestId = beginAIRequest();
   let statusMessage = null;
   try {
     await permissionRequest;
     assertAIRequestActive(requestId);
     const extraction = await send('pages:extract', {
-      tabIds: sourceSelection.tabIds,
-      options: { maxCharsPerPage: 12000, maxTotalChars: 60000 },
+      tabIds: [sourceTab.id],
+      options: { maxCharsPerPage: 12000, maxTotalChars: 12000 },
     });
     assertAIRequestActive(requestId);
     const pages = extraction.pages || [];
     const failures = extraction.failures || [];
-    if (pages.length + failures.length !== sourceSelection.tabIds.length) {
-      throw new Error('Ask Space could not account for every confirmed source. No content was sent.');
+    if (pages.length + failures.length !== 1) {
+      throw new Error('Ask Page could not account for the current page. No content was sent.');
     }
     if (pages.length === 0) {
       const detail = failures[0]?.error;
-      throw new Error(detail || 'The selected pages could not be read. Reload them and try again.');
+      throw new Error(detail || 'The current page could not be read. Reload it and try again.');
     }
-    if (state.activeSpaceId !== sourceSpaceId) {
-      throw new Error('The active Space changed while sources were being prepared. Review the current Space and try again.');
+    const page = pages[0];
+    if (
+      Number(page.tabId) !== Number(sourceTab.id) ||
+      normalizeSessionUrl(page.url) !== normalizeSessionUrl(sourceTab.url)
+    ) {
+      throw new Error('The current page changed while Ask Page was preparing it. Review the new page and try again.');
     }
     const provider = providerById(aiSettings.provider);
-    const sourceTabById = new Map(sourceSelection.tabs.map((tab) => [Number(tab.id), tab]));
-    const limitedSourceCount = Number(sourceSelection.counts?.limited) || 0;
-    const otherUntouchedCount = Math.max(0, sourceSelection.untouchedCount - limitedSourceCount);
-    const limitedSourceLabel = sourceSelection.mode === 'selected' ? 'selected' : 'readable';
     const confirmed = await showPlanPreview({
-      title: 'Review Ask Space',
-      message: `${provider.label} · ${aiSettings.model || 'configured model'} · ${formatCharacterCount(extraction.totalChars)} from ${pages.length} of ${sourceSelection.count} confirmed pages${limitedSourceCount ? ` · ${limitedSourceCount} additional ${limitedSourceLabel} ${limitedSourceCount === 1 ? 'page' : 'pages'} excluded by the 12-page limit` : ''}${history.length ? ` · stored text from ${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'} (generated Sources appendices excluded)` : ''}. Nothing is sent until you confirm.`,
+      title: 'Review Ask Page',
+      message: `${provider.label} · ${aiSettings.model || 'configured model'} · ${formatCharacterCount(extraction.totalChars)} from the current page${page.truncated ? ' · page text truncated' : ''}${history.length ? ` · stored text from ${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'} (generated Sources appendix excluded)` : ''}. Nothing is sent until you confirm.`,
       confirmText: 'Send to provider',
       sections: [
         {
-          title: `${pages.length} source ${pages.length === 1 ? 'page' : 'pages'}`,
-          items: pages.map((page, index) => ({
-            title: `[${index + 1}] ${page.title || page.url || 'Untitled'}`,
+          title: 'Current page',
+          items: [{
+            title: `[1] ${page.title || page.url || 'Untitled'}`,
             result: `${formatCharacterCount(page.charCount || String(page.text || '').length)}${page.truncated ? ' · truncated' : ''}`,
             meta: page.url,
-          })),
+          }],
         },
-        ...(failures.length ? [{
-          title: 'Confirmed sources not sent',
-          items: failures.map((failure) => {
-            const tab = sourceTabById.get(Number(failure.tabId));
-            return {
-              title: tab?.displayTitle || tab?.title || tab?.url || `Tab ${failure.tabId}`,
-              result: failure.reason === 'content-limit' ? 'Content limit reached' : 'Could not read',
-              meta: failure.error,
-            };
-          }),
-        }] : []),
         {
           title: 'Question and conversation context',
           items: [
@@ -5355,45 +5404,30 @@ async function askCustomPrompt({
             }] : []),
           ],
         },
-        ...(limitedSourceCount ? [{
-          title: '12-page source limit',
-          items: [{
-            title: `${limitedSourceCount} additional ${limitedSourceLabel} ${limitedSourceCount === 1 ? 'page' : 'pages'}`,
-            result: 'Not read or sent',
-          }],
-        }] : []),
-        ...(otherUntouchedCount ? [{
-          title: 'Other Space tabs not sent',
-          items: [{
-            title: `${otherUntouchedCount} other saved, restricted, or unselected tabs`,
-            result: 'Untouched',
-          }],
-        }] : []),
       ],
     });
     if (!confirmed) return;
     assertAIRequestActive(requestId);
-    statusMessage = await beginAskTurn(session.key, prompt, sourceSpaceId);
-    activeAskStreams.set(requestId, { messageRef: statusMessage, pages, text: '' });
+    statusMessage = await beginAskTurn(session.key, prompt, sourceTab);
+    activeAskStreams.set(requestId, { messageRef: statusMessage, page, text: '' });
     assertAIRequestActive(requestId);
     const { text, finishReason } = await send('ai:chat', {
       settings: aiSettings,
       requestId,
       stream: true,
-      purpose: 'ask-space',
-      messages: createPrompt('ask-space', {
+      purpose: 'ask-page',
+      messages: createPrompt('ask-page', {
         question: prompt,
-        spaceName: sourceSpaceName,
-        pages,
+        page,
         history,
         language: aiSettings.language,
       }),
     });
     assertAIRequestActive(requestId);
     const answerText = finishReason === 'length'
-      ? `${text || 'No AI text returned.'}\n\n_The provider stopped at the Ask Space output limit; the answer may be incomplete._`
+      ? `${text || 'No AI text returned.'}\n\n_The provider stopped at the Ask Page output limit; the answer may be incomplete._`
       : text || 'No AI text returned.';
-    const answer = appendAskSourceLinks(answerText, pages);
+    const answer = appendAskSourceLink(answerText, page);
     els.askPagePrompt.value = '';
     await persistAskMessage(statusMessage, answer);
   } catch (error) {
@@ -5403,7 +5437,7 @@ async function askCustomPrompt({
     if (statusMessage) {
       const stopped = Boolean(stream?.aborted) || /request was stopped|ask stopped/i.test(message);
       const answer = partial
-        ? appendAskSourceLinks(`${partial}\n\n_${stopped ? 'Request stopped before completion.' : `Request failed before completion: ${message}`}_`, stream?.pages || [])
+        ? appendAskSourceLink(`${partial}\n\n_${stopped ? 'Request stopped before completion.' : `Request failed before completion: ${message}`}_`, stream?.page)
         : message;
       await persistAskMessage(statusMessage, answer);
     }
@@ -5426,17 +5460,15 @@ function recentAskHistory(messages = []) {
   })).filter((message) => message.text);
 }
 
-async function beginAskTurn(sessionKey, prompt, sourceSpaceId) {
+async function beginAskTurn(sessionKey, prompt, sourceTab) {
   let assistantRef;
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
-    if (state.activeSpaceId !== sourceSpaceId) {
-      throw new Error('The active Space changed before Ask was sent. Review the current sources and try again.');
-    }
-    const latestSession = ensureAskSessionByKey(sessionKey);
+    const latestSession = ensureAskSessionByKey(sessionKey, sourceTab);
+    state.activeAskSessionKey = latestSession.key;
     appendAskSessionMessage(latestSession, 'user', prompt);
     const assistant = appendAskSessionMessage(latestSession, 'assistant', 'Thinking...');
-    assistantRef = { sessionKey: latestSession.key, messageId: assistant.id };
+    assistantRef = { sessionKey: latestSession.key, messageId: assistant.id, sourceTab };
     await saveState();
   });
   renderAskMessages();
@@ -5447,7 +5479,7 @@ async function persistAskMessage(ref, text) {
   if (!ref) return;
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
-    const latestSession = ensureAskSessionByKey(ref.sessionKey);
+    const latestSession = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
     const updated = updateAskSessionMessage(latestSession, ref.messageId, text);
     if (!updated) appendAskSessionMessage(latestSession, 'assistant', text);
     await saveState();
@@ -6200,19 +6232,20 @@ function onboardingAIControls() {
   };
 }
 
-function renderOnboardingAISettings() {
+function renderOnboardingAISettings(options = {}) {
   const controls = onboardingAIControls();
   const configured = Boolean(String(state.ai?.baseUrl || '').trim() && String(state.ai?.model || '').trim());
   renderProviderOptions(controls, { placeholder: true });
   controls.apiKeyInput.value = state.ai?.apiKey || '';
   controls.thinkingInput.value = state.ai?.thinking || 'disabled';
-  if (configured) {
+  if (configured && !options.selectNoProvider) {
     renderAIProviderFields(normalizeAIProviderSettings(state.ai), controls);
     controls.apiKeyInput.value = state.ai?.apiKey || '';
-    setAIControlsStatus(controls, 'Review the provider, test it, or continue without AI.');
+    setAIControlsStatus(controls, 'Review the provider, test it, then Save.');
   } else {
     controls.providerInput.value = '';
     controls.baseUrlInput.value = '';
+    controls.apiKeyInput.value = '';
     controls.baseUrlInput.disabled = true;
     controls.modelInput.replaceChildren();
     controls.modelInput.disabled = true;
@@ -6220,7 +6253,7 @@ function renderOnboardingAISettings() {
     controls.thinkingInput.disabled = true;
     controls.customModelLabel.hidden = true;
     controls.customModelInput.required = false;
-    setAIControlsStatus(controls, 'Choose a provider or continue without AI.');
+    setAIControlsStatus(controls, 'Choose a provider, or Save without AI.');
   }
   updateOnboardingAIActionState();
 }
@@ -6235,8 +6268,7 @@ function renderProviderOptions(controls = settingsAIControls(), config = {}) {
   if (config.placeholder) {
     const placeholder = document.createElement('option');
     placeholder.value = '';
-    placeholder.textContent = 'Choose a provider';
-    placeholder.disabled = true;
+    placeholder.textContent = 'No provider';
     providerOptions.unshift(placeholder);
   }
   controls.providerInput.replaceChildren(...providerOptions);
@@ -6417,7 +6449,7 @@ function selectedModelFromControls(controls) {
 
 function updateOnboardingAIActionState() {
   const controls = onboardingAIControls();
-  let valid = false;
+  let valid = !controls.providerInput.value;
   if (controls.providerInput.value) {
     try {
       const settings = currentAISettingsFromControls(controls);
@@ -6427,7 +6459,7 @@ function updateOnboardingAIActionState() {
     }
   }
   els.onboardingOpenWorkbenchButton.disabled = !valid;
-  controls.testButton.disabled = !valid || Boolean(activeAIRequestId);
+  controls.testButton.disabled = !controls.providerInput.value || !valid || Boolean(activeAIRequestId);
 }
 
 function setAIControlsStatus(controls, message) {
@@ -6511,7 +6543,7 @@ async function abortActiveAIRequest() {
 
 function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
-  els.askAIButton.textContent = busy ? 'Stop' : 'Ask Space';
+  els.askAIButton.textContent = busy ? 'Stop' : 'Ask Page';
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
   els.onboardingTestAIButton.textContent = busy ? 'Stop request' : 'Test AI';
   updateOnboardingAIActionState();
@@ -6686,9 +6718,9 @@ function currentSpace() {
 }
 
 function ensureCurrentAskSession() {
-  const space = currentSpace();
-  const key = sessionKeyForSpace(space.id);
-  const session = ensureAskSessionByKey(key, space);
+  const tab = currentAskPageTab() || {};
+  const key = sessionKeyForTab(tab);
+  const session = ensureAskSessionByKey(key, tab);
   state.activeAskSessionKey = key;
   state.askSessions = pruneAskSessions(state.askSessions, {
     activeKey: key,
@@ -6698,17 +6730,36 @@ function ensureCurrentAskSession() {
   return session;
 }
 
-function ensureAskSessionByKey(key, space = currentSpace()) {
-  const safeKey = String(key || '').startsWith('space:') ? key : sessionKeyForSpace(space.id);
-  const keySpaceId = safeKey.slice('space:'.length);
-  const sessionSpace = state.spaces.find((item) => item.id === keySpaceId) || space;
+function ensureAskSessionByKey(key, tab = null) {
+  const currentTab = tab || currentAskPageTab() || {};
+  const currentKey = sessionKeyForTab(currentTab);
+  const requestedKey = String(key || '');
+  const safeKey = requestedKey.startsWith('tab:') ? requestedKey : currentKey;
+  const sessionTab = safeKey === currentKey ? currentTab : askSessionTabFromKey(safeKey);
   if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
-  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createSpaceAskSession(sessionSpace);
+  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createAskSession(sessionTab);
   const session = state.askSessions[safeKey];
-  session.spaceId = sessionSpace.id;
-  session.title = sessionSpace.name || 'Space';
-  session.url = '';
+  session.key = safeKey;
+  if (safeKey === currentKey) {
+    session.tabId = Number.isFinite(Number(currentTab.id)) ? Number(currentTab.id) : null;
+    session.title = currentTab.displayTitle || currentTab.title || session.title || 'Current page';
+    session.url = normalizeSessionUrl(currentTab.url);
+  }
   return session;
+}
+
+function askSessionTabFromKey(key) {
+  const tabId = tabIdFromSessionKey(key);
+  const url = String(key || '').replace(/^tab:(?:\d+|unknown):/, '') || 'about:blank';
+  const openTab = tabs.find((tab) => (
+    (tabId === null || Number(tab.id) === tabId) &&
+    normalizeSessionUrl(tab.url) === normalizeSessionUrl(url)
+  ));
+  return {
+    id: tabId,
+    title: openTab?.displayTitle || openTab?.title || 'Current page',
+    url,
+  };
 }
 
 function buildSpaceViewForSpace(spaceId) {
@@ -7099,11 +7150,12 @@ function createAskMessageElement(message) {
 async function addAskMessage(role, text, sessionKey = state.activeAskSessionKey) {
   if (!text) return;
   let messageRef;
+  const sourceTab = currentAskPageTab() || askSessionTabFromKey(sessionKey);
   await withSharedStateLock(async () => {
     await syncStateFromStorage();
-    const session = ensureAskSessionByKey(sessionKey);
+    const session = ensureAskSessionByKey(sessionKey, sourceTab);
     const message = appendAskSessionMessage(session, role, text);
-    messageRef = { sessionKey: session.key, messageId: message.id };
+    messageRef = { sessionKey: session.key, messageId: message.id, sourceTab };
     await saveState();
   });
   if (messageRef.sessionKey === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
@@ -7112,7 +7164,7 @@ async function addAskMessage(role, text, sessionKey = state.activeAskSessionKey)
 
 async function updateAskMessage(ref, text, options = {}) {
   if (!ref) return;
-  const session = ensureAskSessionByKey(ref.sessionKey);
+  const session = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
   updateAskSessionMessage(session, ref.messageId, text);
   if (session.key === state.activeAskSessionKey && activeView === 'ask') renderAskMessages();
   if (options.persist !== false) await persistAskMessage(ref, text);

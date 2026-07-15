@@ -383,6 +383,50 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
 
+    await waitFor(client, `document.querySelector('.ask-page')`);
+    await evaluate(client, `document.querySelector('.ask-page').click()`);
+    await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
+    const askPageState = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const activeRow = document.querySelector('.tab-row.active');
+      const activeTab = {
+        id: Number(activeRow?.dataset.tabId),
+        title: activeRow?.querySelector('.tab-title')?.textContent || '',
+        url: 'https://example.com/spaces-guide',
+      };
+      if (activeTab.id !== 2 || activeTab.title !== 'Browser Spaces Guide') return null;
+      const expectedKey = 'tab:2:https://example.com/spaces-guide';
+      if (stored.activeAskSessionKey !== expectedKey) return null;
+      const session = stored.askSessions?.[expectedKey];
+      return {
+        key: stored.activeAskSessionKey,
+        expectedKey,
+        scope: document.querySelector('#askScope')?.textContent || '',
+        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
+        sourceCount: document.querySelectorAll('#askSourceList .ask-source-chip').length,
+        tabId: session?.tabId ?? null,
+        url: session?.url || '',
+        activeTab,
+      };
+    })()`);
+    record(
+      'Ask Page uses a tab-and-normalized-URL session for the active fixture page',
+      askPageState.key === askPageState.expectedKey &&
+        askPageState.key.startsWith(`tab:${askPageState.activeTab.id}:`) &&
+        askPageState.tabId === askPageState.activeTab.id &&
+        askPageState.url === askPageState.expectedKey.slice(`tab:${askPageState.activeTab.id}:`.length) &&
+        /^https?:\/\//.test(askPageState.activeTab.url) &&
+        askPageState.sourceSummary === 'Current page' &&
+        askPageState.sourceCount === 1 &&
+        !askPageState.scope.includes('Context'),
+      JSON.stringify(askPageState),
+    );
+    await evaluate(client, `(() => {
+      [...document.querySelectorAll('.space')].find((button) => button.title === 'Default')?.click();
+      return true;
+    })()`);
+    await waitFor(client, `!document.querySelector('#groupsList')?.hidden`);
+
     if (arcImportFile) {
       const arcImportText = await readFile(arcImportFile, 'utf8');
       const existingSpaces = await evaluate(client, `(() => {
@@ -591,30 +635,7 @@ async function main() {
   record('saved Workbench shortcuts apply immediately and Save shows visible feedback', true);
   await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
   await client.send('Page.navigate', { url: sidepanelUrl });
-  await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.ask-space')`);
-
-  await evaluate(client, `document.querySelector('.ask-space').click()`);
-  await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
-  const askSpaceState = await waitFor(client, `(() => {
-    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    if (stored.activeAskSessionKey !== 'space:default') return null;
-    return {
-      key: stored.activeAskSessionKey,
-      scope: document.querySelector('#askScope')?.textContent || '',
-      spaceId: stored.askSessions?.['space:default']?.spaceId || '',
-    };
-  })()`);
-  record(
-    'Ask Space uses one conversation session for the active Space',
-    askSpaceState.key === 'space:default' && askSpaceState.spaceId === 'default' && !askSpaceState.scope.includes('Context'),
-    JSON.stringify(askSpaceState),
-  );
-
-  await evaluate(client, `(() => {
-    [...document.querySelectorAll('.space')].find((button) => button.title === 'Default')?.click();
-    return true;
-  })()`);
-  await waitFor(client, `!document.querySelector('#groupsList')?.hidden`);
+  await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Default' && !document.querySelector('#groupsList')?.hidden`);
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];

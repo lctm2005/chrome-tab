@@ -45,7 +45,7 @@ test('settings expose provider and model selectors without prefilled free text m
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 
-test('sidepanel exposes Ask Space and portable backup controls without Context or Summary UI', async () => {
+test('sidepanel exposes single-page Ask Page and portable backup controls without Context or Summary UI', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
@@ -53,15 +53,25 @@ test('sidepanel exposes Ask Space and portable backup controls without Context o
   for (const id of ['askScope', 'askProvider', 'askSourceSummary', 'askSourceList', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.match(source, /createPrompt\('ask-space'/);
+  assert.match(source, /askButton\.className = `space ask-page/);
+  assert.match(html, />Ask Page</);
+  assert.match(html, /Only the current page is read after confirmation\./);
+  assert.match(source, /createPrompt\('ask-page'/);
+  assert.match(source, /purpose: 'ask-page'/);
+  assert.match(source, /sessionKeyForTab\(sourceTab\)/);
+  assert.match(source, /normalizeSessionUrl\(page\.url\) !== normalizeSessionUrl\(sourceTab\.url\)/);
+  assert.match(source, /appendAskSourceLink\(answerText, page\)/);
+  assert.match(source, /chrome\.tabs\.onActivated\.addListener\(handleChromeTabActivated\)/);
+  assert.match(source, /lastActivatedAskPageTab/);
   assert.match(source, /startAskFromUserGesture/);
   assert.match(source, /requestAskPermissionsFromUserGesture/);
   assert.match(source, /chrome\.permissions\.request\(\{ origins \}\)/);
-  assert.match(source, /send\('pages:extract'/);
-  assert.match(source, /title: 'Confirmed sources not sent'/);
-  assert.match(source, /additional selected[\s\S]*excluded by the 12-page limit/);
+  assert.match(source, /send\('pages:extract', \{[\s\S]*tabIds: \[sourceTab\.id\]/);
+  assert.match(source, /title: 'Review Ask Page'/);
+  assert.match(source, /title: 'Current page'/);
+  assert.match(source, /Switch to an http or https page before using Ask Page\./);
   assert.match(source, /stored text from \$\{history\.length\} recent conversation/);
-  assert.match(source, /generated Sources appendices excluded/);
+  assert.match(source, /generated Sources appendix excluded/);
   const recentHistorySource = source.slice(
     source.indexOf('function recentAskHistory'),
     source.indexOf('async function beginAskTurn'),
@@ -76,6 +86,8 @@ test('sidepanel exposes Ask Space and portable backup controls without Context o
   assert.match(background, /if \(event\.done\)[\s\S]*reader\.cancel/);
   assert.match(source, /createSpaceBackup\(state\)/);
   assert.match(source, /restoreSpaceBackup\(state, pendingSpaceBackup\)/);
+  assert.doesNotMatch(source, /createPrompt\('ask-space'|purpose: 'ask-space'|selectAskSpaceSources|appendAskSourceLinks|12-page limit/);
+  assert.doesNotMatch(html, /Ask Space/);
   assert.doesNotMatch(html, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"/);
   assert.doesNotMatch(source, /currentSpaceContextForAI|summarizeCurrentPage/);
 });
@@ -99,13 +111,19 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
     'onboardingApiKeyInput',
     'onboardingThinkingInput',
     'onboardingTestAIButton',
-    'onboardingSkipAIButton',
+    'onboardingOpenWorkbenchButton',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  for (const id of ['onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
+    assert.doesNotMatch(html, new RegExp(`id="${id}"`));
+    assert.doesNotMatch(source, new RegExp(`\\b${id}\\b`));
+  }
   assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
-  assert.match(html, /id="onboardingOpenWorkbenchButton" disabled>Save AI &amp; start</);
+  assert.match(html, /id="onboardingOpenWorkbenchButton">Save</);
+  assert.match(html, /<option value="" selected>No provider<\/option>/);
+  assert.match(source, /async function saveOnboardingAIAndFinish\(\)[\s\S]*if \(!onboardingAIControls\(\)\.providerInput\.value\) \{[\s\S]*await finishOnboarding\(true, \{ clearAI: true \}\)/);
   assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
   assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);

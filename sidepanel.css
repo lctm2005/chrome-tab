@@ -1305,12 +1305,12 @@ menu button:disabled,
   color: var(--accent);
 }
 
-.ask-space {
+.ask-page {
   background: var(--surface-strong);
   border-color: var(--glass-border);
 }
 
-.ask-space.active {
+.ask-page.active {
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
   color: white;
   border: 0;
@@ -2356,6 +2356,10 @@ menu {
   gap: 10px;
 }
 
+.onboarding-finish-actions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .onboarding-footer.single-action {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -2371,19 +2375,7 @@ menu {
   font-weight: 780;
 }
 
-.onboarding-finish-actions .danger-link,
-.onboarding-finish-actions .link-button {
-  background: transparent;
-  box-shadow: none;
-  color: var(--danger);
-}
-
-.onboarding-finish-actions > :nth-child(n + 3) {
-  min-height: 28px;
-}
-
-.onboarding-footer .secondary-button,
-.onboarding-finish-actions .secondary-button {
+.onboarding-footer .secondary-button {
   border: 1px solid var(--glass-border);
   background: var(--surface-strong);
   color: var(--text);

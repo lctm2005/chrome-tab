@@ -43,11 +43,11 @@ const shots = [
   {
     id: 'ask',
     file: '05-ask-page-byok-ai.png',
-    title: 'Ask multiple pages with your own AI key.',
-    kicker: 'Ask Space',
-    description: 'Review the provider, sources, and content size before anything is sent.',
+    title: 'Ask the current page with your own AI key.',
+    kicker: 'Ask Page',
+    description: 'Review the provider, exact page, and content size before anything is sent.',
     activeSpaceId: 'launch',
-    notes: ['Selected or all live pages', 'Clickable citations', 'Stream + Stop'],
+    notes: ['Current page only', 'Clickable citation', 'Stream + Stop'],
   },
   {
     id: 'auto-group',
@@ -550,30 +550,20 @@ function storeShotHtml(shot) {
       }
 
       async function openAskPage(doc) {
-        const select = (tabId) => doc.querySelector(\`[data-tab-id="\${tabId}"]\`)?.dispatchEvent(new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          view: panel.contentWindow,
-          ctrlKey: true,
-        }));
-        select(1);
-        await wait(80);
-        select(3);
-        await wait(80);
-        doc.querySelector('.ask-space')?.click();
-        await waitFor(() => !doc.querySelector('#askPageView')?.hidden, 8000, 'Ask Space view');
+        doc.querySelector('.ask-page')?.click();
+        await waitFor(() => !doc.querySelector('#askPageView')?.hidden, 8000, 'Ask Page view');
         const input = doc.querySelector('#askPagePrompt');
-        input.value = 'Compare the launch brief with the reviewer notes. What is still missing?';
+        input.value = 'What launch work is still missing from this brief?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
         await waitFor(() => doc.querySelector('#actionDialog')?.open &&
-          /Review Ask Space/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000, 'Ask Space send review');
+          /Review Ask Page/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000, 'Ask Page send review');
         doc.querySelector('#actionDialogConfirm')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
-          .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Space preview response');
+          .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Page preview response');
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
-          assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review and package verification <a href="https://docs.example.com/launch-brief">[1]</a>. Reviewer notes also require multi-page Ask and Auto Group Undo checks <a href="https://example.com/reviewer-notes">[2]</a>.</p><p><strong>Sources</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a> · <a href="https://example.com/reviewer-notes">[2] Reviewer notes</a></p>';
+          assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review, package verification, and the final store checklist <a href="https://docs.example.com/launch-brief">[1]</a>.</p><p><strong>Source</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a></p>';
           const messages = doc.querySelector('#askMessages');
           messages?.replaceChildren(assistant);
           if (messages) messages.scrollTop = 0;

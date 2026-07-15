@@ -12,7 +12,7 @@ import {
   sessionKeyForSpace,
   updateAskSessionMessage,
 } from '../src/shared/ask-session.js';
-import { appendAskSourceLinks } from '../src/shared/ask-sources.js';
+import { appendAskSourceLink } from '../src/shared/ask-sources.js';
 
 test('normalizes Ask session URLs without fragment-only churn', () => {
   assert.equal(
@@ -83,9 +83,9 @@ test('caps stored Ask messages by count and text length', () => {
 test('keeps the Sources appendix when a long assistant answer is truncated', () => {
   const session = createSpaceAskSession({ id: 'research', name: 'Research' });
   const message = appendAskSessionMessage(session, 'assistant', 'Thinking...');
-  const answer = appendAskSourceLinks(
+  const answer = appendAskSourceLink(
     `Finding [1]. ${'Supporting detail. '.repeat(80)}`,
-    [{ title: 'Primary research', url: 'https://example.com/research' }],
+    { title: 'Primary research', url: 'https://example.com/research' },
   );
 
   const updated = updateAskSessionMessage(session, message.id, answer, {
