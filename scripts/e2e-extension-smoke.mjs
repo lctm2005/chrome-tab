@@ -259,6 +259,7 @@ async function startAskFixtureServer() {
   const timers = new Set();
   const autoGroupDormantUrl = 'https://example.net/saved-auto-group-e2e';
   const autoGroupTargetTitle = 'Auto Group E2E Proposal';
+  const autoGroupPreservedEmptyTagTitle = 'Preserved Empty Tag E2E';
   const tidyPrimaryTitle = 'Tidy Names E2E planning document with a deliberately long stable title';
   const tidySecondaryTitle = 'Tidy Names E2E companion reference with another deliberately long stable title';
 
@@ -518,6 +519,7 @@ async function startAskFixtureServer() {
     originPattern: 'http://127.0.0.1/*',
     autoGroupDormantUrl,
     autoGroupTargetTitle,
+    autoGroupPreservedEmptyTagTitle,
     requests,
     pageHits,
     async close() {
@@ -1847,21 +1849,31 @@ async function main() {
         updatedAt: Date.now(),
         groups: [],
       };
+      snapshot.preserveGroups = true;
       snapshot.groups = (snapshot.groups || []).filter((group) =>
         group.title !== 'Historical Tag E2E' &&
+        group.title !== ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)} &&
         group.title !== ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
-      snapshot.groups.push({
-        title: 'Historical Tag E2E',
-        color: 'purple',
-        collapsed: false,
-        tabs: [{
-          title: 'Saved Historical Auto Group E2E',
-          url: ${JSON.stringify(askFixtureServer.autoGroupDormantUrl)},
-        }],
-      });
-      // Two same-named empty historical Tags recreate the persisted shadow
-      // that used to render beside the real group created by Auto Group.
       snapshot.groups.push(
+        {
+          title: 'Historical Tag E2E',
+          color: 'purple',
+          collapsed: false,
+          tabs: [{
+            title: 'Saved Historical Auto Group E2E',
+            url: ${JSON.stringify(askFixtureServer.autoGroupDormantUrl)},
+          }],
+        },
+        {
+          title: ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)},
+          color: 'orange',
+          collapsed: true,
+          custom: 'preserve-empty-history-e2e',
+          tabs: [],
+        },
+        // Retain the duplicate-shadow regression fixture: one target receives
+        // the moved rows, while the other empty same-name history must not
+        // render as a duplicate card.
         {
           title: ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)},
           color: 'green',
@@ -1884,7 +1896,10 @@ async function main() {
     await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
       !document.querySelector('#askPageView')?.hidden &&
       [...document.querySelectorAll('.group-header h2')]
-        .some((heading) => heading.textContent === 'Historical Tag E2E')`, 12000);
+        .some((heading) => heading.textContent === 'Historical Tag E2E') &&
+      [...document.querySelectorAll('.group-header h2')]
+        .some((heading) => heading.textContent ===
+          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)})`, 12000);
     await evaluate(client, `window.__captureAutoGroupE2E = async () => {
       const [stored, listed] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
@@ -1946,6 +1961,18 @@ async function main() {
       };
     }`);
     const autoGroupFixtureBefore = await evaluate(client, `window.__captureAutoGroupE2E()`);
+    const preservedEmptyTagBefore = autoGroupFixtureBefore.storage.snapshot.groups?.find((group) =>
+      group.title === askFixtureServer.autoGroupPreservedEmptyTagTitle);
+    if (
+      autoGroupFixtureBefore.storage.snapshot.preserveGroups !== true ||
+      !preservedEmptyTagBefore ||
+      preservedEmptyTagBefore.color !== 'orange' ||
+      preservedEmptyTagBefore.collapsed !== true ||
+      preservedEmptyTagBefore.custom !== 'preserve-empty-history-e2e' ||
+      preservedEmptyTagBefore.tabs.length !== 0
+    ) {
+      throw new Error(`Auto Group E2E did not establish the preserved empty Tag fixture: ${JSON.stringify(preservedEmptyTagBefore)}`);
+    }
     const autoGroupRequestsBefore = askFixtureServer.requests
       .filter((request) => request.mode === 'auto-group').length;
     const autoGroupPermissionRequestsBefore = await evaluate(client,
@@ -2126,6 +2153,8 @@ async function main() {
       const alphaGroup = captured.chrome.groups.find((group) => group.id === alpha?.groupId);
       const historical = captured.storage.snapshot.groups?.find((group) =>
         group.title === 'Historical Tag E2E');
+      const preservedEmptyTag = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const target = captured.storage.snapshot.groups?.find((group) =>
         group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
       const operation = [...(captured.storage.operationHistory || [])].reverse()
@@ -2134,19 +2163,31 @@ async function main() {
       const matchingCards = [...document.querySelectorAll('#groupsList .group-card')]
         .filter((card) => card.querySelector('.group-header h2')?.textContent ===
           ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+      const emptiedSourceCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Historical Tag E2E');
+      const preservedEmptyTagCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       if (alphaGroup?.title !== ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)} ||
-          !historical || !target || operation?.status !== 'applied' ||
-          matchingCards.length === 0 ||
+          historical || !preservedEmptyTag || !target || operation?.status !== 'applied' ||
+          matchingCards.length === 0 || emptiedSourceCards.length !== 0 ||
+          preservedEmptyTagCards.length !== 1 ||
           document.querySelector('#operationRecord')?.hidden ||
           recordText !== 'Auto Group organized 2 tabs') return null;
       return {
         captured,
         alphaGroup,
-        historical,
+        historical: historical || null,
+        preservedEmptyTag,
         target,
         operation,
         recordText,
         matchingCards: matchingCards.map((card) => ({
+          key: card.dataset.groupKey || '',
+          rows: card.querySelectorAll('.tab-row').length,
+        })),
+        emptiedSourceCards: emptiedSourceCards.length,
+        preservedEmptyTagCards: preservedEmptyTagCards.map((card) => ({
           key: card.dataset.groupKey || '',
           rows: card.querySelectorAll('.tab-row').length,
         })),
@@ -2160,6 +2201,9 @@ async function main() {
     const beforeSnapshotUrls = (autoGroupFixtureBefore.storage.snapshot.groups || [])
       .flatMap((group) => (group.tabs || []).map((tab) => tab.url))
       .sort();
+    const baselineAutoGroupOrphans = new Set(autoGroupFixtureBefore.orphanGroupSpaceIds || []);
+    const newOrphansAfterApply = (appliedAutoGroupState.captured.orphanGroupSpaceIds || [])
+      .filter((groupId) => !baselineAutoGroupOrphans.has(groupId));
     const autoGroupSnapshotBeforeApply = structuredClone(autoGroupFixtureBefore.storage.snapshot);
     for (const group of autoGroupSnapshotBeforeApply.groups || []) {
       for (const tab of group.tabs || []) {
@@ -2176,14 +2220,25 @@ async function main() {
     const autoGroupPermissionRequestsAfterApply = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
     record(
-      'Auto Group Apply preserves history without rendering a same-name empty shadow and exposes Undo',
+      'Auto Group Apply removes newly emptied folders, preserves pre-existing empty history, and exposes Undo',
       appliedAutoGroupState.alphaGroup.color === 'green' &&
-        appliedAutoGroupState.historical.tabs.length === 0 &&
+        appliedAutoGroupState.historical === null &&
+        appliedAutoGroupState.emptiedSourceCards === 0 &&
+        appliedAutoGroupState.preservedEmptyTag.title ===
+          askFixtureServer.autoGroupPreservedEmptyTagTitle &&
+        appliedAutoGroupState.preservedEmptyTag.color === 'orange' &&
+        appliedAutoGroupState.preservedEmptyTag.collapsed === true &&
+        appliedAutoGroupState.preservedEmptyTag.custom === 'preserve-empty-history-e2e' &&
+        appliedAutoGroupState.preservedEmptyTag.tabs.length === 0 &&
+        appliedAutoGroupState.preservedEmptyTagCards.length === 1 &&
+        appliedAutoGroupState.preservedEmptyTagCards[0].rows === 0 &&
         appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.sourceAlphaUrl) &&
         appliedAutoGroupState.target.tabs.some((tab) => tab.url === askFixtureServer.autoGroupDormantUrl) &&
         appliedAutoGroupState.matchingCards.length === 1 &&
         appliedAutoGroupState.matchingCards[0].rows === 2 &&
         JSON.stringify(appliedSnapshotUrls) === JSON.stringify(beforeSnapshotUrls) &&
+        appliedAutoGroupState.captured.layout.groups.every((group) => group.urls.length > 0) &&
+        newOrphansAfterApply.length === 0 &&
         appliedAutoGroupState.operation.spaceId === 'default' &&
         appliedAutoGroupState.undoText === 'Undo' &&
         appliedAutoGroupState.status.includes('Auto group updated Default') &&
@@ -2200,8 +2255,12 @@ async function main() {
       JSON.stringify({
         alphaGroup: appliedAutoGroupState.alphaGroup,
         historical: appliedAutoGroupState.historical,
+        preservedEmptyTag: appliedAutoGroupState.preservedEmptyTag,
+        emptiedSourceCards: appliedAutoGroupState.emptiedSourceCards,
+        preservedEmptyTagCards: appliedAutoGroupState.preservedEmptyTagCards,
         target: appliedAutoGroupState.target,
         matchingCards: appliedAutoGroupState.matchingCards,
+        newOrphansAfterApply,
         operation: {
           type: appliedAutoGroupState.operation.type,
           spaceId: appliedAutoGroupState.operation.spaceId,
@@ -2226,26 +2285,37 @@ async function main() {
         .find((item) => item?.type === 'auto-group');
       const historical = captured.storage.snapshot.groups?.find((group) =>
         group.title === 'Historical Tag E2E');
-      const target = captured.storage.snapshot.groups?.find((group) =>
-        group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
+      const preservedEmptyTag = captured.storage.snapshot.groups?.find((group) =>
+        group.title === ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
+      const restoredEmptyTargets = captured.storage.snapshot.groups?.filter((group) =>
+        group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)} &&
+        (group.tabs || []).length === 0) || [];
       const status = document.querySelector('#syncStatus')?.textContent || '';
+      const restoredSourceCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Historical Tag E2E');
+      const preservedEmptyTagCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
+          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       if (operation?.status !== 'undone' ||
           status !== 'Undid: Auto Group organized 2 tabs.' ||
-          !historical) return null;
+          !historical || !preservedEmptyTag || restoredSourceCards.length !== 1 ||
+          preservedEmptyTagCards.length !== 1) return null;
       return {
         captured,
         operation,
         historical,
-        target: target || null,
+        preservedEmptyTag,
+        restoredSourceCards: restoredSourceCards.length,
+        preservedEmptyTagCards: preservedEmptyTagCards.length,
+        restoredEmptyTargets,
         status,
         toast: document.querySelector('#workbenchToast')?.textContent || '',
         operationRecordHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
         sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
       };
     })()`, 15000);
-    const baselineOrphans = new Set(autoGroupFixtureBefore.orphanGroupSpaceIds || []);
     const newOrphansAfterUndo = (undoneAutoGroupState.captured.orphanGroupSpaceIds || [])
-      .filter((groupId) => !baselineOrphans.has(groupId));
+      .filter((groupId) => !baselineAutoGroupOrphans.has(groupId));
     record(
       'Auto Group Undo restores live and saved organization without orphaning or losing Tags',
       JSON.stringify(undoneAutoGroupState.captured.layout) === JSON.stringify(autoGroupFixtureBefore.layout) &&
@@ -2253,7 +2323,15 @@ async function main() {
           JSON.stringify(autoGroupSnapshotBeforeApply) &&
         undoneAutoGroupState.historical.tabs.some((tab) =>
           tab.url === askFixtureServer.autoGroupDormantUrl) &&
-        !undoneAutoGroupState.target &&
+        undoneAutoGroupState.restoredSourceCards === 1 &&
+        undoneAutoGroupState.preservedEmptyTag.title ===
+          askFixtureServer.autoGroupPreservedEmptyTagTitle &&
+        undoneAutoGroupState.preservedEmptyTag.color === 'orange' &&
+        undoneAutoGroupState.preservedEmptyTag.collapsed === true &&
+        undoneAutoGroupState.preservedEmptyTag.custom === 'preserve-empty-history-e2e' &&
+        undoneAutoGroupState.preservedEmptyTag.tabs.length === 0 &&
+        undoneAutoGroupState.preservedEmptyTagCards === 1 &&
+        undoneAutoGroupState.restoredEmptyTargets.length === 2 &&
         !undoneAutoGroupState.captured.chrome.groups.some((group) =>
           group.id === appliedAutoGroupId || group.title === askFixtureServer.autoGroupTargetTitle) &&
         !Object.hasOwn(undoneAutoGroupState.captured.storage.groupSpaces, String(appliedAutoGroupId)) &&
@@ -2267,7 +2345,10 @@ async function main() {
         snapshotRestored: JSON.stringify(undoneAutoGroupState.captured.storage.snapshot) ===
           JSON.stringify(autoGroupSnapshotBeforeApply),
         historical: undoneAutoGroupState.historical,
-        target: undoneAutoGroupState.target,
+        preservedEmptyTag: undoneAutoGroupState.preservedEmptyTag,
+        restoredSourceCards: undoneAutoGroupState.restoredSourceCards,
+        preservedEmptyTagCards: undoneAutoGroupState.preservedEmptyTagCards,
+        restoredEmptyTargets: undoneAutoGroupState.restoredEmptyTargets,
         newOrphansAfterUndo,
         operationStatus: undoneAutoGroupState.operation.status,
         status: undoneAutoGroupState.status,

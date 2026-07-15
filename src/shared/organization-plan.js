@@ -85,8 +85,9 @@ export function rebaseOrganizationPlan({
  *
  * Unlike merge-by-URL snapshot refreshes, this function only moves candidate
  * rows named by the confirmed plan. Unplanned rows and group metadata retain
- * their original order. Empty source groups are intentionally preserved so a
- * live-tab regroup cannot silently erase a historical Tag.
+ * their original order. A source group emptied by this plan is removed so it
+ * cannot render as an empty folder, while groups that were already empty when
+ * the plan started remain preserved as historical user data.
  */
 export function applyOrganizationPlanToSnapshot({
   snapshot = null,
@@ -101,6 +102,7 @@ export function applyOrganizationPlanToSnapshot({
   if (assignments.length === 0) return source;
 
   const groups = source.groups;
+  const originalGroupTabCounts = groups.map((group) => group.tabs.length);
   const assignedSnapshotLocations = new Set();
   const originalGroupIndexesByTitle = groupIndexesByTitle(groups);
   const moves = [];
@@ -181,11 +183,17 @@ export function applyOrganizationPlanToSnapshot({
     throw new Error(`Organization snapshot changed tab count from ${expectedCount} to ${actualCount}.`);
   }
 
+  const nextGroups = groups.filter((group, groupIndex) => !(
+    removalIndexesByGroup.has(groupIndex) &&
+    originalGroupTabCounts[groupIndex] > 0 &&
+    group.tabs.length === 0
+  ));
+
   return {
     ...source,
     preserveGroups: true,
     updatedAt: finiteTimestamp(now, source.updatedAt),
-    groups,
+    groups: nextGroups,
   };
 }
 

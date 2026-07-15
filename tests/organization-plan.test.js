@@ -498,22 +498,34 @@ test('moves a planned live row without absorbing unplanned dormant tabs or histo
   assert.deepEqual(snapshot.groups[0].tabs.map((tab) => tab.title), ['Current', 'Saved history']);
 });
 
-test('preserves an empty historical Tag when its only live row is regrouped', () => {
+test('removes a source folder emptied by Auto Group while preserving pre-existing empty history', () => {
   const snapshot = {
     version: 1,
     updatedAt: 1,
-    groups: [{
-      title: 'Historical Tag',
-      color: 'orange',
-      collapsed: true,
-      tabs: [{ title: 'Current', url: 'https://example.com/current' }],
-    }],
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Historical Folder / Only Tag',
+        color: 'orange',
+        collapsed: true,
+        tabs: [{ title: 'Current', url: 'https://example.com/current' }],
+      },
+      {
+        title: 'Kept Empty History',
+        color: 'green',
+        collapsed: false,
+        custom: 'keep-me',
+        tabs: [],
+      },
+    ],
   };
+  const original = structuredClone(snapshot);
+  const originalTabCount = snapshot.groups.reduce((total, group) => total + group.tabs.length, 0);
   const built = buildOrganizationCandidates({
     snapshot,
     liveGroups: [{
       id: 10,
-      title: 'Historical Tag',
+      title: 'Historical Folder / Only Tag',
       color: 'orange',
       tabs: [{ id: 101, title: 'Current', url: 'https://example.com/current' }],
     }],
@@ -528,9 +540,10 @@ test('preserves an empty historical Tag when its only live row is regrouped', ()
 
   assert.deepEqual(result.groups, [
     {
-      title: 'Historical Tag',
-      color: 'orange',
-      collapsed: true,
+      title: 'Kept Empty History',
+      color: 'green',
+      collapsed: false,
+      custom: 'keep-me',
       tabs: [],
     },
     {
@@ -540,6 +553,11 @@ test('preserves an empty historical Tag when its only live row is regrouped', ()
       tabs: [{ title: 'Current', url: 'https://example.com/current' }],
     },
   ]);
+  assert.equal(
+    result.groups.reduce((total, group) => total + group.tabs.length, 0),
+    originalTabCount,
+  );
+  assert.deepEqual(snapshot, original);
 });
 
 test('moves an exact dormant duplicate once and leaves unplanned duplicates in place', () => {
@@ -580,7 +598,7 @@ test('moves an exact dormant duplicate once and leaves unplanned duplicates in p
     'Alpha:Alpha only:https://example.com/alpha',
     'Gamma:Duplicate B:https://example.com/shared',
   ]);
-  assert.equal(result.groups.find((group) => group.title === 'Beta').tabs.length, 0);
+  assert.equal(result.groups.find((group) => group.title === 'Beta'), undefined);
 });
 
 test('keeps planned rows in place when their confirmed group is unchanged', () => {
