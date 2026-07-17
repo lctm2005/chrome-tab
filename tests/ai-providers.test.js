@@ -27,7 +27,7 @@ test('catalog exposes built-in providers and custom OpenAI-compatible settings',
     label: 'GLM-5.2',
     documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
   });
-  assert.equal(providerById('glm').baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+  assert.equal(providerById('glm').baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
   assert.equal(providerById('glm').models[0].id, 'glm-5.2');
   assert.equal(providerById('openai').baseUrl, 'https://api.openai.com/v1');
   assert.ok(providerById('openai').models.some((model) => model.id === 'gpt-5.4-mini'));
@@ -51,7 +51,7 @@ test('detects a built-in provider from an existing base URL', () => {
   const provider = providerForBaseUrl('https://api.z.ai/api/paas/v4/');
 
   assert.equal(provider.id, 'z-ai');
-  assert.equal(providerForBaseUrl('https://open.bigmodel.cn/api/paas/v4/').id, 'glm');
+  assert.equal(providerForBaseUrl('https://open.bigmodel.cn/api/coding/paas/v4/').id, 'glm');
 });
 
 test('detects built-in providers from user-pasted request endpoints and URL casing', () => {
@@ -64,7 +64,7 @@ test('detects built-in providers from user-pasted request endpoints and URL casi
     'z-ai',
   );
   assert.equal(
-    providerForBaseUrl(new URL('https://open.bigmodel.cn/api/paas/v4/')).id,
+    providerForBaseUrl(new URL('https://open.bigmodel.cn/api/coding/paas/v4/')).id,
     'glm',
   );
 });
@@ -96,7 +96,7 @@ test('normalizes built-in provider settings with provider-owned URL and model', 
     baseUrl: 'https://ignored.example/custom',
     model: 'unknown-model',
   });
-  assert.equal(glm.baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+  assert.equal(glm.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
 
   const migratedGlm = normalizeAIProviderSettings({ provider: 'glm', model: 'glm-5.1' });
   assert.equal(migratedGlm.model, 'glm-5.2');
@@ -164,15 +164,9 @@ test('preserves valid provider models and normalizes custom request endpoints', 
   }).model, 'glm-5.2', 'the retired catalog id must migrate to the current model');
 });
 
-test('keeps Coding Plan explicit and exposes Thinking only for compatible models', () => {
+test('keeps Coding Plan providers distinct and exposes Thinking only for compatible models', () => {
   assert.equal(providerForBaseUrl('https://api.z.ai/api/coding/paas/v4'), null);
-  const coding = normalizeAIProviderSettings({
-    provider: CUSTOM_AI_PROVIDER_ID,
-    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
-    model: 'glm-5.2',
-  });
-  assert.equal(coding.provider, CUSTOM_AI_PROVIDER_ID);
-  assert.equal(coding.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(providerForBaseUrl('https://open.bigmodel.cn/api/coding/paas/v4').id, 'glm');
 
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-5.2' }), true);
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.5-air' }), true);

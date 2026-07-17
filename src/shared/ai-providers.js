@@ -17,7 +17,7 @@ export const AI_PROVIDER_CATALOG = [
   {
     id: 'glm',
     label: 'GLM（国内）',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
     editableBaseUrl: false,
     models: [
       {
