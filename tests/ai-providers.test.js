@@ -151,19 +151,19 @@ test('keeps Coding Plan explicit and exposes Thinking only for compatible models
   const coding = normalizeAIProviderSettings({
     provider: CUSTOM_AI_PROVIDER_ID,
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-    model: 'glm-5.1',
+    model: 'glm-5.2',
   });
   assert.equal(coding.provider, CUSTOM_AI_PROVIDER_ID);
   assert.equal(coding.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
 
-  assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-5.1' }), true);
+  assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-5.2' }), true);
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.5-air' }), true);
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.4' }), false);
   assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v4-flash' }), true);
   assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v3' }), false);
   assert.equal(providerSupportsThinking({ provider: 'openai', model: 'deepseek-v4-pro' }), false);
   assert.equal(providerSupportsThinking({ provider: 'gemini', model: 'gemini-3.5-flash' }), false);
-  assert.equal(providerSupportsThinking({ provider: 'ollama', model: 'glm-5.1' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'ollama', model: 'glm-5.2' }), false);
   assert.equal(providerSupportsThinking({
     provider: CUSTOM_AI_PROVIDER_ID,
     model: 'deepseek-v4-pro',

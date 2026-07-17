@@ -68,11 +68,11 @@ test('derives the permission origin pattern for BYOK endpoints', () => {
   assert.throws(() => getOriginPattern('ftp://example.com/v1'), /must use http or https/i);
 });
 
-test('builds a GLM-5.1 request with a purpose budget instead of stored max tokens', () => {
+test('builds a GLM-5.2 request with a purpose budget instead of stored max tokens', () => {
   const request = buildChatCompletionRequest({
     provider: 'openai-compatible',
     baseUrl: 'https://api.z.ai/api/paas/v4/',
-    model: 'glm-5.1',
+    model: 'glm-5.2',
     apiKey: 'secret',
     thinking: 'disabled',
     temperature: 0.4,
@@ -84,7 +84,7 @@ test('builds a GLM-5.1 request with a purpose budget instead of stored max token
 
   assert.equal(request.url, 'https://api.z.ai/api/paas/v4/chat/completions');
   assert.equal(request.headers.Authorization, 'Bearer secret');
-  assert.equal(request.body.model, 'glm-5.1');
+  assert.equal(request.body.model, 'glm-5.2');
   assert.equal(request.body.thinking.type, 'disabled');
   assert.equal(request.body.max_tokens, 8_192);
   assert.equal(request.body.stream, false);
@@ -330,6 +330,10 @@ test('keeps missing API key errors distinct from provider rejection', () => {
   assert.equal(
     formatAIError(new Error('账户余额不足')),
     'AI provider rejected the request: insufficient balance. Update the BYOK account or API key in Settings.'
+  );
+  assert.equal(
+    formatAIError(new Error('AI provider rejected the request (HTTP 429, code 1113): quota window exhausted')),
+    'AI provider rejected the request (HTTP 429, code 1113): quota window exhausted'
   );
   assert.equal(formatAIError('Provider timed out.'), 'Provider timed out.');
   assert.equal(formatAIError(null), 'AI request failed.');

@@ -24,7 +24,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 10,
+    version: 11,
     browserSessionId: normalizeBrowserSessionId(localConfig.browserSessionId),
     theme: 'purple',
     activeSpaceId: 'default',
@@ -238,7 +238,7 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     lastArcImport: normalizeLastArcImport(stored.lastArcImport),
     operationHistory: normalizeOperationHistory(stored.operationHistory),
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
-    ai: migrateAISettings(stored.ai, defaults.ai),
+    ai: migrateAISettings(stored.ai, defaults.ai, stored.version),
   };
 }
 
@@ -304,7 +304,7 @@ function normalizeOperationHistory(value) {
     }));
 }
 
-function migrateAISettings(storedAI = {}, defaultAI = {}) {
+function migrateAISettings(storedAI = {}, defaultAI = {}, storedVersion = 0) {
   const normalizedStoredAI = storedAI && typeof storedAI === 'object' ? storedAI : {};
   const ai = { ...defaultAI, ...normalizedStoredAI };
   if (!normalizedStoredAI.provider && normalizedStoredAI.baseUrl) {
@@ -316,6 +316,13 @@ function migrateAISettings(storedAI = {}, defaultAI = {}) {
     ai.provider = defaultAI.provider;
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';
+  }
+  if (
+    Number(storedVersion) < 11 &&
+    normalizeUrl(ai.baseUrl) === LEGACY_DEFAULT_AI_BASE_URL &&
+    String(ai.model || '').trim().toLowerCase() === 'glm-5.1'
+  ) {
+    ai.model = 'glm-5.2';
   }
   return normalizeAIProviderSettings({
     ...ai,

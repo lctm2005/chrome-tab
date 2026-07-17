@@ -133,6 +133,7 @@ export function languageInstruction(language) {
 export function formatAIError(error) {
   const message = String(error?.message || error || '').trim();
   if (error?.name === 'AbortError') return 'AI request was stopped.';
+  if (/^AI provider rejected the request \(HTTP \d+/i.test(message)) return message;
   if (/api key is missing|missing api key|add it in settings/i.test(message)) {
     return 'AI API key is missing. Add it in Settings.';
   }

@@ -1904,8 +1904,16 @@ async function fetchChatCompletion(settings, messages, purpose, itemCount, signa
     } catch {
       payload = { error: { message: rawBody } };
     }
-    const message = payload?.error?.message || payload?.message || `AI request failed with ${response.status}`;
-    throw new Error(message);
+    const providerError = payload?.error;
+    const message = (typeof providerError === 'string' ? providerError : providerError?.message) ||
+      payload?.message || rawBody || response.statusText || 'Request failed';
+    const code = providerError?.code ?? payload?.code;
+    const codeDetail = code === undefined || code === null || String(code).trim() === ''
+      ? ''
+      : `, code ${String(code).trim()}`;
+    throw new Error(
+      `AI provider rejected the request (HTTP ${response.status}${codeDetail}): ${String(message).trim()}`,
+    );
   }
 
   const contentType = response.headers.get('content-type') || '';

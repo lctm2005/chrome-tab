@@ -2247,17 +2247,29 @@ test('a local AI provider works without a key and missing response fields use st
 
 test('AI HTTP failures preserve provider messages, invalid bodies, and generic status errors', async () => {
   const responses = [
-    jsonResponse({ error: { message: 'Invalid model' } }, { ok: false, status: 400 }),
+    jsonResponse({ error: { code: 'model_not_found', message: 'Invalid model' } }, { ok: false, status: 400 }),
     jsonResponse({ message: 'Account disabled' }, { ok: false, status: 403 }),
     jsonResponse(null, { ok: false, status: 502, rawBody: '<html>gateway down</html>' }),
     jsonResponse({}, { ok: false, status: 503, rawBody: '{}' }),
   ];
   const background = await loadBackground({ fetch: async () => responses.shift() });
   const request = { type: 'ai:chat', settings: aiSettings, messages: [], purpose: 'test-ai' };
-  assert.deepEqual(await background.send(request), { ok: false, error: 'Invalid model' });
-  assert.deepEqual(await background.send(request), { ok: false, error: 'Account disabled' });
-  assert.deepEqual(await background.send(request), { ok: false, error: '<html>gateway down</html>' });
-  assert.deepEqual(await background.send(request), { ok: false, error: 'AI request failed with 503' });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 400, code model_not_found): Invalid model',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 403): Account disabled',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 502): <html>gateway down</html>',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 503): {}',
+  });
 });
 
 test('Z.ai account failures never jump silently to the Coding Plan endpoint', async () => {
@@ -2273,14 +2285,17 @@ test('Z.ai account failures never jump silently to the Coding Plan endpoint', as
     settings: {
       provider: 'z-ai',
       baseUrl: 'https://api.z.ai/api/paas/v4',
-      model: 'glm-5.1',
+      model: 'glm-5.2',
       apiKey: 'z-key',
       thinking: 'enabled',
     },
     messages: [],
     purpose: 'test-ai',
   });
-  assert.deepEqual(response, { ok: false, error: '账户余额不足' });
+  assert.deepEqual(response, {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 429): 账户余额不足',
+  });
   assert.deepEqual(urls, ['https://api.z.ai/api/paas/v4/chat/completions']);
 });
 

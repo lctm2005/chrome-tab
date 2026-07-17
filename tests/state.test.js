@@ -255,7 +255,7 @@ test('serializes a pending navigation as the restorable tab URL', () => {
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 10);
+  assert.equal(state.version, 11);
   assert.equal(state.browserSessionId, '');
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
@@ -405,7 +405,7 @@ test('deleting a Space moves every affected window to the fallback without chang
   ), { activeSpaceIds: {} });
 });
 
-test('keeps explicitly configured BYOK AI settings and migrates a retired model id', () => {
+test('keeps explicitly configured BYOK AI settings and the selected GLM-5.2 model', () => {
   const state = createDefaultState({
     ai: {
       provider: 'z-ai',
@@ -421,6 +421,21 @@ test('keeps explicitly configured BYOK AI settings and migrates a retired model 
   assert.equal(state.ai.model, 'glm-5.2');
   assert.equal(state.ai.apiKey, 'secret');
   assert.equal(Object.hasOwn(state.ai, 'maxTokens'), false);
+});
+
+test('migrates the saved Coding Plan model to GLM-5.2 once without overriding later choices', () => {
+  const codingSettings = {
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    model: 'glm-5.1',
+  };
+  const migrated = mergeStoredState({ version: 10, ai: codingSettings }, createDefaultState());
+  assert.equal(migrated.ai.provider, 'openai-compatible');
+  assert.equal(migrated.ai.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(migrated.ai.model, 'glm-5.2');
+
+  const current = mergeStoredState({ version: 11, ai: codingSettings }, createDefaultState());
+  assert.equal(current.ai.model, 'glm-5.1');
 });
 
 test('returns supplied defaults when top-level stored state is missing or corrupt', () => {
@@ -616,7 +631,7 @@ test('migrates the old Ctrl+C Ask abort default without breaking intentional cur
   assert.equal(current.shortcuts.askAbort, 'Control+C');
 });
 
-test('migrates v4 Space ownership into v10 without resetting shortcuts', () => {
+test('migrates v4 Space ownership into v11 without resetting shortcuts', () => {
   const merged = mergeStoredState({
     version: 4,
     activeSpaceId: 'work',
@@ -627,7 +642,7 @@ test('migrates v4 Space ownership into v10 without resetting shortcuts', () => {
     shortcuts: { togglePanel: 'Meta+S' },
   }, createDefaultState());
 
-  assert.equal(merged.version, 10);
+  assert.equal(merged.version, 11);
   assert.equal(merged.activeSpaceId, 'work');
   assert.deepEqual(merged.groupSpaces, { 7: 'work' });
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
