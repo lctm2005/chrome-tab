@@ -1,4 +1,7 @@
-import { comparableSnapshotUrl } from './space-snapshot.js';
+import {
+  comparableSnapshotUrl,
+  snapshotTabIdentitiesConflict,
+} from './space-snapshot.js';
 
 const ORGANIZATION_FINGERPRINT_VERSION = 2;
 
@@ -11,7 +14,11 @@ const ORGANIZATION_FINGERPRINT_VERSION = 2;
  * unmatched open tabs are appended afterwards. This keeps numeric planner ids
  * stable while the same logical Space state is being reviewed.
  */
-export function buildOrganizationCandidates({ liveGroups = [], snapshot = null } = {}) {
+export function buildOrganizationCandidates({
+  liveGroups = [],
+  snapshot = null,
+  tabIdAliases = {},
+} = {}) {
   const liveEntries = flattenLiveGroups(liveGroups);
   const snapshotEntries = flattenSnapshot(snapshot);
   const liveMatchBySnapshotKey = matchLiveEntriesToSnapshot(liveEntries, snapshotEntries);
@@ -31,8 +38,79 @@ export function buildOrganizationCandidates({ liveGroups = [], snapshot = null }
 
   return {
     candidates,
-    fingerprint: fingerprintCandidates(candidates, snapshot),
+    fingerprint: fingerprintCandidates(candidates, snapshot, tabIdAliases),
   };
+}
+
+/**
+ * Identifies organization candidates that are already open outside the panel's
+ * Chrome window.
+ *
+ * Stable saved-row identity is authoritative and deliberately fail-closed: if
+ * a local candidate and a foreign tab both claim the same snapshot row, that
+ * candidate is unsafe to send or mutate. Legacy URL fallback only considers
+ * snapshot candidates that are not already backed by a local live tab. This
+ * reserves the panel window's one-to-one snapshot matches before equal-URL
+ * foreign tabs consume the remaining dormant rows.
+ */
+export function organizationCandidateIdsOpenInOtherWindows(
+  candidates = [],
+  otherWindowTabs = [],
+) {
+  const candidateEntries = arrayValue(candidates)
+    .map(organizationCandidateForeignEntry)
+    .filter(Boolean);
+  const foreignEntries = arrayValue(otherWindowTabs)
+    .map(organizationForeignTabEntry)
+    .filter(Boolean);
+  const unsafeCandidateIds = new Set();
+  const claimedCandidateIds = new Set();
+  const consumedForeignIndexes = new Set();
+
+  for (let foreignIndex = 0; foreignIndex < foreignEntries.length; foreignIndex += 1) {
+    const foreign = foreignEntries[foreignIndex];
+    if (!foreign.snapshotTabId) continue;
+    const stableMatches = candidateEntries.filter((candidate) => (
+      candidate.snapshotTabId === foreign.snapshotTabId
+    ));
+    if (stableMatches.length === 0) continue;
+    for (const candidate of stableMatches) {
+      unsafeCandidateIds.add(candidate.id);
+      claimedCandidateIds.add(candidate.id);
+    }
+    consumedForeignIndexes.add(foreignIndex);
+  }
+
+  for (const urlKey of ['exactUrl', 'navigationUrl']) {
+    for (const candidate of candidateEntries) {
+      if (
+        candidate.localLive ||
+        claimedCandidateIds.has(candidate.id) ||
+        !candidate[urlKey]
+      ) continue;
+      const compatibleIndexes = [];
+      for (let foreignIndex = 0; foreignIndex < foreignEntries.length; foreignIndex += 1) {
+        const foreign = foreignEntries[foreignIndex];
+        if (
+          consumedForeignIndexes.has(foreignIndex) ||
+          foreign[urlKey] !== candidate[urlKey] ||
+          organizationForeignIdentitiesConflict(candidate, foreign)
+        ) continue;
+        compatibleIndexes.push(foreignIndex);
+      }
+      const sameGroupIndex = compatibleIndexes.find((foreignIndex) => (
+        candidate.snapshotGroupId &&
+        candidate.snapshotGroupId === foreignEntries[foreignIndex].snapshotGroupId
+      ));
+      const foreignIndex = sameGroupIndex ?? compatibleIndexes[0];
+      if (foreignIndex === undefined) continue;
+      unsafeCandidateIds.add(candidate.id);
+      claimedCandidateIds.add(candidate.id);
+      consumedForeignIndexes.add(foreignIndex);
+    }
+  }
+
+  return unsafeCandidateIds;
 }
 
 /**
@@ -46,14 +124,14 @@ export function rebaseOrganizationPlan({
   currentCandidates = [],
   plannedGroups = [],
 } = {}) {
+  const groups = arrayValue(plannedGroups);
   const previewById = indexCandidates(previewCandidates);
   indexCandidates(currentCandidates);
-  const assignments = normalizeAssignments(plannedGroups, previewById);
+  const assignments = normalizeAssignments(groups, previewById);
   const currentIdByPreviewId = new Map();
   const usedCurrentIds = new Set();
 
   for (const assignment of assignments) {
-    if (currentIdByPreviewId.has(assignment.candidateId)) continue;
     const previewCandidate = previewById.get(assignment.candidateId);
     const currentCandidate = resolveCurrentPlanCandidate(
       previewCandidate,
@@ -68,16 +146,58 @@ export function rebaseOrganizationPlan({
     currentIdByPreviewId.set(assignment.candidateId, currentId);
   }
 
-  return plannedGroups.map((group) => ({
+  return groups.map((group) => ({
     ...group,
-    tabIds: arrayValue(group?.tabIds).map((candidateId) => {
-      const currentId = currentIdByPreviewId.get(Number(candidateId));
-      if (!Number.isSafeInteger(currentId)) {
-        throw stalePlanError('is no longer available');
-      }
-      return currentId;
-    }),
+    tabIds: arrayValue(group?.tabIds).map((candidateId) => (
+      currentIdByPreviewId.get(Number(candidateId))
+    )),
   }));
+}
+
+/**
+ * Turns an AI proposal into the changes the user will actually see. Assigning
+ * a tab to its current titled group is a no-op, and an existing target keeps
+ * its user-controlled title, color, and collapsed state instead of adopting
+ * cosmetic metadata invented by the model.
+ */
+export function resolveOrganizationPlanChanges({
+  plannedGroups = [],
+  candidates = [],
+  existingGroups = [],
+} = {}) {
+  const candidateById = indexCandidates(candidates);
+  normalizeAssignments(plannedGroups, candidateById);
+  const existingByTitle = new Map();
+  for (const group of arrayValue(existingGroups)) {
+    const titleKey = normalizedGroupTitle(group?.title);
+    if (titleKey && !existingByTitle.has(titleKey)) existingByTitle.set(titleKey, group);
+  }
+
+  const unchangedCandidateIds = [];
+  const changes = [];
+  for (const group of arrayValue(plannedGroups)) {
+    const proposedTitle = cleanText(group?.title);
+    const titleKey = normalizedGroupTitle(proposedTitle);
+    const existing = existingByTitle.get(titleKey);
+    const tabIds = arrayValue(group?.tabIds)
+      .map(Number)
+      .filter((candidateId) => {
+        const candidate = candidateById.get(candidateId);
+        if (normalizedGroupTitle(candidate?.currentGroup?.title) !== titleKey) return true;
+        unchangedCandidateIds.push(candidateId);
+        return false;
+      });
+    if (tabIds.length === 0) continue;
+    changes.push({
+      ...group,
+      title: cleanText(existing?.title) || proposedTitle,
+      color: cleanText(existing?.color) || cleanText(group?.color) || 'blue',
+      collapsed: existing ? Boolean(existing.collapsed) : Boolean(group?.collapsed),
+      tabIds,
+    });
+  }
+
+  return { plannedGroups: changes, unchangedCandidateIds };
 }
 
 /**
@@ -86,8 +206,9 @@ export function rebaseOrganizationPlan({
  * Unlike merge-by-URL snapshot refreshes, this function only moves candidate
  * rows named by the confirmed plan. Unplanned rows and group metadata retain
  * their original order. A source group emptied by this plan is removed so it
- * cannot render as an empty folder, while groups that were already empty when
- * the plan started remain preserved as historical user data.
+ * cannot render as an empty folder. Pre-existing empty history remains intact
+ * unless it has the same title as a populated planned target, in which case it
+ * is an indistinguishable duplicate and is absorbed into that target.
  */
 export function applyOrganizationPlanToSnapshot({
   snapshot = null,
@@ -96,7 +217,6 @@ export function applyOrganizationPlanToSnapshot({
   now = Date.now(),
 } = {}) {
   const source = cloneSnapshot(snapshot);
-  const originalSnapshotTabCount = snapshotTabCount(source);
   const candidateById = indexCandidates(candidates);
   const assignments = normalizeAssignments(plannedGroups, candidateById);
   if (assignments.length === 0) return source;
@@ -167,7 +287,7 @@ export function applyOrganizationPlanToSnapshot({
         targetGroupIndex = groups.length;
         groups.push({
           title: move.title,
-          color: move.color || 'blue',
+          color: move.color,
           collapsed: false,
           tabs: [],
         });
@@ -177,17 +297,20 @@ export function applyOrganizationPlanToSnapshot({
     groups[targetGroupIndex].tabs.push(move.tabRecord);
   }
 
-  const expectedCount = originalSnapshotTabCount + moves.filter((move) => !move.location).length;
-  const actualCount = groups.reduce((sum, group) => sum + group.tabs.length, 0);
-  if (actualCount !== expectedCount) {
-    throw new Error(`Organization snapshot changed tab count from ${expectedCount} to ${actualCount}.`);
-  }
-
-  const nextGroups = groups.filter((group, groupIndex) => !(
-    removalIndexesByGroup.has(groupIndex) &&
-    originalGroupTabCounts[groupIndex] > 0 &&
-    group.tabs.length === 0
-  ));
+  const plannedTargetTitleKeys = new Set(moves.map((move) => normalizedGroupTitle(move.title)));
+  const populatedPlannedTitleKeys = new Set(groups
+    .filter((group) => (
+      group.tabs.length > 0 && plannedTargetTitleKeys.has(normalizedGroupTitle(group.title))
+    ))
+    .map((group) => normalizedGroupTitle(group.title)));
+  const nextGroups = groups.filter((group, groupIndex) => {
+    const emptiedByPlan = removalIndexesByGroup.has(groupIndex) &&
+      originalGroupTabCounts[groupIndex] > 0 &&
+      group.tabs.length === 0;
+    const emptyPlannedDuplicate = group.tabs.length === 0 &&
+      populatedPlannedTitleKeys.has(normalizedGroupTitle(group.title));
+    return !emptiedByPlan && !emptyPlannedDuplicate;
+  });
 
   return {
     ...source,
@@ -281,7 +404,9 @@ function matchLiveEntriesByUrl({
     const urlKey = liveEntry[liveUrlKey];
     if (!urlKey) continue;
     const candidates = snapshotEntries.filter((entry) => (
-      !matchedSnapshotKeys.has(entry.key) && entry[snapshotUrlKey] === urlKey
+      !matchedSnapshotKeys.has(entry.key) &&
+      entry[snapshotUrlKey] === urlKey &&
+      !snapshotTabIdentitiesConflict(liveEntry.tab, entry.tab)
     ));
     const match = candidates.find((entry) => sameGroup(entry.currentGroup, liveEntry.currentGroup, true)) ||
       candidates.find((entry) => sameGroup(entry.currentGroup, liveEntry.currentGroup, false)) ||
@@ -294,12 +419,16 @@ function matchLiveEntriesByUrl({
 }
 
 function candidateFromSnapshot(id, snapshotEntry, liveEntry) {
+  const snapshotGroupId = cleanText(snapshotEntry.group?.snapshotGroupId);
+  const snapshotTabId = cleanText(snapshotEntry.tab?.snapshotTabId);
   const snapshotSource = {
     groupIndex: snapshotEntry.groupIndex,
     tabIndex: snapshotEntry.tabIndex,
     groupTitle: snapshotEntry.currentGroup.title,
     groupColor: snapshotEntry.currentGroup.color,
     url: String(snapshotEntry.tab?.url || ''),
+    ...(snapshotGroupId ? { snapshotGroupId } : {}),
+    ...(snapshotTabId ? { snapshotTabId } : {}),
   };
   if (!liveEntry) {
     return {
@@ -321,9 +450,9 @@ function candidateFromSnapshot(id, snapshotEntry, liveEntry) {
   return {
     id,
     title: liveDisplayTitle(liveEntry.tab),
-    pageTitle: String(liveEntry.tab?.title || liveEntry.tab?.url || 'Untitled'),
+    pageTitle: String(liveEntry.tab?.title || liveEntry.tab.url),
     panelTitle: cleanText(liveEntry.tab?.panelTitle),
-    url: String(liveEntry.tab?.url || ''),
+    url: String(liveEntry.tab.url),
     pinned: Boolean(liveEntry.tab?.pinned),
     dormant: false,
     currentGroup: liveEntry.currentGroup,
@@ -360,6 +489,41 @@ function liveSource(entry) {
     groupIndex: entry.groupIndex,
     tabIndex: entry.tabIndex,
   };
+}
+
+function organizationCandidateForeignEntry(candidate) {
+  const id = Number(candidate?.id);
+  const snapshot = candidate?.source?.snapshot;
+  if (!Number.isSafeInteger(id) || id <= 0 || !snapshot) return null;
+  const url = snapshot.url !== undefined ? snapshot.url : candidate?.url;
+  return {
+    id,
+    localLive: Boolean(candidate?.source?.live),
+    snapshotTabId: cleanText(snapshot.snapshotTabId),
+    snapshotGroupId: cleanText(snapshot.snapshotGroupId),
+    exactUrl: exactUrlIdentity(url),
+    navigationUrl: comparableSnapshotUrl(url),
+  };
+}
+
+function organizationForeignTabEntry(tab) {
+  const id = Number(tab?.id);
+  if (!Number.isSafeInteger(id) || id < 0) return null;
+  return {
+    snapshotTabId: cleanText(tab?.snapshotTabId),
+    snapshotGroupId: cleanText(tab?.snapshotGroupId),
+    exactUrl: exactUrlIdentity(tab?.url),
+    navigationUrl: comparableSnapshotUrl(tab?.url),
+  };
+}
+
+function organizationForeignIdentitiesConflict(candidate, foreign) {
+  return Boolean(
+    candidate.snapshotTabId && foreign.snapshotTabId &&
+      candidate.snapshotTabId !== foreign.snapshotTabId ||
+    candidate.snapshotGroupId && foreign.snapshotGroupId &&
+      candidate.snapshotGroupId !== foreign.snapshotGroupId
+  );
 }
 
 function resolveCurrentPlanCandidate(previewCandidate, previewCandidates, currentCandidates) {
@@ -399,6 +563,15 @@ function resolveCurrentPlanCandidate(previewCandidate, previewCandidates, curren
 
 function snapshotIdentityMatches(candidates, previewCandidate) {
   const source = previewCandidate?.source?.snapshot;
+  const snapshotTabId = cleanText(source?.snapshotTabId);
+  const snapshotGroupId = cleanText(source?.snapshotGroupId);
+  if (source && snapshotTabId) {
+    return arrayValue(candidates).filter((candidate) => {
+      const candidateSource = candidate?.source?.snapshot;
+      if (cleanText(candidateSource?.snapshotTabId) !== snapshotTabId) return false;
+      return !snapshotGroupId || cleanText(candidateSource?.snapshotGroupId) === snapshotGroupId;
+    });
+  }
   const groupTitle = normalizedGroupTitle(source?.groupTitle || previewCandidate?.currentGroup?.title);
   const url = exactUrlIdentity(source?.url !== undefined ? source.url : previewCandidate?.url);
   if (!source || !groupTitle || !url) return [];
@@ -487,6 +660,14 @@ function snapshotTabAt(snapshot, location, candidate) {
   const group = snapshot.groups[location.groupIndex];
   const tab = group?.tabs?.[location.tabIndex];
   if (!tab) throw new Error(`Organization snapshot row ${snapshotLocationKey(location.groupIndex, location.tabIndex)} no longer exists.`);
+  const expectedSnapshotGroupId = cleanText(location.snapshotGroupId);
+  const expectedSnapshotTabId = cleanText(location.snapshotTabId);
+  if (
+    (expectedSnapshotGroupId && cleanText(group.snapshotGroupId) !== expectedSnapshotGroupId) ||
+    (expectedSnapshotTabId && cleanText(tab.snapshotTabId) !== expectedSnapshotTabId)
+  ) {
+    throw new Error(`Organization snapshot row ${snapshotLocationKey(location.groupIndex, location.tabIndex)} changed while the plan was open.`);
+  }
   const expectedUrl = exactUrlIdentity(location.url !== undefined ? location.url : candidate?.url);
   const actualUrl = exactUrlIdentity(tab.url);
   if (actualUrl !== expectedUrl) {
@@ -499,7 +680,7 @@ function snapshotTabFromLiveCandidate(candidate) {
   const url = String(candidate?.url || '').trim();
   if (!url) throw new Error(`Organization candidate ${candidate?.id} has no URL to save.`);
   const tab = {
-    title: cleanText(candidate?.pageTitle) || cleanText(candidate?.title) || url,
+    title: cleanText(candidate?.pageTitle) || url,
     url,
   };
   const panelTitle = cleanText(candidate?.panelTitle);
@@ -530,7 +711,7 @@ function groupIndexesByTitle(groups) {
   return byTitle;
 }
 
-function fingerprintCandidates(candidates, snapshot) {
+function fingerprintCandidates(candidates, snapshot, tabIdAliases = {}) {
   const value = JSON.stringify(stableValue({
     candidates: candidates.map((candidate) => ({
       id: candidate.id,
@@ -540,7 +721,7 @@ function fingerprintCandidates(candidates, snapshot) {
       url: candidate.url,
       dormant: candidate.dormant,
       currentGroup: candidate.currentGroup,
-      source: candidate.source,
+      source: fingerprintCandidateSource(candidate.source, tabIdAliases),
     })),
     // Empty historical groups have no candidates, but are still user data.
     // Include the complete group records so deleting or renaming one while a
@@ -553,6 +734,20 @@ function fingerprintCandidates(candidates, snapshot) {
     hash = Math.imul(hash, 0x01000193);
   }
   return `organization-v${ORGANIZATION_FINGERPRINT_VERSION}-${(hash >>> 0).toString(16).padStart(8, '0')}-${candidates.length}`;
+}
+
+function fingerprintCandidateSource(source, tabIdAliases) {
+  if (!source?.live) return source;
+  const liveId = Number(source.live.tabId);
+  const aliases = tabIdAliases && typeof tabIdAliases === 'object' ? tabIdAliases : {};
+  const alias = Number(aliases[liveId]);
+  return {
+    ...source,
+    live: {
+      ...source.live,
+      tabId: Number.isSafeInteger(alias) && alias >= 0 ? alias : source.live.tabId,
+    },
+  };
 }
 
 function stableValue(value) {
@@ -577,10 +772,6 @@ function normalizedGroupTitle(value) {
 
 function snapshotLocationKey(groupIndex, tabIndex) {
   return `${groupIndex}:${tabIndex}`;
-}
-
-function snapshotTabCount(snapshot) {
-  return arrayValue(snapshot?.groups).reduce((sum, group) => sum + arrayValue(group?.tabs).length, 0);
 }
 
 function finiteTimestamp(value, fallback) {

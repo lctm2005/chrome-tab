@@ -30,11 +30,14 @@ test("renders the Arc migration and controlled-AI product promise", async () => 
   assert.match(html, /Choose StorableSidebar\.json for each import/i);
   assert.match(html, /final step has one Save action/i);
   assert.match(html, /leave the provider unselected to continue without AI/i);
-  assert.match(html, /Clicking Tidy Names or Auto Group/i);
+  assert.match(html, /Tidy Names uses your configured provider when available/i);
+  assert.match(html, /falls back to local naming rules without sending tab metadata/i);
+  assert.match(html, /Auto Group requires configured AI/i);
   assert.match(html, /one final preview/i);
   assert.match(html, /tabs and Tags do not change until you choose Apply/i);
   assert.match(html, /Ask Page reads only the current HTTP\(S\) page when you send/i);
-  assert.match(html, /exact page, extracted character count/i);
+  assert.match(html, /exact page/i);
+  assert.match(html, /extracted character count/i);
   assert.match(html, /clickable link to the single source page/i);
   assert.match(html, /No telemetry/);
   assert.match(html, /Space Tabs: Arc-like Spaces &amp; BYOK AI/i);
@@ -64,7 +67,13 @@ test("renders a privacy page that matches the extension data path", async () => 
   assert.match(html, /does not require an account, collect telemetry/i);
   assert.match(html, /manually choose StorableSidebar\.json/i);
   assert.match(html, /does not persist the source file or a reusable file handle/i);
-  assert.match(html, /Clicking Tidy Names or Auto Group/i);
+  assert.match(html, /Saved local file URLs may be stored and restored/i);
+  assert.match(html, /file:\/\/\/\*/i);
+  assert.match(html, /Allow access to file URLs/i);
+  assert.match(html, /does not read the file(?:&apos;|&#x27;|')s contents/i);
+  assert.match(html, /Tidy Names uses the configured provider when available/i);
+  assert.match(html, /falls back to local naming rules without sending tab metadata/i);
+  assert.match(html, /Auto Group requires configured AI/i);
   assert.match(html, /until you review that preview and choose Apply/i);
 });
 

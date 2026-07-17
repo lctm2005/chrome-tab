@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { chromeGroupTitle } from '../src/shared/group-title.js';
+
 import {
+  clearableUngroupedTabs,
   buildSpaceSnapshot,
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
+  isUngroupedSnapshotGroup,
   mergeOpenSpaceSnapshot,
   mergeSpaceSnapshot,
   removeSnapshotTabs,
@@ -14,6 +18,8 @@ import {
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
   snapshotHasPersistentContent,
+  snapshotGroupShouldPersist,
+  snapshotTabIdentitiesConflict,
   snapshotTabCount,
   updateSnapshotTab,
 } from '../src/shared/space-snapshot.js';
@@ -55,19 +61,10 @@ test('snapshots a Space as TabGroup -> Tab restore data', () => {
         { title: 'B', url: 'https://example.com/b#section' },
       ],
     },
-    {
-      title: 'Ungrouped',
-      color: 'grey',
-      collapsed: false,
-      restorable: true,
-      tabs: [
-        { title: 'Chrome', url: 'chrome://extensions' },
-      ],
-    },
   ]);
 });
 
-test('snapshots panel-only tab names as restorable metadata', () => {
+test('snapshots panel-only tab names without replacing the page title', () => {
   const snapshot = buildSpaceSnapshot({
     view: [
       {
@@ -81,6 +78,13 @@ test('snapshots panel-only tab names as restorable metadata', () => {
             panelTitle: '3X-UI',
             url: 'https://67.216.201.49:44374/secret/panel/inbounds',
           },
+          {
+            id: 2,
+            title: '',
+            displayTitle: 'Private dashboard',
+            panelTitle: 'Private dashboard',
+            url: 'https://example.com/dashboard',
+          },
         ],
       },
     ],
@@ -88,19 +92,442 @@ test('snapshots panel-only tab names as restorable metadata', () => {
 
   assert.deepEqual(snapshot.groups[0].tabs, [
     {
-      title: '3X-UI',
+      title: '67.216.201.49 - 入站',
       panelTitle: '3X-UI',
       url: 'https://67.216.201.49:44374/secret/panel/inbounds',
+    },
+    {
+      title: 'https://example.com/dashboard',
+      panelTitle: 'Private dashboard',
+      url: 'https://example.com/dashboard',
     },
   ]);
 });
 
-test('auto closes any unpinned tab owned by a Space', () => {
+test('preserves stable lifecycle identities while refreshing an open snapshot', () => {
+  const snapshot = mergeOpenSpaceSnapshot([{
+    title: 'Docs',
+    color: 'blue',
+    collapsed: true,
+    snapshotGroupId: 'snapshot-group-docs',
+    tabs: [{
+      id: 42,
+      title: 'Live title',
+      displayTitle: 'My spec',
+      panelTitle: 'My spec',
+      url: 'https://example.com/spec',
+      pinned: false,
+      snapshotTabId: 'snapshot-tab-spec',
+    }],
+  }], {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      collapsed: false,
+      snapshotGroupId: 'snapshot-group-docs',
+      tabs: [{
+        title: 'Stored title',
+        panelTitle: 'Old panel name',
+        url: 'https://example.com/spec',
+        snapshotTabId: 'snapshot-tab-spec',
+      }],
+    }],
+  });
+
+  assert.deepEqual(snapshot, {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: snapshot.updatedAt,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      collapsed: true,
+      snapshotGroupId: 'snapshot-group-docs',
+      tabs: [{
+        title: 'Live title',
+        panelTitle: 'My spec',
+        url: 'https://example.com/spec',
+        snapshotTabId: 'snapshot-tab-spec',
+      }],
+    }],
+  });
+});
+
+test('identity-aware snapshots retain distinct same-URL tabs while legacy snapshots stay deduplicated', () => {
+  const snapshot = buildSpaceSnapshot({
+    now: 10,
+    view: [{
+      title: 'Duplicates',
+      color: 'purple',
+      snapshotGroupId: 'snapshot-group-duplicates',
+      tabs: [
+        {
+          title: 'First copy',
+          url: 'https://example.com/same',
+          snapshotTabId: 'snapshot-tab-first',
+        },
+        {
+          title: 'Second copy',
+          url: 'https://example.com/same',
+          snapshotTabId: 'snapshot-tab-second',
+        },
+      ],
+    }],
+  });
+
+  assert.equal(snapshot.identityVersion, 1);
+  assert.equal(sanitizeSpaceSnapshot(snapshot).groups[0].tabs.length, 2);
+  assert.equal(sanitizeSpaceSnapshot({
+    ...snapshot,
+    identityVersion: 0,
+    groups: snapshot.groups.map((group) => ({
+      ...group,
+      tabs: group.tabs.map(({ snapshotTabId, ...tab }) => tab),
+    })),
+  }).groups[0].tabs.length, 1);
+  assert.equal(mergeSpaceSnapshot({
+    version: 1,
+    updatedAt: 11,
+    groups: [{
+      title: 'Live only',
+      color: 'blue',
+      tabs: [{ title: 'Live', url: 'https://example.com/live' }],
+    }],
+  }, snapshot).identityVersion, 1, 'stored identity metadata survives a legacy live input');
+});
+
+test('stable tab identity treats a navigation raced with panel refresh as one row', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'group-docs',
+      title: 'Docs',
+      color: 'blue',
+      collapsed: false,
+      tabs: [
+        { snapshotTabId: 'row-live', title: 'Old page', url: 'https://example.com/old' },
+        { snapshotTabId: 'row-dormant', title: 'Saved', url: 'https://example.com/saved' },
+      ],
+    }],
+  };
+
+  const merged = mergeOpenSpaceSnapshot([{
+    snapshotGroupId: 'group-docs',
+    title: 'Docs',
+    color: 'blue',
+    tabs: [{
+      id: 10,
+      snapshotTabId: 'row-live',
+      title: 'New page',
+      url: 'https://example.com/new',
+    }],
+  }], stored);
+
+  assert.deepEqual(merged.groups[0].tabs, [
+    { snapshotTabId: 'row-live', title: 'New page', url: 'https://example.com/new' },
+    { snapshotTabId: 'row-dormant', title: 'Saved', url: 'https://example.com/saved' },
+  ]);
+});
+
+test('opening a saved row preserves its exact position between dormant siblings', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'group-docs',
+      title: 'Docs',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'row-a', title: 'A saved', url: 'https://example.com/a' },
+        { snapshotTabId: 'row-b', title: 'B saved', url: 'https://example.com/b' },
+        { snapshotTabId: 'row-c', title: 'C saved', url: 'https://example.com/c' },
+      ],
+    }],
+  };
+
+  const merged = mergeOpenSpaceSnapshot([{
+    snapshotGroupId: 'group-docs',
+    title: 'Docs',
+    color: 'blue',
+    tabs: [{
+      id: 20,
+      snapshotTabId: 'row-b',
+      title: 'B live',
+      url: 'https://example.com/b',
+    }],
+  }], stored);
+
+  assert.deepEqual(merged.groups[0].tabs, [
+    { snapshotTabId: 'row-a', title: 'A saved', url: 'https://example.com/a' },
+    { snapshotTabId: 'row-b', title: 'B live', url: 'https://example.com/b' },
+    { snapshotTabId: 'row-c', title: 'C saved', url: 'https://example.com/c' },
+  ]);
+});
+
+test('stable group identity keeps same-title same-color groups separate during refresh', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        snapshotGroupId: 'group-a', title: 'Same', color: 'blue', collapsed: false,
+        tabs: [
+          { snapshotTabId: 'row-a-live', title: 'A old', url: 'https://same.test/item' },
+          { snapshotTabId: 'row-a-saved', title: 'A saved', url: 'https://a.test/saved' },
+        ],
+      },
+      {
+        snapshotGroupId: 'group-b', title: 'Same', color: 'blue', collapsed: false,
+        tabs: [
+          { snapshotTabId: 'row-b-live', title: 'B old', url: 'https://same.test/item' },
+          { snapshotTabId: 'row-b-saved', title: 'B saved', url: 'https://b.test/saved' },
+        ],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        snapshotGroupId: 'group-b', title: 'Same', color: 'blue', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-b-live', title: 'B new', url: 'https://b.test/new' }],
+      },
+      {
+        snapshotGroupId: 'group-a', title: 'Same', color: 'blue', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-a-live', title: 'A new', url: 'https://a.test/new' }],
+      },
+    ],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(merged.groups.map((group) => ({
+    id: group.snapshotGroupId,
+    tabs: group.tabs.map((tab) => tab.snapshotTabId),
+  })), [
+    { id: 'group-a', tabs: ['row-a-live', 'row-a-saved'] },
+    { id: 'group-b', tabs: ['row-b-live', 'row-b-saved'] },
+  ]);
+});
+
+test('duplicate live claims for one stable group preserve every row instead of overwriting a group', () => {
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        snapshotGroupId: 'group-shared', title: 'Shared', color: 'blue',
+        tabs: [{ snapshotTabId: 'row-a', title: 'A live', url: 'https://shared.test/a' }],
+      },
+      {
+        snapshotGroupId: 'group-shared', title: 'Shared', color: 'blue',
+        tabs: [{ snapshotTabId: 'row-b', title: 'B live', url: 'https://shared.test/b' }],
+      },
+    ],
+  };
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'group-shared', title: 'Shared', color: 'blue',
+      tabs: [
+        { snapshotTabId: 'row-a', title: 'A stored', url: 'https://shared.test/a' },
+        { snapshotTabId: 'row-b', title: 'B stored', url: 'https://shared.test/b' },
+        { snapshotTabId: 'row-saved', title: 'Saved', url: 'https://shared.test/saved' },
+      ],
+    }],
+  };
+
+  assert.deepEqual(
+    mergeSpaceSnapshot(live, stored).groups[0].tabs.map((tab) => tab.snapshotTabId),
+    ['row-a', 'row-b', 'row-saved'],
+  );
+});
+
+test('keeps a renamed stable group when its tab identity and URL still agree', () => {
+  const merged = mergeSpaceSnapshot({
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'renamed-group',
+      title: 'New name',
+      color: 'cyan',
+      tabs: [{
+        snapshotTabId: 'shared-row',
+        title: 'Live page',
+        url: 'https://rename.test/page',
+      }],
+    }],
+  }, {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'renamed-group',
+      title: 'Old name',
+      color: 'purple',
+      tabs: [
+        { snapshotTabId: 'shared-row', title: 'Stored page', url: 'https://rename.test/page' },
+        { snapshotTabId: 'saved-row', title: 'Saved page', url: 'https://rename.test/saved' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(merged.groups, [{
+    snapshotGroupId: 'renamed-group',
+    title: 'New name',
+    color: 'cyan',
+    tabs: [
+      { snapshotTabId: 'shared-row', title: 'Live page', url: 'https://rename.test/page' },
+      { snapshotTabId: 'saved-row', title: 'Saved page', url: 'https://rename.test/saved' },
+    ],
+  }]);
+});
+
+test('a unique stable tab identity stays authoritative across navigation and group changes', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        snapshotGroupId: 'stale-group',
+        title: 'Historical',
+        color: 'purple',
+        collapsed: false,
+        tabs: [
+          {
+            snapshotTabId: 'stale-row',
+            title: 'Historical page',
+            url: 'https://history.test/old',
+          },
+          { title: 'Legacy history', url: 'https://history.test/legacy' },
+        ],
+      },
+      {
+        title: 'Current Group',
+        color: 'cyan',
+        collapsed: false,
+        tabs: [
+          { title: 'Current page', url: 'https://current.test/page' },
+          { title: 'Second current page', url: 'https://current.test/second' },
+          { title: 'Saved page', url: 'https://current.test/saved' },
+        ],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'stale-group',
+      title: 'Current Group',
+      color: 'cyan',
+      collapsed: false,
+      tabs: [
+        {
+          snapshotTabId: 'stale-row',
+          title: 'Current page',
+          url: 'https://current.test/page',
+        },
+        { title: 'Second current page', url: 'https://current.test/second' },
+      ],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(merged.groups.map((group) => ({
+    title: group.title,
+    rows: group.tabs.map((tab) => ({ id: tab.snapshotTabId || '', url: tab.url })),
+  })), [
+    {
+      title: 'Historical',
+      rows: [{ id: '', url: 'https://history.test/legacy' }],
+    },
+    {
+      title: 'Current Group',
+      rows: [
+        { id: '', url: 'https://current.test/page' },
+        { id: '', url: 'https://current.test/second' },
+        { id: '', url: 'https://current.test/saved' },
+        { id: 'stale-row', url: 'https://current.test/page' },
+      ],
+    },
+  ]);
+  assert.equal(merged.groups.flatMap((group) => group.tabs)
+    .filter((tab) => tab.snapshotTabId === 'stale-row').length, 1);
+});
+
+test('stable removal survives simultaneous navigation and group changes', () => {
+  const snapshot = {
+    version: 1,
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'old-group',
+      title: 'Old',
+      color: 'purple',
+      tabs: [
+        { snapshotTabId: 'row-a', title: 'Old page', url: 'https://old.test/page' },
+        { snapshotTabId: 'row-b', title: 'Keep', url: 'https://keep.test/page' },
+      ],
+    }],
+  };
+
+  const removed = removeSnapshotTabs(snapshot, [{
+    snapshotTabId: 'row-a',
+    groupTitle: 'New',
+    groupColor: 'cyan',
+    url: 'https://new.test/page',
+  }]);
+
+  assert.deepEqual(removed.groups[0].tabs.map((tab) => tab.snapshotTabId), ['row-b']);
+});
+
+test('auto closes only unpinned tabs that can be durably reopened', () => {
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: false }), true);
   assert.equal(shouldAutoCloseTab({ url: 'http://example.com', pinned: false }), true);
-  assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), true);
-  assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), true);
+  assert.equal(shouldAutoCloseTab({ url: 'chrome://extensions', pinned: false }), false);
+  assert.equal(shouldAutoCloseTab({ url: 'chrome-extension://abc/page.html', pinned: false }), false);
+  assert.equal(shouldAutoCloseTab({ url: 'file:///tmp/report.pdf', pinned: false }), false);
+  assert.equal(shouldAutoCloseTab(
+    { url: 'file:///tmp/report.pdf', pinned: false },
+    { fileSchemeAccess: true },
+  ), true);
+  for (const url of ['blob:https://example.com/id', 'data:text/plain,large', 'about:blank', 'javascript:alert(1)', 'not a url']) {
+    assert.equal(shouldAutoCloseTab({ url, pinned: false }), false);
+    assert.equal(isRestorableSnapshotTab({ url }), false);
+  }
   assert.equal(shouldAutoCloseTab({ url: 'https://example.com', pinned: true }), false);
+});
+
+test('clears only local restorable ungrouped tabs without coercing foreign markers', () => {
+  const tabs = [
+    { id: 1, url: 'https://example.com/local' },
+    { id: 2, url: 'http://example.com/local', foreignWindowTabId: null },
+    { id: 3, url: 'https://example.com/string-marker', foreignWindowTabId: '5' },
+    { id: 4, url: 'https://example.com/foreign-zero', foreignWindowTabId: 0 },
+    { id: 5, url: 'https://example.com/foreign', foreignWindowTabId: 5 },
+    { id: 6, url: 'https://example.com/pinned', pinned: true },
+    { id: 7, url: 'chrome://extensions' },
+    { id: 8, url: 'data:text/plain,keep' },
+    { id: 9, url: 'file:///tmp/keep-without-access.pdf' },
+  ];
+
+  assert.deepEqual(clearableUngroupedTabs(tabs).map((tab) => tab.id), [1, 2, 3]);
+  assert.deepEqual(clearableUngroupedTabs(tabs, { fileSchemeAccess: true }).map((tab) => tab.id), [1, 2, 3, 9]);
+  assert.deepEqual(clearableUngroupedTabs(null), []);
 });
 
 test('drops temporary ungrouped tabs from a stored snapshot', () => {
@@ -210,6 +637,44 @@ test('open Space snapshots preserve live ungrouped tabs while dropping stored-on
   ]);
 });
 
+test('a vanished Chrome group reconciles its stable live row as ungrouped instead of a cached Tag ghost', () => {
+  const snapshot = mergeOpenSpaceSnapshot([{
+    key: 'ungrouped',
+    title: 'Ungrouped',
+    color: 'grey',
+    collapsed: false,
+    snapshotGroupId: 'stable-docs',
+    tabs: [{
+      id: 1,
+      title: 'Spec',
+      url: 'https://example.com/spec',
+      snapshotTabId: 'row-spec',
+      snapshotGroupId: 'stable-docs',
+    }],
+  }], {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      collapsed: true,
+      snapshotGroupId: 'stable-docs',
+      tabs: [{
+        title: 'Spec',
+        url: 'https://example.com/spec',
+        snapshotTabId: 'row-spec',
+      }],
+    }],
+  });
+
+  assert.equal(snapshot.groups.length, 1);
+  assert.equal(snapshot.groups[0].title, 'Ungrouped');
+  assert.equal(snapshot.groups[0].color, 'grey');
+  assert.equal(snapshot.groups[0].snapshotGroupId, 'stable-docs');
+  assert.equal(snapshot.groups[0].tabs.length, 1);
+});
+
 test('mergeOpenSpaceSnapshot consumes one exact live row without dropping query/hash history', () => {
   const snapshot = mergeOpenSpaceSnapshot([{
     title: 'History',
@@ -241,12 +706,101 @@ test('mergeOpenSpaceSnapshot consumes one exact live row without dropping query/
     color: 'blue',
     collapsed: false,
     tabs: [
-      { title: 'Item 2 live', url: 'https://app.test/item?id=2' },
       { title: 'Item 1 saved', url: 'https://app.test/item?id=1' },
+      { title: 'Item 2 live', url: 'https://app.test/item?id=2' },
       { title: 'Third section saved', url: 'https://app.test/item#third' },
     ],
   }]);
   assert.equal(snapshotTabCount(snapshot), 3);
+});
+
+test('different stable tab identities never consume saved rows by exact or fallback URL', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'group-history',
+      title: 'History',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'saved-exact', title: 'Saved exact', url: 'https://app.test/exact' },
+        { snapshotTabId: 'saved-query', title: 'Saved query', url: 'https://app.test/item?id=saved' },
+        { snapshotTabId: 'saved-hash', title: 'Saved section', url: 'https://app.test/docs#saved' },
+      ],
+    }],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'group-history',
+      title: 'History',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'live-exact', title: 'Live exact', url: 'https://app.test/exact' },
+        { snapshotTabId: 'live-query', title: 'Live query', url: 'https://app.test/item?id=live' },
+        { snapshotTabId: 'live-hash', title: 'Live section', url: 'https://app.test/docs#live' },
+      ],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+
+  assert.deepEqual(merged.groups[0].tabs.map((tab) => tab.snapshotTabId), [
+    'saved-exact',
+    'saved-query',
+    'saved-hash',
+    'live-exact',
+    'live-query',
+    'live-hash',
+  ]);
+  assert.equal(snapshotTabCount(merged), 6);
+});
+
+test('URL matching skips a conflicting stable row but can consume a compatible legacy row', () => {
+  const merged = mergeSpaceSnapshot({
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      tabs: [{ snapshotTabId: 'live-row', title: 'Live', url: 'https://same.test/page' }],
+    }],
+  }, {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'saved-row', title: 'Saved stable', url: 'https://same.test/page' },
+        { title: 'Legacy duplicate', url: 'https://same.test/page' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(merged.groups[0].tabs.map((tab) => tab.snapshotTabId || ''), [
+    'saved-row',
+    'live-row',
+  ]);
+});
+
+test('stable tab identity conflicts require two distinct non-empty identities', () => {
+  assert.equal(snapshotTabIdentitiesConflict(), false);
+  assert.equal(snapshotTabIdentitiesConflict(null, { snapshotTabId: 'right' }), false);
+  assert.equal(snapshotTabIdentitiesConflict({ snapshotTabId: 'left' }, null), false);
+  assert.equal(snapshotTabIdentitiesConflict(
+    { snapshotTabId: ' row ' },
+    { snapshotTabId: 'row' },
+  ), false);
+  assert.equal(snapshotTabIdentitiesConflict(
+    { snapshotTabId: 'left' },
+    { snapshotTabId: 'right' },
+  ), true);
 });
 
 test('sanitizes invalid and new-tab placeholder rows from stored grouped snapshots', () => {
@@ -290,6 +844,24 @@ test('sanitizes invalid and new-tab placeholder rows from stored grouped snapsho
   });
 });
 
+test('never persists the trailing-slash new-tab URL returned by real Chrome', () => {
+  const snapshot = buildSpaceSnapshot({
+    view: [{
+      title: 'Ungrouped',
+      color: 'grey',
+      tabs: [
+        { id: 1, title: 'New Tab', url: 'chrome://newtab/' },
+        { id: 2, title: 'Keep me', url: 'https://example.com/real-page' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(snapshot.groups[0].tabs.map((tab) => tab.url), [
+    'https://example.com/real-page',
+  ]);
+  assert.equal(isRestorableSnapshotTab({ url: 'chrome://newtab/' }), false);
+});
+
 test('trims snapshot URLs, fills default metadata, and counts remaining tabs', () => {
   const snapshot = sanitizeSpaceSnapshot({
     version: 1,
@@ -315,8 +887,8 @@ test('trims snapshot URLs, fills default metadata, and counts remaining tabs', (
     updatedAt: 1,
     groups: [
       {
-        title: 'Ungrouped',
-        color: 'grey',
+        title: '',
+        color: 'blue',
         tabs: [{ title: ' https://example.com/a ', url: 'https://example.com/a' }],
       },
     ],
@@ -325,6 +897,61 @@ test('trims snapshot URLs, fills default metadata, and counts remaining tabs', (
   assert.equal(isRestorableSnapshotTab({ url: 'chrome://newtab' }), false);
   assert.equal(isRestorableSnapshotTab({ url: 'chrome-extension://abc/sidepanel.html?layout=workbench' }), false);
   assert.equal(isRestorableSnapshotTab({ url: ' file:///tmp/demo.html ' }), true);
+  assert.equal(isRestorableSnapshotTab({ url: 'https://example.com' }), true);
+  assert.equal(isRestorableSnapshotTab({ url: 'http://example.com' }), true);
+});
+
+test('preserves an explicitly empty Chrome group title through build, sanitize, and merge', () => {
+  const built = buildSpaceSnapshot({
+    now: 10,
+    view: [{
+      snapshotGroupId: 'untitled-group',
+      title: '',
+      color: 'cyan',
+      tabs: [{
+        snapshotTabId: 'live-row',
+        title: 'Live',
+        url: 'https://example.com/live',
+      }],
+    }],
+  });
+  assert.equal(built.groups[0].title, '');
+  assert.equal(built.groups[0].restorable, undefined);
+  assert.equal(isUngroupedSnapshotGroup(built.groups[0]), false);
+
+  const sanitized = sanitizeSpaceSnapshot({
+    ...built,
+    preserveGroups: true,
+    groups: [
+      built.groups[0],
+      { snapshotGroupId: 'empty-tag', title: '', color: 'orange', tabs: [] },
+      { snapshotGroupId: 'missing-title', color: 'grey', tabs: [] },
+    ],
+  });
+  assert.deepEqual(sanitized.groups.map(({ title, color }) => ({ title, color })), [
+    { title: '', color: 'cyan' },
+    { title: '', color: 'orange' },
+  ]);
+
+  const merged = mergeSpaceSnapshot(built, {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'untitled-group',
+      title: '',
+      color: 'cyan',
+      tabs: [
+        { snapshotTabId: 'live-row', title: 'Old live', url: 'https://example.com/live' },
+        { snapshotTabId: 'saved-row', title: 'Saved', url: 'https://example.com/saved' },
+      ],
+    }],
+  });
+  assert.equal(merged.groups[0].title, '');
+  assert.deepEqual(merged.groups[0].tabs.map((tab) => tab.snapshotTabId), [
+    'live-row',
+    'saved-row',
+  ]);
 });
 
 test('removes extension-owned pages from old Space snapshots', () => {
@@ -388,6 +1015,141 @@ test('keeps the same normalized URL in different snapshot groups', () => {
   });
 
   assert.equal(snapshotTabCount(snapshot), 2);
+});
+
+test('keeps the full logical title when Chrome reports its compact physical title', () => {
+  const logicalTitle = `${'研究'.repeat(16)}甲`;
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [{
+      title: chromeGroupTitle(logicalTitle),
+      color: 'purple',
+      tabs: [{ title: 'Open', url: 'https://example.com/open' }],
+    }],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [{
+      title: logicalTitle,
+      color: 'purple',
+      tabs: [
+        { title: 'Open', url: 'https://example.com/open' },
+        { title: 'Saved', url: 'https://example.com/saved' },
+      ],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(liveSnapshot, storedSnapshot);
+
+  assert.equal(merged.groups.length, 1);
+  assert.equal(merged.groups[0].title, logicalTitle);
+  assert.deepEqual(merged.groups[0].tabs.map((tab) => tab.url), [
+    'https://example.com/open',
+    'https://example.com/saved',
+  ]);
+});
+
+test('does not merge two long logical titles that share Chrome-visible prefixes', () => {
+  const prefix = 'project-title-prefix'.padEnd(32, 'x');
+  const firstTitle = `${prefix}A`;
+  const secondTitle = `${prefix}B`;
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      {
+        title: chromeGroupTitle(firstTitle),
+        color: 'blue',
+        tabs: [{ title: 'First open', url: 'https://example.com/first/open' }],
+      },
+      {
+        title: chromeGroupTitle(secondTitle),
+        color: 'blue',
+        tabs: [{ title: 'Second open', url: 'https://example.com/second/open' }],
+      },
+    ],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: firstTitle,
+        color: 'blue',
+        tabs: [
+          { title: 'First open', url: 'https://example.com/first/open' },
+          { title: 'First saved', url: 'https://example.com/first/saved' },
+        ],
+      },
+      {
+        title: secondTitle,
+        color: 'blue',
+        tabs: [
+          { title: 'Second open', url: 'https://example.com/second/open' },
+          { title: 'Second saved', url: 'https://example.com/second/saved' },
+        ],
+      },
+    ],
+  };
+
+  const merged = mergeSpaceSnapshot(liveSnapshot, storedSnapshot);
+  const groupsByTitle = new Map(merged.groups.map((group) => [group.title, group]));
+
+  assert.equal(merged.groups.length, 2);
+  assert.deepEqual(groupsByTitle.get(firstTitle).tabs.map((tab) => tab.url), [
+    'https://example.com/first/open',
+    'https://example.com/first/saved',
+  ]);
+  assert.deepEqual(groupsByTitle.get(secondTitle).tabs.map((tab) => tab.url), [
+    'https://example.com/second/open',
+    'https://example.com/second/saved',
+  ]);
+});
+
+test('does not confuse a long title with a short title equal to its physical identity', () => {
+  const longTitle = `${'collision-candidate-'.repeat(3)}long`;
+  const shortTitle = chromeGroupTitle(longTitle);
+  const liveSnapshot = {
+    version: 1,
+    updatedAt: 2,
+    groups: [{
+      title: shortTitle,
+      color: 'blue',
+      tabs: [{ title: 'Short', url: 'https://example.com/short' }],
+    }],
+  };
+  const storedSnapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: longTitle,
+        color: 'blue',
+        tabs: [{ title: 'Long', url: 'https://example.com/long' }],
+      },
+      {
+        title: shortTitle,
+        color: 'blue',
+        tabs: [{ title: 'Short', url: 'https://example.com/short' }],
+      },
+    ],
+  };
+
+  const groupsByTitle = new Map(
+    mergeSpaceSnapshot(liveSnapshot, storedSnapshot).groups.map((group) => [group.title, group]),
+  );
+
+  assert.deepEqual(groupsByTitle.get(longTitle).tabs.map((tab) => tab.url), [
+    'https://example.com/long',
+  ]);
+  assert.deepEqual(groupsByTitle.get(shortTitle).tabs.map((tab) => tab.url), [
+    'https://example.com/short',
+  ]);
 });
 
 test('keeps dormant tabs with a live group after the group is renamed', () => {
@@ -806,7 +1568,7 @@ test('updates only the exact dormant URL and preserves query/hash siblings', () 
       color: 'blue',
       tabs: [
         { title: 'Item 1', url: 'https://app.test/item?id=1' },
-        { title: 'Item 2', url: 'https://app.test/item?id=2' },
+        { title: 'Item 2', url: 'https://app.test/item?id=2', snapshotTabId: 'saved-item-2' },
         { title: 'Third section', url: 'https://app.test/item#third' },
       ],
     }],
@@ -819,13 +1581,152 @@ test('updates only the exact dormant URL and preserves query/hash siblings', () 
   }, {
     title: 'Item 2 updated',
     url: 'https://app.test/item?id=2&view=full',
+    panelTitle: '  Read   later  ',
   });
 
   assert.deepEqual(result.groups[0].tabs, [
     { title: 'Item 1', url: 'https://app.test/item?id=1' },
-    { title: 'Item 2 updated', url: 'https://app.test/item?id=2&view=full' },
+    {
+      title: 'Item 2 updated',
+      url: 'https://app.test/item?id=2&view=full',
+      snapshotTabId: 'saved-item-2',
+      panelTitle: 'Read later',
+    },
     { title: 'Third section', url: 'https://app.test/item#third' },
   ]);
+});
+
+test('updates only the stable target among same-URL lifecycle rows', () => {
+  const snapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Duplicates',
+      color: 'blue',
+      tabs: [
+        { title: 'Legacy sibling', url: 'https://example.com/legacy' },
+        { title: 'First', url: 'https://example.com/same', snapshotTabId: 'row-first' },
+        { title: 'Second', url: 'https://example.com/same', snapshotTabId: 'row-second' },
+      ],
+    }],
+  };
+
+  const result = updateSnapshotTab(snapshot, {
+    groupTitle: 'Wrong current group title',
+    snapshotTabId: 'row-second',
+    url: 'https://example.com/same',
+  }, {
+    title: 'Second updated',
+    url: 'https://example.com/updated',
+  });
+
+  assert.deepEqual(result.groups[0].tabs, [
+    { title: 'Legacy sibling', url: 'https://example.com/legacy' },
+    { title: 'First', url: 'https://example.com/same', snapshotTabId: 'row-first' },
+    { title: 'Second updated', url: 'https://example.com/updated', snapshotTabId: 'row-second' },
+  ]);
+  assert.deepEqual(removeSnapshotTab(snapshot, {
+    groupTitle: 'Wrong current group title',
+    snapshotTabId: 'row-second',
+  }).groups[0].tabs, [
+    { title: 'Legacy sibling', url: 'https://example.com/legacy' },
+    { title: 'First', url: 'https://example.com/same', snapshotTabId: 'row-first' },
+  ]);
+});
+
+test('required existing updates change exactly one saved row and never append or guess', () => {
+  const snapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: 'Legacy target', url: 'https://legacy.test/target' },
+          { title: 'Other', url: 'https://docs.test/other' },
+        ],
+      },
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [{ title: 'Same metadata', url: 'https://docs.test/other-group' }],
+      },
+      {
+        title: 'Docs',
+        color: 'red',
+        tabs: [{ title: 'Wrong color', url: 'https://legacy.test/target' }],
+      },
+      {
+        title: 'Plans',
+        color: 'blue',
+        tabs: [
+          { title: 'Wrong title', url: 'https://legacy.test/target' },
+          { title: 'Stable target', url: 'https://stable.test/old', snapshotTabId: 'stable-row' },
+        ],
+      },
+    ],
+  };
+
+  const legacyUpdated = updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    groupColor: 'blue',
+    url: 'https://legacy.test/target',
+  }, {
+    title: 'Legacy updated',
+    url: 'https://legacy.test/updated',
+  }, { requireExisting: true });
+  assert.deepEqual(legacyUpdated.groups[0].tabs[0], {
+    title: 'Legacy updated',
+    url: 'https://legacy.test/updated',
+  });
+  assert.deepEqual(legacyUpdated.groups[1], snapshot.groups[1], 'a same-metadata Tag gets no appended row');
+  assert.deepEqual(legacyUpdated.groups[2], snapshot.groups[2], 'a different color is untouched');
+  assert.deepEqual(legacyUpdated.groups[3], snapshot.groups[3], 'a different title is untouched');
+
+  const stableUpdated = updateSnapshotTab(snapshot, {
+    snapshotTabId: 'stable-row',
+    groupTitle: 'Wrong current title',
+    url: 'https://wrong.test',
+  }, {
+    title: 'Stable updated',
+    url: 'https://stable.test/new',
+  }, { requireExisting: true });
+  assert.deepEqual(stableUpdated.groups[3].tabs[1], {
+    title: 'Stable updated',
+    url: 'https://stable.test/new',
+    snapshotTabId: 'stable-row',
+  });
+
+  const colorOnly = updateSnapshotTab(snapshot, {
+    groupColor: 'red',
+    url: 'https://legacy.test/target',
+  }, {
+    title: 'Color target',
+    url: 'https://color.test/new',
+  }, { requireExisting: true });
+  assert.equal(colorOnly.groups[2].tabs[0].url, 'https://color.test/new');
+
+  for (const [name, source, target] of [
+    ['missing row', snapshot, { groupTitle: 'Docs', groupColor: 'blue', url: 'https://missing.test' }],
+    ['ambiguous legacy rows', snapshot, { url: 'https://legacy.test/target' }],
+    ['duplicated stable ids', {
+      ...snapshot,
+      groups: [{ title: 'Duplicate', color: 'blue', tabs: [
+        { title: 'One', url: 'https://one.test', snapshotTabId: 'duplicate-row' },
+        { title: 'Two', url: 'https://two.test', snapshotTabId: 'duplicate-row' },
+      ] }],
+    }, { snapshotTabId: 'duplicate-row', url: 'https://one.test' }],
+  ]) {
+    assert.deepEqual(updateSnapshotTab(source, target, {
+      title: 'Must not be written',
+      url: 'https://wrong.test/new',
+    }, { requireExisting: true }), sanitizeSpaceSnapshot(source, {
+      preserveDuplicateUrls: true,
+    }), name);
+  }
 });
 
 test('updates a saved snapshot tab URL inside the matching group', () => {
@@ -897,6 +1798,7 @@ test('adds a saved snapshot tab when the old URL is not present in the matching 
   }, {
     title: 'Better Spec',
     url: 'https://example.com/better',
+    snapshotTabId: 'new-saved-spec',
   }), {
     version: 1,
     updatedAt: 1,
@@ -906,7 +1808,11 @@ test('adds a saved snapshot tab when the old URL is not present in the matching 
         color: 'blue',
         tabs: [
           { title: 'Plan', url: 'https://example.com/plan' },
-          { title: 'Better Spec', url: 'https://example.com/better' },
+          {
+            title: 'Better Spec',
+            url: 'https://example.com/better',
+            snapshotTabId: 'new-saved-spec',
+          },
         ],
       },
     ],
@@ -1284,4 +2190,528 @@ test('large disjoint live and saved snapshots merge in bounded time without reor
   assert.equal(merged.groups[1].tabs[0].title, 'Live 0');
   assert.equal(merged.groups[1].tabs.at(-1).title, `Live ${tabCount - 1}`);
   assert.ok(elapsedMs < 2_500, `large disjoint merge took ${elapsedMs.toFixed(1)} ms`);
+});
+
+test('treats missing snapshot inputs as empty, safe lifecycle states', () => {
+  assert.deepEqual(buildSpaceSnapshot({ now: 0 }), {
+    version: 1,
+    updatedAt: 0,
+    groups: [],
+  });
+  assert.deepEqual(buildSpaceSnapshot().groups, []);
+  assert.equal(shouldAutoCloseTab(), false);
+  assert.equal(isRestorableSnapshotTab(), false);
+  assert.equal(snapshotTabCount(), 0);
+  assert.equal(snapshotTabCount(null), 0);
+  assert.equal(snapshotTabCount({ groups: [{}] }), 0);
+  assert.equal(snapshotGroupShouldPersist(), false);
+  assert.equal(snapshotGroupShouldPersist({ preserveGroups: true }, {
+    title: 'Saved tag',
+    tabs: [],
+  }), true);
+  assert.equal(snapshotGroupShouldPersist({ preserveGroups: true }, {
+    title: 'Ungrouped',
+    tabs: [],
+  }), false);
+  assert.equal(snapshotHasPersistentContent(), false);
+  assert.equal(snapshotHasPersistentContent({
+    preserveGroups: true,
+    groups: [{ title: 'Saved tag', tabs: [] }],
+  }), true);
+  assert.equal(snapshotHasPersistentContent({ preserveGroups: true, groups: null }), false);
+  assert.equal(isUngroupedSnapshotGroup(), false);
+  assert.equal(isUngroupedSnapshotGroup({ title: 'Ungrouped' }), true);
+  assert.equal(isUngroupedSnapshotGroup({ title: 'Ungrouped', color: 'blue' }), false);
+  assert.equal(comparableSnapshotUrl(), '');
+  assert.equal(comparableSnapshotUrl('?query-only'), '?query-only');
+  assert.equal(dropTemporarySnapshotGroups(null), null);
+  assert.equal(sanitizeSpaceSnapshot(null), null);
+  assert.deepEqual(sanitizeSpaceSnapshot({ groups: null }), { groups: [] });
+  assert.equal(removeSnapshotTab(null), null);
+  assert.equal(removeSnapshotTabs(null), null);
+  assert.equal(updateSnapshotTab(null), null);
+  assert.equal(mergeSpaceSnapshot(null, null), null);
+});
+
+test('builds readable default records and cleans panel-only metadata', () => {
+  const snapshot = buildSpaceSnapshot({
+    now: 10,
+    view: [
+      {
+        tabs: [{ title: '', panelTitle: '   ', url: ' https://example.com/loose ' }],
+      },
+      {
+        title: 'Saved',
+        tabs: [{
+          title: 'Browser title',
+          displayTitle: 'Display title',
+          panelTitle: '  Custom   name  ',
+          url: 'https://example.com/saved',
+        }],
+      },
+      { title: 'Empty', tabs: [] },
+      { title: 'Missing tabs' },
+    ],
+  });
+
+  assert.deepEqual(snapshot, {
+    version: 1,
+    updatedAt: 10,
+    groups: [
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        collapsed: false,
+        restorable: true,
+        tabs: [{ title: ' https://example.com/loose ', url: 'https://example.com/loose' }],
+      },
+      {
+        title: 'Saved',
+        color: 'grey',
+        collapsed: false,
+        tabs: [{
+          title: 'Browser title',
+          panelTitle: 'Custom name',
+          url: 'https://example.com/saved',
+        }],
+      },
+    ],
+  });
+
+  assert.deepEqual(sanitizeSpaceSnapshot({
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Saved empty tag',
+      },
+      {
+        title: 'Docs',
+        tabs: [
+          { title: '', panelTitle: '   ', url: ' https://example.com/docs ' },
+          { title: 'Named', panelTitle: '  Saved   panel name ', url: 'https://example.com/named' },
+        ],
+      },
+    ],
+  }), {
+    preserveGroups: true,
+    groups: [
+      { title: 'Saved empty tag', color: 'blue', tabs: [] },
+      {
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          { title: ' https://example.com/docs ', url: 'https://example.com/docs' },
+          {
+            title: 'Named',
+            panelTitle: 'Saved panel name',
+            url: 'https://example.com/named',
+          },
+        ],
+      },
+    ],
+  });
+});
+
+test('portable sanitization keeps an explicitly empty saved group without inventing tabs', () => {
+  assert.deepEqual(sanitizeSpaceSnapshot({
+    preserveGroups: true,
+    groups: [{ title: 'Saved empty tag' }],
+  }, { preserveDuplicateUrls: true }), {
+    preserveGroups: true,
+    groups: [{ title: 'Saved empty tag', color: 'blue', tabs: [] }],
+  });
+});
+
+test('creates the expected destination group when a saved tab moves to a new group', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'green',
+      tabs: [{ title: 'Plan', url: 'https://example.com/plan' }],
+    }],
+  };
+
+  const research = updateSnapshotTab(snapshot, {
+    groupTitle: 'Research',
+    url: 'https://example.com/missing',
+  }, {
+    url: ' https://example.com/paper ',
+  });
+  assert.deepEqual(research.groups.at(-1), {
+    title: 'Research',
+    color: 'blue',
+    tabs: [{ title: 'https://example.com/paper', url: 'https://example.com/paper' }],
+  });
+
+  const ungrouped = updateSnapshotTab(snapshot, {
+    groupTitle: 'Ungrouped',
+  }, {
+    title: 'Loose',
+    url: 'https://example.com/loose',
+  });
+  assert.deepEqual(ungrouped.groups.at(-1), {
+    title: 'Ungrouped',
+    color: 'grey',
+    tabs: [{ title: 'Loose', url: 'https://example.com/loose' }],
+  });
+
+  const colorOnly = updateSnapshotTab(snapshot, {
+    groupColor: 'orange',
+  }, {
+    title: 'Color only',
+    url: 'https://example.com/color-only',
+  });
+  assert.deepEqual(colorOnly.groups.at(-1), {
+    title: 'Ungrouped',
+    color: 'orange',
+    tabs: [{ title: 'Color only', url: 'https://example.com/color-only' }],
+  });
+
+  assert.deepEqual(updateSnapshotTab(snapshot, {}, {
+    title: 'New Tab',
+    url: 'chrome://newtab/',
+  }), snapshot);
+  assert.deepEqual(updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    url: 'https://example.com/plan',
+  }, {
+    title: 'Settings',
+    url: 'chrome://settings/',
+  }), snapshot);
+  assert.deepEqual(updateSnapshotTab(snapshot, {
+    groupTitle: 'Docs',
+    url: 'https://example.com/plan',
+  }, {
+    title: 'Inline data',
+    url: 'data:text/plain,not-portable',
+  }), snapshot);
+});
+
+test('retitles a uniquely identified stored group even before live URLs are available', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 7,
+    groups: [{
+      title: 'Research',
+      color: 'blue',
+      tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+    }],
+  };
+
+  assert.deepEqual(retitleSnapshotGroup(snapshot, {
+    title: 'Research',
+  }, 'Deep Work', 'not-a-time'), {
+    version: 1,
+    updatedAt: 7,
+    groups: [{
+      title: 'Deep Work',
+      color: 'blue',
+      tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+    }],
+  });
+
+  assert.deepEqual(retitleSnapshotGroup(snapshot), snapshot);
+  assert.deepEqual(retitleSnapshotGroup(snapshot, { title: 'Research' }, ''), snapshot);
+  assert.deepEqual(retitleSnapshotGroup(snapshot, { title: 'Research' }, 'Research'), snapshot);
+  assert.deepEqual(retitleSnapshotGroup(snapshot, { title: 'Missing' }, 'New'), snapshot);
+  assert.deepEqual(retitleSnapshotGroup(snapshot, {}, 'New'), snapshot);
+  assert.equal(retitleSnapshotGroup(null, { title: 'Missing' }, 'New'), null);
+
+  assert.equal(retitleSnapshotGroup({
+    version: 1,
+    groups: [{
+      title: 'Ungrouped',
+      tabs: [{ title: 'Loose', url: 'https://example.com/loose' }],
+    }],
+  }, {
+    title: 'Ungrouped',
+    tabs: [{ url: 'https://example.com/loose' }],
+  }, 'Inbox').groups[0].title, 'Inbox');
+});
+
+test('retitles an untitled group only by a unique stable group identity', () => {
+  const snapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        snapshotGroupId: 'untitled-a',
+        title: '',
+        color: 'blue',
+        tabs: [{ snapshotTabId: 'row-a', title: 'A', url: 'https://example.com/a' }],
+      },
+      {
+        snapshotGroupId: 'untitled-b',
+        title: '',
+        color: 'blue',
+        tabs: [{ snapshotTabId: 'row-b', title: 'B', url: 'https://example.com/b' }],
+      },
+    ],
+  };
+
+  const renamed = retitleSnapshotGroup(snapshot, {
+    snapshotGroupId: 'untitled-b',
+    title: '',
+    color: 'red',
+    tabs: [],
+  }, 'Named B', 2);
+  assert.deepEqual(renamed.groups.map((group) => group.title), ['', 'Named B']);
+  assert.equal(renamed.updatedAt, 2);
+  assert.deepEqual(snapshot.groups.map((group) => group.title), ['', '']);
+
+  assert.deepEqual(retitleSnapshotGroup(snapshot, {
+    snapshotGroupId: 'missing',
+    title: '',
+  }, 'Do not guess'), snapshot);
+  assert.deepEqual(retitleSnapshotGroup(snapshot, {
+    title: '',
+    color: 'blue',
+    tabs: [{ url: 'https://example.com/b' }],
+  }, 'Legacy must stay conservative'), snapshot);
+
+  const duplicateIdentity = {
+    ...snapshot,
+    groups: snapshot.groups.map((group) => ({ ...group, snapshotGroupId: 'duplicate' })),
+  };
+  assert.deepEqual(retitleSnapshotGroup(duplicateIdentity, {
+    snapshotGroupId: 'duplicate',
+  }, 'Do not guess'), duplicateIdentity);
+  assert.deepEqual(retitleSnapshotGroup(renamed, {
+    snapshotGroupId: 'untitled-b',
+  }, 'Named B'), renamed);
+
+  const identityBesideLegacy = {
+    ...snapshot,
+    groups: [snapshot.groups[0], {
+      title: 'Legacy without identity',
+      color: 'red',
+      tabs: [{ title: 'Legacy', url: 'https://example.com/legacy' }],
+    }],
+  };
+  assert.deepEqual(retitleSnapshotGroup(identityBesideLegacy, {
+    snapshotGroupId: 'untitled-a',
+  }, 'Named A').groups.map((group) => group.title), [
+    'Named A',
+    'Legacy without identity',
+  ]);
+});
+
+test('targets an explicitly untitled snapshot group without treating it as a wildcard', () => {
+  const sharedUrl = 'https://example.com/shared';
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        title: '',
+        color: 'blue',
+        tabs: [{ title: 'Untitled copy', url: sharedUrl }],
+      },
+      {
+        title: 'Ungrouped',
+        color: 'grey',
+        restorable: true,
+        tabs: [{ title: 'Loose copy', url: sharedUrl }],
+      },
+    ],
+  };
+
+  const removed = removeSnapshotTab(snapshot, {
+    groupTitle: '',
+    groupColor: 'blue',
+    url: sharedUrl,
+  });
+  assert.deepEqual(removed.groups.map(({ title, tabs }) => ({ title, count: tabs.length })), [
+    { title: 'Ungrouped', count: 1 },
+  ]);
+
+  const bulkRemoved = removeSnapshotTabs(snapshot, [{
+    groupTitle: '',
+    groupColor: 'blue',
+    url: sharedUrl,
+  }]);
+  assert.deepEqual(bulkRemoved.groups.map(({ title, tabs }) => ({ title, count: tabs.length })), [
+    { title: 'Ungrouped', count: 1 },
+  ]);
+
+  const created = updateSnapshotTab({ version: 1, updatedAt: 1, groups: [] }, {
+    groupTitle: '',
+    groupColor: 'cyan',
+  }, {
+    title: 'Created',
+    url: 'https://example.com/created',
+  });
+  assert.deepEqual(created.groups, [{
+    title: '',
+    color: 'cyan',
+    tabs: [{ title: 'Created', url: 'https://example.com/created' }],
+  }]);
+});
+
+test('retitles only the strongest URL match when duplicate group names differ in history', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Research',
+        color: 'blue',
+        tabs: [
+          { title: 'A', url: 'https://example.com/a' },
+          { title: 'B', url: 'https://example.com/b' },
+        ],
+      },
+      {
+        title: 'Research',
+        color: 'blue',
+        tabs: [{ title: 'A copy', url: 'https://example.com/a' }],
+      },
+    ],
+  };
+
+  const renamed = retitleSnapshotGroup(snapshot, {
+    title: 'Research',
+    color: 'blue',
+    tabs: [
+      { url: 'https://example.com/a' },
+      { url: 'https://example.com/b' },
+    ],
+  }, 'Deep Work', 2);
+
+  assert.deepEqual(renamed.groups.map((group) => group.title), ['Deep Work', 'Research']);
+});
+
+test('does not guess a renamed merge target when two live groups overlap equally', () => {
+  const sharedUrl = 'https://example.com/shared';
+  const merged = mergeSpaceSnapshot({
+    version: 1,
+    updatedAt: 2,
+    groups: [
+      { title: 'One', color: 'green', tabs: [{ title: 'One', url: sharedUrl }] },
+      { title: 'Two', color: 'purple', tabs: [{ title: 'Two', url: sharedUrl }] },
+    ],
+  }, {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Old name',
+      color: 'blue',
+      tabs: [
+        { title: 'Saved shared', url: sharedUrl },
+        { title: 'Dormant', url: 'https://example.com/dormant' },
+      ],
+    }],
+  });
+
+  assert.deepEqual(merged.groups.map((group) => ({
+    title: group.title,
+    urls: group.tabs.map((tab) => tab.url),
+  })), [
+    { title: 'Old name', urls: ['https://example.com/dormant'] },
+    { title: 'One', urls: [sharedUrl] },
+    { title: 'Two', urls: [sharedUrl] },
+  ]);
+});
+
+test('advances duplicate URL cursors while preserving one-to-one group-aware removal', () => {
+  const sharedUrl = 'https://example.com/shared';
+  const result = removeSnapshotTabs({
+    version: 1,
+    preserveGroups: true,
+    groups: [
+      { title: 'Current', color: 'blue', tabs: [{ title: 'Current', url: sharedUrl }] },
+      { title: 'Archive', color: 'green', tabs: [{ title: 'Archive', url: sharedUrl }] },
+    ],
+  }, [
+    { groupTitle: 'Current', groupColor: 'blue', url: sharedUrl },
+    { groupTitle: 'Current', groupColor: 'blue', url: sharedUrl },
+  ]);
+
+  assert.deepEqual(result.groups, [
+    { title: 'Current', color: 'blue', tabs: [] },
+    { title: 'Archive', color: 'green', tabs: [] },
+  ]);
+});
+
+test('bulk removal ignores unusable targets and leaves unmatched history intact', () => {
+  const snapshot = {
+    version: 1,
+    groups: [{
+      title: 'Docs',
+      color: 'blue',
+      tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+    }],
+  };
+
+  assert.deepEqual(removeSnapshotTabs(snapshot, null), snapshot);
+  assert.deepEqual(removeSnapshotTabs(snapshot, [null, {}, { url: '   ' }]), snapshot);
+  assert.deepEqual(removeSnapshotTabs(snapshot, [{ url: 'https://example.com/missing' }]), snapshot);
+  assert.deepEqual(removeSnapshotTab(snapshot), snapshot);
+});
+
+test('derives group preference defaults from partial bulk-removal targets', () => {
+  const result = removeSnapshotTabs({
+    version: 1,
+    preserveGroups: true,
+    groups: [
+      { title: 'Ungrouped', color: 'grey', tabs: [{ title: 'Loose', url: 'https://example.com/loose' }] },
+      { title: 'Docs', color: 'blue', tabs: [{ title: 'Spec', url: 'https://example.com/spec' }] },
+      { title: 'Ungrouped', color: 'green', tabs: [{ title: 'Green', url: 'https://example.com/green' }] },
+    ],
+  }, [
+    { groupTitle: 'Ungrouped', url: 'https://example.com/loose' },
+    { groupTitle: 'Docs', url: 'https://example.com/spec' },
+    { groupColor: 'green', url: 'https://example.com/green' },
+  ]);
+
+  assert.deepEqual(result.groups, [
+    { title: 'Docs', color: 'blue', tabs: [] },
+    { title: 'Ungrouped', color: 'green', tabs: [] },
+  ]);
+});
+
+test('uses stable merge metadata defaults and honors preserveGroups from either side', () => {
+  const startedAt = Date.now();
+  const merged = mergeSpaceSnapshot({
+    version: 0,
+    updatedAt: 0,
+    preserveGroups: true,
+    groups: [{ title: 'Live', color: 'blue', tabs: [{ title: 'Live', url: 'https://example.com/live' }] }],
+  }, {
+    version: 2,
+    updatedAt: 1,
+    groups: [{ title: 'Saved', color: 'green', tabs: [{ title: 'Saved', url: 'https://example.com/saved' }] }],
+  });
+
+  assert.equal(merged.version, 2);
+  assert.ok(merged.updatedAt >= startedAt);
+  assert.equal(merged.preserveGroups, true);
+  assert.deepEqual(merged.groups.map((group) => group.title), ['Saved', 'Live']);
+
+  const liveOnly = sanitizeSpaceSnapshot({
+    version: 3,
+    groups: [{ title: 'Live', tabs: [{ title: 'Live', url: 'https://example.com/live' }] }],
+  });
+  assert.deepEqual(mergeSpaceSnapshot(liveOnly, null), liveOnly);
+
+  const storedOnly = sanitizeSpaceSnapshot({
+    version: 4,
+    groups: [{ title: 'Saved', tabs: [{ title: 'Saved', url: 'https://example.com/saved' }] }],
+  });
+  assert.deepEqual(mergeSpaceSnapshot(null, storedOnly), storedOnly);
+
+  const defaultVersion = mergeSpaceSnapshot({
+    version: 0,
+    updatedAt: 5,
+    groups: [{ title: 'Live', tabs: [{ title: 'Live', url: 'https://example.com/live' }] }],
+  }, {
+    version: 0,
+    groups: [{ title: 'Saved', tabs: [{ title: 'Saved', url: 'https://example.com/saved' }] }],
+  });
+  assert.equal(defaultVersion.version, 1);
+  assert.equal(defaultVersion.updatedAt, 5);
 });

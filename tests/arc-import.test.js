@@ -7,6 +7,11 @@ import {
   createArcImportPlan,
   selectArcImportPlan,
 } from '../src/shared/arc-import.js';
+import {
+  dropTemporarySnapshotGroups,
+  mergeOpenSpaceSnapshot,
+  sanitizeSpaceSnapshot,
+} from '../src/shared/space-snapshot.js';
 
 function readArcFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
@@ -153,6 +158,7 @@ test('creates an append-only import plan from Arc Spaces and folders', () => {
         title: 'Ungrouped',
         color: 'grey',
         collapsed: false,
+        restorable: true,
         tabs: [
           { title: 'Inbox', url: 'https://example.com/inbox' },
           { title: 'Later', url: 'https://example.com/later' },
@@ -188,6 +194,50 @@ test('creates an append-only import plan from Arc Spaces and folders', () => {
   assert.deepEqual(plan.conflicts, plan.spacePreviews[0].conflicts);
 });
 
+test('keeps imported top-level Arc pages restorable when the Space first opens', () => {
+  const plan = createArcImportPlan({
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['top-level-space'] } },
+      spaceModels: [{
+        value: {
+          id: 'top-level-space',
+          title: 'Top Level',
+          newContainerIDs: ['top-level-container'],
+        },
+      }],
+      items: [
+        {
+          value: {
+            id: 'top-level-container',
+            data: { itemContainer: { containerType: { spaceItems: { _0: 'top-level-space' } } } },
+            childrenIds: ['top-level-page'],
+          },
+        },
+        {
+          value: {
+            id: 'top-level-page',
+            title: 'Arc Inbox',
+            data: { tab: { savedURL: 'https://example.com/arc-inbox' } },
+            childrenIds: [],
+          },
+        },
+      ],
+    },
+  }, { now: 9 });
+  const snapshot = plan.spaceSnapshots['arc-top-level-space'];
+  const expectedGroup = {
+    title: 'Ungrouped',
+    color: 'grey',
+    collapsed: false,
+    restorable: true,
+    tabs: [{ title: 'Arc Inbox', url: 'https://example.com/arc-inbox' }],
+  };
+
+  assert.deepEqual(snapshot.groups, [expectedGroup]);
+  assert.deepEqual(dropTemporarySnapshotGroups(snapshot)?.groups, [expectedGroup]);
+  assert.deepEqual(mergeOpenSpaceSnapshot([], snapshot)?.groups, [expectedGroup]);
+});
+
 test('skips Arc-only items and unsafe tab URLs', () => {
   const arcData = {
     sidebarSyncState: {
@@ -206,11 +256,12 @@ test('skips Arc-only items and unsafe tab URLs', () => {
           value: {
             id: 'container-b',
             data: { itemContainer: { containerType: { spaceItems: { _0: 'space-b' } } } },
-            childrenIds: ['folder-empty', 'bad-tab', 'arc-note', 'arc-split'],
+            childrenIds: ['folder-empty', 'bad-tab', 'new-tab', 'arc-note', 'arc-split'],
           },
         },
         { value: { id: 'folder-empty', title: 'Empty', data: { list: {} }, childrenIds: [] } },
         { value: { id: 'bad-tab', data: { tab: { savedTitle: 'Arc URL', savedURL: 'arc://boosts' } } } },
+        { value: { id: 'new-tab', data: { tab: { savedTitle: 'New Tab', savedURL: 'chrome://newtab' } } } },
         { value: { id: 'arc-note', data: { easel: { title: 'Board' } }, childrenIds: [] } },
         { value: { id: 'arc-split', data: { splitView: { focusItemID: 'bad-tab' } }, childrenIds: [] } },
       ],
@@ -226,13 +277,14 @@ test('skips Arc-only items and unsafe tab URLs', () => {
     tabs: 0,
     skipped: {
       emptyFolders: 1,
-      invalidTabs: 1,
+      invalidTabs: 2,
       unsupportedItems: 0,
       easel: 1,
       splitView: 1,
     },
   });
   assert.deepEqual(plan.spaceSnapshots['arc-space-b'].groups, []);
+  assert.deepEqual(sanitizeSpaceSnapshot(plan.spaceSnapshots['arc-space-b']).groups, []);
 });
 
 test('can parse Arc sidebar container exports with JSON string records', () => {
@@ -278,6 +330,7 @@ test('can parse Arc sidebar container exports with JSON string records', () => {
       title: 'Ungrouped',
       color: 'grey',
       collapsed: false,
+      restorable: true,
       tabs: [{ title: 'Home', url: 'https://example.com/home' }],
     },
   ]);
@@ -297,6 +350,7 @@ test('ignores an items-only firebase segment when sidebarSync has importable Spa
     title: 'Ungrouped',
     color: 'grey',
     collapsed: false,
+    restorable: true,
     tabs: [{ title: 'Recovered tab', url: 'https://example.com/recovered' }],
   }]);
 });
@@ -723,4 +777,230 @@ test('distinguishes batch, existing, and mixed generated id conflicts', () => {
     resolved: 'arc-foo-bar-3',
     reason: 'mixed',
   }]);
+});
+
+test('normalizes malformed Arc records, follows cyclic trees once, and applies safe defaults', () => {
+  const before = Date.now();
+  const plan = createArcImportPlan({
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['main', '   ', 'missing', 'main'] } },
+      spaceModels: [
+        null,
+        '{broken json',
+        { value: { id: 'main', newContainerIDs: ['container'] } },
+        { value: { id: '   ', title: 'Symbols !', newContainerIDs: [] } },
+        { value: { id: 'later', title: 'Later' } },
+      ],
+      items: [
+        null,
+        '{not-json',
+        {
+          value: {
+            id: 'container',
+            data: { itemContainer: {} },
+            childrenIds: ['folder', 'folder', 'missing-child', 'unsupported', 'url-title'],
+          },
+        },
+        {
+          value: {
+            id: 'folder',
+            title: '   ',
+            data: { list: {} },
+            childrenIds: ['folder-tab', 'container'],
+          },
+        },
+        {
+          value: {
+            id: 'folder-tab',
+            data: { tab: { savedURL: 'https://example.com/folder' } },
+          },
+        },
+        { value: { id: 'unsupported' } },
+        {
+          value: {
+            id: 'url-title',
+            title: '',
+            data: { tab: { savedTitle: '', savedURL: 'https://example.com/title-fallback' } },
+          },
+        },
+      ],
+    },
+  }, {
+    existingSpaces: [null, { id: '', title: 'Symbols !' }, { name: '' }],
+  });
+  const after = Date.now();
+
+  assert.deepEqual(plan.spaces.map(({ id, name, icon }) => ({ id, name, icon })), [
+    { id: 'arc-main', name: 'Arc Space', icon: 'A' },
+    { id: 'arc-symbols', name: 'Symbols ! (Arc)', icon: 'S' },
+    { id: 'arc-later', name: 'Later', icon: 'L' },
+  ]);
+  assert.ok(plan.spaceSnapshots['arc-main'].updatedAt >= before);
+  assert.ok(plan.spaceSnapshots['arc-main'].updatedAt <= after);
+  assert.deepEqual(plan.spaceSnapshots['arc-main'].groups, [
+    {
+      title: 'Folder',
+      color: 'blue',
+      collapsed: false,
+      tabs: [{ title: 'https://example.com/folder', url: 'https://example.com/folder' }],
+    },
+    {
+      title: 'Ungrouped',
+      color: 'grey',
+      collapsed: false,
+      restorable: true,
+      tabs: [{
+        title: 'https://example.com/title-fallback',
+        url: 'https://example.com/title-fallback',
+      }],
+    },
+  ]);
+  assert.equal(plan.summary.tabs, 2, 'duplicate and cyclic references must not duplicate imported pages');
+  assert.equal(plan.summary.skipped.unsupportedItems, 1);
+  assert.equal(createArcImportPlan(null, { now: 1 }).summary.source, 'unknown');
+});
+
+test('keeps the first source when complete Arc exports tie exactly', () => {
+  const space = { id: 'tie', title: 'Tie', newContainerIDs: ['tie-container'] };
+  const container = {
+    id: 'tie-container',
+    data: { itemContainer: {} },
+    childrenIds: ['tie-tab'],
+  };
+  const tab = {
+    id: 'tie-tab',
+    data: { tab: { savedURL: 'https://example.com/tie' } },
+  };
+  const plan = createArcImportPlan({
+    firebaseSyncState: {
+      syncData: {
+        orderedSpaceIDs: { value: ['tie'] },
+        spaceModels: [{ value: space }],
+        items: [{ value: container }, { value: tab }],
+      },
+    },
+    sidebarSyncState: {
+      container: { value: { orderedSpaceIDs: ['tie'] } },
+      spaceModels: [{ value: space }],
+      items: [{ value: container }, { value: tab }],
+    },
+  }, { now: 12 });
+
+  assert.equal(plan.summary.source, 'firebaseSyncState');
+  assert.equal(plan.summary.tabs, 1);
+});
+
+test('selects legacy plans safely when preview metadata is absent or partially malformed', () => {
+  const legacyPlan = {
+    spaces: [{ id: 'legacy', name: 'Legacy' }],
+    spaceSnapshots: { legacy: { groups: [] } },
+    summary: {
+      source: 'legacy-export',
+      folders: 3,
+      tabs: 4,
+      skipped: { invalidTabs: 2 },
+    },
+    conflicts: [
+      { spaceId: 'legacy', field: 'name' },
+      { spaceId: 'other', field: 'id' },
+      { field: 'id' },
+    ],
+  };
+  const selected = selectArcImportPlan(legacyPlan, ['legacy']);
+
+  assert.deepEqual(selected.spaces, [{ id: 'legacy', name: 'Legacy' }]);
+  assert.deepEqual(selected.summary, {
+    source: 'legacy-export',
+    spaces: 1,
+    folders: 3,
+    tabs: 4,
+    skipped: {
+      emptyFolders: 0,
+      invalidTabs: 2,
+      unsupportedItems: 0,
+      easel: 0,
+      splitView: 0,
+    },
+  });
+  assert.deepEqual(selected.conflicts, [{ spaceId: 'legacy', field: 'name' }]);
+  assert.deepEqual(selectArcImportPlan({ spaces: [null, { name: 'No id' }] }, ['legacy']).spaces, []);
+
+  const defaults = selectArcImportPlan({
+    spaces: [{ id: 'only' }],
+    spaceSnapshots: {},
+  }, ['only']);
+  assert.equal(defaults.summary.source, 'unknown');
+  assert.equal(defaults.summary.tabs, 0);
+  assert.deepEqual(selectArcImportPlan(legacyPlan, null).spaces, []);
+
+  const withMalformedPreview = selectArcImportPlan({
+    spaces: [{ id: 'legacy', name: 'Legacy' }],
+    spaceSnapshots: {},
+    summary: { source: 'preview' },
+    spacePreviews: [null, { spaceId: 'legacy', folders: 0, tabs: 0 }],
+  }, ['legacy']);
+  assert.deepEqual(withMalformedPreview.spacePreviews[0].skipped, {
+    emptyFolders: 0,
+    invalidTabs: 0,
+    unsupportedItems: 0,
+    easel: 0,
+    splitView: 0,
+  });
+
+  assert.throws(
+    () => selectArcImportPlan({
+      spaces: [{ id: 'nameless' }],
+      spacePreviews: [{ spaceId: '' }],
+    }, ['nameless']),
+    /Space "nameless"/,
+  );
+});
+
+test('append initializes empty state, rejects invalid ids, and cannot overwrite from orphan snapshots', () => {
+  const emptyState = {};
+  assert.deepEqual(appendArcImportPlan(emptyState, null), {
+    importedSpaces: 0,
+    importedSpaceIds: [],
+    importedTabs: 0,
+  });
+  assert.deepEqual(emptyState, { spaces: [], spaceSnapshots: {} });
+
+  const state = {
+    spaces: [{ id: 'keep', name: 'Keep' }],
+    spaceSnapshots: {
+      keep: { groups: [{ tabs: [{ url: 'https://example.com/keep' }] }] },
+    },
+  };
+  const result = appendArcImportPlan(state, {
+    spaces: [{ id: 'fresh', name: 'Fresh' }, { id: 'without-snapshot', name: 'No snapshot' }],
+    spaceSnapshots: {
+      fresh: { groups: [{ tabs: [{ url: 'https://example.com/fresh' }] }] },
+      keep: { groups: [{ tabs: [{ url: 'https://example.com/overwrite' }] }] },
+      orphan: { groups: [{ tabs: [{ url: 'https://example.com/orphan' }] }] },
+    },
+  });
+
+  assert.equal(result.importedTabs, 1);
+  assert.equal(state.spaceSnapshots.keep.groups[0].tabs[0].url, 'https://example.com/keep');
+  assert.deepEqual(Object.keys(state.spaceSnapshots).sort(), ['fresh', 'keep']);
+
+  for (const spaces of [
+    [{ name: 'Missing id' }],
+    [{ id: '__proto__' }],
+    [{ id: 'duplicate' }, { id: 'duplicate' }],
+  ]) {
+    const target = { spaces: [], spaceSnapshots: {} };
+    assert.throws(
+      () => appendArcImportPlan(target, { spaces, spaceSnapshots: [] }),
+      /valid id|no longer available/,
+    );
+    assert.deepEqual(target, { spaces: [], spaceSnapshots: {} });
+  }
+
+  assert.throws(
+    () => appendArcImportPlan({ spaces: [], spaceSnapshots: { reserved: {} } }, {
+      spaces: [{ id: 'reserved' }],
+    }),
+    /no longer available/,
+  );
 });

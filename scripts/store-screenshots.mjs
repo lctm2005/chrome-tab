@@ -627,7 +627,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 8,
+    version: 10,
     theme: 'ocean',
     activeSpaceId,
     spaces,
@@ -713,8 +713,8 @@ function baseState(activeSpaceId) {
     onboarding: { version: 2, completed: true, stage: 'done' },
     shortcuts: {
       togglePanel: 'Alt+S',
-      askSubmit: 'Meta+Enter',
-      askAbort: 'Control+C',
+      askSubmit: 'Primary+Enter',
+      askAbort: 'Escape',
       openAsk: 'Alt+A',
       tidyNames: 'Control+Alt+T',
       autoGroup: 'Control+Alt+G',

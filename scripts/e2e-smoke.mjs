@@ -1,10 +1,16 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, normalize, relative } from 'node:path';
+import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createArcImportPlan } from '../src/shared/arc-import.js';
+import {
+  compressLineNumbers,
+  summarizeLocalIstanbulCoverage,
+  summarizeLocalPreciseCoverage,
+} from './cdp-coverage.mjs';
 
 const port = Number(process.env.CDP_PORT || 9223);
 const extensionId = process.env.EXT_ID || 'fignfifoniblkonapihmkfakmlgkbkcf';
@@ -14,6 +20,7 @@ const arcImportFile = process.env.ARC_IMPORT_FILE || '';
 const repoRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const base = `http://127.0.0.1:${port}`;
 const autoChrome = process.env.E2E_AUTO_CHROME !== '0';
+const coverageEnabled = ['1', 'true'].includes(String(process.env.E2E_COVERAGE || '').toLowerCase());
 const sidepanelUrl = preview
   ? (process.env.PREVIEW_URL || `http://127.0.0.1:${previewPort}/sidepanel.html`)
   : `chrome-extension://${extensionId}/sidepanel.html`;
@@ -183,9 +190,10 @@ async function json(url, options) {
 
 async function sidepanelTarget() {
   let targets = await json(`${base}/json/list`);
-  let target = targets.find((item) => item.url === sidepanelUrl);
+  let target = coverageEnabled ? null : targets.find((item) => item.url === sidepanelUrl);
   if (!target) {
-    target = await json(`${base}/json/new?${encodeURIComponent(sidepanelUrl)}`, { method: 'PUT' });
+    const initialUrl = coverageEnabled ? 'about:blank' : sidepanelUrl;
+    target = await json(`${base}/json/new?${encodeURIComponent(initialUrl)}`, { method: 'PUT' });
   }
   return target;
 }
@@ -245,16 +253,133 @@ async function waitFor(client, expression, timeoutMs = 5000) {
   throw new Error(`Timed out waiting for: ${expression}`);
 }
 
+async function startPreviewCoverage(client) {
+  await client.send('Profiler.enable');
+  await client.send('Profiler.startPreciseCoverage', {
+    callCount: true,
+    detailed: true,
+  });
+}
+
+async function checkpointPreviewCoverage(client, snapshots) {
+  if (!coverageEnabled) return null;
+  const snapshot = await client.send('Profiler.takePreciseCoverage');
+  snapshots.push(...(snapshot.result || []));
+  return snapshot;
+}
+
+function previewRelativeScriptPath(scriptUrl) {
+  try {
+    const script = new URL(String(scriptUrl || ''));
+    const previewRoot = new URL(sidepanelUrl);
+    if (script.origin !== previewRoot.origin) return '';
+    const path = decodeURIComponent(script.pathname).replace(/^\/+/, '');
+    if (!path.endsWith('.js')) return '';
+    const segments = path.split('/');
+    if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return '';
+    return path;
+  } catch {
+    return '';
+  }
+}
+
+async function collectPreviewCoverage(client, snapshots, complete) {
+  const finalSnapshot = await client.send('Profiler.takePreciseCoverage');
+  const scripts = [...snapshots, ...(finalSnapshot.result || [])];
+  const sourceCache = new Map();
+  const records = [];
+  for (const script of scripts) {
+    const path = previewRelativeScriptPath(script?.url);
+    if (!path) continue;
+    const sourcePath = join(repoRoot, path);
+    if (!await pathExists(sourcePath)) continue;
+    if (!sourceCache.has(path)) sourceCache.set(path, await readFile(sourcePath, 'utf8'));
+    records.push({
+      path,
+      source: sourceCache.get(path),
+      functions: script.functions || [],
+    });
+  }
+  const summary = summarizeLocalPreciseCoverage(records);
+  const astSummary = await summarizeLocalIstanbulCoverage(records);
+  const astFiles = new Map(astSummary.files.map((file) => [file.path, file]));
+  const sourceHashes = Object.fromEntries([...sourceCache]
+    .map(([path, source]) => [
+      path,
+      createHash('sha256').update(source).digest('hex'),
+    ])
+    .sort(([left], [right]) => left.localeCompare(right)));
+  const files = summary.files.map((file) => ({
+    path: file.path,
+    lines: {
+      covered: file.lines.covered,
+      total: file.lines.total,
+      percent: file.lines.percent,
+      ...(file.path === 'sidepanel.js'
+        ? { uncoveredRanges: compressLineNumbers(file.lines.uncovered) }
+        : {}),
+    },
+    functions: {
+      covered: file.functions.covered,
+      total: file.functions.total,
+      percent: file.functions.percent,
+      ...(file.path === 'sidepanel.js'
+        ? {
+            uncovered: file.functions.uncovered,
+            details: file.functions.details,
+          }
+        : {}),
+    },
+    ...(astFiles.has(file.path)
+      ? {
+          coverage: {
+            statements: astFiles.get(file.path).statements,
+            branches: astFiles.get(file.path).branches,
+            functions: astFiles.get(file.path).functions,
+            lines: astFiles.get(file.path).lines,
+          },
+          ...(file.path === 'sidepanel.js'
+            ? { uncovered: astFiles.get(file.path).uncovered }
+            : {}),
+        }
+      : {}),
+  }));
+  return {
+    schemaVersion: 2,
+    engine: 'cdp-precise',
+    generatedAt: new Date().toISOString(),
+    complete: Boolean(complete),
+    startedBeforeExecution: true,
+    sourceHashAlgorithm: 'sha256',
+    sourceHashes,
+    totals: summary.totals,
+    coverage: astSummary.totals,
+    files,
+  };
+}
+
+async function writePreviewCoverage(report) {
+  const configuredPath = String(process.env.E2E_COVERAGE_OUTPUT || '').trim();
+  if (!configuredPath) return '';
+  const outputPath = resolve(repoRoot, configuredPath);
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+  return outputPath;
+}
+
 async function main() {
   const previewServer = await startPreviewServer();
   const chrome = await startChromeForCdp();
   let client = null;
+  const coverageSnapshots = [];
+  let coverageCollected = false;
   try {
     const target = await sidepanelTarget();
     client = createClient(target.webSocketDebuggerUrl);
     await client.ready;
     await client.send('Runtime.enable');
     await client.send('Page.enable');
+    if (coverageEnabled) await startPreviewCoverage(client);
     await client.send('Page.navigate', { url: sidepanelUrl });
     await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)}`);
 
@@ -266,6 +391,216 @@ async function main() {
     if (document.readyState === 'complete') resolve(true);
     else addEventListener('load', () => resolve(true), { once: true });
   })`);
+
+    if (preview) {
+      await evaluate(client, `(() => {
+        localStorage.clear();
+        sessionStorage.clear();
+        return true;
+      })()`);
+      const onboardingUrl = new URL(sidepanelUrl);
+      onboardingUrl.searchParams.set('layout', 'workbench');
+      onboardingUrl.searchParams.set('onboarding', '1');
+      await checkpointPreviewCoverage(client, coverageSnapshots);
+      await client.send('Page.navigate', { url: onboardingUrl.toString() });
+      await waitFor(client, `document.querySelector('#onboardingDialog')?.open && document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 3'`);
+      await evaluate(client, `(() => {
+        const originalSetItem = Storage.prototype.setItem;
+        window.__ONBOARDING_STORAGE_FAULT__ = {
+          failuresRemaining: 0,
+          successfulWritesBeforeFailure: 0,
+          message: '',
+          restore() {
+            Storage.prototype.setItem = originalSetItem;
+          },
+        };
+        Storage.prototype.setItem = function(key, value) {
+          const fault = window.__ONBOARDING_STORAGE_FAULT__;
+          if (this !== localStorage || key !== 'spaceTabsState') {
+            return originalSetItem.call(this, key, value);
+          }
+          originalSetItem.call(this, key, value);
+          if (fault.failuresRemaining > 0) {
+            if (fault.successfulWritesBeforeFailure > 0) {
+              fault.successfulWritesBeforeFailure -= 1;
+              return;
+            }
+            fault.failuresRemaining -= 1;
+            throw new Error(fault.message || 'Simulated onboarding storage failure.');
+          }
+        };
+        document.querySelector('[data-onboarding-path="fresh"]').click();
+        const input = document.querySelector('#onboardingSpaceNameInput');
+        input.value = 'Atomic Space';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
+        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated skip storage failure.';
+        document.querySelector('#skipOnboardingButton').click();
+        return true;
+      })()`);
+      const failedSkip = await waitFor(client, `(() => {
+        const toast = document.querySelector('#workbenchToast');
+        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated skip storage failure.')) return null;
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        return {
+          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+          input: document.querySelector('#onboardingSpaceNameInput')?.value || '',
+          storedNames: (stored.spaces || []).map((space) => space.name),
+          onboarding: stored.onboarding || null,
+          toast: { text: toast.textContent, tone: toast.dataset.tone },
+        };
+      })()`);
+      record(
+        'skipping onboarding rolls an apply-then-reject write back without a ghost completion',
+        failedSkip.dialogOpen &&
+          failedSkip.step === 'Step 2 of 3' &&
+          failedSkip.input === 'Atomic Space' &&
+          failedSkip.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
+          failedSkip.onboarding?.completed === false &&
+          failedSkip.onboarding?.stage === 'choose' &&
+          failedSkip.toast.tone === 'error' &&
+          !/ready|completed|saved/i.test(failedSkip.toast.text),
+        JSON.stringify(failedSkip),
+      );
+
+      await evaluate(client, `(() => {
+        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
+        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated create storage failure.';
+        document.querySelector('#onboardingNextButton').click();
+        return true;
+      })()`);
+      const failedCreate = await waitFor(client, `(() => {
+        const toast = document.querySelector('#workbenchToast');
+        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated create storage failure.')) return null;
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
+        return {
+          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+          nextAction: document.querySelector('#onboardingNextButton')?.textContent || '',
+          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+          railNames,
+          storedNames: (stored.spaces || []).map((space) => space.name),
+          activeSpaceId: stored.activeSpaceId || '',
+          onboarding: stored.onboarding || null,
+          finishVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
+          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+          toast: { text: toast.textContent, tone: toast.dataset.tone },
+        };
+      })()`);
+      record(
+        'onboarding Space creation storage failure stays on the naming step without a ghost or false success',
+        failedCreate.dialogOpen &&
+          failedCreate.step === 'Step 2 of 3' &&
+          failedCreate.nextAction === 'Create Space' &&
+          failedCreate.activeSpaceName === 'Default' &&
+          failedCreate.railNames.filter((name) => name === 'Atomic Space').length === 0 &&
+          failedCreate.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
+          failedCreate.activeSpaceId === 'default' &&
+          failedCreate.onboarding?.completed !== true &&
+          failedCreate.onboarding?.stage !== 'ai' &&
+          failedCreate.finishVisible === false &&
+          failedCreate.finishMessage !== 'Atomic Space is ready.' &&
+          failedCreate.toast.tone === 'error' &&
+          !/ready|created|saved/i.test(failedCreate.toast.text),
+        JSON.stringify(failedCreate),
+      );
+
+      await evaluate(client, `(() => {
+        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 1;
+        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
+        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated post-commit refresh storage failure.';
+        document.querySelector('#onboardingNextButton').click();
+        return true;
+      })()`);
+      const retriedCreate = await waitFor(client, `(() => {
+        if (document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 3 of 3') return null;
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
+        return {
+          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+          railMatches: railNames.filter((name) => name === 'Atomic Space').length,
+          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
+          spaceIds: (stored.spaces || []).map((space) => space.id),
+          onboarding: stored.onboarding || null,
+        };
+      })()`);
+      record(
+        'retrying onboarding Space creation commits one visible and durable Space',
+        retriedCreate.dialogOpen &&
+          retriedCreate.step === 'Step 3 of 3' &&
+          retriedCreate.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
+          retriedCreate.activeSpaceName === 'Atomic Space' &&
+          retriedCreate.railMatches === 1 &&
+          retriedCreate.storedMatches === 1 &&
+          retriedCreate.spaceIds.length === 1 &&
+          retriedCreate.spaceIds[0] === 'default' &&
+          retriedCreate.onboarding?.completed === false &&
+          retriedCreate.onboarding?.stage === 'ai',
+        JSON.stringify(retriedCreate),
+      );
+
+      await evaluate(client, `(() => {
+        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 0;
+        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
+        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated completion storage failure.';
+        document.querySelector('#onboardingOpenWorkbenchButton').click();
+        return true;
+      })()`);
+      const failedCompletion = await waitFor(client, `(() => {
+        const toast = document.querySelector('#workbenchToast');
+        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated completion storage failure.')) return null;
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        return {
+          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
+          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
+          onboarding: stored.onboarding || null,
+          toast: { text: toast.textContent, tone: toast.dataset.tone },
+        };
+      })()`);
+      record(
+        'onboarding completion storage failure keeps the final step open and rolls back the completion marker',
+        failedCompletion.dialogOpen &&
+          failedCompletion.step === 'Step 3 of 3' &&
+          failedCompletion.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
+          failedCompletion.storedMatches === 1 &&
+          failedCompletion.onboarding?.completed === false &&
+          failedCompletion.onboarding?.stage === 'ai' &&
+          failedCompletion.toast.tone === 'error' &&
+          !/setup saved|onboarding completed/i.test(failedCompletion.toast.text),
+        JSON.stringify(failedCompletion),
+      );
+
+      await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
+      const retriedCompletion = await waitFor(client, `(() => {
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        if (document.querySelector('#onboardingDialog')?.open || stored.onboarding?.completed !== true) return null;
+        window.__ONBOARDING_STORAGE_FAULT__?.restore();
+        return {
+          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
+          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
+          onboarding: stored.onboarding || null,
+        };
+      })()`);
+      record(
+        'retrying onboarding completion closes setup with one Space and one durable completion state',
+        retriedCompletion.dialogOpen === false &&
+          retriedCompletion.storedMatches === 1 &&
+          retriedCompletion.onboarding?.completed === true &&
+          retriedCompletion.onboarding?.stage === 'done',
+        JSON.stringify(retriedCompletion),
+      );
+
+      await checkpointPreviewCoverage(client, coverageSnapshots);
+      await client.send('Page.navigate', { url: sidepanelUrl });
+      await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)}`);
+    }
 
     await evaluate(client, `(async () => {
     const STORAGE_KEY = 'spaceTabsState';
@@ -293,9 +628,9 @@ async function main() {
       spaceSnapshots: {},
       shortcuts: {},
       ai: {
-        provider: 'openai-compatible',
-        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-        model: 'glm-5.2',
+        provider: 'z-ai',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        model: 'glm-5.1',
         apiKey: '',
         thinking: 'disabled',
         language: 'zh-CN',
@@ -375,10 +710,23 @@ async function main() {
         ],
       }],
     };
-    if (${JSON.stringify(preview)}) localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
-    else await chrome.storage.local.set({ [STORAGE_KEY]: state });
+    if (${JSON.stringify(preview)}) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify({
+        [SECRET_STORAGE_KEY]: {
+          ai: {
+            provider: 'z-ai',
+            baseUrl: 'https://api.z.ai/api/paas/v4',
+            apiKey: 'preview-e2e-key',
+          },
+        },
+      }));
+    } else {
+      await chrome.storage.local.set({ [STORAGE_KEY]: state });
+    }
     return true;
   })()`);
+    await checkpointPreviewCoverage(client, coverageSnapshots);
     await client.send('Page.reload', { ignoreCache: true });
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
@@ -441,9 +789,10 @@ async function main() {
         stored.spaces = [...(stored.spaces || []), ...plan.spaces];
         stored.spaceSnapshots = { ...(stored.spaceSnapshots || {}), ...(plan.spaceSnapshots || {}) };
         localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: stored }));
-        location.reload();
         return true;
       })()`);
+      await checkpointPreviewCoverage(client, coverageSnapshots);
+      await client.send('Page.reload', { ignoreCache: true });
       await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
       for (const space of arcPlan.spaces) {
         await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
@@ -513,29 +862,283 @@ async function main() {
   await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
   await evaluate(client, `document.querySelector('.add-space').click()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open`);
+  const addSpaceAtomicityBaseline = await evaluate(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    return {
+      local: localStorage.getItem('spaceTabsState'),
+      window: sessionStorage.getItem('spaceTabsWindowState'),
+      activeSpaceId: stored.activeSpaceId || '',
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      targetRailMatches: [...document.querySelectorAll('.space')]
+        .filter((button) => button.title === 'E2E Space').length,
+    };
+  })()`);
   await evaluate(client, `(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    window.__ADD_SPACE_ATOMICITY_FAULT__ = {
+      originalSetItem,
+      modes: ['pre-write', 'apply-then-reject'],
+      candidateWrites: 0,
+      restore() {
+        Storage.prototype.setItem = originalSetItem;
+        delete window.__ADD_SPACE_ATOMICITY_FAULT__;
+      },
+    };
+    Storage.prototype.setItem = function addSpaceAtomicitySetItem(key, value) {
+      const fault = window.__ADD_SPACE_ATOMICITY_FAULT__;
+      let candidate = false;
+      if (fault && this === localStorage && key === 'spaceTabsState') {
+        try {
+          const stored = JSON.parse(value || '{}').spaceTabsState || {};
+          candidate = (stored.spaces || []).some((space) => space.name === 'E2E Space') &&
+            stored.activeSpaceId === 'e2e-space';
+        } catch {
+          candidate = false;
+        }
+      }
+      if (!candidate) return originalSetItem.call(this, key, value);
+      fault.candidateWrites += 1;
+      const mode = fault.modes.shift() || '';
+      if (mode === 'pre-write') throw new Error('Add Space pre-write failure E2E');
+      if (mode === 'apply-then-reject') {
+        originalSetItem.call(this, key, value);
+        throw new Error('Add Space apply-then-reject failure E2E');
+      }
+      return originalSetItem.call(this, key, value);
+    };
     const input = document.querySelector('#actionDialogInput');
     input.value = 'E2E Space';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelector('#actionDialogConfirm').click();
     return true;
   })()`);
-  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'E2E Space'`);
-  const newEmptySpaceState = await waitFor(client, `(() => {
-    if (document.querySelector('#activeSpaceName')?.textContent !== 'E2E Space') return null;
+
+  const addSpacePreWriteFailure = await waitFor(client, `(() => {
+    const fault = window.__ADD_SPACE_ATOMICITY_FAULT__;
+    const input = document.querySelector('#actionDialogInput');
+    const toast = document.querySelector('#workbenchToast');
+    const status = document.querySelector('#syncStatus')?.textContent || '';
+    if (fault?.candidateWrites !== 1 || !document.querySelector('#actionDialog')?.open ||
+        input?.value !== 'E2E Space' || document.activeElement !== input ||
+        !status.includes('Add Space pre-write failure E2E')) return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const mutationCommands = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
     return {
-      rows: document.querySelectorAll('.tab-row').length,
+      local: localStorage.getItem('spaceTabsState'),
+      window: sessionStorage.getItem('spaceTabsWindowState'),
+      activeSpaceId: stored.activeSpaceId || '',
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      storedMatches: (stored.spaces || []).filter((space) => space.name === 'E2E Space').length,
+      railMatches: [...document.querySelectorAll('.space')]
+        .filter((button) => button.title === 'E2E Space').length,
+      draft: input.value,
+      focused: document.activeElement === input,
+      dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
+      toast: toast.textContent || '',
+      tone: toast.dataset.tone || '',
+      status,
+      candidateWrites: fault.candidateWrites,
       chromeMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => mutationCommands.has(command.type)),
     };
   })()`);
   record(
-    'add Space dialog activates a new Space with a fallback tab and closes previous Space tags',
-    newEmptySpaceState.rows === 1 &&
-      newEmptySpaceState.chromeMutations.some((command) => command.type === 'tabs:create') &&
-      newEmptySpaceState.chromeMutations.some((command) => command.type === 'tabs:close'),
+    'Add Space pre-write failure is a focused, retryable no-op',
+    addSpacePreWriteFailure.local === addSpaceAtomicityBaseline.local &&
+      addSpacePreWriteFailure.window === addSpaceAtomicityBaseline.window &&
+      addSpacePreWriteFailure.activeSpaceId === addSpaceAtomicityBaseline.activeSpaceId &&
+      addSpacePreWriteFailure.activeSpaceName === addSpaceAtomicityBaseline.activeSpaceName &&
+      addSpacePreWriteFailure.storedMatches === 0 &&
+      addSpacePreWriteFailure.railMatches === addSpaceAtomicityBaseline.targetRailMatches &&
+      addSpacePreWriteFailure.draft === 'E2E Space' &&
+      addSpacePreWriteFailure.focused && addSpacePreWriteFailure.dialogOpen &&
+      addSpacePreWriteFailure.status.includes('Add Space pre-write failure E2E') &&
+      !/created|ready|saved/i.test(addSpacePreWriteFailure.status) &&
+      addSpacePreWriteFailure.candidateWrites === 1 &&
+      addSpacePreWriteFailure.chromeMutations.length === 0,
+    JSON.stringify({
+      ...addSpacePreWriteFailure,
+      local: undefined,
+      window: undefined,
+      localRestored: addSpacePreWriteFailure.local === addSpaceAtomicityBaseline.local,
+      windowRestored: addSpacePreWriteFailure.window === addSpaceAtomicityBaseline.window,
+    }),
+  );
+
+  await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+  const addSpaceApplyThenRejectFailure = await waitFor(client, `(() => {
+    const fault = window.__ADD_SPACE_ATOMICITY_FAULT__;
+    const input = document.querySelector('#actionDialogInput');
+    const toast = document.querySelector('#workbenchToast');
+    const status = document.querySelector('#syncStatus')?.textContent || '';
+    if (fault?.candidateWrites !== 2 || !document.querySelector('#actionDialog')?.open ||
+        input?.value !== 'E2E Space' || document.activeElement !== input ||
+        !status.includes('Add Space apply-then-reject failure E2E')) return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const mutationCommands = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
+    return {
+      local: localStorage.getItem('spaceTabsState'),
+      window: sessionStorage.getItem('spaceTabsWindowState'),
+      activeSpaceId: stored.activeSpaceId || '',
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      storedMatches: (stored.spaces || []).filter((space) => space.name === 'E2E Space').length,
+      railMatches: [...document.querySelectorAll('.space')]
+        .filter((button) => button.title === 'E2E Space').length,
+      draft: input.value,
+      focused: document.activeElement === input,
+      dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
+      toast: toast.textContent || '',
+      tone: toast.dataset.tone || '',
+      status,
+      candidateWrites: fault.candidateWrites,
+      chromeMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => mutationCommands.has(command.type)),
+    };
+  })()`);
+  record(
+    'Add Space apply-then-reject is compensated before the same draft retries',
+    addSpaceApplyThenRejectFailure.local === addSpaceAtomicityBaseline.local &&
+      addSpaceApplyThenRejectFailure.window === addSpaceAtomicityBaseline.window &&
+      addSpaceApplyThenRejectFailure.activeSpaceId === addSpaceAtomicityBaseline.activeSpaceId &&
+      addSpaceApplyThenRejectFailure.activeSpaceName === addSpaceAtomicityBaseline.activeSpaceName &&
+      addSpaceApplyThenRejectFailure.storedMatches === 0 &&
+      addSpaceApplyThenRejectFailure.railMatches === addSpaceAtomicityBaseline.targetRailMatches &&
+      addSpaceApplyThenRejectFailure.draft === 'E2E Space' &&
+      addSpaceApplyThenRejectFailure.focused && addSpaceApplyThenRejectFailure.dialogOpen &&
+      addSpaceApplyThenRejectFailure.status.includes('Add Space apply-then-reject failure E2E') &&
+      !/created|ready|saved/i.test(addSpaceApplyThenRejectFailure.status) &&
+      addSpaceApplyThenRejectFailure.candidateWrites === 2 &&
+      addSpaceApplyThenRejectFailure.chromeMutations.length === 0,
+    JSON.stringify({
+      ...addSpaceApplyThenRejectFailure,
+      local: undefined,
+      window: undefined,
+      localRestored: addSpaceApplyThenRejectFailure.local === addSpaceAtomicityBaseline.local,
+      windowRestored: addSpaceApplyThenRejectFailure.window === addSpaceAtomicityBaseline.window,
+    }),
+  );
+
+  await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'E2E Space'`);
+  const newEmptySpaceState = await waitFor(client, `(() => {
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'E2E Space') return null;
+    const mutationCommands = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const fault = window.__ADD_SPACE_ATOMICITY_FAULT__;
+    return {
+      activeSpaceId: stored.activeSpaceId,
+      rows: document.querySelectorAll('.tab-row').length,
+      snapshot: stored.spaceSnapshots?.['e2e-space'] || null,
+      storedMatches: (stored.spaces || []).filter((space) =>
+        space.id === 'e2e-space' && space.name === 'E2E Space').length,
+      railMatches: [...document.querySelectorAll('.space')]
+        .filter((button) => button.dataset.spaceId === 'e2e-space' && button.title === 'E2E Space').length,
+      candidateWrites: fault?.candidateWrites || 0,
+      chromeMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .filter((command) => mutationCommands.has(command.type)),
+    };
+  })()`);
+  await evaluate(client, `window.__ADD_SPACE_ATOMICITY_FAULT__?.restore()`);
+  record(
+    'retrying Add Space commits one durable active Space without mutating browser tabs',
+    newEmptySpaceState.activeSpaceId === 'e2e-space' &&
+      newEmptySpaceState.rows === 0 &&
+      !newEmptySpaceState.snapshot &&
+      newEmptySpaceState.storedMatches === 1 &&
+      newEmptySpaceState.railMatches === 1 &&
+      newEmptySpaceState.candidateWrites === 3 &&
+      newEmptySpaceState.chromeMutations.length === 0,
     JSON.stringify(newEmptySpaceState)
+  );
+
+  const unsafeAddSpaceBaseline = await evaluate(client, `(() => ({
+    local: localStorage.getItem('spaceTabsState'),
+    window: sessionStorage.getItem('spaceTabsWindowState'),
+    activeSpaceId: JSON.parse(localStorage.getItem('spaceTabsState') || '{}')
+      .spaceTabsState?.activeSpaceId || '',
+    activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+  }))()`);
+  await evaluate(client, `document.querySelector('.add-space').click()`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open`);
+  await evaluate(client, `(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    window.__UNSAFE_ADD_SPACE_FAULT__ = {
+      originalSetItem,
+      baselineLocal: localStorage.getItem('spaceTabsState'),
+      candidateWrites: 0,
+      rollbackWrites: 0,
+    };
+    Storage.prototype.setItem = function unsafeAddSpaceSetItem(key, value) {
+      const fault = window.__UNSAFE_ADD_SPACE_FAULT__;
+      if (fault && this === localStorage && key === 'spaceTabsState') {
+        let candidate = false;
+        try {
+          const stored = JSON.parse(value || '{}').spaceTabsState || {};
+          candidate = stored.activeSpaceId === 'unsafe-space' &&
+            (stored.spaces || []).some((space) =>
+              space.id === 'unsafe-space' && space.name === 'Unsafe Space');
+        } catch {
+          candidate = false;
+        }
+        if (candidate) {
+          fault.candidateWrites += 1;
+          originalSetItem.call(this, key, value);
+          throw new Error('Add Space uncertain candidate failure E2E');
+        }
+        if (fault.candidateWrites > 0 && value === fault.baselineLocal) {
+          fault.rollbackWrites += 1;
+          throw new Error('Add Space compensation failure E2E');
+        }
+      }
+      return originalSetItem.call(this, key, value);
+    };
+    const input = document.querySelector('#actionDialogInput');
+    input.value = 'Unsafe Space';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#actionDialogConfirm').click();
+  })()`);
+  const unsafeAddSpaceFailure = await waitFor(client, `(() => {
+    const fault = window.__UNSAFE_ADD_SPACE_FAULT__;
+    const status = document.querySelector('#syncStatus')?.textContent || '';
+    if (fault?.candidateWrites !== 1 || fault.rollbackWrites !== 1 ||
+        !status.includes('Reload Space Tabs before trying Add Space again')) return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    return {
+      activeSpaceId: stored.activeSpaceId || '',
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      storedMatches: (stored.spaces || []).filter((space) =>
+        space.id === 'unsafe-space' || space.name === 'Unsafe Space').length,
+      railMatches: [...document.querySelectorAll('.space')]
+        .filter((button) => button.dataset.spaceId === 'unsafe-space' ||
+          button.title === 'Unsafe Space').length,
+      dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
+      status,
+      candidateWrites: fault.candidateWrites,
+      rollbackWrites: fault.rollbackWrites,
+    };
+  })()`);
+  const unsafeAddSpaceRepair = await evaluate(client, `(() => {
+    const fault = window.__UNSAFE_ADD_SPACE_FAULT__;
+    Storage.prototype.setItem = fault.originalSetItem;
+    fault.originalSetItem.call(localStorage, 'spaceTabsState', fault.baselineLocal);
+    delete window.__UNSAFE_ADD_SPACE_FAULT__;
+    return {
+      localRestored: localStorage.getItem('spaceTabsState') === ${JSON.stringify(unsafeAddSpaceBaseline.local)},
+      windowRestored: sessionStorage.getItem('spaceTabsWindowState') ===
+        ${JSON.stringify(unsafeAddSpaceBaseline.window)},
+    };
+  })()`);
+  record(
+    'Add Space fails closed when storage compensation cannot verify a safe retry',
+    unsafeAddSpaceFailure.candidateWrites === 1 &&
+      unsafeAddSpaceFailure.rollbackWrites === 1 &&
+      unsafeAddSpaceFailure.storedMatches === 1 &&
+      unsafeAddSpaceFailure.railMatches === 0 &&
+      !unsafeAddSpaceFailure.dialogOpen &&
+      unsafeAddSpaceFailure.activeSpaceName === unsafeAddSpaceBaseline.activeSpaceName &&
+      unsafeAddSpaceFailure.status.includes('Reload Space Tabs before trying Add Space again') &&
+      unsafeAddSpaceRepair.localRestored && unsafeAddSpaceRepair.windowRestored,
+    JSON.stringify({ ...unsafeAddSpaceFailure, ...unsafeAddSpaceRepair }),
   );
 
   await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
@@ -559,8 +1162,9 @@ async function main() {
     };
   })()`);
   record(
-    'switching away from a brand-new Space reuses its fallback tab for the target Space',
-    emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
+    'switching away from a brand-new empty Space restores the target without a placeholder tab',
+    emptySpaceSwitchState.rows.length === 5 &&
+      emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
       emptySpaceSwitchState.carrierMutations.length === 0 &&
@@ -582,6 +1186,7 @@ async function main() {
   const settingsUrl = new URL(sidepanelUrl);
   settingsUrl.searchParams.set('layout', 'workbench');
   settingsUrl.searchParams.set('view', 'settings');
+  await checkpointPreviewCoverage(client, coverageSnapshots);
   await client.send('Page.navigate', { url: settingsUrl.toString() });
   await waitFor(client, `document.documentElement.dataset.layout === 'workbench' && document.querySelector('#settingsDialog')?.open`);
   const settingsState = await evaluate(client, `(() => ({
@@ -594,7 +1199,9 @@ async function main() {
   }))()`);
   record(
     'Workbench Settings uses the full page with local backup controls',
-    settingsState.api === 'No API key configured.'
+    settingsState.api === (preview
+      ? 'API key is configured for this Chrome session.'
+      : 'No API key configured.')
       && settingsState.exportBackup
       && settingsState.restoreBackup
       && settingsState.workbench
@@ -634,6 +1241,312 @@ async function main() {
   await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'New Space'`);
   record('saved Workbench shortcuts apply immediately and Save shows visible feedback', true);
   await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
+
+  const settingsAtomicityBaseline = await evaluate(client, `(() => ({
+    local: localStorage.getItem('spaceTabsState'),
+    session: sessionStorage.getItem('spaceTabsSecrets'),
+  }))()`);
+  await evaluate(client, `(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    let rejectSecretWriteAfterApply = true;
+    Storage.prototype.setItem = function setItemWithOneShotSessionFailure(key, value) {
+      originalSetItem.call(this, key, value);
+      if (this === sessionStorage && key === 'spaceTabsSecrets' && rejectSecretWriteAfterApply) {
+        rejectSecretWriteAfterApply = false;
+        throw new Error('session write failed after apply');
+      }
+    };
+    window.__restoreSettingsAtomicityStorage__ = () => {
+      Storage.prototype.setItem = originalSetItem;
+      delete window.__restoreSettingsAtomicityStorage__;
+    };
+
+    document.querySelector('.theme-option[data-theme="ocean"]').click();
+    document.querySelector('#languageInput').value = 'en';
+    document.querySelector('#apiKeyInput').value = 'preview-e2e-key-after-retry';
+    const shortcut = document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]');
+    shortcut.dataset.shortcut = 'Control+Alt+J';
+    shortcut.value = 'Ctrl + Alt + J';
+    document.querySelector('#saveSettingsButton').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#workbenchToast')?.dataset.tone === 'error' && document.querySelector('#workbenchToast')?.textContent.includes('session write failed after apply')`);
+  const settingsAtomicityFailure = await evaluate(client, `(() => ({
+    local: localStorage.getItem('spaceTabsState'),
+    session: sessionStorage.getItem('spaceTabsSecrets'),
+    toast: document.querySelector('#workbenchToast')?.textContent || '',
+    tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
+    status: document.querySelector('#settingsStatus')?.textContent || '',
+    apiKeyDraft: document.querySelector('#apiKeyInput')?.value || '',
+    languageDraft: document.querySelector('#languageInput')?.value || '',
+    shortcutDraft: document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')?.dataset.shortcut || '',
+    themeDraft: document.querySelector('.theme-option.active')?.dataset.theme || '',
+    appliedTheme: document.documentElement.dataset.theme || 'purple',
+  }))()`);
+  record(
+    'Settings rolls local and session storage back without false success while retaining the full draft',
+    settingsAtomicityFailure.local === settingsAtomicityBaseline.local &&
+      settingsAtomicityFailure.session === settingsAtomicityBaseline.session &&
+      settingsAtomicityFailure.tone === 'error' &&
+      settingsAtomicityFailure.toast.includes('session write failed after apply') &&
+      settingsAtomicityFailure.status.includes('session write failed after apply') &&
+      settingsAtomicityFailure.toast !== 'Settings saved.' &&
+      settingsAtomicityFailure.apiKeyDraft === 'preview-e2e-key-after-retry' &&
+      settingsAtomicityFailure.languageDraft === 'en' &&
+      settingsAtomicityFailure.shortcutDraft === 'Control+Alt+J' &&
+      settingsAtomicityFailure.themeDraft === 'ocean' &&
+      settingsAtomicityFailure.appliedTheme === 'ocean',
+    JSON.stringify({
+      ...settingsAtomicityFailure,
+      localRolledBack: settingsAtomicityFailure.local === settingsAtomicityBaseline.local,
+      sessionRolledBack: settingsAtomicityFailure.session === settingsAtomicityBaseline.session,
+    }),
+  );
+
+  await evaluate(client, `document.querySelector('#saveSettingsButton').click()`);
+  await waitFor(client, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.' && document.querySelector('#workbenchToast')?.dataset.tone === 'success'`);
+  const settingsAtomicityRetry = await evaluate(client, `(() => {
+    window.__restoreSettingsAtomicityStorage__?.();
+    const local = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const session = JSON.parse(sessionStorage.getItem('spaceTabsSecrets') || '{}').spaceTabsSecrets || {};
+    return {
+      theme: local.theme,
+      language: local.ai?.language,
+      durableApiKey: local.ai?.apiKey,
+      sessionApiKey: session.ai?.apiKey,
+      sessionProvider: session.ai?.provider,
+      sessionBaseUrl: session.ai?.baseUrl,
+      shortcut: local.shortcuts?.addSpace,
+      apiKeyDraft: document.querySelector('#apiKeyInput')?.value || '',
+      appliedTheme: document.documentElement.dataset.theme || 'purple',
+      toast: document.querySelector('#workbenchToast')?.textContent || '',
+      tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
+    };
+  })()`);
+  record(
+    'retrying the retained Settings draft commits one consistent local/session configuration',
+    settingsAtomicityRetry.theme === 'ocean' &&
+      settingsAtomicityRetry.language === 'en' &&
+      settingsAtomicityRetry.durableApiKey === '' &&
+      settingsAtomicityRetry.sessionApiKey === 'preview-e2e-key-after-retry' &&
+      settingsAtomicityRetry.sessionProvider === 'z-ai' &&
+      settingsAtomicityRetry.sessionBaseUrl === 'https://api.z.ai/api/paas/v4' &&
+      settingsAtomicityRetry.shortcut === 'Control+Alt+J' &&
+      settingsAtomicityRetry.apiKeyDraft === 'preview-e2e-key-after-retry' &&
+      settingsAtomicityRetry.appliedTheme === 'ocean' &&
+      settingsAtomicityRetry.toast === 'Settings saved.' &&
+      settingsAtomicityRetry.tone === 'success',
+    JSON.stringify(settingsAtomicityRetry),
+  );
+
+  const restoreAtomicityBaseline = await evaluate(client, `(() => ({
+    local: localStorage.getItem('spaceTabsState'),
+    windowState: sessionStorage.getItem('spaceTabsWindowState'),
+    previewRuntime: sessionStorage.getItem('spaceTabsPreviewRuntime'),
+    activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+    visibleSpaceNames: [...document.querySelectorAll('.space')].map((button) => button.title),
+  }))()`);
+  const restoreAtomicityFixture = {
+    id: 'preview-restore-atomic',
+    name: 'Preview Restore Atomic',
+    filename: 'preview-restore-atomic.json',
+    context: 'PREVIEW_RESTORE_CONTEXT_ATOMIC',
+    savedUrl: 'https://example.net/preview-restore-saved',
+  };
+  await evaluate(client, `(() => {
+    const fixture = ${JSON.stringify(restoreAtomicityFixture)};
+    const backup = {
+      format: 'space-context-workspaces',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      activeSpaceId: fixture.id,
+      spaces: [{ id: fixture.id, name: fixture.name, icon: 'P', color: 'cyan' }],
+      spaceContexts: { [fixture.id]: fixture.context },
+      spaceSnapshots: {
+        [fixture.id]: {
+          version: 1,
+          preserveGroups: true,
+          updatedAt: Date.now(),
+          groups: [{
+            title: 'Saved before opening',
+            color: 'cyan',
+            collapsed: false,
+            tabs: [{ title: 'Saved restore target', url: fixture.savedUrl }],
+          }],
+        },
+      },
+      askSessions: {},
+      collapsedSpaceGroups: {},
+    };
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([JSON.stringify(backup)], fixture.filename, {
+      type: 'application/json',
+    }));
+    const input = document.querySelector('#spaceBackupInput');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  await waitFor(client, `!document.querySelector('#restoreSpaceDataButton')?.disabled &&
+    document.querySelector('#spaceBackupStatus')?.textContent.startsWith('Ready to restore ') &&
+    document.querySelector('#spaceBackupInput')?.files?.[0]?.name ===
+      ${JSON.stringify(restoreAtomicityFixture.filename)}`);
+  await evaluate(client, `document.querySelector('#restoreSpaceDataButton').click()`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+    document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`);
+  const restoreFailureInjectionInstalled = await evaluate(client, `(() => {
+    const fixture = ${JSON.stringify(restoreAtomicityFixture)};
+    const originalSetItem = Storage.prototype.setItem;
+    window.__restoreBackupAtomicityFailureCount = 0;
+    Storage.prototype.setItem = function setItemWithOneShotRestoreFailure(key, value) {
+      const parsed = this === localStorage && key === 'spaceTabsState'
+        ? JSON.parse(String(value || '{}')).spaceTabsState
+        : null;
+      const isRestoreWrite = parsed?.spaces?.length === 1 &&
+        parsed.spaces[0]?.id === fixture.id;
+      originalSetItem.call(this, key, value);
+      if (isRestoreWrite && window.__restoreBackupAtomicityFailureCount === 0) {
+        window.__restoreBackupAtomicityFailureCount += 1;
+        throw new Error('preview restore write failed after apply');
+      }
+    };
+    window.__restoreBackupAtomicityStorage__ = () => {
+      Storage.prototype.setItem = originalSetItem;
+      delete window.__restoreBackupAtomicityStorage__;
+    };
+    document.querySelector('#actionDialogConfirm').click();
+    return Storage.prototype.setItem !== originalSetItem;
+  })()`);
+  if (!restoreFailureInjectionInstalled) {
+    throw new Error('Could not install the Preview Restore storage failure.');
+  }
+  const restoreAtomicityFailure = await waitFor(client, `(() => {
+    const fixture = ${JSON.stringify(restoreAtomicityFixture)};
+    const toast = document.querySelector('#workbenchToast');
+    const backupStatus = document.querySelector('#spaceBackupStatus')?.textContent || '';
+    if (toast?.hidden || toast?.dataset.tone !== 'error' ||
+        !toast.textContent.includes('preview restore write failed after apply') ||
+        !backupStatus.includes('Restore failed')) return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    return {
+      local: localStorage.getItem('spaceTabsState'),
+      windowState: sessionStorage.getItem('spaceTabsWindowState'),
+      previewRuntime: sessionStorage.getItem('spaceTabsPreviewRuntime'),
+      failureCount: window.__restoreBackupAtomicityFailureCount,
+      settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
+      selectedFilename: document.querySelector('#spaceBackupInput')?.files?.[0]?.name || '',
+      selectedFiles: document.querySelector('#spaceBackupInput')?.files?.length || 0,
+      restoreEnabled: !document.querySelector('#restoreSpaceDataButton')?.disabled,
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      visibleSpaceNames: [...document.querySelectorAll('.space')].map((button) => button.title),
+      restoredSpacePresent: (stored.spaces || []).some((space) => space.id === fixture.id),
+      backupStatus,
+      toast: toast.textContent || '',
+      tone: toast.dataset.tone || '',
+    };
+  })()`);
+  record(
+    'Restore compensates an apply-then-reject commit and keeps the reviewed file immediately retryable',
+    restoreAtomicityFailure.local === restoreAtomicityBaseline.local &&
+      restoreAtomicityFailure.windowState === restoreAtomicityBaseline.windowState &&
+      restoreAtomicityFailure.previewRuntime === restoreAtomicityBaseline.previewRuntime &&
+      restoreAtomicityFailure.failureCount === 1 &&
+      restoreAtomicityFailure.settingsOpen &&
+      restoreAtomicityFailure.selectedFilename === restoreAtomicityFixture.filename &&
+      restoreAtomicityFailure.selectedFiles === 1 &&
+      restoreAtomicityFailure.restoreEnabled &&
+      restoreAtomicityFailure.activeSpaceName === restoreAtomicityBaseline.activeSpaceName &&
+      JSON.stringify(restoreAtomicityFailure.visibleSpaceNames) ===
+        JSON.stringify(restoreAtomicityBaseline.visibleSpaceNames) &&
+      !restoreAtomicityFailure.restoredSpacePresent &&
+      restoreAtomicityFailure.tone === 'error' &&
+      !/Restored \d/.test(restoreAtomicityFailure.toast),
+    JSON.stringify({
+      ...restoreAtomicityFailure,
+      localCompensated: restoreAtomicityFailure.local === restoreAtomicityBaseline.local,
+      windowStateCompensated:
+        restoreAtomicityFailure.windowState === restoreAtomicityBaseline.windowState,
+      physicalTabsUnchanged:
+        restoreAtomicityFailure.previewRuntime === restoreAtomicityBaseline.previewRuntime,
+    }),
+  );
+
+  await evaluate(client, `(() => {
+    window.__restoreBackupAtomicityStorage__?.();
+    document.querySelector('#restoreSpaceDataButton').click();
+    return true;
+  })()`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+    document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`);
+  await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+  const restoreAtomicityRetry = await waitFor(client, `(() => {
+    const fixture = ${JSON.stringify(restoreAtomicityFixture)};
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const savedRows = (stored.spaceSnapshots?.[fixture.id]?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .filter((tab) => tab.url === fixture.savedUrl);
+    const operations = (stored.operationHistory || [])
+      .filter((operation) => operation?.type === 'restore-backup' && operation.status !== 'undone');
+    if (stored.activeSpaceId !== fixture.id || document.querySelector('#settingsDialog')?.open ||
+        document.querySelector('#activeSpaceName')?.textContent !== fixture.name) return null;
+    return {
+      activeSpaceId: stored.activeSpaceId,
+      spaces: (stored.spaces || []).map((space) => space.id),
+      context: stored.spaceContexts?.[fixture.id] || '',
+      savedRows: savedRows.length,
+      liveTabOwners: (runtime.tabs || []).map((tab) => ({
+        tabId: tab.id,
+        spaceId: stored.tabSpaces?.[String(tab.id)] ||
+          stored.groupSpaces?.[String(tab.groupId)] || '',
+        lifecycleSpaceId: stored.tabLifecycle?.[String(tab.id)]?.spaceId || '',
+      })),
+      liveGroupOwners: (runtime.groups || []).map((group) => stored.groupSpaces?.[String(group.id)] || ''),
+      windowSpaceId: JSON.parse(
+        sessionStorage.getItem('spaceTabsWindowState') || '{}'
+      ).spaceTabsWindowState?.activeSpaceIds?.['1'] || '',
+      operations: operations.length,
+      settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
+      selectedFiles: document.querySelector('#spaceBackupInput')?.files?.length || 0,
+      restoreDisabled: Boolean(document.querySelector('#restoreSpaceDataButton')?.disabled),
+      activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+      previewRuntime: sessionStorage.getItem('spaceTabsPreviewRuntime'),
+      status: document.querySelector('#syncStatus')?.textContent || '',
+    };
+  })()`);
+  record(
+    'retrying the retained Restore file commits one workspace and adopts every live Preview tab exactly once',
+    restoreAtomicityRetry.activeSpaceId === restoreAtomicityFixture.id &&
+      JSON.stringify(restoreAtomicityRetry.spaces) === JSON.stringify([restoreAtomicityFixture.id]) &&
+      restoreAtomicityRetry.context === restoreAtomicityFixture.context &&
+      restoreAtomicityRetry.savedRows === 1 &&
+      restoreAtomicityRetry.liveTabOwners.length > 0 &&
+      restoreAtomicityRetry.liveTabOwners.every((owner) =>
+        owner.spaceId === restoreAtomicityFixture.id &&
+        (!owner.lifecycleSpaceId || owner.lifecycleSpaceId === restoreAtomicityFixture.id)) &&
+      restoreAtomicityRetry.liveGroupOwners.length > 0 &&
+      restoreAtomicityRetry.liveGroupOwners.every((spaceId) => spaceId === restoreAtomicityFixture.id) &&
+      restoreAtomicityRetry.windowSpaceId === restoreAtomicityFixture.id &&
+      restoreAtomicityRetry.operations === 1 &&
+      !restoreAtomicityRetry.settingsOpen &&
+      restoreAtomicityRetry.selectedFiles === 0 &&
+      restoreAtomicityRetry.restoreDisabled &&
+      restoreAtomicityRetry.activeSpaceName === restoreAtomicityFixture.name &&
+      restoreAtomicityRetry.previewRuntime === restoreAtomicityBaseline.previewRuntime &&
+      restoreAtomicityRetry.status.startsWith('Restored '),
+    JSON.stringify(restoreAtomicityRetry),
+  );
+  await evaluate(client, `(() => {
+    const baseline = ${JSON.stringify(restoreAtomicityBaseline)};
+    localStorage.setItem('spaceTabsState', baseline.local);
+    if (baseline.windowState === null) sessionStorage.removeItem('spaceTabsWindowState');
+    else sessionStorage.setItem('spaceTabsWindowState', baseline.windowState);
+    if (baseline.previewRuntime === null) sessionStorage.removeItem('spaceTabsPreviewRuntime');
+    else sessionStorage.setItem('spaceTabsPreviewRuntime', baseline.previewRuntime);
+    delete window.__restoreBackupAtomicityFailureCount;
+    return true;
+  })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
   await client.send('Page.navigate', { url: sidepanelUrl });
   await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} && document.querySelector('#activeSpaceName')?.textContent === 'Default' && !document.querySelector('#groupsList')?.hidden`);
 
@@ -685,6 +1598,410 @@ async function main() {
       collapsedFolderState.groupHeaders.length === 0,
     JSON.stringify(collapsedFolderState)
   );
+
+  const groupPreviewKeyboardState = await evaluate(client, `(() => {
+    const trigger = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    if (!trigger) return null;
+    const sendKey = (target, key) => {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const focusIndex = (items) => items.indexOf(document.activeElement);
+
+    const disclosureExpandedBefore = trigger.getAttribute('aria-expanded');
+    trigger.focus();
+    const arrowDownPrevented = sendKey(trigger, 'ArrowDown');
+    const popover = document.querySelector('#groupPreviewPopover');
+    const search = popover?.querySelector('.group-preview-search-input');
+    const list = popover?.querySelector('.group-preview-list');
+    const firstOpenItems = [...(list?.querySelectorAll('.group-preview-item') || [])];
+    const openedWithArrowDown = {
+      hidden: popover?.hidden,
+      focusInSearch: document.activeElement === search,
+      previewOpen: trigger.dataset.previewOpen,
+      disclosureExpanded: trigger.getAttribute('aria-expanded'),
+    };
+    const searchEscapePrevented = search ? sendKey(search, 'Escape') : false;
+    const closedFromSearch = {
+      hidden: popover?.hidden,
+      focusReturned: document.activeElement === trigger,
+      previewOpen: trigger.dataset.previewOpen,
+      disclosureExpanded: trigger.getAttribute('aria-expanded'),
+    };
+
+    const arrowRightPrevented = sendKey(trigger, 'ArrowRight');
+    const reopenedSearch = popover?.querySelector('.group-preview-search-input');
+    const reopenedList = popover?.querySelector('.group-preview-list');
+    const items = [...(reopenedList?.querySelectorAll('.group-preview-item') || [])];
+    const reopenedWithArrowRight = {
+      hidden: popover?.hidden,
+      focusedSearch: document.activeElement === reopenedSearch,
+      previewOpen: trigger.dataset.previewOpen,
+      disclosureExpanded: trigger.getAttribute('aria-expanded'),
+    };
+    const searchDownPrevented = reopenedSearch ? sendKey(reopenedSearch, 'ArrowDown') : false;
+    const afterSearchDown = focusIndex(items);
+    const firstDownPrevented = document.activeElement ? sendKey(document.activeElement, 'ArrowDown') : false;
+    const afterFirstDown = focusIndex(items);
+    const wrapDownPrevented = document.activeElement ? sendKey(document.activeElement, 'ArrowDown') : false;
+    const afterWrapDown = focusIndex(items);
+    const wrapUpPrevented = document.activeElement ? sendKey(document.activeElement, 'ArrowUp') : false;
+    const afterWrapUp = focusIndex(items);
+    const homePrevented = document.activeElement ? sendKey(document.activeElement, 'Home') : false;
+    const afterHome = focusIndex(items);
+    const endPrevented = document.activeElement ? sendKey(document.activeElement, 'End') : false;
+    const afterEnd = focusIndex(items);
+    const itemEscapePrevented = document.activeElement ? sendKey(document.activeElement, 'Escape') : false;
+    const closedFromItem = {
+      hidden: popover?.hidden,
+      focusReturned: document.activeElement === trigger,
+      previewOpen: trigger.dataset.previewOpen,
+      disclosureExpanded: trigger.getAttribute('aria-expanded'),
+    };
+
+    return {
+      trigger: {
+        hasPopup: trigger.getAttribute('aria-haspopup'),
+        controls: trigger.getAttribute('aria-controls'),
+        keyShortcuts: trigger.getAttribute('aria-keyshortcuts'),
+        disclosureExpandedBefore,
+      },
+      dialog: {
+        id: popover?.id,
+        role: popover?.getAttribute('role'),
+        label: popover?.getAttribute('aria-label'),
+      },
+      search: {
+        label: search?.getAttribute('aria-label'),
+      },
+      list: {
+        role: list?.getAttribute('role'),
+        label: list?.getAttribute('aria-label'),
+        itemCount: firstOpenItems.length,
+        itemRoles: firstOpenItems.map((item) => item.getAttribute('role')),
+        itemSelections: firstOpenItems.map((item) => item.getAttribute('aria-selected')),
+      },
+      openedWithArrowDown,
+      closedFromSearch,
+      reopenedWithArrowRight,
+      navigation: {
+        itemCount: items.length,
+        afterSearchDown,
+        afterFirstDown,
+        afterWrapDown,
+        afterWrapUp,
+        afterHome,
+        afterEnd,
+      },
+      prevented: {
+        arrowDownPrevented,
+        searchEscapePrevented,
+        arrowRightPrevented,
+        searchDownPrevented,
+        firstDownPrevented,
+        wrapDownPrevented,
+        wrapUpPrevented,
+        homePrevented,
+        endPrevented,
+        itemEscapePrevented,
+      },
+      closedFromItem,
+    };
+  })()`);
+  record(
+    'collapsed group preview is fully keyboard operable and exposes truthful accessibility semantics',
+    groupPreviewKeyboardState?.trigger.hasPopup === 'dialog' &&
+      groupPreviewKeyboardState.trigger.controls === groupPreviewKeyboardState.dialog.id &&
+      groupPreviewKeyboardState.trigger.keyShortcuts === 'ArrowDown ArrowRight' &&
+      groupPreviewKeyboardState.trigger.disclosureExpandedBefore === 'false' &&
+      groupPreviewKeyboardState.dialog.role === 'dialog' &&
+      Boolean(groupPreviewKeyboardState.dialog.label) &&
+      Boolean(groupPreviewKeyboardState.search.label) &&
+      groupPreviewKeyboardState.list.role === 'listbox' &&
+      Boolean(groupPreviewKeyboardState.list.label) &&
+      groupPreviewKeyboardState.list.itemCount === 2 &&
+      groupPreviewKeyboardState.list.itemRoles.every((role) => role === 'option') &&
+      groupPreviewKeyboardState.list.itemSelections.every((selected) => ['true', 'false'].includes(selected)) &&
+      groupPreviewKeyboardState.openedWithArrowDown.hidden === false &&
+      groupPreviewKeyboardState.openedWithArrowDown.focusInSearch &&
+      groupPreviewKeyboardState.openedWithArrowDown.previewOpen === 'true' &&
+      groupPreviewKeyboardState.openedWithArrowDown.disclosureExpanded === 'false' &&
+      groupPreviewKeyboardState.closedFromSearch.hidden === true &&
+      groupPreviewKeyboardState.closedFromSearch.focusReturned &&
+      groupPreviewKeyboardState.closedFromSearch.previewOpen === 'false' &&
+      groupPreviewKeyboardState.closedFromSearch.disclosureExpanded === 'false' &&
+      groupPreviewKeyboardState.reopenedWithArrowRight.hidden === false &&
+      groupPreviewKeyboardState.reopenedWithArrowRight.focusedSearch &&
+      groupPreviewKeyboardState.reopenedWithArrowRight.previewOpen === 'true' &&
+      groupPreviewKeyboardState.reopenedWithArrowRight.disclosureExpanded === 'false' &&
+      groupPreviewKeyboardState.navigation.itemCount === 2 &&
+      groupPreviewKeyboardState.navigation.afterSearchDown === 0 &&
+      groupPreviewKeyboardState.navigation.afterFirstDown === 1 &&
+      groupPreviewKeyboardState.navigation.afterWrapDown === 0 &&
+      groupPreviewKeyboardState.navigation.afterWrapUp === 1 &&
+      groupPreviewKeyboardState.navigation.afterHome === 0 &&
+      groupPreviewKeyboardState.navigation.afterEnd === 1 &&
+      Object.values(groupPreviewKeyboardState.prevented).every(Boolean) &&
+      groupPreviewKeyboardState.closedFromItem.hidden === true &&
+      groupPreviewKeyboardState.closedFromItem.focusReturned &&
+      groupPreviewKeyboardState.closedFromItem.previewOpen === 'false' &&
+      groupPreviewKeyboardState.closedFromItem.disclosureExpanded === 'false',
+    JSON.stringify(groupPreviewKeyboardState),
+  );
+
+  // Exercise the preview as a real launcher, not just as a keyboard-focus
+  // surface. Keep this fixture isolated because the next scenarios expect the
+  // original all-dormant Folder Demo snapshot.
+  const groupPreviewFixtureBackup = await evaluate(client, `({
+    local: [...Array(localStorage.length)].map((_, index) => {
+      const key = localStorage.key(index);
+      return [key, localStorage.getItem(key)];
+    }),
+    session: [...Array(sessionStorage.length)].map((_, index) => {
+      const key = sessionStorage.key(index);
+      return [key, sessionStorage.getItem(key)];
+    }),
+  })`);
+  const dormantPreviewLaunch = await evaluate(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const target = (stored.spaceSnapshots?.['folder-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .find((tab) => tab.url === 'https://example.com/nested-plan');
+    const trigger = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    if (!target?.snapshotTabId || !trigger) return null;
+    const sendKey = (targetNode, key) => {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      targetNode.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    trigger.focus();
+    const openPrevented = sendKey(trigger, 'ArrowDown');
+    const popover = document.querySelector('#groupPreviewPopover');
+    const input = popover?.querySelector('.group-preview-search-input');
+    if (!input) return null;
+    input.value = 'nested-plan';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const items = [...popover.querySelectorAll('.group-preview-item')];
+    const before = items.map((item) => ({
+      title: item.querySelector('.group-preview-title')?.textContent || '',
+      dormant: item.classList.contains('dormant'),
+      state: item.querySelector('.group-preview-state')?.textContent || '',
+    }));
+    const enterPrevented = sendKey(input, 'Enter');
+    return {
+      snapshotTabId: target.snapshotTabId,
+      query: input.value,
+      openPrevented,
+      enterPrevented,
+      before,
+    };
+  })()`);
+  const dormantPreviewLaunchState = await waitFor(client, `(() => {
+    const snapshotTabId = ${JSON.stringify(dormantPreviewLaunch?.snapshotTabId || '')};
+    if (!snapshotTabId) return null;
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
+    const targetTabs = (runtime.tabs || [])
+      .filter((tab) => tab.url === 'https://example.com/nested-plan');
+    const targetBindings = Object.entries(stored.tabLifecycle || {})
+      .filter(([, binding]) => binding?.snapshotTabId === snapshotTabId);
+    if (targetTabs.length !== 1 || targetBindings.length !== 1) return null;
+    const [bindingTabId, binding] = targetBindings[0];
+    const createCommands = commands.filter((command) => command.type === 'tabs:create');
+    return {
+      popoverHidden: document.querySelector('#groupPreviewPopover')?.hidden,
+      previewOpen: [...document.querySelectorAll('.folder-header')]
+        .find((node) => node.querySelector('strong')?.textContent === 'Work')
+        ?.dataset.previewOpen,
+      targetTabs,
+      bindingTabId: Number(bindingTabId),
+      binding,
+      createCommands,
+      focusCommands: commands.filter((command) => command.type === 'tabs:focus'),
+    };
+  })()`, 7000);
+  record(
+    'collapsed group preview search + Enter opens the exact dormant saved tab once',
+    dormantPreviewLaunch?.query === 'nested-plan' &&
+      dormantPreviewLaunch.openPrevented &&
+      dormantPreviewLaunch.enterPrevented &&
+      dormantPreviewLaunch.before.length === 1 &&
+      dormantPreviewLaunch.before[0].title === 'Nested Plan' &&
+      dormantPreviewLaunch.before[0].dormant &&
+      dormantPreviewLaunch.before[0].state === 'Saved' &&
+      dormantPreviewLaunchState.popoverHidden === true &&
+      dormantPreviewLaunchState.previewOpen === 'false' &&
+      dormantPreviewLaunchState.createCommands.length === 1 &&
+      dormantPreviewLaunchState.createCommands[0]?.payload?.url === 'https://example.com/nested-plan' &&
+      dormantPreviewLaunchState.focusCommands.length === 0 &&
+      dormantPreviewLaunchState.targetTabs[0]?.active === true &&
+      dormantPreviewLaunchState.targetTabs[0]?.id === dormantPreviewLaunchState.bindingTabId &&
+      dormantPreviewLaunchState.binding.snapshotTabId === dormantPreviewLaunch.snapshotTabId &&
+      dormantPreviewLaunchState.binding.trackingMode === 'saved-target',
+    JSON.stringify({ dormantPreviewLaunch, dormantPreviewLaunchState }),
+  );
+
+  await evaluate(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    if (workSection && !workSection.classList.contains('collapsed')) {
+      workSection.querySelector(':scope > .folder-header')?.click();
+    }
+    return Boolean(workSection);
+  })()`);
+  await waitFor(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    return workSection?.classList.contains('collapsed') || null;
+  })()`);
+  const livePreviewLaunch = await evaluate(client, `(() => {
+    const trigger = [...document.querySelectorAll('.folder-header')]
+      .find((node) => node.querySelector('strong')?.textContent === 'Work');
+    if (!trigger) return null;
+    const sendKey = (targetNode, key) => {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      targetNode.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    trigger.focus();
+    const openPrevented = sendKey(trigger, 'ArrowRight');
+    const popover = document.querySelector('#groupPreviewPopover');
+    const input = popover?.querySelector('.group-preview-search-input');
+    if (!input) return null;
+    input.value = 'nested-plan';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const items = [...popover.querySelectorAll('.group-preview-item')];
+    const before = items.map((item) => ({
+      title: item.querySelector('.group-preview-title')?.textContent || '',
+      dormant: item.classList.contains('dormant'),
+      active: item.classList.contains('active'),
+      state: item.querySelector('.group-preview-state')?.textContent || '',
+    }));
+    const enterPrevented = sendKey(input, 'Enter');
+    return { openPrevented, enterPrevented, before };
+  })()`);
+  const livePreviewLaunchState = await waitFor(client, `(() => {
+    const targetTabId = ${JSON.stringify(dormantPreviewLaunchState?.bindingTabId || null)};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
+    const focusCommands = commands.filter((command) => command.type === 'tabs:focus');
+    if (focusCommands.length < 1) return null;
+    return {
+      popoverHidden: document.querySelector('#groupPreviewPopover')?.hidden,
+      previewOpen: [...document.querySelectorAll('.folder-header')]
+        .find((node) => node.querySelector('strong')?.textContent === 'Work')
+        ?.dataset.previewOpen,
+      createCommands: commands.filter((command) => command.type === 'tabs:create'),
+      focusCommands,
+      targetTabs: (runtime.tabs || [])
+        .filter((tab) => tab.url === 'https://example.com/nested-plan'),
+      targetTabId,
+    };
+  })()`, 7000);
+
+  await evaluate(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    if (workSection?.classList.contains('collapsed')) {
+      workSection.querySelector(':scope > .folder-header')?.click();
+    }
+    return Boolean(workSection);
+  })()`);
+  await waitFor(client, `(() => {
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    return workSection && !workSection.classList.contains('collapsed') || null;
+  })()`);
+  await evaluate(client, `(() => {
+    const docsCard = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Docs');
+    if (docsCard?.classList.contains('collapsed')) docsCard.querySelector('.group-toggle')?.click();
+    return Boolean(docsCard);
+  })()`);
+  const livePreviewIdentityState = await waitFor(client, `(() => {
+    const snapshotTabId = ${JSON.stringify(dormantPreviewLaunch?.snapshotTabId || '')};
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const rows = [...document.querySelectorAll('.tab-row')]
+      .filter((row) => row.dataset.snapshotTabId === snapshotTabId)
+      .map((row) => ({
+        tabId: Number(row.dataset.tabId),
+        dormant: row.classList.contains('dormant'),
+        title: row.querySelector('.tab-title')?.textContent || '',
+      }));
+    if (rows.length !== 1) return null;
+    const snapshotRows = (stored.spaceSnapshots?.['folder-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .filter((tab) => tab.snapshotTabId === snapshotTabId);
+    const lifecycleRows = Object.entries(stored.tabLifecycle || {})
+      .filter(([, binding]) => binding?.snapshotTabId === snapshotTabId);
+    return {
+      rows,
+      snapshotRows,
+      lifecycleRows,
+      runtimeTargets: (runtime.tabs || [])
+        .filter((tab) => tab.url === 'https://example.com/nested-plan'),
+    };
+  })()`, 7000);
+  record(
+    'collapsed group preview search + Enter reuses the exact live identity without duplicate rows',
+    livePreviewLaunch?.openPrevented &&
+      livePreviewLaunch.enterPrevented &&
+      livePreviewLaunch.before.length === 1 &&
+      livePreviewLaunch.before[0].dormant === false &&
+      livePreviewLaunch.before[0].active === true &&
+      livePreviewLaunch.before[0].state === 'Active' &&
+      livePreviewLaunchState.popoverHidden === true &&
+      livePreviewLaunchState.previewOpen === 'false' &&
+      livePreviewLaunchState.createCommands.length === 0 &&
+      livePreviewLaunchState.focusCommands.length === 1 &&
+      livePreviewLaunchState.focusCommands[0]?.payload?.tabId === livePreviewLaunchState.targetTabId &&
+      livePreviewLaunchState.targetTabs.length === 1 &&
+      livePreviewLaunchState.targetTabs[0]?.id === livePreviewLaunchState.targetTabId &&
+      livePreviewLaunchState.targetTabs[0]?.active === true &&
+      livePreviewIdentityState.rows.length === 1 &&
+      livePreviewIdentityState.rows[0]?.tabId === livePreviewLaunchState.targetTabId &&
+      livePreviewIdentityState.rows[0]?.dormant === false &&
+      livePreviewIdentityState.snapshotRows.length === 1 &&
+      livePreviewIdentityState.lifecycleRows.length === 1 &&
+      livePreviewIdentityState.runtimeTargets.length === 1,
+    JSON.stringify({ livePreviewLaunch, livePreviewLaunchState, livePreviewIdentityState }),
+  );
+
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await evaluate(client, `(() => {
+    const backup = ${JSON.stringify(groupPreviewFixtureBackup)};
+    localStorage.clear();
+    sessionStorage.clear();
+    for (const [key, value] of backup.local) localStorage.setItem(key, value);
+    for (const [key, value] of backup.session) sessionStorage.setItem(key, value);
+    return true;
+  })()`);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `(() => {
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'Folder Demo') return null;
+    const workSection = [...document.querySelectorAll('.folder-section')]
+      .find((node) => node.querySelector(':scope > .folder-header strong')?.textContent === 'Work');
+    return workSection?.classList.contains('collapsed') || null;
+  })()`);
 
   await evaluate(client, `(() => {
     const workHeader = [...document.querySelectorAll('.folder-header')]
@@ -783,6 +2100,318 @@ async function main() {
       folderContextMenuState.menuText.includes('Rename'),
     JSON.stringify(folderContextMenuState)
   );
+
+  const savedOnlyDeletionFixtureBackup = await evaluate(client, `({
+    local: [...Array(localStorage.length)].map((_, index) => {
+      const key = localStorage.key(index);
+      return [key, localStorage.getItem(key)];
+    }),
+    session: [...Array(sessionStorage.length)].map((_, index) => {
+      const key = sessionStorage.key(index);
+      return [key, sessionStorage.getItem(key)];
+    }),
+  })`);
+  await evaluate(client, `(() => {
+    document.body.click();
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const state = raw.spaceTabsState || {};
+    const spaceId = 'saved-delete-demo';
+    state.spaces = (state.spaces || []).filter((space) => space.id !== spaceId);
+    state.spaces.push({ id: spaceId, name: 'Saved Delete Demo', icon: 'S', color: 'cyan' });
+    state.activeSpaceId = spaceId;
+    state.spaceContexts = state.spaceContexts || {};
+    state.spaceContexts[spaceId] = '# Saved-only Context must survive failed deletion';
+    state.askSessions = state.askSessions || {};
+    state.askSessions['space:' + spaceId] = {
+      key: 'space:' + spaceId,
+      title: 'Saved-only conversation',
+      messages: [{
+        id: 'saved-delete-question',
+        role: 'user',
+        text: 'Keep this saved-only conversation',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    state.spaceSnapshots = state.spaceSnapshots || {};
+    state.spaceSnapshots[spaceId] = {
+      version: 1,
+      identityVersion: 1,
+      updatedAt: 1,
+      groups: [
+        {
+          snapshotGroupId: 'saved-delete-group-single',
+          title: 'Saved Single',
+          color: 'blue',
+          collapsed: false,
+          tabs: [
+            {
+              snapshotTabId: 'saved-delete-tab-remove',
+              title: 'Remove after retry',
+              url: 'https://saved-delete.test/remove',
+            },
+            {
+              snapshotTabId: 'saved-delete-tab-keep',
+              title: 'Keep exact identity',
+              url: 'https://saved-delete.test/keep',
+            },
+          ],
+        },
+        {
+          snapshotGroupId: 'saved-delete-group-whole',
+          title: 'Saved Whole',
+          color: 'green',
+          collapsed: false,
+          tabs: [{
+            snapshotTabId: 'saved-delete-tab-whole',
+            title: 'Delete with group after retry',
+            url: 'https://saved-delete.test/whole',
+          }],
+        },
+      ],
+    };
+    state.collapsedGroups = state.collapsedGroups || {};
+    state.collapsedGroups['snapshot:0:saved-delete-demo:saved-delete-group-single'] = false;
+    state.collapsedGroups['snapshot:1:saved-delete-demo:saved-delete-group-whole'] = false;
+    state.collapsedSpaceGroups = state.collapsedSpaceGroups || {};
+    state.collapsedSpaceGroups[spaceId] = false;
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    sessionStorage.removeItem('spaceTabsWindowState');
+    sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
+      tabs: [],
+      groups: [],
+      nextId: 9100,
+      nextGroupId: 9200,
+    }));
+    return true;
+  })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `(() => {
+    if (document.querySelector('#activeSpaceName')?.textContent !== 'Saved Delete Demo') return null;
+    const rows = [...document.querySelectorAll('.tab-row.dormant')];
+    return rows.length === 3 &&
+      rows.some((row) => row.dataset.snapshotTabId === 'saved-delete-tab-remove') &&
+      rows.some((row) => row.dataset.snapshotTabId === 'saved-delete-tab-keep') &&
+      rows.some((row) => row.dataset.snapshotTabId === 'saved-delete-tab-whole') || null;
+  })()`);
+  const savedOnlyDeletionStateExpression = `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const snapshot = stored.spaceSnapshots?.['saved-delete-demo'];
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const chromeMutations = new Set(${JSON.stringify(dormantSwitchMutationCommands)});
+    return {
+      groups: (snapshot?.groups || []).map((group) => ({
+        id: group.snapshotGroupId || '',
+        title: group.title || '',
+        tabs: (group.tabs || []).map((tab) => tab.snapshotTabId || ''),
+      })),
+      context: stored.spaceContexts?.['saved-delete-demo'] || '',
+      askMessages: (stored.askSessions?.['space:saved-delete-demo']?.messages || [])
+        .map((message) => ({ id: message.id, text: message.text })),
+      domRows: [...document.querySelectorAll('.tab-row')].map((row) => ({
+        snapshotGroupId: row.dataset.snapshotGroupId || '',
+        snapshotTabId: row.dataset.snapshotTabId || '',
+        dormant: row.classList.contains('dormant'),
+      })),
+      status: document.querySelector('#syncStatus')?.textContent || '',
+      runtimeTabs: (runtime.tabs || []).length,
+      commands: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+        .map((command) => command.type)
+        .filter((type) => chromeMutations.has(type)),
+    };
+  })()`;
+  const savedOnlyDeletionBaseline = await evaluate(client, savedOnlyDeletionStateExpression);
+
+  await evaluate(client, `(() => {
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    const originalSetItem = Storage.prototype.setItem;
+    let rejectAfterApply = true;
+    Storage.prototype.setItem = function savedTabCheckpointFailure(key, value) {
+      originalSetItem.call(this, key, value);
+      if (this === localStorage && key === 'spaceTabsState' && rejectAfterApply) {
+        rejectAfterApply = false;
+        throw new Error('saved-only tab checkpoint failed after apply');
+      }
+    };
+    window.__restoreSavedDeletionStorage__ = () => {
+      Storage.prototype.setItem = originalSetItem;
+      delete window.__restoreSavedDeletionStorage__;
+    };
+    const row = [...document.querySelectorAll('.tab-row')]
+      .find((node) => node.dataset.snapshotTabId === 'saved-delete-tab-remove');
+    row?.querySelector('button[aria-label="Remove saved tab"]')?.click();
+    return Boolean(row);
+  })()`);
+  await waitFor(client, `document.querySelector('#syncStatus')?.textContent.includes('saved-only tab checkpoint failed after apply')`);
+  const savedOnlyTabFailureState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'saved-only tab deletion compensates an applied checkpoint failure without losing DOM, Context, or identity',
+    JSON.stringify(savedOnlyTabFailureState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
+      JSON.stringify(savedOnlyTabFailureState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
+      savedOnlyTabFailureState.context === savedOnlyDeletionBaseline.context &&
+      JSON.stringify(savedOnlyTabFailureState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
+      savedOnlyTabFailureState.status.includes('saved-only tab checkpoint failed after apply') &&
+      !savedOnlyTabFailureState.status.includes('Removed saved tab') &&
+      savedOnlyTabFailureState.runtimeTabs === 0 &&
+      savedOnlyTabFailureState.commands.length === 0,
+    JSON.stringify({ savedOnlyDeletionBaseline, savedOnlyTabFailureState }),
+  );
+
+  await evaluate(client, `window.__restoreSavedDeletionStorage__?.()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('.tab-row[data-snapshot-tab-id="saved-delete-tab-remove"]') || null`);
+  const savedOnlyTabFailureReloadState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'saved-only tab remains durable after the failed deletion is reloaded',
+    JSON.stringify(savedOnlyTabFailureReloadState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
+      JSON.stringify(savedOnlyTabFailureReloadState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
+      savedOnlyTabFailureReloadState.context === savedOnlyDeletionBaseline.context &&
+      JSON.stringify(savedOnlyTabFailureReloadState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages),
+    JSON.stringify(savedOnlyTabFailureReloadState),
+  );
+
+  await evaluate(client, `(() => {
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    const row = [...document.querySelectorAll('.tab-row')]
+      .find((node) => node.dataset.snapshotTabId === 'saved-delete-tab-remove');
+    row?.querySelector('button[aria-label="Remove saved tab"]')?.click();
+    return Boolean(row);
+  })()`);
+  await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const ids = (stored.spaceSnapshots?.['saved-delete-demo']?.groups || [])
+      .flatMap((group) => (group.tabs || []).map((tab) => tab.snapshotTabId));
+    return !ids.includes('saved-delete-tab-remove') &&
+      !document.querySelector('.tab-row[data-snapshot-tab-id="saved-delete-tab-remove"]') || null;
+  })()`);
+  const savedOnlyTabRetryState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'retrying saved-only tab deletion removes exactly one row and preserves the remaining identities and Context',
+    JSON.stringify(savedOnlyTabRetryState.groups) === JSON.stringify([
+      {
+        id: 'saved-delete-group-single',
+        title: 'Saved Single',
+        tabs: ['saved-delete-tab-keep'],
+      },
+      {
+        id: 'saved-delete-group-whole',
+        title: 'Saved Whole',
+        tabs: ['saved-delete-tab-whole'],
+      },
+    ]) &&
+      savedOnlyTabRetryState.domRows.length === 2 &&
+      savedOnlyTabRetryState.domRows.every((row) => row.dormant) &&
+      savedOnlyTabRetryState.context === savedOnlyDeletionBaseline.context &&
+      JSON.stringify(savedOnlyTabRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
+      savedOnlyTabRetryState.status === 'Removed saved tab.' &&
+      savedOnlyTabRetryState.runtimeTabs === 0 &&
+      savedOnlyTabRetryState.commands.length === 0,
+    JSON.stringify(savedOnlyTabRetryState),
+  );
+
+  const savedOnlyGroupBaseline = savedOnlyTabRetryState;
+  await evaluate(client, `(() => {
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    const originalSetItem = Storage.prototype.setItem;
+    let rejectAfterApply = true;
+    Storage.prototype.setItem = function savedGroupCheckpointFailure(key, value) {
+      originalSetItem.call(this, key, value);
+      if (this === localStorage && key === 'spaceTabsState' && rejectAfterApply) {
+        rejectAfterApply = false;
+        throw new Error('saved-only group checkpoint failed after apply');
+      }
+    };
+    window.__restoreSavedDeletionStorage__ = () => {
+      Storage.prototype.setItem = originalSetItem;
+      delete window.__restoreSavedDeletionStorage__;
+    };
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
+    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    return Boolean(card);
+  })()`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
+  await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+  await waitFor(client, `document.querySelector('#syncStatus')?.textContent.includes('saved-only group checkpoint failed after apply')`);
+  const savedOnlyGroupFailureState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'saved-only group deletion compensates an applied checkpoint failure without losing the group or its Context',
+    JSON.stringify(savedOnlyGroupFailureState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
+      JSON.stringify(savedOnlyGroupFailureState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
+      savedOnlyGroupFailureState.context === savedOnlyGroupBaseline.context &&
+      JSON.stringify(savedOnlyGroupFailureState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages) &&
+      savedOnlyGroupFailureState.status.includes('saved-only group checkpoint failed after apply') &&
+      !savedOnlyGroupFailureState.status.includes('Deleted saved group') &&
+      savedOnlyGroupFailureState.runtimeTabs === 0 &&
+      savedOnlyGroupFailureState.commands.length === 0,
+    JSON.stringify({ savedOnlyGroupBaseline, savedOnlyGroupFailureState }),
+  );
+
+  await evaluate(client, `window.__restoreSavedDeletionStorage__?.()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('.tab-row[data-snapshot-tab-id="saved-delete-tab-whole"]') || null`);
+  const savedOnlyGroupFailureReloadState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'saved-only group remains durable after the failed deletion is reloaded',
+    JSON.stringify(savedOnlyGroupFailureReloadState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
+      JSON.stringify(savedOnlyGroupFailureReloadState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
+      savedOnlyGroupFailureReloadState.context === savedOnlyGroupBaseline.context &&
+      JSON.stringify(savedOnlyGroupFailureReloadState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages),
+    JSON.stringify(savedOnlyGroupFailureReloadState),
+  );
+
+  await evaluate(client, `(() => {
+    window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
+    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    return Boolean(card);
+  })()`);
+  await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
+  await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+  await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const groups = stored.spaceSnapshots?.['saved-delete-demo']?.groups || [];
+    return !groups.some((group) => group.snapshotGroupId === 'saved-delete-group-whole') &&
+      !document.querySelector('.tab-row[data-snapshot-tab-id="saved-delete-tab-whole"]') || null;
+  })()`);
+  const savedOnlyGroupRetryState = await evaluate(client, savedOnlyDeletionStateExpression);
+  record(
+    'retrying saved-only group deletion removes exactly that group once and preserves Context',
+    JSON.stringify(savedOnlyGroupRetryState.groups) === JSON.stringify([{
+      id: 'saved-delete-group-single',
+      title: 'Saved Single',
+      tabs: ['saved-delete-tab-keep'],
+    }]) &&
+      JSON.stringify(savedOnlyGroupRetryState.domRows) === JSON.stringify([{
+        snapshotGroupId: 'saved-delete-group-single',
+        snapshotTabId: 'saved-delete-tab-keep',
+        dormant: true,
+      }]) &&
+      savedOnlyGroupRetryState.context === savedOnlyDeletionBaseline.context &&
+      JSON.stringify(savedOnlyGroupRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
+      savedOnlyGroupRetryState.status === 'Deleted saved group "Saved Whole".' &&
+      savedOnlyGroupRetryState.runtimeTabs === 0 &&
+      savedOnlyGroupRetryState.commands.length === 0,
+    JSON.stringify(savedOnlyGroupRetryState),
+  );
+
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await evaluate(client, `(() => {
+    const backup = ${JSON.stringify(savedOnlyDeletionFixtureBackup)};
+    localStorage.clear();
+    sessionStorage.clear();
+    for (const [key, value] of backup.local) localStorage.setItem(key, value);
+    for (const [key, value] of backup.session) sessionStorage.setItem(key, value);
+    return true;
+  })()`);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Folder Demo'`);
 
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
@@ -912,11 +2541,20 @@ async function main() {
   const dormantSortState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const titles = (stored.spaceSnapshots?.['drag-demo']?.groups || []).map((group) => group.title);
-    return titles[0] === 'Beta' ? { titles } : null;
+    const domOrder = [...(document.querySelector('#groupsList')?.children || [])]
+      .map((node) => {
+        const title = node.matches('.group-card')
+          ? node.querySelector(':scope > .group-header h2')?.textContent
+          : node.querySelector(':scope > .folder-header strong')?.textContent;
+        return title ? (node.matches('.folder-section') ? 'folder:' : 'group:') + title : '';
+      })
+      .filter(Boolean);
+    return titles[0] === 'Beta' ? { titles, domOrder } : null;
   })()`);
   record(
     'dormant imported groups can be drag-sorted',
-    dormantSortState.titles.join(' > ') === 'Beta > Alpha > Gamma',
+    dormantSortState.titles.join(' > ') === 'Beta > Alpha > Gamma' &&
+      dormantSortState.domOrder.join(' > ') === 'group:Beta > group:Alpha > group:Gamma',
     JSON.stringify(dormantSortState)
   );
   await evaluate(client, `(() => {
@@ -963,12 +2601,80 @@ async function main() {
   const dormantNestState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const titles = (stored.spaceSnapshots?.['drag-demo']?.groups || []).map((group) => group.title);
-    return titles.includes('Beta / Gamma') ? { titles } : null;
+    const groupsList = document.querySelector('#groupsList');
+    const betaFolder = [...(groupsList?.children || [])].find((node) => (
+      node.matches('.folder-section') &&
+      node.querySelector(':scope > .folder-header strong')?.textContent === 'Beta'
+    ));
+    const rootOrder = [...(groupsList?.children || [])]
+      .map((node) => {
+        const title = node.matches('.group-card')
+          ? node.querySelector(':scope > .group-header h2')?.textContent
+          : node.querySelector(':scope > .folder-header strong')?.textContent;
+        return title ? (node.matches('.folder-section') ? 'folder:' : 'group:') + title : '';
+      })
+      .filter(Boolean);
+    const betaChildren = [...(betaFolder?.querySelector(':scope > .folder-children')?.children || [])]
+      .map((node) => 'group:' + (node.querySelector(':scope > .group-header h2')?.textContent || ''));
+    const gammaHeader = [...(betaFolder?.querySelectorAll('.group-header h2') || [])]
+      .find((node) => node.textContent === 'Gamma');
+    const gammaDepth = gammaHeader
+      ? [...gammaHeader.closest('.group-card, .folder-direct-group').parentElement.closest('#groupsList')
+        .querySelectorAll('.folder-section')]
+        .filter((section) => section.contains(gammaHeader)).length
+      : 0;
+    return titles.includes('Beta / Gamma')
+      ? { titles, rootOrder, betaChildren, gammaDepth }
+      : null;
   })()`);
   record(
     'dormant imported groups can be dragged into another group',
-    dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha',
+    dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
+      dormantNestState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
+      dormantNestState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
+      dormantNestState.gammaDepth === 1,
     JSON.stringify(dormantNestState)
+  );
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drag Demo'`);
+  const dormantNestReloadState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const titles = (stored.spaceSnapshots?.['drag-demo']?.groups || []).map((group) => group.title);
+    const groupsList = document.querySelector('#groupsList');
+    const betaFolder = [...(groupsList?.children || [])].find((node) => (
+      node.matches('.folder-section') &&
+      node.querySelector(':scope > .folder-header strong')?.textContent === 'Beta'
+    ));
+    const rootOrder = [...(groupsList?.children || [])]
+      .map((node) => {
+        const title = node.matches('.group-card')
+          ? node.querySelector(':scope > .group-header h2')?.textContent
+          : node.querySelector(':scope > .folder-header strong')?.textContent;
+        return title ? (node.matches('.folder-section') ? 'folder:' : 'group:') + title : '';
+      })
+      .filter(Boolean);
+    const betaChildren = [...(betaFolder?.querySelector(':scope > .folder-children')?.children || [])]
+      .map((node) => 'group:' + (node.querySelector(':scope > .group-header h2')?.textContent || ''));
+    const gammaHeader = [...(betaFolder?.querySelectorAll('.group-header h2') || [])]
+      .find((node) => node.textContent === 'Gamma');
+    return titles.includes('Beta / Gamma') && gammaHeader
+      ? {
+          titles,
+          rootOrder,
+          betaChildren,
+          gammaFolderTitle: gammaHeader.closest('.folder-section')
+            ?.querySelector(':scope > .folder-header strong')?.textContent || '',
+        }
+      : null;
+  })()`);
+  record(
+    'dormant imported group nesting keeps storage and DOM hierarchy after reload',
+    dormantNestReloadState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
+      dormantNestReloadState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
+      dormantNestReloadState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
+      dormantNestReloadState.gammaFolderTitle === 'Beta',
+    JSON.stringify(dormantNestReloadState)
   );
   await evaluate(client, `(() => {
     const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
@@ -983,9 +2689,9 @@ async function main() {
     state.tabGroups = state.tabGroups || {};
     state.virtualGroups = state.virtualGroups || {};
     state.spaceSnapshots = state.spaceSnapshots || {};
-    state.groupSpaces[1] = 'drop-demo';
-    state.tabSpaces[2] = 'drop-demo';
-    delete state.tabGroups[2];
+    state.groupSpaces[1201] = 'drop-demo';
+    state.tabSpaces[1202] = 'drop-demo';
+    delete state.tabGroups[1202];
     state.spaceSnapshots['drop-demo'] = {
       version: 1,
       updatedAt: Date.now(),
@@ -1002,29 +2708,30 @@ async function main() {
     localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
     sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
       tabs: [{
-        id: 2,
+        id: 1202,
         title: 'Browser Spaces Guide',
         url: 'https://example.com/spaces-guide',
         favIconUrl: '',
         pinned: false,
         muted: false,
         active: true,
-        groupId: 1,
+        groupId: 1201,
         index: 0,
         windowId: 1,
         audible: false,
       }],
-      groups: [{ id: 1, title: 'Research', color: 'blue', collapsed: false }],
-      nextId: 6,
-      nextGroupId: 4,
+      groups: [{ id: 1201, title: 'Research', color: 'blue', collapsed: false }],
+      nextId: 1203,
+      nextGroupId: 1202,
     }));
     return true;
   })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
   await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
   await evaluate(client, `(() => {
     for (const header of document.querySelectorAll('.group-card.collapsed .group-header')) {
-      header.click();
+      header.querySelector('.group-toggle')?.click();
     }
     return true;
   })()`);
@@ -1035,8 +2742,187 @@ async function main() {
       .some((node) => node.textContent === 'Research');
     return source && target;
   })()`);
+  const dormantTabDropReadyState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
+    const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .map((tab) => tab.url);
+    const ready = rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      rows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      !rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      snapshotUrls.filter((url) => url === 'https://example.com/spaces-guide').length === 1;
+    return ready ? { rows, snapshotUrls } : null;
+  })()`);
+  record(
+    'an imported legacy row binds to one matching live tab without a duplicate dormant row',
+    dormantTabDropReadyState.snapshotUrls.includes('https://example.com/drop-saved'),
+    JSON.stringify(dormantTabDropReadyState)
+  );
+  await evaluate(client, `(() => {
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const state = raw.spaceTabsState || {};
+    state.groupSpaces = state.groupSpaces || {};
+    state.tabSpaces = state.tabSpaces || {};
+    state.tabGroups = state.tabGroups || {};
+    state.groupOrder = state.groupOrder || {};
+    state.tabOrder = state.tabOrder || {};
+    state.collapsedGroups = state.collapsedGroups || {};
+    state.tabLifecycle = state.tabLifecycle || {};
+    delete state.groupSpaces[1201];
+    delete state.tabSpaces[1202];
+    delete state.tabGroups[1202];
+    delete state.tabLifecycle[1202];
+    state.groupSpaces[1301] = 'drop-demo';
+    state.groupSpaces[1302] = 'drop-demo';
+    delete state.tabSpaces[1303];
+    delete state.tabSpaces[1304];
+    delete state.tabGroups[1303];
+    delete state.tabGroups[1304];
+    delete state.tabLifecycle[1303];
+    delete state.tabLifecycle[1304];
+    state.groupOrder['drop-demo'] = ['group:1301', 'group:1302'];
+    state.tabOrder['drop-demo'] = { 'group:1301': [1304], 'group:1302': [1303] };
+    state.collapsedGroups['group:1301'] = false;
+    state.collapsedGroups['group:1302'] = false;
+    state.spaceSnapshots['drop-demo'] = {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [
+        {
+          snapshotGroupId: 'drop-research',
+          title: 'Research',
+          color: 'blue',
+          collapsed: false,
+          tabs: [
+            {
+              snapshotTabId: 'drop-anchor',
+              title: 'Research Anchor',
+              url: 'https://example.com/research-anchor',
+            },
+            {
+              snapshotTabId: 'drop-saved',
+              title: 'Saved Doc',
+              url: 'https://example.com/drop-saved',
+            },
+          ],
+        },
+        {
+          snapshotGroupId: 'drop-source',
+          title: 'Source',
+          color: 'green',
+          collapsed: false,
+          tabs: [{
+            snapshotTabId: 'drop-live',
+            title: 'Browser Spaces Guide',
+            url: 'https://example.com/spaces-guide',
+          }],
+        },
+      ],
+    };
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
+      tabs: [
+        {
+          id: 1303,
+          title: 'Browser Spaces Guide',
+          url: 'https://example.com/spaces-guide',
+          favIconUrl: '',
+          pinned: false,
+          muted: false,
+          active: true,
+          groupId: 1302,
+          index: 0,
+          windowId: 1,
+          audible: false,
+        },
+        {
+          id: 1304,
+          title: 'Research Anchor',
+          url: 'https://example.com/research-anchor',
+          favIconUrl: '',
+          pinned: false,
+          muted: false,
+          active: false,
+          groupId: 1301,
+          index: 1,
+          windowId: 1,
+          audible: false,
+        },
+      ],
+      groups: [
+        { id: 1301, title: 'Research', color: 'blue', collapsed: false },
+        { id: 1302, title: 'Source', color: 'green', collapsed: false },
+      ],
+      nextId: 1305,
+      nextGroupId: 1303,
+    }));
+    return true;
+  })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
+  const distinctDropFixtureState = await waitFor(client, `(() => {
+    for (const card of document.querySelectorAll('.group-card.collapsed')) {
+      card.querySelector('.group-toggle')?.click();
+    }
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const cardFor = (title) => [...document.querySelectorAll('.group-card')]
+      .find((card) => card.querySelector('.group-header h2')?.textContent === title);
+    const rowsFor = (title) => [...(cardFor(title)?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const targetRows = rowsFor('Research');
+    const sourceRows = rowsFor('Source');
+    const runtimeTab = (runtime.tabs || []).find((tab) => Number(tab.id) === 1303);
+    const snapshotGroups = stored.spaceSnapshots?.['drop-demo']?.groups || [];
+    const researchUrls = snapshotGroups.find((group) => group.title === 'Research')?.tabs
+      ?.map((tab) => tab.url) || [];
+    const sourceUrls = snapshotGroups.find((group) => group.title === 'Source')?.tabs
+      ?.map((tab) => tab.url) || [];
+    const ready = Number(runtimeTab?.groupId) === 1302 &&
+      stored.groupSpaces?.[1301] === 'drop-demo' &&
+      stored.groupSpaces?.[1302] === 'drop-demo' &&
+      targetRows.some((row) => !row.dormant && row.text.includes('Research Anchor')) &&
+      targetRows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      !targetRows.some((row) => row.text.includes('Browser Spaces Guide')) &&
+      sourceRows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      !sourceRows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      !researchUrls.includes('https://example.com/spaces-guide') &&
+      researchUrls.includes('https://example.com/research-anchor') &&
+      sourceUrls.filter((url) => url === 'https://example.com/spaces-guide').length === 1;
+    return ready ? {
+      runtimeGroupId: runtimeTab.groupId,
+      targetRows,
+      sourceRows,
+      researchUrls,
+      sourceUrls,
+    } : null;
+  })()`);
+  record(
+    'live-tab drop fixture starts in distinct physical Source and Research groups',
+    distinctDropFixtureState.runtimeGroupId === 1302 &&
+      distinctDropFixtureState.targetRows.some((row) => (
+        !row.dormant && row.text.includes('Research Anchor')
+      )) &&
+      !distinctDropFixtureState.targetRows.some((row) => row.text.includes('Browser Spaces Guide')) &&
+      distinctDropFixtureState.sourceRows.some((row) => (
+        !row.dormant && row.text.includes('Browser Spaces Guide')
+      )),
+    JSON.stringify(distinctDropFixtureState)
+  );
+  await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
   const dormantTabDropDispatchState = await evaluate(client, `(() => {
-    const source = [...document.querySelectorAll('.tab-row:not(.dormant)')]
+    const sourceCard = [...document.querySelectorAll('.group-card')]
+      .find((card) => card.querySelector('.group-header h2')?.textContent === 'Source');
+    const source = [...(sourceCard?.querySelectorAll('.tab-row:not(.dormant)') || [])]
       .find((row) => row.textContent.includes('Browser Spaces Guide'));
     const target = [...document.querySelectorAll('.group-card')]
       .find((card) => card.querySelector('.group-header h2')?.textContent === 'Research');
@@ -1076,6 +2962,7 @@ async function main() {
       clientX,
       clientY,
     }));
+    window.__dormantTabDropStartedAt = Date.now();
     return {
       ok: true,
       overPrevented: over.defaultPrevented || overResult === false,
@@ -1084,45 +2971,241 @@ async function main() {
   })()`);
   const dormantTabDropState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    const card = [...document.querySelectorAll('.group-card')]
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const targetCard = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
-    if (card?.classList.contains('collapsed')) {
-      card.querySelector('.group-header')?.click();
+    if (targetCard?.classList.contains('collapsed')) {
+      targetCard.querySelector('.group-toggle')?.click();
       return null;
     }
-    const groupKey = card?.dataset.groupKey || '';
+    const sourceCard = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Source');
+    const groupKey = targetCard?.dataset.groupKey || '';
     const groupId = groupKey.match(/^group:(\\d+)$/)?.[1] || '';
-    const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
+    const targetRows = [...(targetCard?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
     }));
-    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
-      .flatMap((group) => group.tabs || [])
-      .map((tab) => tab.url);
+    const sourceRows = [...(sourceCard?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const matchingRows = [...document.querySelectorAll('.tab-row')]
+      .filter((row) => row.textContent.includes('Browser Spaces Guide'))
+      .map((row) => ({
+        text: row.textContent,
+        dormant: row.classList.contains('dormant'),
+        groupTitle: row.closest('.group-card')?.querySelector('.group-header h2')?.textContent || '',
+      }));
+    const snapshotGroups = (stored.spaceSnapshots?.['drop-demo']?.groups || []).map((group) => ({
+      snapshotGroupId: group.snapshotGroupId || '',
+      title: group.title,
+      color: group.color,
+      collapsed: Boolean(group.collapsed),
+      tabs: (group.tabs || []).map((tab) => ({
+        snapshotTabId: tab.snapshotTabId || '',
+        title: tab.title,
+        url: tab.url,
+      })),
+    }));
+    const snapshotUrls = snapshotGroups.flatMap((group) => group.tabs).map((tab) => tab.url);
+    const sourceSnapshotUrls = snapshotGroups.find((group) => group.title === 'Source')?.tabs
+      ?.map((tab) => tab.url) || [];
     const syntheticStateKeys = [
       ...Object.keys(stored.tabSpaces || {}),
       ...Object.keys(stored.tabGroups || {}),
     ].filter((key) => key.startsWith('snapshot:'));
-    return groupId && stored.groupSpaces?.[groupId] === 'drop-demo' && rows.length ? {
+    const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
+    const groupExistingCommands = commands.filter((command) => command.type === 'tabs:groupExisting');
+    const moveRelativeCommands = commands.filter((command) => command.type === 'tabs:moveRelative');
+    const runtimeTab = (runtime.tabs || []).find((tab) => Number(tab.id) === 1303);
+    const runtimeOrder = [...(runtime.tabs || [])]
+      .sort((left, right) => Number(left.index) - Number(right.index))
+      .map((item) => ({ id: Number(item.id), index: Number(item.index), groupId: Number(item.groupId) }));
+    const runtimeGroupIds = (runtime.groups || []).map((group) => Number(group.id)).sort((a, b) => a - b);
+    const status = document.querySelector('#syncStatus')?.textContent || '';
+    const expectedGroupCommand = groupExistingCommands.length === 1 &&
+      Number(groupExistingCommands[0]?.payload?.groupId) === 1301 &&
+      JSON.stringify(groupExistingCommands[0]?.payload?.tabIds || []) === '[1303]';
+    const expectedMoveCommand = moveRelativeCommands.length === 1 &&
+      JSON.stringify(moveRelativeCommands[0]?.payload || {}) === JSON.stringify({
+        tabId: 1303,
+        anchorTabId: 1304,
+        edge: 'after',
+        expectedGroupId: 1301,
+      });
+    const storageProjection = {
+      groupSpaces: {
+        research: stored.groupSpaces?.[1301] || '',
+        source: stored.groupSpaces?.[1302] || '',
+      },
+      tabSpaces: stored.tabSpaces?.[1303] || '',
+      tabGroups: stored.tabGroups?.[1303] || '',
+      groupOrder: stored.groupOrder?.['drop-demo'] || [],
+      tabOrder: stored.tabOrder?.['drop-demo'] || {},
+      snapshotGroups,
+    };
+    const complete = groupId === '1301' && stored.groupSpaces?.[1301] === 'drop-demo' &&
+      Number(runtimeTab?.groupId) === 1301 && expectedGroupCommand && expectedMoveCommand &&
+      JSON.stringify(runtimeOrder) === JSON.stringify([
+        { id: 1304, index: 0, groupId: 1301 },
+        { id: 1303, index: 1, groupId: 1301 },
+      ]) &&
+      JSON.stringify(runtimeGroupIds) === JSON.stringify([1301]) &&
+      targetRows.some((row) => !row.dormant && row.text.includes('Research Anchor')) &&
+      targetRows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      targetRows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      !targetRows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      matchingRows.length === 1 && !matchingRows[0].dormant && matchingRows[0].groupTitle === 'Research' &&
+      sourceRows.length === 0 && !sourceCard &&
+      !sourceSnapshotUrls.includes('https://example.com/spaces-guide') &&
+      snapshotUrls.filter((url) => url === 'https://example.com/spaces-guide').length === 1 &&
+      snapshotUrls.includes('https://example.com/research-anchor') &&
+      snapshotUrls.includes('https://example.com/drop-saved') &&
+      syntheticStateKeys.length === 0 && !/could not|changed|failed|error/i.test(status);
+    const diagnosticReady = Date.now() - Number(window.__dormantTabDropStartedAt || 0) >= 2500;
+    return complete || diagnosticReady ? {
+      complete,
       groupKey,
-      rows,
+      runtimeGroupId: runtimeTab?.groupId,
+      targetRows,
+      sourceRows,
+      sourceCardPresent: Boolean(sourceCard),
+      matchingRows,
       snapshotUrls,
+      sourceSnapshotUrls,
+      snapshotGroups,
       syntheticStateKeys,
+      groupExistingCommands,
+      moveRelativeCommands,
+      runtimeOrder,
+      runtimeGroupIds,
+      storageProjection,
+      status,
     } : null;
   })()`);
   record(
-    'live tabs can drop onto imported group headers without leaving dormant residue',
+    'live tabs physically move from Source onto imported Research without residue',
     dormantTabDropDispatchState.ok &&
       dormantTabDropDispatchState.overPrevented &&
       dormantTabDropDispatchState.dropPrevented &&
-      dormantTabDropState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
-      dormantTabDropState.rows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
-      !dormantTabDropState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      dormantTabDropState.complete &&
+      dormantTabDropState.runtimeGroupId === 1301 &&
+      dormantTabDropState.groupExistingCommands.length === 1 &&
+      dormantTabDropState.groupExistingCommands[0].payload.groupId === 1301 &&
+      JSON.stringify(dormantTabDropState.groupExistingCommands[0].payload.tabIds) === '[1303]' &&
+      dormantTabDropState.moveRelativeCommands.length === 1 &&
+      JSON.stringify(dormantTabDropState.moveRelativeCommands[0].payload) === JSON.stringify({
+        tabId: 1303,
+        anchorTabId: 1304,
+        edge: 'after',
+        expectedGroupId: 1301,
+      }) &&
+      JSON.stringify(dormantTabDropState.runtimeOrder) === JSON.stringify([
+        { id: 1304, index: 0, groupId: 1301 },
+        { id: 1303, index: 1, groupId: 1301 },
+      ]) &&
+      JSON.stringify(dormantTabDropState.runtimeGroupIds) === JSON.stringify([1301]) &&
+      dormantTabDropState.targetRows.some((row) => (
+        !row.dormant && row.text.includes('Browser Spaces Guide')
+      )) &&
+      dormantTabDropState.targetRows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      dormantTabDropState.matchingRows.length === 1 &&
+      dormantTabDropState.sourceRows.length === 0 &&
+      dormantTabDropState.sourceCardPresent === false &&
       dormantTabDropState.snapshotUrls
         .filter((url) => url === 'https://example.com/spaces-guide').length === 1 &&
+      dormantTabDropState.snapshotUrls.includes('https://example.com/research-anchor') &&
       dormantTabDropState.snapshotUrls.includes('https://example.com/drop-saved') &&
       dormantTabDropState.syntheticStateKeys.length === 0,
     JSON.stringify({ dormantTabDropDispatchState, dormantTabDropState })
+  );
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
+  await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
+  const dormantTabDropReloadState = await waitFor(client, `(() => {
+    for (const card of document.querySelectorAll('.group-card.collapsed')) {
+      card.querySelector('.group-toggle')?.click();
+    }
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const targetCard = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
+    const sourceCard = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Source');
+    const targetRows = [...(targetCard?.querySelectorAll('.tab-row') || [])].map((row) => ({
+      text: row.textContent,
+      dormant: row.classList.contains('dormant'),
+    }));
+    const matchingRows = [...document.querySelectorAll('.tab-row')]
+      .filter((row) => row.textContent.includes('Browser Spaces Guide'))
+      .map((row) => ({
+        dormant: row.classList.contains('dormant'),
+        groupTitle: row.closest('.group-card')?.querySelector('.group-header h2')?.textContent || '',
+      }));
+    const snapshotGroups = (stored.spaceSnapshots?.['drop-demo']?.groups || []).map((group) => ({
+      snapshotGroupId: group.snapshotGroupId || '',
+      title: group.title,
+      color: group.color,
+      collapsed: Boolean(group.collapsed),
+      tabs: (group.tabs || []).map((tab) => ({
+        snapshotTabId: tab.snapshotTabId || '',
+        title: tab.title,
+        url: tab.url,
+      })),
+    }));
+    const runtimeTab = (runtime.tabs || []).find((tab) => Number(tab.id) === 1303);
+    const runtimeOrder = [...(runtime.tabs || [])]
+      .sort((left, right) => Number(left.index) - Number(right.index))
+      .map((item) => ({ id: Number(item.id), index: Number(item.index), groupId: Number(item.groupId) }));
+    const runtimeGroupIds = (runtime.groups || []).map((group) => Number(group.id)).sort((a, b) => a - b);
+    const storageProjection = {
+      groupSpaces: {
+        research: stored.groupSpaces?.[1301] || '',
+        source: stored.groupSpaces?.[1302] || '',
+      },
+      tabSpaces: stored.tabSpaces?.[1303] || '',
+      tabGroups: stored.tabGroups?.[1303] || '',
+      groupOrder: stored.groupOrder?.['drop-demo'] || [],
+      tabOrder: stored.tabOrder?.['drop-demo'] || {},
+      snapshotGroups,
+    };
+    const ready = Number(runtimeTab?.groupId) === 1301 &&
+      targetRows.some((row) => !row.dormant && row.text.includes('Research Anchor')) &&
+      targetRows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
+      targetRows.some((row) => row.dormant && row.text.includes('Saved Doc')) &&
+      matchingRows.length === 1 && !matchingRows[0].dormant &&
+      matchingRows[0].groupTitle === 'Research' && !sourceCard;
+    const diagnosticReady = performance.now() >= 2500;
+    return ready || diagnosticReady ? {
+      ready,
+      runtimeGroupId: runtimeTab.groupId,
+      runtimeOrder,
+      runtimeGroupIds,
+      targetRows,
+      matchingRows,
+      sourceCardPresent: Boolean(sourceCard),
+      sourceRows: [...(sourceCard?.querySelectorAll('.tab-row') || [])].map((row) => ({
+        text: row.textContent,
+        dormant: row.classList.contains('dormant'),
+      })),
+      storageProjection,
+    } : null;
+  })()`);
+  record(
+    'live-tab imported-group drop keeps runtime, DOM, and storage stable after reload',
+    dormantTabDropReloadState.ready &&
+      dormantTabDropReloadState.runtimeGroupId === 1301 &&
+      JSON.stringify(dormantTabDropReloadState.runtimeOrder) === JSON.stringify([
+        { id: 1304, index: 0, groupId: 1301 },
+        { id: 1303, index: 1, groupId: 1301 },
+      ]) &&
+      JSON.stringify(dormantTabDropReloadState.runtimeGroupIds) === JSON.stringify([1301]) &&
+      dormantTabDropReloadState.matchingRows.length === 1 &&
+      dormantTabDropReloadState.sourceCardPresent === false &&
+      JSON.stringify(dormantTabDropReloadState.storageProjection) ===
+        JSON.stringify(dormantTabDropState.storageProjection),
+    JSON.stringify({ dormantTabDropState, dormantTabDropReloadState })
   );
   await evaluate(client, `(() => {
     const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
@@ -1135,13 +3218,14 @@ async function main() {
     localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
     return true;
   })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
   await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Drop Demo'`);
   const activatedTagResidueState = await waitFor(client, `(() => {
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
     if (card?.classList.contains('collapsed')) {
-      card.querySelector('.group-header')?.click();
+      card.querySelector('.group-toggle')?.click();
       return null;
     }
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
@@ -1173,40 +3257,82 @@ async function main() {
       .find((node) => !node.classList.contains('dormant') && node.textContent.includes('Browser Spaces Guide'));
     const closeButton = row?.querySelector('button[aria-label="Close"]');
     closeButton?.click();
+    window.__closeGroupTagStartedAt = Date.now();
     return {
       clicked: Boolean(closeButton),
       rowText: row?.textContent || '',
     };
   })()`);
+  const closeGroupTagCheckpointState = await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .map((tab) => tab.url);
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const runtimeUrls = (runtime.tabs || []).map((tab) => tab.url);
+    const complete = !runtimeUrls.includes('https://example.com/spaces-guide') &&
+      snapshotUrls.includes('https://example.com/drop-saved') &&
+      snapshotUrls.includes('https://example.com/spaces-guide#stale-dormant-row') &&
+      !snapshotUrls.includes('https://example.com/spaces-guide');
+    const diagnosticReady = Date.now() - Number(window.__closeGroupTagStartedAt || 0) >= 2500;
+    return complete || diagnosticReady ? { complete, runtimeUrls, snapshotUrls } : null;
+  })()`);
+  await evaluate(client, `(() => {
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
+    if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
+    return true;
+  })()`);
   const closeGroupTagResidueState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
-    if (card?.classList.contains('collapsed')) {
-      card.querySelector('.group-header')?.click();
-      return null;
-    }
     const rows = [...(card?.querySelectorAll('.tab-row') || [])].map((row) => ({
       text: row.textContent,
       dormant: row.classList.contains('dormant'),
     }));
-    if (rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
-    if (!rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
     const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
       .flatMap((group) => group.tabs || [])
       .map((tab) => tab.url);
+    if (!rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide'))) return null;
     return { rows, snapshotUrls };
   })()`);
   record(
     'closing a live group tag keeps its distinct URL-variant history',
     closeGroupTagDispatchState.clicked &&
+      closeGroupTagCheckpointState.complete &&
       !closeGroupTagResidueState.rows.some((row) => !row.dormant && row.text.includes('Browser Spaces Guide')) &&
       closeGroupTagResidueState.rows.some((row) => row.dormant && row.text.includes('Browser Spaces Guide')) &&
       closeGroupTagResidueState.snapshotUrls.includes('https://example.com/drop-saved') &&
       closeGroupTagResidueState.snapshotUrls.includes('https://example.com/spaces-guide#stale-dormant-row') &&
       !closeGroupTagResidueState.snapshotUrls.includes('https://example.com/spaces-guide'),
-    JSON.stringify({ closeGroupTagDispatchState, closeGroupTagResidueState })
+    JSON.stringify({
+      closeGroupTagDispatchState,
+      closeGroupTagCheckpointState,
+      closeGroupTagResidueState,
+    })
   );
+  const dropFixtureAnchorCleanup = await evaluate(client, `(() => {
+    const card = [...document.querySelectorAll('.group-card')]
+      .find((node) => node.querySelector('.group-header h2')?.textContent === 'Research');
+    const row = [...(card?.querySelectorAll('.tab-row') || [])]
+      .find((node) => !node.classList.contains('dormant') && node.textContent.includes('Research Anchor'));
+    const closeButton = row?.querySelector('button[aria-label="Close"]');
+    closeButton?.click();
+    return { clicked: Boolean(closeButton), rowText: row?.textContent || '' };
+  })()`);
+  await waitFor(client, `(() => {
+    const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+    const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+    const snapshotUrls = (stored.spaceSnapshots?.['drop-demo']?.groups || [])
+      .flatMap((group) => group.tabs || [])
+      .map((tab) => tab.url);
+    return ${JSON.stringify(dropFixtureAnchorCleanup.clicked)} &&
+      !(runtime.tabs || []).some((tab) => tab.url === 'https://example.com/research-anchor') &&
+      !snapshotUrls.includes('https://example.com/research-anchor') &&
+      snapshotUrls.includes('https://example.com/drop-saved') &&
+      snapshotUrls.includes('https://example.com/spaces-guide#stale-dormant-row');
+  })()`);
   await evaluate(client, `new Promise((resolve) => setTimeout(resolve, 400))`);
   await evaluate(client, `(() => {
     const buttons = [...document.querySelectorAll('.space')];
@@ -1293,11 +3419,11 @@ async function main() {
   await evaluate(client, `(() => {
     const header = [...document.querySelectorAll('.group-header')]
       .find((node) => node.querySelector('h2')?.textContent === 'Search');
-    if (header?.closest('.collapsed')) header.click();
+    if (header?.closest('.collapsed')) header.querySelector('.group-toggle')?.click();
     return true;
   })()`);
   await waitFor(client, `document.querySelectorAll('.tab-row.dormant').length === 2`);
-  await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
+  await evaluate(client, `document.querySelector('.tab-row.dormant .tab-main-button').click()`);
   const firstDormantOpenState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const searchSnapshot = (stored.spaceSnapshots?.['dormant-demo']?.groups || [])
@@ -1343,7 +3469,7 @@ async function main() {
     bugs.push('Opening a dormant grouped tab left duplicate dormant/live rows or leaked a new-tab carrier.');
   }
 
-  await evaluate(client, `document.querySelector('.tab-row.dormant').click()`);
+  await evaluate(client, `document.querySelector('.tab-row.dormant .tab-main-button').click()`);
   const allDormantOpenState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     const searchSnapshot = (stored.spaceSnapshots?.['dormant-demo']?.groups || [])
@@ -1428,9 +3554,10 @@ async function main() {
       }],
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: stored }));
-    location.reload();
     return true;
   })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Temp Demo'`);
   const tempReloadPurgeState = await waitFor(client, `(() => {
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
@@ -1476,7 +3603,7 @@ async function main() {
   await evaluate(client, `(() => {
     const header = [...document.querySelectorAll('.group-header')]
       .find((node) => node.querySelector('h2')?.textContent === 'Search');
-    if (header?.closest('.collapsed')) header.click();
+    if (header?.closest('.collapsed')) header.querySelector('.group-toggle')?.click();
     return true;
   })()`);
   const brutalStressState = await evaluate(client, `(() => {
@@ -1572,33 +3699,34 @@ async function main() {
         nextId: 203,
         nextGroupId: 21,
       }));
-      location.reload();
       return true;
     })()`);
+    await checkpointPreviewCoverage(client, coverageSnapshots);
+    await client.send('Page.reload', { ignoreCache: true });
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelectorAll('.tab-row').length === 2`);
     await evaluate(client, `(() => {
       const row = document.querySelectorAll('.tab-row')[0];
-      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      row.querySelector('.tab-main-button')?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
       return true;
     })()`);
     await waitFor(client, `document.querySelectorAll('.tab-row.selected').length === 1`);
     await evaluate(client, `(() => {
       const row = document.querySelectorAll('.tab-row')[1];
-      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, shiftKey: true }));
+      row.querySelector('.tab-main-button')?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, shiftKey: true }));
       return true;
     })()`);
     const moveShiftSelectionState = await waitFor(client, `(() => {
       const rows = [...document.querySelectorAll('.tab-row')].map((row) => ({
         title: row.querySelector('.tab-title')?.textContent || '',
         selected: row.classList.contains('selected'),
-        ariaSelected: row.getAttribute('aria-selected'),
+        ariaPressed: row.querySelector('.tab-main-button')?.getAttribute('aria-pressed'),
       }));
       return rows.filter((row) => row.selected).length === 2 ? rows : null;
     })()`);
     record(
       'Shift multi-select updates visible tab rows',
       moveShiftSelectionState.length === 2 &&
-        moveShiftSelectionState.every((row) => row.selected && row.ariaSelected === 'true'),
+        moveShiftSelectionState.every((row) => row.selected && row.ariaPressed === 'true'),
       JSON.stringify(moveShiftSelectionState)
     );
 
@@ -1624,7 +3752,7 @@ async function main() {
     await evaluate(client, `(() => {
       const header = [...document.querySelectorAll('.group-header')]
         .find((node) => node.querySelector('h2')?.textContent === 'Move Source');
-      if (header?.closest('.collapsed')) header.click();
+      if (header?.closest('.collapsed')) header.querySelector('.group-toggle')?.click();
       return Boolean(header);
     })()`);
     const moveToState = await waitFor(client, `(() => {
@@ -1637,6 +3765,7 @@ async function main() {
       }));
       if (rows.length < 2) return null;
       const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
       return {
         activeSpaceId: stored.activeSpaceId,
         rows,
@@ -1644,6 +3773,10 @@ async function main() {
         groupSpaces: stored.groupSpaces || {},
         tabSpaces: stored.tabSpaces || {},
         tabGroups: stored.tabGroups || {},
+        virtualGroups: stored.virtualGroups || {},
+        runtimeGroupIds: (runtime.tabs || [])
+          .filter((tab) => tab.id === 201 || tab.id === 202)
+          .map((tab) => tab.groupId),
         closedMovedTabIds: commands
           .filter((command) => command.type === 'tabs:close')
           .map((command) => command.payload?.tabId)
@@ -1654,15 +3787,24 @@ async function main() {
       };
     })()`, 7000);
     const movedTitles = moveToState.rows.map((row) => row.title);
+    const moveVirtualGroupKeys = [201, 202].map((tabId) => moveToState.tabGroups[tabId] || '');
+    const moveVirtualGroup = moveToState.virtualGroups[moveVirtualGroupKeys[0]];
     const moveToWorked = moveToState.activeSpaceId === 'move-target' &&
       moveToState.headers.includes('Move Source') &&
       ['Move Alpha', 'Move Beta'].every((title) => movedTitles.includes(title)) &&
       moveToState.rows.filter((row) => row.selected).length === 2 &&
-      Object.values(moveToState.groupSpaces).includes('move-target') &&
+      [201, 202].every((tabId) => moveToState.tabSpaces[tabId] === 'move-target') &&
+      moveVirtualGroupKeys[0].startsWith('vgroup:') &&
+      moveVirtualGroupKeys.every((key) => key === moveVirtualGroupKeys[0]) &&
+      moveVirtualGroup?.spaceId === 'move-target' &&
+      moveVirtualGroup?.title === 'Move Source' &&
+      moveVirtualGroup?.color === 'blue' &&
+      moveToState.runtimeGroupIds.length === 2 &&
+      moveToState.runtimeGroupIds.every((groupId) => groupId === -1) &&
       moveToState.closedMovedTabIds.length === 0 &&
       [201, 202].every((tabId) => moveToState.ungroupedTabIds.includes(tabId));
     record(
-      'Move to moves selected tabs, switches Space, and keeps grouping',
+      'Move to checkpoints selected tabs in one durable destination group before activation',
       moveToWorked,
       JSON.stringify(moveToState)
     );
@@ -1676,10 +3818,45 @@ async function main() {
         runtime.tabs[0].title = 'Move Alpha planning document with a deliberately long browser title for tidy preview';
       }
       sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify(runtime));
-      location.reload();
       return true;
     })()`);
+    await checkpointPreviewCoverage(client, coverageSnapshots);
+    await client.send('Page.reload', { ignoreCache: true });
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' && document.querySelectorAll('.tab-row').length >= 2`);
+    const moveMaterializedState = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const movedTabs = (runtime.tabs || []).filter((tab) => tab.id === 201 || tab.id === 202);
+      const groupIds = movedTabs.map((tab) => Number(tab.groupId));
+      if (groupIds.length !== 2 || groupIds[0] < 0 || groupIds.some((groupId) => groupId !== groupIds[0])) {
+        return null;
+      }
+      const group = (runtime.groups || []).find((candidate) => Number(candidate.id) === groupIds[0]);
+      return {
+        groupId: groupIds[0],
+        group,
+        groupSpaceId: stored.groupSpaces?.[groupIds[0]] || '',
+        tabSpaces: [stored.tabSpaces?.[201] || '', stored.tabSpaces?.[202] || ''],
+        tabGroups: [stored.tabGroups?.[201] || '', stored.tabGroups?.[202] || ''],
+        virtualGroupKeys: Object.keys(stored.virtualGroups || {}),
+        headers: [...document.querySelectorAll('.group-header h2')].map((node) => node.textContent),
+      };
+    })()`, 7000);
+    const moveMaterialized = moveMaterializedState.group?.title === 'Move Source' &&
+      moveMaterializedState.group?.color === 'blue' &&
+      moveMaterializedState.groupSpaceId === 'move-target' &&
+      moveMaterializedState.tabSpaces.every((spaceId) => !spaceId) &&
+      moveMaterializedState.tabGroups.every((groupKey) => !groupKey) &&
+      !moveMaterializedState.virtualGroupKeys.includes(moveVirtualGroupKeys[0]) &&
+      moveMaterializedState.headers.includes('Move Source');
+    record(
+      'Move to materializes the durable destination group in Chrome on refresh',
+      moveMaterialized,
+      JSON.stringify(moveMaterializedState)
+    );
+    if (!moveMaterialized) {
+      bugs.push('Move to did not materialize its durable destination group in Chrome.');
+    }
     await evaluate(client, `(() => {
       window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
       window.__tidyPreviewTitles = [];
@@ -1700,7 +3877,8 @@ async function main() {
         message: document.querySelector('#actionDialogMessage')?.textContent || '',
         titles: [...new Set(window.__tidyPreviewTitles || [])],
         confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-        commands: window.__SPACE_TABS_PREVIEW_COMMANDS__ || [],
+        providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => command.type === 'ai:chat').length,
       };
     })()`);
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
@@ -1717,7 +3895,8 @@ async function main() {
       'Tidy Names directly opens one concise final preview and Cancel has no side effects',
       tidyPreview.items > 0 &&
         tidyPreview.confirmText === 'Apply tidy' &&
-        /^\d+ names? · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
+        /^\d+ names? · AI: Z\.ai \/ GLM · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
+        tidyPreview.providerRequests === 1 &&
         !tidyPreview.titles.includes('Generate Tidy Names preview?') &&
         tidyCancelState.mutations.length === 0 &&
         Object.keys(tidyCancelState.renamedTabs).length === 0,
@@ -1848,20 +4027,180 @@ async function main() {
     record(
       'Auto Group applies only after confirmation without rendering an empty same-name shadow',
       groupApplyState.mutations.length > 0 &&
-        groupApplyState.planningSnapshotGroups.length === 2 &&
-        groupApplyState.planningSnapshotGroups.filter((group) => group.tabs === 0).length === 1 &&
+        groupApplyState.planningSnapshotGroups.length === 1 &&
+        groupApplyState.planningSnapshotGroups[0].tabs === 2 &&
         groupApplyState.matchingCards.length === 1 &&
         groupApplyState.matchingCards[0].rows === 2,
       JSON.stringify(groupApplyState)
     );
   }
 
-    console.log(JSON.stringify({ results, bugs }, null, 2));
+    await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k', metaKey: true, bubbles: true, cancelable: true,
+    }))`);
+    const paletteOpenState = await waitFor(client, `(() => {
+      const dialog = document.querySelector('#commandPaletteDialog');
+      const input = document.querySelector('#commandPaletteInput');
+      return dialog?.open && document.activeElement === input
+        ? {
+            options: dialog.querySelectorAll('[data-command-index]').length,
+            selected: dialog.querySelector('[aria-selected="true"]')?.textContent || '',
+          }
+        : null;
+    })()`);
+    record(
+      'Command Palette opens from the reserved keyboard shortcut with a selected result',
+      paletteOpenState.options > 0 && Boolean(paletteOpenState.selected),
+      JSON.stringify(paletteOpenState),
+    );
+
+    await evaluate(client, `(() => {
+      const input = document.querySelector('#commandPaletteInput');
+      input.value = 'no-result-e2e-query';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    const paletteEmptyState = await waitFor(client, `(() => {
+      const results = document.querySelector('#commandPaletteResults');
+      return results?.querySelectorAll('[data-command-index]').length === 0
+        ? {
+            text: results.textContent.trim(),
+            options: results.querySelectorAll('[data-command-index]').length,
+          }
+        : null;
+    })()`);
+    record(
+      'Command Palette gives an explicit empty result instead of leaving stale commands',
+      paletteEmptyState.options === 0 && paletteEmptyState.text === 'No matching Spaces, tabs, or commands.',
+      JSON.stringify(paletteEmptyState),
+    );
+
+    const paletteWrapState = await evaluate(client, `(() => {
+      const input = document.querySelector('#commandPaletteInput');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const before = [...document.querySelectorAll('#commandPaletteResults [data-command-index]')]
+        .map((button) => button.textContent.trim());
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowUp', bubbles: true, cancelable: true,
+      }));
+      const selected = document.querySelector('#commandPaletteResults [aria-selected="true"]');
+      return {
+        count: before.length,
+        expected: before.at(-1) || '',
+        selected: selected?.textContent.trim() || '',
+      };
+    })()`);
+    record(
+      'Command Palette Arrow Up wraps from the first result to the last result',
+      paletteWrapState.count > 1 && paletteWrapState.selected === paletteWrapState.expected,
+      JSON.stringify(paletteWrapState),
+    );
+    await evaluate(client, `document.querySelector('#commandPaletteDialog').close()`);
+
+    const shortcutCaptureState = await evaluate(client, `(() => {
+      const input = document.querySelector('.shortcut-input');
+      if (!input) return null;
+      const keyEvent = (key, options = {}) => new KeyboardEvent('keydown', {
+        key,
+        code: options.code || '',
+        ctrlKey: Boolean(options.ctrlKey),
+        altKey: Boolean(options.altKey),
+        metaKey: Boolean(options.metaKey),
+        shiftKey: Boolean(options.shiftKey),
+        bubbles: true,
+        cancelable: true,
+      });
+      const captured = keyEvent('j', { code: 'KeyJ', ctrlKey: true, altKey: true });
+      input.dispatchEvent(captured);
+      const afterCapture = {
+        prevented: captured.defaultPrevented,
+        value: input.value,
+        shortcut: input.dataset.shortcut || '',
+      };
+      const tab = keyEvent('Tab', { code: 'Tab' });
+      input.dispatchEvent(tab);
+      const afterTab = {
+        prevented: tab.defaultPrevented,
+        shortcut: input.dataset.shortcut || '',
+      };
+      const cleared = keyEvent('Backspace', { code: 'Backspace' });
+      input.dispatchEvent(cleared);
+      return {
+        afterCapture,
+        afterTab,
+        afterClear: {
+          prevented: cleared.defaultPrevented,
+          value: input.value,
+          shortcut: input.dataset.shortcut || '',
+        },
+      };
+    })()`);
+    record(
+      'Shortcut capture records a real modifier chord, preserves Tab navigation, and clears with Backspace',
+      shortcutCaptureState?.afterCapture.prevented === true &&
+        shortcutCaptureState.afterCapture.shortcut === 'Control+Alt+J' &&
+        shortcutCaptureState.afterCapture.value === 'Ctrl+Alt+J' &&
+        shortcutCaptureState.afterTab.prevented === false &&
+        shortcutCaptureState.afterTab.shortcut === 'Control+Alt+J' &&
+        shortcutCaptureState.afterClear.prevented === true &&
+        shortcutCaptureState.afterClear.value === '' &&
+        shortcutCaptureState.afterClear.shortcut === '',
+      JSON.stringify(shortcutCaptureState),
+    );
+
     const failures = results.filter((result) => !result.ok);
+    let coverage;
+    let coverageOutputPath = '';
+    if (coverageEnabled) {
+      coverage = await collectPreviewCoverage(
+        client,
+        coverageSnapshots,
+        failures.length === 0 && bugs.length === 0,
+      );
+      coverageCollected = true;
+      coverageOutputPath = await writePreviewCoverage(coverage);
+      if (coverageOutputPath) process.stderr.write(`[e2e] preview coverage written to ${coverageOutputPath}\n`);
+      const sidepanel = coverage.files.find((file) => file.path === 'sidepanel.js');
+      process.stderr.write(
+        `[e2e] preview coverage sidepanel.js lines=${sidepanel?.coverage?.lines.percent ?? 0}% ` +
+        `branches=${sidepanel?.coverage?.branches.percent ?? 0}% ` +
+        `functions=${sidepanel?.coverage?.functions.percent ?? 0}%\n`,
+      );
+      await client.send('Profiler.stopPreciseCoverage').catch(() => null);
+      await client.send('Profiler.disable').catch(() => null);
+    }
+    const sidepanelCoverage = coverage?.files.find((file) => file.path === 'sidepanel.js');
+    console.log(JSON.stringify({
+      results,
+      bugs,
+      ...(coverage ? {
+        coverage: {
+          complete: coverage.complete,
+          generatedAt: coverage.generatedAt,
+          outputPath: coverageOutputPath,
+          totals: coverage.coverage,
+          sidepanel: sidepanelCoverage?.coverage,
+        },
+      } : {}),
+    }, null, 2));
     if (failures.length || bugs.length) {
       throw new Error(`E2E smoke failed: ${failures.map((failure) => failure.name).join(', ') || bugs.join('; ')}`);
     }
   } finally {
+    if (coverageEnabled && !coverageCollected && client) {
+      try {
+        const coverage = await collectPreviewCoverage(client, coverageSnapshots, false);
+        coverageCollected = true;
+        const outputPath = await writePreviewCoverage(coverage);
+        if (outputPath) process.stderr.write(`[e2e] incomplete preview coverage written to ${outputPath}\n`);
+      } catch (coverageError) {
+        process.stderr.write(
+          `[e2e] could not collect incomplete preview coverage: ${coverageError?.message || String(coverageError)}\n`,
+        );
+      }
+      await client.send('Profiler.stopPreciseCoverage').catch(() => null);
+      await client.send('Profiler.disable').catch(() => null);
+    }
     client?.close();
     await chrome?.close();
     await new Promise((resolve) => previewServer?.close(resolve) ?? resolve());

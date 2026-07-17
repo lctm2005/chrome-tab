@@ -8,6 +8,7 @@ import {
   providerRequiresApiKey,
   providerById,
   providerForBaseUrl,
+  providerSupportsThinking,
 } from '../src/shared/ai-providers.js';
 
 test('catalog exposes built-in providers and custom OpenAI-compatible settings', () => {
@@ -19,12 +20,20 @@ test('catalog exposes built-in providers and custom OpenAI-compatible settings',
     'ollama',
     CUSTOM_AI_PROVIDER_ID,
   ]);
-  assert.equal(providerById('z-ai').baseUrl, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(providerById('z-ai').models[0].id, 'glm-5.2');
+  assert.equal(providerById('z-ai').baseUrl, 'https://api.z.ai/api/paas/v4');
+  assert.deepEqual(providerById('z-ai').models[0], {
+    id: 'glm-5.1',
+    label: 'GLM-5.1',
+    documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.1',
+  });
   assert.equal(providerById('openai').baseUrl, 'https://api.openai.com/v1');
   assert.ok(providerById('openai').models.some((model) => model.id === 'gpt-5.4-mini'));
   assert.equal(providerById('gemini').baseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai');
   assert.ok(providerById('gemini').models.some((model) => model.id === 'gemini-3.5-flash'));
+  assert.ok(providerById('gemini').models.some((model) => model.id === 'gemini-3.1-flash-lite'));
+  assert.ok(!providerById('gemini').models.some((model) => (
+    ['gemini-3.1-flash-lite-preview'].includes(model.id)
+  )), 'shut-down model ids must not return to the built-in catalog');
   assert.equal(providerById('deepseek').baseUrl, 'https://api.deepseek.com');
   assert.ok(providerById('deepseek').models.some((model) => model.id === 'deepseek-v4-pro'));
   assert.equal(providerById('ollama').baseUrl, 'http://localhost:11434/v1');
@@ -36,9 +45,20 @@ test('catalog exposes built-in providers and custom OpenAI-compatible settings',
 });
 
 test('detects a built-in provider from an existing base URL', () => {
-  const provider = providerForBaseUrl('https://api.z.ai/api/coding/paas/v4/');
+  const provider = providerForBaseUrl('https://api.z.ai/api/paas/v4/');
 
   assert.equal(provider.id, 'z-ai');
+});
+
+test('detects built-in providers from user-pasted request endpoints and URL casing', () => {
+  assert.equal(
+    providerForBaseUrl(' HTTPS://API.OPENAI.COM/v1/chat/completions/ ').id,
+    'openai',
+  );
+  assert.equal(
+    providerForBaseUrl(new URL('https://api.z.ai/api/paas/v4/')).id,
+    'z-ai',
+  );
 });
 
 test('detects the added built-in providers from their base URLs', () => {
@@ -59,8 +79,8 @@ test('normalizes built-in provider settings with provider-owned URL and model', 
   });
 
   assert.equal(settings.provider, 'z-ai');
-  assert.equal(settings.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(settings.model, 'glm-5.2');
+  assert.equal(settings.baseUrl, 'https://api.z.ai/api/paas/v4');
+  assert.equal(settings.model, 'unknown-model');
   assert.equal(settings.apiKey, 'secret');
 });
 
@@ -73,4 +93,84 @@ test('keeps unknown endpoints as custom OpenAI-compatible settings', () => {
   assert.equal(settings.provider, CUSTOM_AI_PROVIDER_ID);
   assert.equal(settings.baseUrl, 'https://llm.example.com/v1');
   assert.equal(settings.model, 'my-model');
+});
+
+test('falls back safely for unknown, empty, and damaged provider settings', () => {
+  assert.equal(providerById('missing').id, CUSTOM_AI_PROVIDER_ID);
+  assert.equal(providerById().id, CUSTOM_AI_PROVIDER_ID);
+  assert.equal(providerForBaseUrl(''), null);
+  assert.equal(providerForBaseUrl('https://unknown.example/v1'), null);
+  assert.equal(providerForBaseUrl('not a valid URL'), null);
+  assert.equal(providerRequiresApiKey({ provider: 'missing' }), true);
+  assert.equal(providerRequiresApiKey({ baseUrl: 'https://unknown.example/v1' }), true);
+  assert.equal(providerRequiresApiKey(null), true);
+
+  assert.deepEqual(normalizeAIProviderSettings(null), {
+    provider: CUSTOM_AI_PROVIDER_ID,
+    baseUrl: '',
+    model: '',
+  });
+  assert.deepEqual(normalizeAIProviderSettings(), {
+    provider: CUSTOM_AI_PROVIDER_ID,
+    baseUrl: '',
+    model: '',
+  });
+});
+
+test('preserves valid provider models and normalizes custom request endpoints', () => {
+  const builtIn = normalizeAIProviderSettings({
+    provider: 'openai',
+    model: 'gpt-5.4-mini',
+    baseUrl: 'https://ignored.example/v1',
+  });
+  assert.equal(builtIn.model, 'gpt-5.4-mini');
+  assert.equal(builtIn.baseUrl, 'https://api.openai.com/v1');
+
+  const ollama = normalizeAIProviderSettings({
+    provider: 'ollama',
+    model: '  llama3.2  ',
+  });
+  assert.equal(ollama.model, 'llama3.2');
+
+  const custom = normalizeAIProviderSettings({
+    provider: CUSTOM_AI_PROVIDER_ID,
+    baseUrl: ' HTTPS://LLM.EXAMPLE.COM/v1/chat/completions/ ',
+    model: '  custom-model  ',
+  });
+  assert.equal(custom.baseUrl, 'https://llm.example.com/v1');
+  assert.equal(custom.model, 'custom-model');
+
+  assert.equal(normalizeAIProviderSettings({
+    provider: 'z-ai',
+    model: 'glm-5.2',
+  }).model, 'glm-5.1', 'the retired pre-release catalog id must migrate to the official model');
+});
+
+test('keeps Coding Plan explicit and exposes Thinking only for compatible models', () => {
+  assert.equal(providerForBaseUrl('https://api.z.ai/api/coding/paas/v4'), null);
+  const coding = normalizeAIProviderSettings({
+    provider: CUSTOM_AI_PROVIDER_ID,
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    model: 'glm-5.1',
+  });
+  assert.equal(coding.provider, CUSTOM_AI_PROVIDER_ID);
+  assert.equal(coding.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
+
+  assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-5.1' }), true);
+  assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.5-air' }), true);
+  assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.4' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v4-flash' }), true);
+  assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v3' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'openai', model: 'deepseek-v4-pro' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'gemini', model: 'gemini-3.5-flash' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'ollama', model: 'glm-5.1' }), false);
+  assert.equal(providerSupportsThinking({
+    provider: CUSTOM_AI_PROVIDER_ID,
+    model: 'deepseek-v4-pro',
+  }), true);
+  assert.equal(providerSupportsThinking({
+    provider: CUSTOM_AI_PROVIDER_ID,
+    model: 'unknown-model',
+  }), false);
+  assert.equal(providerSupportsThinking(null), false);
 });

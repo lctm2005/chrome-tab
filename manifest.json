@@ -5,6 +5,7 @@
   "description": "Move your Arc workspace into Chrome. Organize Spaces, ask pages with your own AI key, and keep workspace data local.",
   "version": "0.5.8",
   "minimum_chrome_version": "116",
+  "incognito": "not_allowed",
   "action": {
     "default_title": "Open Space Tabs",
     "default_icon": {
@@ -30,13 +31,14 @@
         "default": "Alt+S",
         "mac": "Alt+S"
       },
-      "description": "Toggle Space"
+      "description": "Toggle Space Tabs panel"
     }
   },
   "side_panel": {
     "default_path": "sidepanel.html"
   },
   "permissions": [
+    "alarms",
     "favicon",
     "scripting",
     "sidePanel",
@@ -44,7 +46,9 @@
     "tabGroups",
     "tabs"
   ],
-  "host_permissions": [],
+  "host_permissions": [
+    "file:///*"
+  ],
   "optional_host_permissions": [
     "https://*/*",
     "http://*/*"

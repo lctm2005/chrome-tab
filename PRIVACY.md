@@ -17,10 +17,15 @@ Space Tabs may handle:
   import. Space Tabs reads the selected file locally and never modifies it.
 - The title, URL, selected text, and page text from the current HTTP(S) page
   only when the user sends a question with Ask Page.
-- Tab titles, simplified URLs without query strings or fragments, domains,
-  and—for Auto Group—current Tag and live/saved status, only when the user
-  starts a Tidy Names or Auto Group proposal.
+- Tab titles, simplified URLs without query strings or fragments, and domains
+  when the user starts Tidy Names with usable AI settings. Tidy Names uses
+  local naming rules and sends no tab metadata when AI is unconfigured or
+  unavailable. Auto Group additionally sends current Tag and live/saved status
+  when the user starts it with configured AI.
 - User-provided AI provider settings and an optional AI API key.
+- Local `file://` page URLs present in open tabs, Arc imports, or backups. Space
+  Tabs does not read local file contents; opening or managing those tabs
+  requires the user's separate **Allow access to file URLs** Chrome setting.
 
 ## Local Storage
 
@@ -38,19 +43,27 @@ The user chooses where those files are stored and shared.
 Space Tabs does not persist an Arc source file or a reusable file handle. The
 user selects `StorableSidebar.json` again for each import.
 
+Space Tabs cannot be enabled in Incognito mode. This prevents private-window
+tab URLs, page content, and Ask history from entering the regular profile's
+shared extension storage.
+
 ## Network Requests
 
 Core Space, Arc import, folder, shortcut, export, restore, and tab management
 features work locally.
 
 Before Ask Page sends anything, it shows the selected provider, the single
-current page, extracted character count, truncation state, and whether stored
+current page, whether selected text is included, the total extracted character
+count including that selection, truncation state, and whether stored
 text from recent conversation messages will be included. Generated-response
 source links are not included in the conversation context sent to the AI
-provider. Starting Tidy Names or Auto Group sends the disclosed tab metadata
-directly to the configured provider and generates one final preview. Neither
-workflow changes tabs or Tags until the user reviews that preview and chooses
-Apply. Space Tabs sends
+provider. Tidy Names sends the disclosed tab metadata directly to the
+configured provider when AI is available; if AI is unconfigured or the request
+fails, it uses local naming rules without sending metadata (or without sending
+again after a failed provider request). Auto Group requires configured AI and
+sends the disclosed metadata directly to that provider. Both workflows
+generate one final preview and neither changes tabs or Tags until the user
+reviews that preview and chooses Apply. Space Tabs sends
 the confirmed prompt, source content, stored text from recent conversation
 messages, or tab metadata directly to the AI endpoint configured by the user.
 The API key is sent to that provider as an authorization credential.
@@ -63,12 +76,18 @@ Space Tabs does not sell, rent, or share user data for advertising.
 Space Tabs requests Chrome permissions to:
 
 - Show the extension in Chrome's side panel.
-- Read and manage tabs and Chrome tab groups for the active browser window.
+- Read and manage tabs and Chrome tab groups across browser windows for Space
+  actions. Each side panel displays its own window; explicit cross-window
+  restore, switch, move, and delete actions can inspect or update other windows.
 - Store local Space data and preferences.
 - Read only the current HTTP(S) page after a user sends a question with Ask
   Page.
 - Request access only to that current page's origin and the selected AI
   provider endpoint at the explicit action that needs them.
+- Recognize, restore, and manage saved local-file tabs only after the user
+  manually enables Chrome's **Allow access to file URLs** setting. The declared
+  `file:///*` host permission does not bypass that user-controlled toggle, and
+  Ask Page remains limited to HTTP(S) pages.
 
 ## User Control
 

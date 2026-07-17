@@ -1,5 +1,20 @@
+import { chromeGroupTitle, chromeGroupTitleKey, groupTitleKey } from './group-title.js';
+
+export { groupTitleKey } from './group-title.js';
+
 const GROUP_COLORS = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
 const TITLE_PLACEHOLDER_MARKS = '.\u2026\u22ef\u3002';
+
+export function isChromeNewTabUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return url.protocol === 'chrome:' &&
+      url.hostname === 'newtab' &&
+      (url.pathname === '' || url.pathname === '/');
+  } catch {
+    return false;
+  }
+}
 
 export function domainFromUrl(value) {
   try {
@@ -11,17 +26,46 @@ export function domainFromUrl(value) {
   }
 }
 
-export function decorateTabs(tabs, state = {}) {
+export function isForeignWindowTab(tab = {}) {
+  return isNonNegativeInteger(tab?.foreignWindowTabId);
+}
+
+export function tabRowPresentation(tab = {}) {
+  const foreign = isForeignWindowTab(tab);
+  const locationLabel = String(tab?.domain || tab?.url || '');
+  return {
+    foreign,
+    ariaStateLabel: foreign
+      ? 'open in another window'
+      : tab?.dormant ? 'saved tab' : '',
+    secondaryLabel: foreign
+      ? [locationLabel, 'Open in another window'].filter(Boolean).join(' · ')
+      : locationLabel,
+    foreignWindowTabId: foreign ? tab.foreignWindowTabId : null,
+    foreignWindowId: foreign && isNonNegativeInteger(tab?.foreignWindowId)
+      ? tab.foreignWindowId
+      : null,
+  };
+}
+
+function isNonNegativeInteger(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+export function decorateTabs(tabs = [], state = {}) {
   return tabs.map((tab) => {
     const domain = domainFromUrl(tab.url);
     const title = cleanTitle(tab.title);
-    const renamedTitle = cleanTitle(state.renamedTabs?.[tab.id]);
+    // Pinned tabs are global Chrome fixtures rather than Space-managed rows.
+    // Keep a prior panel rename in storage so unpinning can restore it, but do
+    // not let that Space-specific name replace Chrome's title while pinned.
+    const renamedTitle = tab.pinned ? '' : cleanTitle(state.renamedTabs?.[tab.id]);
     const tabWithoutPanelTitle = { ...tab };
     delete tabWithoutPanelTitle.panelTitle;
     const decorated = {
       ...tabWithoutPanelTitle,
       domain,
-      displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title) || domain,
+      displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title),
     };
     if (renamedTitle) decorated.panelTitle = renamedTitle;
     else delete decorated.panelTitle;
@@ -37,7 +81,7 @@ export function isPlaceholderTabTitle(value) {
     new RegExp(`^loading[${marks}]*$`, 'i').test(compact);
 }
 
-export function searchTabs(tabs, query) {
+export function searchTabs(tabs = [], query) {
   const needle = String(query || '').trim().toLowerCase();
   if (!needle) return tabs;
   return tabs.filter((tab) => {
@@ -145,7 +189,7 @@ export function preferredFocusableTab(tabs = []) {
   return tabs.find((tab) => isPageShortcutCapableUrl(tab.url)) || tabs[0] || null;
 }
 
-export function planTidyGroups(tabs) {
+export function planTidyGroups(tabs = []) {
   const buckets = new Map();
   for (const tab of tabs) {
     if (!tab?.id || tab.pinned) continue;
@@ -193,17 +237,10 @@ export function sanitizeTidyGroups(plannedGroups, tabs) {
   }));
 }
 
-export function groupTitleKey(title) {
-  return String(title || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
 export function plannedRegroupTabIds(plannedGroups = [], candidateTabs = [], liveGroups = []) {
   const plannedTitleByTabId = new Map();
   for (const group of plannedGroups) {
-    const titleKey = groupTitleKey(group.title);
+    const titleKey = chromeGroupTitleKey(group.title);
     for (const tabId of group.tabIds || []) plannedTitleByTabId.set(Number(tabId), titleKey);
   }
   const liveGroupsById = new Map(liveGroups.map((group) => [Number(group.id), group]));
@@ -211,7 +248,7 @@ export function plannedRegroupTabIds(plannedGroups = [], candidateTabs = [], liv
     if (!isGroupedTab(tab)) return false;
     const plannedTitle = plannedTitleByTabId.get(Number(tab.id));
     if (!plannedTitle) return false;
-    return plannedTitle !== groupTitleKey(liveGroupsById.get(Number(tab.groupId))?.title || '');
+    return plannedTitle !== chromeGroupTitleKey(liveGroupsById.get(Number(tab.groupId))?.title || '');
   }).map((tab) => Number(tab.id));
 }
 
@@ -232,13 +269,12 @@ function uniqueNumbers(values = []) {
 }
 
 function compactGroupTitle(title) {
-  const text = String(title || 'Tabs').replace(/\s+/g, ' ').trim();
-  return (text || 'Tabs').slice(0, 32);
+  return chromeGroupTitle(title);
 }
 
 export function buildSpaceView({
   activeSpaceId,
-  tabs,
+  tabs = [],
   groups = [],
   groupSpaces = {},
   tabSpaces = {},
@@ -248,7 +284,7 @@ export function buildSpaceView({
   tabOrder = {},
   collapsedGroups = {},
   includeUngrouped = false,
-}) {
+} = {}) {
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const visibleTabs = tabs.filter((tab) => {
     if (isGroupedTab(tab)) return groupSpaces[tab.groupId] === activeSpaceId;
@@ -273,7 +309,9 @@ export function buildSpaceView({
         title: virtualGroup
           ? virtualGroup.title
           : grouped
-          ? (group?.title || titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title))
+          ? (group && Object.hasOwn(group, 'title')
+            ? String(group.title)
+            : titleForDomain(tab.domain || domainFromUrl(tab.url), tab.title))
           : 'Ungrouped',
         color: virtualGroup ? (virtualGroup.color || 'grey') : grouped ? (group?.color || 'grey') : 'grey',
         collapsed: grouped
@@ -327,8 +365,7 @@ export function planDuplicateUrlClosures(tabs = []) {
   const buckets = new Map();
   for (const tab of tabs || []) {
     if (!tab?.id || !isPageShortcutCapableUrl(tab.url)) continue;
-    const url = String(tab.url || '').trim();
-    if (!url) continue;
+    const url = String(tab.url).trim();
     if (!buckets.has(url)) buckets.set(url, []);
     buckets.get(url).push(tab);
   }
@@ -350,7 +387,7 @@ function preferredDuplicateUrlTab(tabs) {
     [...tabs].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0))[0];
 }
 
-export function tidyPanelName(tab) {
+export function tidyPanelName(tab = {}) {
   const domain = domainFromUrl(tab.url);
   let title = cleanTitle(tab.title);
   const path = safePath(tab.url);
@@ -383,7 +420,9 @@ export function tidyPanelName(tab) {
   if (domain.includes('anthropic.com')) {
     if (path.includes('/claude-code/')) {
       const topic = readablePathTail(path);
-      return topic ? compactText(`Claude - Code ${topic}`) : 'Claude - Code';
+      return topic && topic.toLowerCase() !== 'claude code'
+        ? compactText(`Claude - Code ${topic}`)
+        : 'Claude - Code';
     }
     const clean = stripKnownSuffixes(title, ['Anthropic']);
     return compactName('Claude', clean);
@@ -411,7 +450,7 @@ export function tidyPanelName(tab) {
   return title.length > 48 ? `${title.slice(0, 45)}...` : (title || domain);
 }
 
-export function titleForDomain(domain, title = '') {
+export function titleForDomain(domain = 'unknown', title = '') {
   if (domain === 'unknown') return 'Other';
   if (domain.includes('anthropic.com') || /claude/i.test(title)) return 'Claude';
   if (domain.includes('monica.im') || /monica/i.test(title)) return 'Monica';
@@ -423,7 +462,7 @@ export function titleForDomain(domain, title = '') {
   return root.charAt(0).toUpperCase() + root.slice(1);
 }
 
-export function compactTabForAI(tab) {
+export function compactTabForAI(tab = {}) {
   return {
     id: tab.id,
     title: String(tab.title || '').trim().slice(0, 240),
@@ -449,9 +488,9 @@ export function compactUrlForAI(value) {
   return raw.slice(0, 512);
 }
 
-export function spaceGroupPlan({ space, tabIds }) {
+export function spaceGroupPlan({ space, tabIds } = {}) {
   return {
-    title: String(space?.name || 'Space').slice(0, 32),
+    title: chromeGroupTitle(space?.name || 'Space', 'Space'),
     color: normalizeChromeGroupColor(space?.color),
     tabIds: (tabIds || []).map(Number).filter(Number.isFinite),
   };
@@ -471,7 +510,7 @@ function safePath(value) {
 }
 
 function githubRepositoryName(path, headings = []) {
-  const parts = String(path || '').split('/').filter(Boolean);
+  const parts = String(path).split('/').filter(Boolean);
   if (parts.length >= 2 && !isGithubNonRepoRoute(parts[0])) return `${parts[0]}/${parts[1]}`;
   const headingRepo = (headings || [])
     .map((heading) => String(heading || '').trim())
@@ -500,7 +539,7 @@ function isGithubNonRepoRoute(route) {
     'settings',
     'sponsors',
     'topics',
-  ]).has(String(route || '').toLowerCase());
+  ]).has(String(route).toLowerCase());
 }
 
 function bestContentHeading(headings = [], excluded = []) {
@@ -521,11 +560,11 @@ function bestContentHeading(headings = [], excluded = []) {
 function githubContextName(repo, kind, heading) {
   const suffix = [kind, heading].filter(Boolean).join(' ');
   const subject = [repo, suffix].filter(Boolean).join(' ');
-  return compactText(subject ? `GitHub - ${subject}` : `GitHub - ${kind}`, 72);
+  return compactText(`GitHub - ${subject}`, 72);
 }
 
 function readablePathTail(path) {
-  const parts = String(path || '')
+  const parts = String(path)
     .split('/')
     .map((part) => part.trim())
     .filter(Boolean);
@@ -551,7 +590,7 @@ function looksLikeThreeXUiPanel(domain, path, title) {
 }
 
 function panelRoute(path) {
-  const match = String(path || '').match(/(?:^|\/)panel(?:\/([^/?#]+))?/i);
+  const match = String(path).match(/(?:^|\/)panel(?:\/([^/?#]+))?/i);
   return match?.[1] || '';
 }
 
@@ -570,7 +609,7 @@ function threeXUiRouteLabel(route) {
 }
 
 function isIpHost(domain) {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(String(domain || ''));
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(String(domain));
 }
 
 function stripKnownSuffixes(title, suffixes) {
@@ -578,6 +617,7 @@ function stripKnownSuffixes(title, suffixes) {
   for (const suffix of suffixes) {
     const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     clean = clean
+      .replace(new RegExp(`^${escaped}$`, 'i'), '')
       .replace(new RegExp(`\\s*[|—-]\\s*${escaped}\\s*$`, 'i'), '')
       .replace(new RegExp(`^${escaped}\\s*[|—-]\\s*`, 'i'), '')
       .trim();
@@ -613,7 +653,7 @@ function escapeRegExp(value) {
 }
 
 function sortBySavedOrder(items, savedOrder, getKey) {
-  const order = new Map((savedOrder || []).map((key, index) => [String(key), index]));
+  const order = new Map(savedOrder.map((key, index) => [String(key), index]));
   return [...items].sort((a, b) => {
     const aKey = String(getKey(a));
     const bKey = String(getKey(b));

@@ -18,6 +18,8 @@ a { color: inherit; text-decoration: none; }
 button, input { font: inherit; }
 .site-frame { min-height: 100vh; overflow: hidden; }
 .section-wrap { width: min(1180px, calc(100% - 48px)); margin-inline: auto; }
+.skip-link { position: absolute; top: 8px; left: 8px; z-index: 100; padding: 10px 14px; border-radius: 9px; color: white; background: var(--purple-dark); transform: translateY(-150%); transition: transform .15s ease; }
+.skip-link:focus { transform: translateY(0); }
 
 .site-header { height: 82px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 17px; letter-spacing: -.02em; }
@@ -88,4 +90,4 @@ button, input { font: inherit; }
   .legal-wrap { margin-block: 70px 95px; }.legal-wrap h1, .support-hero h1 { font-size: 47px; }.legal-summary article { border-right: 0; border-bottom: 1px solid var(--line); }.legal-content section { grid-template-columns: 1fr; }.legal-content h2 { grid-row: auto; margin-bottom: 15px; }.support-hero { padding-block: 70px 80px; }.faq-section { padding-block: 80px; }.support-contact { align-items: flex-start; flex-direction: column; margin-bottom: 70px; }
 }
 
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; }.skip-link { transition: none; } }

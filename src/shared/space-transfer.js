@@ -1,12 +1,212 @@
-import { ASK_SESSION_LIMITS } from './ask-session.js';
+import {
+  ASK_SESSION_LIMITS,
+  PORTABLE_ASK_SESSION_PREFIX,
+  clampAskSessionMessages,
+  normalizeSessionUrl,
+} from './ask-session.js';
 import {
   isUngroupedSnapshotGroup,
   sanitizeSpaceSnapshot,
+  snapshotGroupShouldPersist,
+  snapshotHasPersistentContent,
 } from './space-snapshot.js';
 
 export const SPACE_BACKUP_FORMAT = 'space-context-workspaces';
 export const SPACE_BACKUP_VERSION = 1;
 export const WORKSPACE_STORAGE_BUDGET_BYTES = 8 * 1024 * 1024;
+
+export function captureSnapshotIdentityOverlay(snapshots = {}) {
+  const overlay = {};
+  for (const [spaceId, source] of Object.entries(snapshots || {})) {
+    const snapshot = sanitizeSpaceSnapshot(source, { preserveDuplicateUrls: true });
+    if (!snapshot) continue;
+    const groups = snapshot.groups.map((group) => [
+      overlayIdentity(group.snapshotGroupId),
+      group.tabs.map((tab) => overlayIdentity(tab.snapshotTabId)),
+    ]);
+    if (groups.some(([groupId, tabIds]) => groupId || tabIds.some(Boolean))) {
+      overlay[spaceId] = groups;
+    }
+  }
+  return overlay;
+}
+
+export function restoreSnapshotIdentityOverlay(snapshots = {}, overlay = {}) {
+  const restored = { ...(snapshots || {}) };
+  for (const [spaceId, source] of Object.entries(snapshots || {})) {
+    const snapshot = sanitizeSpaceSnapshot(source, { preserveDuplicateUrls: true });
+    const records = Array.isArray(overlay?.[spaceId]) ? overlay[spaceId] : null;
+    if (!snapshot || !records) continue;
+    const usedGroupIds = new Set();
+    const usedTabIds = new Set();
+    let hasIdentity = false;
+    const groups = snapshot.groups.map((group, groupIndex) => {
+      const record = Array.isArray(records[groupIndex]) ? records[groupIndex] : [];
+      const snapshotGroupId = uniqueOverlayIdentity(record[0], usedGroupIds);
+      const tabRecords = Array.isArray(record[1]) ? record[1] : [];
+      const tabs = group.tabs.map((tab, tabIndex) => {
+        const snapshotTabId = uniqueOverlayIdentity(tabRecords[tabIndex], usedTabIds);
+        if (snapshotTabId) hasIdentity = true;
+        return snapshotTabId ? { ...tab, snapshotTabId } : tab;
+      });
+      if (snapshotGroupId) hasIdentity = true;
+      return {
+        ...group,
+        ...(snapshotGroupId ? { snapshotGroupId } : {}),
+        tabs,
+      };
+    });
+    restored[spaceId] = {
+      ...snapshot,
+      ...(hasIdentity ? { identityVersion: 1 } : {}),
+      groups,
+    };
+  }
+  return restored;
+}
+
+function overlayIdentity(value) {
+  const id = String(value || '').trim();
+  return id.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id) ? id : '';
+}
+
+function uniqueOverlayIdentity(value, used) {
+  const id = overlayIdentity(value);
+  if (!id || used.has(id)) return '';
+  used.add(id);
+  return id;
+}
+
+export function transferSnapshotGroupsBetweenSpaces({
+  sourceSnapshot = null,
+  targetSnapshot = null,
+  snapshotGroupIds = [],
+  snapshotTabIds = [],
+  now = Date.now(),
+} = {}) {
+  const source = sanitizeSpaceSnapshot(sourceSnapshot, { preserveDuplicateUrls: true });
+  const target = sanitizeSpaceSnapshot(targetSnapshot, { preserveDuplicateUrls: true });
+  const selectedGroupIds = new Set(identityList(snapshotGroupIds).map(cleanIdentity).filter(Boolean));
+  const selectedTabIds = new Set(identityList(snapshotTabIds).map(cleanIdentity).filter(Boolean));
+  if (!source || (selectedGroupIds.size === 0 && selectedTabIds.size === 0)) {
+    return { sourceSnapshot: source, targetSnapshot: target, movedGroups: [] };
+  }
+
+  const movingGroups = [];
+  const remainingGroups = [];
+  for (const group of source.groups) {
+    const groupId = cleanIdentity(group.snapshotGroupId);
+    const selectedByGroup = Boolean(groupId && selectedGroupIds.has(groupId));
+    const selectedByTab = group.tabs.some((tab) => (
+      selectedTabIds.has(cleanIdentity(tab.snapshotTabId))
+    ));
+    (selectedByGroup || selectedByTab ? movingGroups : remainingGroups).push(group);
+  }
+  if (movingGroups.length === 0) {
+    return { sourceSnapshot: source, targetSnapshot: target, movedGroups: [] };
+  }
+
+  const movedTabIds = new Set(movingGroups.flatMap((group) => (
+    group.tabs.map((tab) => cleanIdentity(tab.snapshotTabId)).filter(Boolean)
+  )));
+  const movedGroupIds = new Set(movingGroups
+    .map((group) => cleanIdentity(group.snapshotGroupId))
+    .filter(Boolean));
+  const targetGroupsByMovedId = new Map();
+  const retainedTargetGroups = [];
+
+  for (const group of target?.groups || []) {
+    const groupId = cleanIdentity(group.snapshotGroupId);
+    const tabs = group.tabs.filter((tab) => (
+      !movedTabIds.has(cleanIdentity(tab.snapshotTabId))
+    ));
+    if (groupId && movedGroupIds.has(groupId)) {
+      if (!targetGroupsByMovedId.has(groupId)) targetGroupsByMovedId.set(groupId, []);
+      targetGroupsByMovedId.get(groupId).push(...tabs);
+      continue;
+    }
+    const nextGroup = { ...group, tabs };
+    if (snapshotGroupShouldPersist(target, nextGroup)) retainedTargetGroups.push(nextGroup);
+  }
+
+  const transferredGroups = movingGroups.map((group) => {
+    const groupId = cleanIdentity(group.snapshotGroupId);
+    const targetOnlyTabs = groupId ? targetGroupsByMovedId.get(groupId) || [] : [];
+    return {
+      ...group,
+      tabs: [...group.tabs, ...targetOnlyTabs],
+    };
+  });
+  const timestamp = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const sourceNext = {
+    ...source,
+    updatedAt: timestamp,
+    groups: remainingGroups,
+  };
+  const targetNext = {
+    ...(target || {}),
+    version: target?.version || source.version || 1,
+    updatedAt: timestamp,
+    ...(target?.identityVersion || source.identityVersion
+      ? { identityVersion: target?.identityVersion || source.identityVersion }
+      : {}),
+    ...(target?.preserveGroups || source.preserveGroups ? { preserveGroups: true } : {}),
+    groups: [...retainedTargetGroups, ...transferredGroups],
+  };
+
+  return {
+    sourceSnapshot: snapshotHasPersistentContent(sourceNext) ? sourceNext : null,
+    targetSnapshot: targetNext,
+    movedGroups: transferredGroups,
+  };
+}
+
+/**
+ * Snapshot group keys contain their array index. Moving one saved group can
+ * therefore change every later key even though those Tags did not move. Keep
+ * explicit user ordering attached to durable group identity and discard stale
+ * snapshot keys, while leaving live Chrome/virtual group keys untouched.
+ */
+export function remapSnapshotGroupOrderKeys({
+  order = [],
+  beforeSnapshot = null,
+  afterSnapshot = null,
+  spaceId = '',
+} = {}) {
+  const before = sanitizeSpaceSnapshot(beforeSnapshot, { preserveDuplicateUrls: true });
+  const after = sanitizeSpaceSnapshot(afterSnapshot, { preserveDuplicateUrls: true });
+  const beforeIdentityByKey = new Map((before?.groups || []).flatMap((group, index) => {
+    const snapshotGroupId = cleanIdentity(group.snapshotGroupId);
+    return snapshotGroupId
+      ? [[indexedSnapshotGroupKey(index, group, spaceId), snapshotGroupId]]
+      : [];
+  }));
+  const nextKeyByIdentity = new Map((after?.groups || []).flatMap((group, index) => {
+    const snapshotGroupId = cleanIdentity(group.snapshotGroupId);
+    return snapshotGroupId
+      ? [[snapshotGroupId, indexedSnapshotGroupKey(index, group, spaceId)]]
+      : [];
+  }));
+  const remapped = [];
+  const seen = new Set();
+  for (const rawKey of identityList(order)) {
+    const key = String(rawKey);
+    const snapshotGroupId = beforeIdentityByKey.get(key);
+    const nextKey = snapshotGroupId
+      ? nextKeyByIdentity.get(snapshotGroupId)
+      : key.startsWith('snapshot:')
+      ? ''
+      : key;
+    if (!nextKey || seen.has(nextKey)) continue;
+    seen.add(nextKey);
+    remapped.push(nextKey);
+  }
+  return remapped;
+}
+
+function indexedSnapshotGroupKey(index, group, spaceId) {
+  return `snapshot:${index}:${encodeURIComponent(String(spaceId))}:${group.snapshotGroupId}`;
+}
 
 export function serializedJsonBytes(value) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -41,7 +241,7 @@ export function createSpaceBackup(state = {}, now = Date.now()) {
     spaces,
     spaceContexts: normalizeSpaceContexts(state.spaceContexts, validSpaceIds),
     spaceSnapshots: normalizeSpaceSnapshots(state.spaceSnapshots, validSpaceIds),
-    askSessions: normalizeSpaceAskSessions(state.askSessions, validSpaceIds),
+    askSessions: normalizePortableAskSessions(state.askSessions, validSpaceIds),
     collapsedSpaceGroups: normalizeSpaceFlags(state.collapsedSpaceGroups, validSpaceIds),
   };
 }
@@ -84,6 +284,7 @@ export function restoreSpaceBackup(state, input) {
 
   state.groupSpaces = {};
   state.tabSpaces = {};
+  state.tabLifecycle = {};
   state.virtualGroups = {};
   state.tabGroups = {};
   state.ephemeralTabIds = [];
@@ -91,11 +292,13 @@ export function restoreSpaceBackup(state, input) {
   state.groupOrder = {};
   state.tabOrder = {};
   state.collapsedGroups = {};
+  state.lastArcImport = null;
 
   return {
     spaces: backup.spaces.length,
     contexts: Object.values(backup.spaceContexts).filter(Boolean).length,
     savedTabs: countSnapshotTabs(backup.spaceSnapshots),
+    askConversations: countAskConversations(backup.askSessions),
   };
 }
 
@@ -178,7 +381,7 @@ function normalizeSpaceSnapshots(snapshots, validSpaceIds) {
   const normalized = {};
   for (const [spaceId, snapshot] of Object.entries(snapshots || {})) {
     if (!validSpaceIds.has(spaceId)) continue;
-    const clean = sanitizeSpaceSnapshot(snapshot);
+    const clean = sanitizeSpaceSnapshot(snapshot, { preserveDuplicateUrls: true });
     const portable = clean ? portableSnapshot(clean) : null;
     if ((portable?.groups || []).length > 0) normalized[spaceId] = portable;
   }
@@ -187,16 +390,16 @@ function normalizeSpaceSnapshots(snapshots, validSpaceIds) {
 
 function portableSnapshot(snapshot) {
   const preserveGroups = Boolean(snapshot.preserveGroups);
-  const groups = (snapshot.groups || []).map((group) => ({
-    title: String(group.title || 'Ungrouped'),
-    color: String(group.color || 'grey'),
+  const groups = snapshot.groups.map((group) => ({
+    title: String(group.title),
+    color: String(group.color),
     collapsed: Boolean(group.collapsed),
     ...(group.restorable ? { restorable: true } : {}),
-    tabs: (group.tabs || [])
+    tabs: group.tabs
       .filter((tab) => isPortableTabUrl(tab.url))
       .map((tab) => ({
-        title: String(tab.title || tab.url || 'Untitled'),
-        url: String(tab.url || ''),
+        title: String(tab.title),
+        url: String(tab.url),
         ...(tab.panelTitle ? { panelTitle: String(tab.panelTitle) } : {}),
       })),
   })).filter((group) => (
@@ -211,7 +414,7 @@ function portableSnapshot(snapshot) {
   };
 }
 
-function normalizeSpaceAskSessions(sessions, validSpaceIds) {
+function normalizePortableAskSessions(sessions, validSpaceIds) {
   const normalized = {};
   for (const spaceId of validSpaceIds) {
     const key = `space:${spaceId}`;
@@ -224,19 +427,63 @@ function normalizeSpaceAskSessions(sessions, validSpaceIds) {
       url: '',
       createdAt: finiteTimestamp(session.createdAt),
       updatedAt: finiteTimestamp(session.updatedAt),
-      messages: (Array.isArray(session.messages) ? session.messages : [])
-        .slice(-ASK_SESSION_LIMITS.maxMessagesPerSession)
-        .map((message, index) => ({
-          id: String(message?.id || `${finiteTimestamp(message?.createdAt)}-${index}`),
-          role: message?.role === 'user' ? 'user' : 'assistant',
-          text: String(message?.text || '').slice(0, ASK_SESSION_LIMITS.maxMessageChars),
-          createdAt: finiteTimestamp(message?.createdAt),
-          ...(message?.updatedAt ? { updatedAt: finiteTimestamp(message.updatedAt) } : {}),
-        }))
-        .filter((message) => message.text),
+      messages: normalizeAskMessages(session.messages),
     };
   }
+
+  // Runtime Ask Page conversations are scoped to a Chrome tab id and URL.
+  // Tab ids are ephemeral and must not leave the browser in a portable backup,
+  // so retain each conversation under a URL-backed page key instead. Separate
+  // conversations for duplicate tabs remain separate and can be adopted one at
+  // a time when those pages are reopened after restore.
+  const pageSessions = Object.entries(sessions || {})
+    .filter(([key]) => key.startsWith('tab:') || key.startsWith(PORTABLE_ASK_SESSION_PREFIX))
+    .map(([, session]) => {
+      const url = normalizeSessionUrl(session?.url);
+      return {
+        title: String(session?.title || 'Current page'),
+        url,
+        createdAt: finiteTimestamp(session?.createdAt),
+        updatedAt: finiteTimestamp(session?.updatedAt),
+        messages: normalizeAskMessages(session?.messages),
+      };
+    })
+    .filter((session) => isPortableAskPageUrl(session.url) && session.messages.length > 0)
+    .sort((left, right) => Number(right.updatedAt) - Number(left.updatedAt))
+    .slice(0, ASK_SESSION_LIMITS.maxSessions)
+    .sort((left, right) => portableAskSessionSortKey(left).localeCompare(portableAskSessionSortKey(right)));
+
+  const ordinals = new Map();
+  for (const session of pageSessions) {
+    const hash = fnv1a(session.url);
+    const ordinal = (ordinals.get(hash) || 0) + 1;
+    ordinals.set(hash, ordinal);
+    const key = `${PORTABLE_ASK_SESSION_PREFIX}${hash}:${ordinal}`;
+    normalized[key] = { key, ...session };
+  }
   return normalized;
+}
+
+function normalizeAskMessages(messages) {
+  const normalized = (Array.isArray(messages) ? messages : [])
+    .slice(-ASK_SESSION_LIMITS.maxMessagesPerSession)
+    .map((message, index) => ({
+      id: String(message?.id || `${finiteTimestamp(message?.createdAt)}-${index}`),
+      role: message?.role === 'user' ? 'user' : 'assistant',
+      text: String(message?.text || '').slice(0, ASK_SESSION_LIMITS.maxMessageChars),
+      createdAt: finiteTimestamp(message?.createdAt),
+      ...(message?.updatedAt ? { updatedAt: finiteTimestamp(message.updatedAt) } : {}),
+    }))
+    .filter((message) => message.text);
+  return clampAskSessionMessages(normalized);
+}
+
+function portableAskSessionSortKey(session) {
+  return JSON.stringify({
+    url: session.url,
+    title: session.title,
+    messages: session.messages.map((message) => ({ role: message.role, text: message.text })),
+  });
 }
 
 function normalizeSpaceFlags(flags, validSpaceIds) {
@@ -246,14 +493,28 @@ function normalizeSpaceFlags(flags, validSpaceIds) {
 }
 
 function countSnapshotTabs(snapshots) {
-  return Object.values(snapshots || {}).reduce((total, snapshot) => (
-    total + (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0)
+  return Object.values(snapshots).reduce((total, snapshot) => (
+    total + snapshot.groups.reduce((sum, group) => sum + group.tabs.length, 0)
   ), 0);
+}
+
+function countAskConversations(sessions) {
+  return Object.values(sessions)
+    .filter((session) => session.messages.length > 0)
+    .length;
 }
 
 function finiteTimestamp(value) {
   const timestamp = Number(value);
   return Number.isFinite(timestamp) ? timestamp : Date.now();
+}
+
+function cleanIdentity(value) {
+  return String(value || '').trim();
+}
+
+function identityList(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function validDate(value) {
@@ -267,7 +528,15 @@ function isSafeRecordKey(value) {
 
 function isPortableTabUrl(value) {
   try {
-    return ['http:', 'https:', 'file:', 'chrome:'].includes(new URL(String(value || '')).protocol);
+    return ['http:', 'https:', 'file:', 'chrome:'].includes(new URL(String(value)).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isPortableAskPageUrl(value) {
+  try {
+    return ['http:', 'https:'].includes(new URL(String(value)).protocol);
   } catch {
     return false;
   }
@@ -287,15 +556,16 @@ function portableAskSessionsContent(sessions = {}) {
 
 function portableAskSessionContent(session) {
   if (!session) return null;
-  const messages = (session.messages || []).map((message) => ({
+  const messages = session.messages.map((message) => ({
     role: message.role === 'user' ? 'user' : 'assistant',
-    text: String(message.text || ''),
+    text: String(message.text),
   }));
   if (messages.length === 0) return null;
   return {
-    key: String(session.key || ''),
-    spaceId: String(session.spaceId || ''),
-    title: String(session.title || ''),
+    key: String(session.key),
+    spaceId: session.spaceId ? String(session.spaceId) : '',
+    title: String(session.title),
+    url: String(session.url),
     messages,
   };
 }

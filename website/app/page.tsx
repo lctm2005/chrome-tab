@@ -41,11 +41,11 @@ export default function Home() {
   return (
     <div className="site-frame">
       <SiteHeader />
-      <main>
+      <main id="main-content" tabIndex={-1}>
         <section className="hero section-wrap">
           <div className="hero-copy">
             <p className="eyebrow"><span /> Arc workflow, without browser lock-in</p>
-            <h1>Keep Chrome.<br />Bring your Arc workflow.<br /><em>Add private BYOK AI.</em></h1>
+            <h1>Keep Chrome.<br />{" "}Bring your Arc workflow.<br />{" "}<em>Add private BYOK AI.</em></h1>
             <p className="hero-lede">
               Space Tabs: Arc-like Spaces &amp; BYOK AI turns Chrome into focused workspaces, imports selected
               Arc Spaces in minutes, and lets you ask or organize with the AI provider you choose.
@@ -109,8 +109,8 @@ export default function Home() {
           <div className="section-heading right-copy">
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
-            <p>Clicking Tidy Names or Auto Group sends the relevant tab metadata to your configured provider and generates one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Page reads only the current HTTP(S) page when you send. Before anything goes to your provider, it shows the provider, exact page, extracted character count, and whether stored text from recent conversation messages will be included. Responses stream, can be stopped, and include a clickable link to the single source page.</span></div>
+            <p>Tidy Names uses your configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed metadata and generate one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Page reads only the current HTTP(S) page when you send and prioritizes selected text when present. Before anything goes to your provider, it shows the provider, exact page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages will be included. Responses stream, can be stopped, and include a clickable link to the single source page.</span></div>
           </div>
         </section>
 

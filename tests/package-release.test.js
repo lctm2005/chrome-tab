@@ -14,6 +14,22 @@ import {
 test('release allowlist contains only explicit runtime files and the generated empty config', () => {
   assert.doesNotThrow(() => assertSafeReleaseEntries(RELEASE_FILES));
   assert.ok(RELEASE_FILES.includes('src/shared/space-transfer.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/ai-auth.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/group-title.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/space-deletion.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/space-view-merge.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/tab-lifecycle.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/tab-close-transaction.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/storage-transaction.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/chrome-group-transaction.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/command-palette-controller.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/command-palette-selection.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/dormant-snapshot.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/ask-stream.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/panel-keyboard.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/panel-focus.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/panel-render-signatures.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/tab-replacement.js'));
   assert.equal(RELEASE_FILES.includes('src/shared/arc-file-access.js'), false);
   assert.ok(RELEASE_FILES.includes(GENERATED_CONFIG_PATH));
   assert.equal(GENERATED_CONFIG_CONTENT.includes('SPACE_TABS_CONFIG'), true);

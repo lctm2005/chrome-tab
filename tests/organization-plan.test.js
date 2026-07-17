@@ -4,8 +4,44 @@ import assert from 'node:assert/strict';
 import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
+  organizationCandidateIdsOpenInOtherWindows,
   rebaseOrganizationPlan,
+  resolveOrganizationPlanChanges,
 } from '../src/shared/organization-plan.js';
+
+test('previews only real Auto Group moves and preserves existing target presentation', () => {
+  const candidates = [
+    { id: 1, currentGroup: { title: 'Research' } },
+    { id: 2, currentGroup: { title: 'Docs' } },
+    { id: 3, currentGroup: { title: 'Later' } },
+  ];
+  const resolved = resolveOrganizationPlanChanges({
+    candidates,
+    plannedGroups: [
+      { title: 'docs', color: 'blue', tabIds: [1, 2] },
+      { title: 'New group', color: '', collapsed: true, tabIds: [3] },
+    ],
+    existingGroups: [{ title: 'Docs', color: 'red', collapsed: true }],
+  });
+
+  assert.deepEqual(resolved, {
+    plannedGroups: [
+      { title: 'Docs', color: 'red', collapsed: true, tabIds: [1] },
+      { title: 'New group', color: 'blue', collapsed: true, tabIds: [3] },
+    ],
+    unchangedCandidateIds: [2],
+  });
+});
+
+test('does not preview a group when every proposed assignment is already true', () => {
+  const resolved = resolveOrganizationPlanChanges({
+    candidates: [{ id: 1, currentGroup: { title: 'Docs' } }],
+    plannedGroups: [{ title: 'Docs', color: 'purple', tabIds: [1] }],
+    existingGroups: [null, { title: '' }, { title: 'Docs', color: '', collapsed: false }],
+  });
+
+  assert.deepEqual(resolved, { plannedGroups: [], unchangedCandidateIds: [1] });
+});
 
 test('builds stable numeric candidates from live and one-to-one dormant snapshot rows', () => {
   const input = {
@@ -76,6 +112,177 @@ test('builds stable numeric candidates from live and one-to-one dormant snapshot
   assert.equal(first.candidates[2].currentGroup.title, 'Docs');
   assert.equal(first.candidates[2].source.kind, 'snapshot');
   assert.equal(first.candidates[4].source.snapshot, null);
+});
+
+test('foreign matching reserves local snapshot rows before consuming equal-URL dormant siblings', () => {
+  const sharedUrl = 'https://example.com/shared?copy=1#saved';
+  const candidates = [
+    {
+      id: 1,
+      url: sharedUrl,
+      source: {
+        kind: 'live',
+        live: { tabId: 101 },
+        snapshot: {
+          snapshotTabId: 'row-local',
+          snapshotGroupId: 'group-a',
+          url: sharedUrl,
+        },
+      },
+    },
+    {
+      id: 2,
+      url: sharedUrl,
+      source: {
+        kind: 'snapshot',
+        snapshot: {
+          snapshotTabId: 'row-foreign-legacy',
+          snapshotGroupId: 'group-a',
+          url: sharedUrl,
+        },
+      },
+    },
+    {
+      id: 3,
+      source: {
+        kind: 'snapshot',
+        snapshot: {
+          snapshotTabId: 'row-foreign-stable',
+          snapshotGroupId: 'group-b',
+          url: 'https://example.com/stable',
+        },
+      },
+    },
+    { id: 4, url: sharedUrl, source: { kind: 'live', live: { tabId: 104 }, snapshot: null } },
+  ];
+
+  const foreignIds = organizationCandidateIdsOpenInOtherWindows(candidates, [
+    {
+      id: 201,
+      snapshotGroupId: 'group-a',
+      url: sharedUrl,
+    },
+    {
+      id: 202,
+      snapshotTabId: 'row-foreign-stable',
+      snapshotGroupId: 'group-b',
+      url: 'https://example.com/stable?new-navigation=1',
+    },
+  ]);
+
+  assert.deepEqual([...foreignIds], [3, 2]);
+  assert.equal(foreignIds.has(1), false, 'the panel window keeps its reserved snapshot row');
+  assert.equal(foreignIds.has(4), false, 'an unmatched local live tab is never URL-matched as foreign');
+});
+
+test('same stable identity in the panel and another window fails closed for every claimed candidate', () => {
+  const candidates = [
+    {
+      id: 1,
+      source: {
+        live: { tabId: 101 },
+        snapshot: {
+          snapshotTabId: 'row-shared',
+          snapshotGroupId: 'group-local',
+          url: 'https://example.com/shared',
+        },
+      },
+    },
+    {
+      id: 2,
+      source: {
+        snapshot: {
+          snapshotTabId: 'row-shared',
+          snapshotGroupId: 'group-duplicate',
+          url: 'https://example.com/shared',
+        },
+      },
+    },
+    {
+      id: 3,
+      source: {
+        snapshot: {
+          snapshotTabId: 'row-other',
+          snapshotGroupId: 'group-local',
+          url: 'https://example.com/other',
+        },
+      },
+    },
+  ];
+
+  const foreignIds = organizationCandidateIdsOpenInOtherWindows(candidates, [
+    {
+      id: 201,
+      snapshotTabId: 'row-shared',
+      snapshotGroupId: 'group-foreign',
+      url: 'https://example.com/shared',
+    },
+    {
+      id: 202,
+      snapshotTabId: 'row-missing',
+      snapshotGroupId: 'group-local',
+      url: 'https://example.com/other',
+    },
+  ]);
+
+  assert.deepEqual([...foreignIds], [1, 2]);
+});
+
+test('foreign URL fallback is one-to-one, exact-first, and rejects contradictory identities', () => {
+  const candidates = [
+    {
+      id: 1,
+      source: { snapshot: { url: 'https://example.com/doc?id=1#exact' } },
+    },
+    {
+      id: 2,
+      source: { snapshot: { url: 'https://example.com/doc?id=2#saved' } },
+    },
+    {
+      id: 3,
+      source: {
+        snapshot: {
+          snapshotTabId: 'row-a',
+          snapshotGroupId: 'group-a',
+          url: 'https://example.com/contradiction',
+        },
+      },
+    },
+    { id: 4, source: { snapshot: { url: '' } } },
+    { id: 'invalid', source: { snapshot: { url: 'https://example.com/invalid' } } },
+    { id: 5, source: {} },
+    { id: 6, url: 'https://example.com/candidate-url', source: { snapshot: {} } },
+  ];
+  const foreignIds = organizationCandidateIdsOpenInOtherWindows(candidates, [
+    { id: 201, url: 'https://example.com/doc?id=3#navigated' },
+    { id: 202, url: 'https://example.com/doc?id=1#exact' },
+    {
+      id: 203,
+      snapshotTabId: 'row-b',
+      snapshotGroupId: 'group-a',
+      url: 'https://example.com/contradiction',
+    },
+    { id: 204, url: 'https://example.com/candidate-url' },
+    { id: 'invalid', url: 'https://example.com/invalid' },
+  ]);
+
+  assert.deepEqual([...foreignIds], [1, 6, 2]);
+  assert.deepEqual(organizationCandidateIdsOpenInOtherWindows([
+    {
+      id: 6,
+      source: {
+        snapshot: {
+          snapshotGroupId: 'group-a',
+          url: 'https://example.com/group-conflict',
+        },
+      },
+    },
+  ], [{
+    id: 205,
+    snapshotGroupId: 'group-b',
+    url: 'https://example.com/group-conflict',
+  }]), new Set());
+  assert.deepEqual(organizationCandidateIdsOpenInOtherWindows(null, null), new Set());
 });
 
 test('keeps planner ids anchored to snapshot rows when a live tab changes group', () => {
@@ -160,6 +367,60 @@ test('reserves query and hash exact matches before base-URL fallback without los
   ]);
 });
 
+test('different stable identities stay separate despite exact and navigation-fallback URLs', () => {
+  const built = buildOrganizationCandidates({
+    snapshot: {
+      identityVersion: 1,
+      groups: [{
+        title: 'Docs',
+        color: 'blue',
+        tabs: [
+          {
+            snapshotTabId: 'saved-exact',
+            title: 'Saved exact',
+            url: 'https://example.com/exact',
+          },
+          {
+            snapshotTabId: 'saved-query',
+            title: 'Saved query',
+            url: 'https://example.com/item?version=saved#saved',
+          },
+        ],
+      }],
+    },
+    liveGroups: [{
+      id: 10,
+      title: 'Docs',
+      color: 'blue',
+      tabs: [
+        {
+          id: 101,
+          snapshotTabId: 'live-exact',
+          title: 'Live exact',
+          url: 'https://example.com/exact',
+        },
+        {
+          id: 102,
+          snapshotTabId: 'live-query',
+          title: 'Live query',
+          url: 'https://example.com/item?version=live#live',
+        },
+      ],
+    }],
+  });
+
+  assert.deepEqual(built.candidates.map((candidate) => ({
+    dormant: candidate.dormant,
+    liveTabId: candidate.source.live?.tabId ?? null,
+    snapshotTabIndex: candidate.source.snapshot?.tabIndex ?? null,
+  })), [
+    { dormant: true, liveTabId: null, snapshotTabIndex: 0 },
+    { dormant: true, liveTabId: null, snapshotTabIndex: 1 },
+    { dormant: false, liveTabId: 101, snapshotTabIndex: null },
+    { dormant: false, liveTabId: 102, snapshotTabIndex: null },
+  ]);
+});
+
 test('prefers the same Tag when a live navigation only has a base-URL fallback', () => {
   const built = buildOrganizationCandidates({
     snapshot: {
@@ -230,6 +491,34 @@ test('invalidates an organization preview when titles, panel names, or empty Tag
     },
     liveGroups,
   }).fingerprint, initial);
+});
+
+test('organization fingerprints retain logical identity across Chrome tab replacement', () => {
+  const liveGroups = [{
+    id: 10,
+    title: 'Docs',
+    color: 'blue',
+    tabs: [{ id: 101, title: 'Spec', url: 'https://example.com/spec' }],
+  }];
+  const before = buildOrganizationCandidates({ liveGroups }).fingerprint;
+  const replacementGroups = [{
+    ...liveGroups[0],
+    tabs: [{ ...liveGroups[0].tabs[0], id: 202 }],
+  }];
+
+  assert.equal(buildOrganizationCandidates({
+    liveGroups: replacementGroups,
+    tabIdAliases: { 202: 101 },
+  }).fingerprint, before);
+  assert.notEqual(buildOrganizationCandidates({ liveGroups: replacementGroups }).fingerprint, before);
+  assert.equal(buildOrganizationCandidates({
+    liveGroups: replacementGroups,
+    tabIdAliases: { 202: 'bad' },
+  }).fingerprint, buildOrganizationCandidates({ liveGroups: replacementGroups }).fingerprint);
+  assert.equal(buildOrganizationCandidates({
+    liveGroups: replacementGroups,
+    tabIdAliases: null,
+  }).fingerprint, buildOrganizationCandidates({ liveGroups: replacementGroups }).fingerprint);
 });
 
 test('rebases planned targets across display updates and unrelated candidate insertions', () => {
@@ -307,6 +596,90 @@ test('rebases planned targets across display updates and unrelated candidate ins
     tabIds: [liveCurrent.id, savedCurrent.id],
   }]);
   assert.notDeepEqual(rebased[0].tabIds, [livePreview.id, savedPreview.id]);
+});
+
+test('stable snapshot identities rebase same-URL duplicates after row reordering', () => {
+  const previewSnapshot = {
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'group-duplicates',
+      title: 'Duplicates',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'row-a', title: 'First', url: 'https://same.test/page' },
+        { snapshotTabId: 'row-b', title: 'Second', url: 'https://same.test/page' },
+      ],
+    }],
+  };
+  const currentSnapshot = {
+    ...previewSnapshot,
+    groups: [{
+      ...previewSnapshot.groups[0],
+      tabs: [...previewSnapshot.groups[0].tabs].reverse(),
+    }],
+  };
+  const preview = buildOrganizationCandidates({ snapshot: previewSnapshot });
+  const unchanged = buildOrganizationCandidates({ snapshot: previewSnapshot });
+  const current = buildOrganizationCandidates({ snapshot: currentSnapshot });
+  const plannedGroups = [{ title: 'Target', color: 'green', tabIds: [preview.candidates[0].id] }];
+
+  assert.equal(preview.candidates[0].source.snapshot.snapshotTabId, 'row-a');
+  assert.deepEqual(rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: unchanged.candidates,
+    plannedGroups,
+  }), plannedGroups);
+
+  const rebased = rebaseOrganizationPlan({
+    previewCandidates: preview.candidates,
+    currentCandidates: current.candidates,
+    plannedGroups,
+  });
+  const currentRowA = current.candidates.find((candidate) => (
+    candidate.source.snapshot?.snapshotTabId === 'row-a'
+  ));
+  assert.deepEqual(rebased, [{ title: 'Target', color: 'green', tabIds: [currentRowA.id] }]);
+
+  const applied = applyOrganizationPlanToSnapshot({
+    snapshot: currentSnapshot,
+    candidates: current.candidates,
+    plannedGroups: rebased,
+    now: 10,
+  });
+  assert.deepEqual(applied.groups.map((group) => ({
+    title: group.title,
+    rows: group.tabs.map((tab) => tab.snapshotTabId),
+  })), [
+    { title: 'Duplicates', rows: ['row-b'] },
+    { title: 'Target', rows: ['row-a'] },
+  ]);
+});
+
+test('applying a stable candidate rejects stale tab or group identity at its old row index', () => {
+  const snapshot = {
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'group-a',
+      title: 'Source',
+      color: 'blue',
+      tabs: [{ snapshotTabId: 'row-a', title: 'Page', url: 'https://same.test/page' }],
+    }],
+  };
+  const built = buildOrganizationCandidates({ snapshot });
+  const plannedGroups = [{ title: 'Target', tabIds: [built.candidates[0].id] }];
+
+  for (const identityPatch of [
+    { snapshotTabId: 'row-b' },
+    { snapshotGroupId: 'group-b' },
+  ]) {
+    const candidates = structuredClone(built.candidates);
+    Object.assign(candidates[0].source.snapshot, identityPatch);
+    assert.throws(() => applyOrganizationPlanToSnapshot({
+      snapshot,
+      candidates,
+      plannedGroups,
+    }), /snapshot row 0:0 changed/);
+  }
 });
 
 test('rejects rebasing when a planned live target meaningfully changes', () => {
@@ -560,6 +933,74 @@ test('removes a source folder emptied by Auto Group while preserving pre-existin
   assert.deepEqual(snapshot, original);
 });
 
+test('absorbs empty same-named history into a populated planned target without deleting unrelated history', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    preserveGroups: true,
+    groups: [
+      {
+        title: 'Inbox',
+        color: 'blue',
+        tabs: [
+          { title: 'Open page', url: 'https://example.com/open' },
+          { title: 'Saved page', url: 'https://example.com/saved' },
+        ],
+      },
+      {
+        title: 'Project',
+        color: 'purple',
+        collapsed: true,
+        custom: 'target-kept',
+        tabs: [],
+      },
+      {
+        title: ' project ',
+        color: 'orange',
+        collapsed: false,
+        custom: 'duplicate-removed',
+        tabs: [],
+      },
+      {
+        title: 'Unrelated Empty History',
+        color: 'green',
+        collapsed: true,
+        custom: 'unrelated-kept',
+        tabs: [],
+      },
+    ],
+  };
+  const built = buildOrganizationCandidates({ snapshot, liveGroups: [] });
+
+  const result = applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: built.candidates,
+    plannedGroups: [{ title: 'Project', color: 'cyan', tabIds: [1, 2] }],
+    now: 2,
+  });
+
+  assert.deepEqual(result.groups, [
+    {
+      title: 'Project',
+      color: 'purple',
+      collapsed: true,
+      custom: 'target-kept',
+      tabs: [
+        { title: 'Open page', url: 'https://example.com/open' },
+        { title: 'Saved page', url: 'https://example.com/saved' },
+      ],
+    },
+    {
+      title: 'Unrelated Empty History',
+      color: 'green',
+      collapsed: true,
+      custom: 'unrelated-kept',
+      tabs: [],
+    },
+  ]);
+  assert.equal(result.groups.filter((group) => group.title.trim().toLowerCase() === 'project').length, 1);
+});
+
 test('moves an exact dormant duplicate once and leaves unplanned duplicates in place', () => {
   const snapshot = {
     version: 1,
@@ -762,4 +1203,237 @@ test('rejects applying a preview when its exact snapshot URL query or hash chang
       plannedGroups: [{ title: 'New Tag', color: 'purple', tabIds: [1] }],
     }), /changed while the plan was open/);
   }
+});
+
+test('candidate building gives malformed or untitled live and saved rows stable user-visible fallbacks', () => {
+  const built = buildOrganizationCandidates({
+    liveGroups: [
+      {
+        tabs: [{ id: null, title: '', url: '' }],
+      },
+      {
+        title: 'Named',
+        tabs: [{ id: 2, title: '', url: 'https://example.com/saved' }],
+      },
+    ],
+    snapshot: {
+      groups: [
+        { title: '', tabs: [{ title: '', url: '' }] },
+        { title: 'Named', tabs: [{ title: '', url: 'https://example.com/saved' }] },
+      ],
+    },
+  });
+
+  assert.equal(built.candidates.length, 3);
+  assert.deepEqual(built.candidates[0], {
+    id: 1,
+    title: 'Untitled',
+    pageTitle: 'Untitled',
+    panelTitle: '',
+    url: '',
+    pinned: false,
+    dormant: true,
+    currentGroup: {
+      id: null,
+      key: 'snapshot:0:Ungrouped',
+      title: 'Ungrouped',
+      color: 'grey',
+      collapsed: false,
+      source: 'snapshot',
+    },
+    source: {
+      kind: 'snapshot',
+      snapshot: {
+        groupIndex: 0,
+        tabIndex: 0,
+        groupTitle: 'Ungrouped',
+        groupColor: 'grey',
+        url: '',
+      },
+    },
+  });
+  assert.equal(built.candidates[1].title, 'https://example.com/saved');
+  assert.equal(built.candidates[1].pageTitle, 'https://example.com/saved');
+  assert.equal(built.candidates[1].dormant, false);
+  assert.equal(built.candidates[1].currentGroup.color, 'blue');
+  assert.equal(built.candidates[2].title, 'Untitled');
+  assert.equal(built.candidates[2].pageTitle, 'Untitled');
+  assert.equal(built.candidates[2].url, '');
+  assert.equal(built.candidates[2].source.live.tabId, null);
+  assert.equal(built.candidates[2].source.live.groupId, null);
+  assert.match(built.fingerprint, /^organization-v2-/);
+  assert.deepEqual(buildOrganizationCandidates(), buildOrganizationCandidates({ liveGroups: null }));
+});
+
+test('applying a plan normalizes malformed snapshots and joins an existing target without relocating history', () => {
+  assert.deepEqual(applyOrganizationPlanToSnapshot(), {
+    version: 1,
+    updatedAt: 0,
+    groups: [],
+  });
+
+  const snapshot = {
+    version: 0,
+    updatedAt: 'invalid',
+    custom: 'preserved',
+    groups: [
+      { title: '', tabs: null, custom: 'empty-history' },
+      {
+        title: 'Target',
+        color: 'orange',
+        tabs: [{ title: 'Historical', url: 'https://example.com/history' }],
+      },
+    ],
+  };
+  const result = applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [
+      {
+        id: 1,
+        title: 'Panel alias',
+        pageTitle: '',
+        panelTitle: 'Panel alias',
+        url: 'https://example.com/live-title',
+        source: { kind: 'live', live: { tabId: 10 }, snapshot: null },
+      },
+      {
+        id: 2,
+        title: '',
+        pageTitle: '',
+        panelTitle: '',
+        url: 'https://example.com/live-url',
+        source: { kind: 'live', live: { tabId: 11 }, snapshot: null },
+      },
+    ],
+    plannedGroups: [{ title: 'Target', color: '', tabIds: [1, 2] }],
+    now: Number.NaN,
+  });
+
+  assert.equal(result.version, 1);
+  assert.equal(result.updatedAt, 0);
+  assert.equal(result.custom, 'preserved');
+  assert.equal(result.groups.length, 2);
+  assert.deepEqual(result.groups[0], { title: '', tabs: [], custom: 'empty-history' });
+  assert.deepEqual(result.groups[1].tabs, [
+    { title: 'Historical', url: 'https://example.com/history' },
+    {
+      title: 'https://example.com/live-title',
+      panelTitle: 'Panel alias',
+      url: 'https://example.com/live-title',
+    },
+    { title: 'https://example.com/live-url', url: 'https://example.com/live-url' },
+  ]);
+  assert.equal(snapshot.groups[1].tabs.length, 1);
+});
+
+test('applying a plan rejects corrupt candidate identities and snapshot locations before mutation', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 1,
+    groups: [{
+      title: 'Source',
+      tabs: [{ title: 'One', url: 'https://example.com/one' }],
+    }],
+  };
+  const original = structuredClone(snapshot);
+  const snapshotCandidate = (id, snapshotSource) => ({
+    id,
+    title: 'One',
+    pageTitle: 'One',
+    url: 'https://example.com/one',
+    source: { kind: 'snapshot', snapshot: snapshotSource },
+  });
+
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [
+      snapshotCandidate(1, { groupIndex: 0, tabIndex: 0, url: 'https://example.com/one' }),
+      snapshotCandidate(2, { groupIndex: 0, tabIndex: 0, url: 'https://example.com/one' }),
+    ],
+    plannedGroups: [{ title: 'Target', tabIds: [1, 2] }],
+  }), /reuse snapshot row 0:0/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [snapshotCandidate(1, { groupIndex: -1, tabIndex: 0 })],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  }), /invalid snapshot location/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [snapshotCandidate(1, { groupIndex: 9, tabIndex: 0 })],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  }), /snapshot row 9:0 no longer exists/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [{ id: 1, source: { kind: 'unknown' } }],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  }), /has no usable source/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [{ id: 1, source: { kind: 'live' }, url: '' }],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  }), /has no URL to save/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [snapshotCandidate(1, { groupIndex: 0, tabIndex: 0 })],
+    plannedGroups: [{ title: '', tabIds: [1] }],
+  }), /group title is required/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [{ id: 0 }],
+  }), /Invalid organization candidate id/);
+  assert.throws(() => applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [{ id: 1 }, { id: 1 }],
+  }), /Duplicate organization candidate id/);
+  assert.deepEqual(snapshot, original);
+
+  const moved = applyOrganizationPlanToSnapshot({
+    snapshot,
+    candidates: [snapshotCandidate(1, { groupIndex: 0, tabIndex: 0 })],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+    now: 5,
+  });
+  assert.equal(moved.groups[0].title, 'Target');
+  assert.equal(moved.groups[0].tabs[0].url, 'https://example.com/one');
+});
+
+test('rebasing rejects two preview identities resolving to one current row and supports snapshot fallbacks', () => {
+  const live = (id, tabId) => ({
+    id,
+    url: 'https://example.com/live',
+    pinned: false,
+    currentGroup: { title: 'Source' },
+    source: { kind: 'live', live: { tabId }, snapshot: null },
+  });
+  assert.throws(() => rebaseOrganizationPlan({
+    previewCandidates: [live(1, 10), live(2, 10)],
+    currentCandidates: [live(9, 10)],
+    plannedGroups: [{ title: 'Target', tabIds: [1, 2] }],
+  }), /matched unambiguously/);
+
+  const savedPreview = {
+    id: 1,
+    url: 'https://example.com/saved',
+    pinned: false,
+    currentGroup: { title: 'Saved' },
+    source: { kind: 'snapshot', snapshot: {} },
+  };
+  const savedCurrent = { ...structuredClone(savedPreview), id: 7 };
+  assert.deepEqual(rebaseOrganizationPlan({
+    previewCandidates: [savedPreview],
+    currentCandidates: [savedCurrent],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  })[0].tabIds, [7]);
+  assert.deepEqual(rebaseOrganizationPlan({ plannedGroups: null }), []);
+  assert.throws(() => rebaseOrganizationPlan({
+    previewCandidates: [{ id: 1, currentGroup: { title: 'Saved' }, source: null }],
+    currentCandidates: [],
+    plannedGroups: [{ title: 'Target', tabIds: [1] }],
+  }), /saved row changed or was removed/);
+  assert.throws(() => rebaseOrganizationPlan({
+    previewCandidates: [{ id: 0 }],
+  }), /Invalid organization candidate id/);
+  assert.throws(() => rebaseOrganizationPlan({
+    previewCandidates: [{ id: 1 }, { id: 1 }],
+  }), /Duplicate organization candidate id/);
 });

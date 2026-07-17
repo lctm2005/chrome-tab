@@ -7,9 +7,9 @@ export function createArcImportPlan(input, options = {}) {
   const source = pickArcSource(data);
   const existingSpaces = Array.isArray(options.existingSpaces) ? options.existingSpaces : [];
   const now = Number(options.now ?? Date.now());
-  const existingIds = new Set(existingSpaces.map((space) => String(space.id || '')).filter(Boolean));
+  const existingIds = new Set(existingSpaces.map((space) => String(space?.id || '')).filter(Boolean));
   const existingNames = new Set(existingSpaces
-    .map((space) => String(space.name || space.title || ''))
+    .map((space) => String(space?.name || space?.title || ''))
     .filter(Boolean));
   const importedIds = new Set();
   const importedNames = new Set();
@@ -78,13 +78,18 @@ export function appendArcImportPlan(state, plan) {
   if (!Array.isArray(state.spaces)) state.spaces = [];
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
 
+  const importedSnapshots = {};
+  for (const space of spaces) {
+    const id = cleanText(space.id);
+    if (Object.hasOwn(snapshots, id)) importedSnapshots[id] = snapshots[id];
+  }
   state.spaces.push(...spaces);
-  Object.assign(state.spaceSnapshots, snapshots);
+  Object.assign(state.spaceSnapshots, importedSnapshots);
 
   return {
     importedSpaces: spaces.length,
     importedSpaceIds: spaces.map((space) => space.id),
-    importedTabs: Object.values(snapshots).reduce((sum, snapshot) => (
+    importedTabs: Object.values(importedSnapshots).reduce((sum, snapshot) => (
       sum + arrayValue(snapshot?.groups).reduce((groupSum, group) => groupSum + arrayValue(group?.tabs).length, 0)
     ), 0),
   };
@@ -99,7 +104,9 @@ function assertAppendIdsAvailable(state, spaces) {
   const incomingIds = new Set();
   for (const space of spaces) {
     const id = cleanText(space?.id);
-    if (!id) continue;
+    if (!id || ['__proto__', 'prototype', 'constructor'].includes(id)) {
+      throw new Error('Arc import contains a Space without a valid id. Preview the file again.');
+    }
     if (occupiedIds.has(id) || incomingIds.has(id)) {
       throw new Error(`Arc import Space id "${id}" is no longer available. Preview the file again.`);
     }
@@ -284,9 +291,8 @@ function arcSourceCompleteness(source) {
 }
 
 function compareCompleteness(left, right) {
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (left[index] || 0) - (right[index] || 0);
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index] - right[index];
     if (difference !== 0) return difference;
   }
   return 0;
@@ -397,6 +403,7 @@ function buildSnapshotGroupsForSpace(space, itemsById, summary) {
       title: UNGROUPED_TITLE,
       color: 'grey',
       collapsed: false,
+      restorable: true,
       tabs: ungroupedTabs,
     });
   }
@@ -404,7 +411,7 @@ function buildSnapshotGroupsForSpace(space, itemsById, summary) {
 }
 
 function visitItem(item, context) {
-  if (!item?.id || context.visited.has(item.id)) return 0;
+  if (context.visited.has(item.id)) return 0;
   context.visited.add(item.id);
 
   const data = item.data || {};
@@ -466,7 +473,7 @@ function visitChildren(childIds, context) {
 }
 
 function tabFromArcItem(item) {
-  const tab = item.data?.tab || {};
+  const tab = item.data.tab;
   const url = cleanText(tab.savedURL);
   if (!isImportableUrl(url)) return null;
   return {
@@ -476,7 +483,7 @@ function tabFromArcItem(item) {
 }
 
 function isImportableUrl(url) {
-  return /^(https?:|file:)/.test(url) || url === 'chrome://newtab';
+  return /^(https?:|file:)/.test(url);
 }
 
 function containerIdsForSpace(space, itemsById) {
@@ -498,7 +505,7 @@ function containerIdsFromList(list) {
 
 function iconForSpace(space, fallbackName) {
   const iconType = space.customInfo?.iconType || {};
-  return cleanText(iconType.emoji_v2) || cleanText(fallbackName).slice(0, 1).toUpperCase() || 'S';
+  return cleanText(iconType.emoji_v2) || cleanText(fallbackName).slice(0, 1).toUpperCase();
 }
 
 function resolveUniqueImportedName(name, existingNames, importedNames) {
@@ -520,7 +527,7 @@ function resolveUniqueId(raw, existingIds, importedIds) {
   const base = cleanText(raw)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'arc-space';
+    .replace(/^-+|-+$/g, '');
   let candidate = base;
   let index = 2;
   const collisionReasons = new Set();
@@ -548,7 +555,7 @@ function conflictForResolution(field, resolution, spaceId, sourceSpaceId) {
     field,
     original: resolution.original,
     resolved: resolution.resolved,
-    reason: collisionReasons.length > 1 ? 'mixed' : collisionReasons[0] || 'import-batch',
+    reason: collisionReasons.length > 1 ? 'mixed' : collisionReasons[0],
   };
 }
 

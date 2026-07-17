@@ -52,7 +52,7 @@
         <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Page data disclosure">
           <div><span>Provider</span><strong id="askProvider"></strong></div>
           <div><span>Page</span><strong id="askSourceSummary"></strong></div>
-          <p id="askSourceHint">Only the current page is read after confirmation.</p>
+          <p id="askSourceHint">Click Ask Page to read this page locally. Nothing is sent to the provider until you confirm.</p>
           <div class="ask-source-list" id="askSourceList"></div>
         </section>
         <div class="ask-messages" id="askMessages"></div>
@@ -63,11 +63,11 @@
       </main>
 
       <nav class="space-dock" id="spacesList" aria-label="Spaces"></nav>
-      <div class="context-menu" id="contextMenu" hidden></div>
+      <div class="context-menu" id="contextMenu" role="menu" aria-label="Context actions" tabindex="-1" hidden></div>
       <div class="workbench-toast" id="workbenchToast" role="status" aria-live="polite" hidden></div>
     </div>
 
-    <dialog id="actionDialog">
+    <dialog id="actionDialog" aria-labelledby="actionDialogTitle">
       <form class="action-form">
         <div class="dialog-title">
           <h2 id="actionDialogTitle">Action</h2>
@@ -88,7 +88,7 @@
       </form>
     </dialog>
 
-    <dialog id="onboardingDialog" class="onboarding-dialog">
+    <dialog id="onboardingDialog" class="onboarding-dialog" aria-label="Set up Space Tabs">
       <div class="onboarding-shell">
         <aside class="onboarding-rail">
           <div class="onboarding-brand">
@@ -174,15 +174,24 @@
                 <input id="onboardingCustomModelInput" type="text" spellcheck="false">
               </label>
               <label class="onboarding-field">
+                Language
+                <select id="onboardingLanguageInput">
+                  <option value="zh-CN">Chinese (Simplified)</option>
+                  <option value="en">English</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </label>
+              <label class="onboarding-field">
                 API Key
                 <input id="onboardingApiKeyInput" type="password" autocomplete="off" spellcheck="false" disabled>
               </label>
-              <label class="onboarding-field">
+              <label class="onboarding-field" id="onboardingThinkingLabel">
                 Thinking
                 <select id="onboardingThinkingInput" disabled>
                   <option value="disabled">Disabled</option>
                   <option value="enabled">Enabled</option>
                 </select>
+                <span class="ai-field-hint" id="onboardingThinkingHint">Choose a provider to see whether Thinking is supported.</span>
               </label>
             </div>
             <div class="onboarding-ai-actions">
@@ -203,10 +212,10 @@
       </div>
     </dialog>
 
-    <dialog id="settingsDialog">
+    <dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">
       <form method="dialog" class="settings">
         <div class="dialog-title">
-          <h2>Settings</h2>
+          <h2 id="settingsDialogTitle">Settings</h2>
           <button class="icon-button" value="cancel" aria-label="Close settings">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
@@ -254,12 +263,13 @@
           <span id="apiKeyStatus">No API key configured.</span>
           <button type="button" id="clearApiKeyButton" class="link-button">Clear API key</button>
         </div>
-        <label>
+        <label id="thinkingLabel">
           Thinking
           <select id="thinkingInput">
             <option value="disabled">Disabled</option>
             <option value="enabled">Enabled</option>
           </select>
+          <span class="ai-field-hint" id="thinkingHint" hidden></span>
         </label>
         <button type="button" id="testAIButton" class="secondary-button">Test AI</button>
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
@@ -290,6 +300,7 @@
         </section>
         <section class="shortcut-settings">
           <h3>Panel Shortcuts</h3>
+          <p class="shortcut-note">Toggle panel is a Chrome global shortcut (default Alt+S). Change it at <code>chrome://extensions/shortcuts</code>; the bindings below work while Space Tabs is focused.</p>
           <div id="shortcutsList" class="shortcuts-list"></div>
         </section>
         <menu>
@@ -299,9 +310,9 @@
       </form>
     </dialog>
 
-    <dialog id="commandPaletteDialog" class="command-palette-dialog">
+    <dialog id="commandPaletteDialog" class="command-palette-dialog" aria-labelledby="commandPaletteTitle">
       <form method="dialog" class="command-palette-shell">
-        <label for="commandPaletteInput">Switch Spaces, find tabs, or ask</label>
+        <label id="commandPaletteTitle" for="commandPaletteInput">Switch Spaces, find tabs, or ask</label>
         <input id="commandPaletteInput" type="search" autocomplete="off" spellcheck="false" placeholder="Type a Space, tab, or command…">
         <div id="commandPaletteResults" class="command-palette-results" role="listbox"></div>
         <p class="command-palette-help">↑↓ navigate · Enter open · Esc close</p>

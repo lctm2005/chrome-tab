@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { chromeGroupTitle } from '../src/shared/group-title.js';
+
 import {
   buildGroupPreviewItems,
   buildSpaceView,
@@ -9,7 +11,10 @@ import {
   compactUrlForAI,
   decorateTabs,
   domainFromUrl,
+  isChromeNewTabUrl,
+  isForeignWindowTab,
   isPageShortcutCapableUrl,
+  isPlaceholderTabTitle,
   planDuplicateUrlClosures,
   planTidyGroups,
   planTidyTabNames,
@@ -19,7 +24,89 @@ import {
   sanitizeTidyGroups,
   spaceGroupPlan,
   searchTabs,
+  tabRowPresentation,
+  tidyPanelName,
+  titleForDomain,
 } from '../src/shared/tab-utils.js';
+
+test('recognizes Chrome new-tab URLs with the canonical trailing slash', () => {
+  assert.equal(isChromeNewTabUrl('chrome://newtab'), true);
+  assert.equal(isChromeNewTabUrl('chrome://newtab/'), true);
+  assert.equal(isChromeNewTabUrl(' chrome://newtab/#fragment '), true);
+  assert.equal(isChromeNewTabUrl('chrome://newtab/not-the-placeholder'), false);
+  assert.equal(isChromeNewTabUrl('https://newtab/'), false);
+});
+
+test('tab row presentation gives valid foreign tabs priority over dormant semantics', () => {
+  assert.deepEqual(tabRowPresentation({
+    foreignWindowTabId: 0,
+    foreignWindowId: 12,
+    dormant: true,
+    domain: 'example.test',
+    url: 'https://example.test/page',
+  }), {
+    foreign: true,
+    ariaStateLabel: 'open in another window',
+    secondaryLabel: 'example.test · Open in another window',
+    foreignWindowTabId: 0,
+    foreignWindowId: 12,
+  });
+
+  assert.deepEqual(tabRowPresentation({
+    foreignWindowTabId: 9,
+    foreignWindowId: '12',
+    dormant: true,
+    url: 'https://fallback.test/page',
+  }), {
+    foreign: true,
+    ariaStateLabel: 'open in another window',
+    secondaryLabel: 'https://fallback.test/page · Open in another window',
+    foreignWindowTabId: 9,
+    foreignWindowId: null,
+  });
+
+  assert.deepEqual(tabRowPresentation({ foreignWindowTabId: 9 }), {
+    foreign: true,
+    ariaStateLabel: 'open in another window',
+    secondaryLabel: 'Open in another window',
+    foreignWindowTabId: 9,
+    foreignWindowId: null,
+  });
+});
+
+test('tab row presentation keeps ordinary saved and live rows distinct', () => {
+  assert.deepEqual(tabRowPresentation({ dormant: true, domain: 'saved.test' }), {
+    foreign: false,
+    ariaStateLabel: 'saved tab',
+    secondaryLabel: 'saved.test',
+    foreignWindowTabId: null,
+    foreignWindowId: null,
+  });
+  assert.deepEqual(tabRowPresentation({ url: 'https://live.test/page' }), {
+    foreign: false,
+    ariaStateLabel: '',
+    secondaryLabel: 'https://live.test/page',
+    foreignWindowTabId: null,
+    foreignWindowId: null,
+  });
+  assert.deepEqual(tabRowPresentation(null), {
+    foreign: false,
+    ariaStateLabel: '',
+    secondaryLabel: '',
+    foreignWindowTabId: null,
+    foreignWindowId: null,
+  });
+});
+
+test('foreign tab detection accepts id zero and rejects coercible or invalid markers', () => {
+  assert.equal(isForeignWindowTab({ foreignWindowTabId: 0 }), true);
+  assert.equal(isForeignWindowTab({ foreignWindowTabId: 8 }), true);
+  for (const foreignWindowTabId of [undefined, null, '0', '8', -1, 1.5, NaN, Infinity]) {
+    assert.equal(isForeignWindowTab({ foreignWindowTabId }), false);
+  }
+  assert.equal(isForeignWindowTab(), false);
+  assert.equal(isForeignWindowTab(null), false);
+});
 
 test('bounds Auto Group AI input and removes URL query data', () => {
   assert.equal(
@@ -60,18 +147,29 @@ test('counts only grouped tabs that Auto Group would move to a different titled 
 });
 
 test('extracts readable domains from URLs', () => {
-  assert.equal(domainFromUrl('https://docs.z.ai/guides/llm/glm-5.2'), 'docs.z.ai');
+  assert.equal(domainFromUrl('https://docs.z.ai/guides/llm/glm-5.1'), 'docs.z.ai');
   assert.equal(domainFromUrl('chrome://extensions'), 'chrome');
   assert.equal(domainFromUrl('not a url'), 'unknown');
+  assert.equal(domainFromUrl('file:///tmp/example.html'), 'unknown');
 });
 
 test('decorates tabs with display metadata without inventing primary sections', () => {
   const tabs = decorateTabs([
     { id: 1, title: 'Example', url: 'https://example.com', pinned: true, active: false },
     { id: 2, title: 'Hacker News', url: 'https://news.ycombinator.com', pinned: false, active: true },
-  ]);
+  ], {
+    renamedTabs: {
+      1: 'Old Space-specific name',
+      2: 'News panel name',
+    },
+  });
 
   assert.equal(tabs[0].displayTitle, 'Example');
+  assert.equal(tabs[0].title, 'Example');
+  assert.equal(tabs[0].panelTitle, undefined);
+  assert.equal(tabs[1].displayTitle, 'News panel name');
+  assert.equal(tabs[1].title, 'Hacker News');
+  assert.equal(tabs[1].panelTitle, 'News panel name');
   assert.equal(tabs[1].domain, 'news.ycombinator.com');
 });
 
@@ -102,6 +200,10 @@ test('plans tidy groups from tab domains and titles', () => {
   assert.equal(groups.length, 2);
   assert.equal(groups[0].title, 'GitHub');
   assert.deepEqual(groups[0].tabIds, [1, 2]);
+});
+
+test('treats a temporarily missing tab list as an empty tidy plan', () => {
+  assert.deepEqual(planTidyGroups(), []);
 });
 
 test('keeps AI topic groups intact across different domains', () => {
@@ -241,6 +343,30 @@ test('plans a Chrome tab group for the active space', () => {
   });
 });
 
+test('compacts Chrome group titles without collisions or broken emoji', () => {
+  const title31 = 'a'.repeat(31);
+  const title32 = 'b'.repeat(32);
+  const sharedAsciiPrefix = 'c'.repeat(32);
+  const sharedChinesePrefix = '资料'.repeat(16);
+  const emojiBoundary = `${'😀'.repeat(15)}a😀`;
+
+  assert.equal(spaceGroupPlan({ space: { name: title31 }, tabIds: [] }).title, title31);
+  assert.equal(spaceGroupPlan({ space: { name: title32 }, tabIds: [] }).title, title32);
+
+  const asciiA = spaceGroupPlan({ space: { name: `${sharedAsciiPrefix}A` }, tabIds: [] }).title;
+  const asciiB = spaceGroupPlan({ space: { name: `${sharedAsciiPrefix}B` }, tabIds: [] }).title;
+  const chineseA = spaceGroupPlan({ space: { name: `${sharedChinesePrefix}甲` }, tabIds: [] }).title;
+  const chineseB = spaceGroupPlan({ space: { name: `${sharedChinesePrefix}乙` }, tabIds: [] }).title;
+  const emoji = spaceGroupPlan({ space: { name: emojiBoundary }, tabIds: [] }).title;
+
+  assert.notEqual(asciiA, asciiB, 'different long titles with the same prefix need distinct Chrome identities');
+  assert.notEqual(chineseA, chineseB, 'CJK titles must not collide after Chrome compaction');
+  for (const title of [asciiA, asciiB, chineseA, chineseB, emoji]) {
+    assert.ok(title.length <= 32, `Chrome title exceeds 32 UTF-16 code units: ${title}`);
+    assert.doesNotMatch(title, /[\uD800-\uDBFF]$/, 'Chrome title must not end with a split surrogate');
+  }
+});
+
 test('builds a Space -> TabGroup -> Tab view', () => {
   const view = buildSpaceView({
     activeSpaceId: 'work',
@@ -365,6 +491,28 @@ test('renders Chrome groups before stale virtual mappings for grouped tabs', () 
   assert.equal(view[0].title, 'Chrome Docs');
 });
 
+test('keeps an explicitly untitled Chrome group distinct from inferred and Ungrouped sections', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'default',
+    groupSpaces: { 8: 'default', 9: 'default' },
+    tabs: [
+      { id: 1, title: 'Spec', url: 'https://docs.example.com/a', groupId: 8 },
+      { id: 2, title: 'Inbox', url: 'https://mail.example.com/inbox', groupId: 9 },
+    ],
+    groups: [
+      { id: 8, title: '', color: 'blue' },
+      { id: 9, color: 'red' },
+    ],
+    includeUngrouped: true,
+  });
+
+  assert.deepEqual(view.map(({ key, title }) => ({ key, title })), [
+    { key: 'group:8', title: '' },
+    { key: 'group:9', title: 'Mail' },
+    { key: 'ungrouped', title: 'Ungrouped' },
+  ]);
+});
+
 test('uses local collapsed state over Chrome tab group state', () => {
   const view = buildSpaceView({
     activeSpaceId: 'default',
@@ -399,13 +547,14 @@ test('can keep an empty Ungrouped bucket visible as a drop target', () => {
 });
 
 test('normalizes Space group plans and filters invalid tab ids', () => {
+  const longName = 'A very long Space name that Chrome should truncate safely';
   const plan = spaceGroupPlan({
-    space: { name: 'A very long Space name that Chrome should truncate safely', color: 'not-a-color' },
+    space: { name: longName, color: 'not-a-color' },
     tabIds: [1, '2', 'bad', Number.NaN],
   });
 
   assert.deepEqual(plan, {
-    title: 'A very long Space name that Chro',
+    title: chromeGroupTitle(longName, 'Space'),
     color: 'blue',
     tabIds: [1, 2],
   });
@@ -499,4 +648,237 @@ test('tidies names with loading/placeholder titles like dots using heading or do
   assert.equal(names[2], 'bytedance.larkoffice.com');
   assert.equal(names[3], 'bytedance.larkoffice.com');
   assert.equal(names[4], 'bytedance.larkoffice.com');
+});
+
+test('handles empty and malformed transient inputs without breaking panel actions', () => {
+  assert.equal(isChromeNewTabUrl(), false);
+  assert.equal(isChromeNewTabUrl('not a URL'), false);
+  assert.equal(isPageShortcutCapableUrl(), false);
+  assert.equal(isPageShortcutCapableUrl('not a URL'), false);
+  assert.deepEqual(decorateTabs(), []);
+  assert.deepEqual(searchTabs(undefined, 'find me'), []);
+  assert.deepEqual(buildSpaceView(), []);
+  assert.deepEqual(spaceGroupPlan(), {
+    title: 'Space',
+    color: 'blue',
+    tabIds: [],
+  });
+  assert.deepEqual(compactTabForAI(), {
+    id: undefined,
+    title: '',
+    url: '',
+    domain: 'unknown',
+  });
+  assert.equal(tidyPanelName(), 'unknown');
+  assert.equal(titleForDomain(), 'Other');
+  assert.equal(preferredFocusableTab(), null);
+});
+
+test('uses the compact-right preview layout when enough side room remains', () => {
+  const placement = planGroupPreviewPlacement({
+    anchorRect: { left: 20, right: 350, top: 590, width: 330 },
+    viewportWidth: 700,
+    viewportHeight: 700,
+    panelHeight: 280,
+  });
+
+  assert.deepEqual(placement, {
+    width: 334,
+    maxHeight: 684,
+    left: 358,
+    top: 412,
+    placement: 'right-compact',
+  });
+
+  const safeDefaults = planGroupPreviewPlacement({
+    anchorRect: { left: 'bad', width: -10, top: 'bad' },
+    viewportWidth: 0,
+    viewportHeight: Number.NaN,
+    preferredWidth: -1,
+    minWidth: 0,
+    panelHeight: 0,
+  });
+  assert.equal(safeDefaults.left, 8);
+  assert.equal(safeDefaults.top, 8);
+  assert.equal(safeDefaults.maxHeight, 584);
+});
+
+test('builds bounded preview rows with useful fallbacks for incomplete tab data', () => {
+  assert.deepEqual(buildGroupPreviewItems(undefined), []);
+  assert.deepEqual(buildGroupPreviewItems({ tabs: [{}] }, '', { limit: -1 }), []);
+  assert.deepEqual(buildGroupPreviewItems({
+    tabs: [
+      { id: 1, panelTitle: 'Saved name', url: 'https://example.com/a' },
+      { id: 2, url: 'not a URL', domain: 'unknown' },
+      {},
+    ],
+  }, '', { limit: 'not-a-number' }), [
+    {
+      id: 1,
+      title: 'Saved name',
+      subtitle: 'example.com',
+      url: 'https://example.com/a',
+      favIconUrl: '',
+      active: false,
+      dormant: false,
+    },
+    {
+      id: 2,
+      title: 'not a URL',
+      subtitle: 'not a URL',
+      url: 'not a URL',
+      favIconUrl: '',
+      active: false,
+      dormant: false,
+    },
+    {
+      id: undefined,
+      title: 'Untitled',
+      subtitle: '',
+      url: '',
+      favIconUrl: '',
+      active: false,
+      dormant: false,
+    },
+  ]);
+});
+
+test('recognizes placeholder variants but keeps real loading titles', () => {
+  assert.equal(isPlaceholderTabTitle(), true);
+  assert.equal(isPlaceholderTabTitle(' 。 … '), true);
+  assert.equal(isPlaceholderTabTitle('LOADING⋯'), true);
+  assert.equal(isPlaceholderTabTitle('Loading report'), false);
+});
+
+test('classifies tidy groups by user-facing purpose and cycles safe colors', () => {
+  const groups = planTidyGroups([
+    null,
+    { id: 0, title: 'Ignored', url: 'https://ignored.example' },
+    { id: 1, title: 'Claude chat', url: 'https://example.com/chat' },
+    { id: 2, title: 'Monica helper', url: 'https://example.com/helper' },
+    { id: 3, title: 'Repository', url: 'https://github.com/openai/codex' },
+    { id: 4, title: 'API guide', url: 'https://example.com/api' },
+    { id: 5, title: 'Inbox', url: 'https://example.com/inbox' },
+    { id: 6, title: 'Team meeting', url: 'https://example.com/meeting' },
+    { id: 7, title: 'Product', url: 'https://shop.example.com/product' },
+    { id: 8, title: 'Broken', url: 'not a URL' },
+  ]);
+
+  assert.deepEqual(groups.map(({ title, color }) => ({ title, color })), [
+    { title: 'Claude', color: 'blue' },
+    { title: 'Monica', color: 'green' },
+    { title: 'GitHub', color: 'purple' },
+    { title: 'Docs', color: 'yellow' },
+    { title: 'Mail', color: 'pink' },
+    { title: 'Calendar', color: 'cyan' },
+    { title: 'Example', color: 'orange' },
+    { title: 'Other', color: 'blue' },
+  ]);
+
+  assert.equal(titleForDomain('docs.example.com', 'Page'), 'Docs');
+  assert.equal(titleForDomain('mail.example.com', 'Page'), 'Mail');
+  assert.equal(titleForDomain('calendar.example.com', 'Page'), 'Calendar');
+  assert.equal(titleForDomain('localhost', 'Page'), 'Localhost');
+});
+
+test('sanitizes incomplete AI group plans and assigns each live tab once', () => {
+  assert.deepEqual(sanitizeTidyGroups(), []);
+  assert.deepEqual(sanitizeTidyGroups([
+    { title: '', tabIds: [1, '1', 'bad', null] },
+    { title: 'Later', tabIds: [1, 2] },
+    { title: 'Empty', tabIds: null },
+  ], [
+    { id: 1 },
+    { id: 2 },
+  ]), [
+    { title: 'Tabs', tabIds: [1], color: 'blue' },
+    { title: 'Later', tabIds: [2], color: 'green' },
+  ]);
+  assert.deepEqual(plannedRegroupTabIds(), []);
+  assert.deepEqual(plannedRegroupTabIds([
+    { title: 'Unused' },
+    { title: 'Docs', tabIds: [9] },
+  ], [
+    { id: 9, groupId: 42 },
+  ]), [9]);
+  assert.deepEqual(planTidyTabNames(), {});
+  assert.deepEqual(planDuplicateUrlClosures(null), []);
+});
+
+test('keeps the earliest duplicate when no active or pinned copy exists', () => {
+  assert.deepEqual(planDuplicateUrlClosures([
+    null,
+    { id: 1, url: 'not a URL' },
+    { id: 2, url: 'https://example.com/only', index: 9 },
+    { id: 3, url: ' https://example.com/same ', index: 4 },
+    { id: 4, url: 'https://example.com/same', index: 2 },
+  ]), [3]);
+  assert.deepEqual(planDuplicateUrlClosures([
+    { id: 5, url: 'https://example.com/no-index' },
+    { id: 6, url: 'https://example.com/no-index' },
+  ]), [6]);
+});
+
+test('infers missing Chrome-group metadata and applies virtual-group defaults', () => {
+  const view = buildSpaceView({
+    activeSpaceId: 'work',
+    groupSpaces: { 8: 'work' },
+    tabSpaces: { 2: 'work', 3: 'work' },
+    tabGroups: { 2: 'virtual:notes' },
+    virtualGroups: {
+      'virtual:notes': { title: 'Notes', collapsed: true },
+    },
+    collapsedGroups: { ungrouped: true },
+    tabs: [
+      { id: 1, title: 'API guide', url: 'https://docs.example.com/api', groupId: 8, index: 2 },
+      { id: 2, title: 'Scratchpad', url: 'https://notes.example.com', groupId: -1, index: 1 },
+      { id: 3, title: 'Loose', url: 'https://loose.example.com', groupId: -1, index: 0 },
+    ],
+    includeUngrouped: true,
+  });
+
+  assert.deepEqual(view.map(({ key, title, color, collapsed }) => ({ key, title, color, collapsed })), [
+    { key: 'group:8', title: 'Docs', color: 'grey', collapsed: false },
+    { key: 'virtual:notes', title: 'Notes', color: 'grey', collapsed: true },
+    { key: 'ungrouped', title: 'Ungrouped', color: 'grey', collapsed: true },
+  ]);
+});
+
+test('tidies major service pages and generic fallbacks into recognizable names', () => {
+  const cases = [
+    [{ title: 'Issues - GitHub', url: 'https://github.com/issues', outlineHeadings: null }, 'GitHub - Issues'],
+    [{ title: 'GitHub', url: 'https://github.com/issues', outlineHeadings: [null, 'x', 'Navigation menu', 'Project overview'] }, 'GitHub - Project overview'],
+    [{ title: 'Bug report', url: 'https://github.com/openai/codex/issues/27' }, 'GitHub - openai/codex issue #27'],
+    [{ title: 'API reference', url: 'https://developers.openai.com/api-reference/responses' }, 'OpenAI - responses'],
+    [{ title: 'Developers', url: 'https://developers.openai.com/' }, 'OpenAI Developers'],
+    [{ title: 'ChatGPT | OpenAI', url: 'https://openai.com/chatgpt' }, 'OpenAI - ChatGPT'],
+    [{ title: 'OpenAI', url: 'https://openai.com/' }, 'OpenAI'],
+    [{ title: 'Models - Anthropic', url: 'https://www.anthropic.com/models' }, 'Claude - Models'],
+    [{ title: 'Anthropic', url: 'https://docs.anthropic.com/en/docs/claude-code/' }, 'Claude - Code'],
+    [{ title: 'Monica AI', url: 'https://monica.im/' }, 'Monica'],
+    [{ title: '百度一下', url: 'https://www.baidu.com/' }, 'Baidu'],
+    [{ title: '作者文章', url: 'https://baijiahao.baidu.com/s?id=1' }, 'Baijiahao'],
+    [{ title: 'ZHIPU AI OPEN PLATFORM', url: 'https://bigmodel.cn/dev' }, 'Zhipu AI - Open Platform'],
+    [{ title: '模型列表 - Zhipu AI', url: 'https://open.bigmodel.cn/models' }, 'Zhipu AI - 模型列表'],
+    [{ title: 'X-UI 面板', url: 'https://server.example/panel/outbounds' }, '3X-UI - 出站'],
+    [{ title: '3X-UI', url: 'https://server.example/panel' }, '3X-UI'],
+    [{ title: 'Xray panel', url: 'https://server.example/panel/custom-route' }, '3X-UI - custom route'],
+    [{ title: '', url: 'https://developer.chrome.com/' }, 'Chrome Extensions - Docs'],
+    [{ title: 'Anything', url: 'https://docs.z.ai/guide' }, 'Z.AI - GLM docs'],
+    [{ title: 'Anything', url: 'https://resources.arc.net/help' }, 'Browser docs'],
+    [{ title: 'Messages', url: 'https://mail.example.com/' }, 'Mail - Inbox'],
+    [{ title: 'Offline title', url: 'not a URL' }, 'Offline title'],
+    [{ title: '', url: 'https://plain.example.com/' }, 'plain.example.com'],
+    [{ title: 'x'.repeat(60), url: 'https://plain.example.com/' }, `${'x'.repeat(45)}...`],
+    [
+      { title: `${'Long topic '.repeat(8)}| OpenAI`, url: 'https://openai.com/research' },
+      `${`OpenAI - ${'Long topic '.repeat(8).trim()}`.slice(0, 45)}...`,
+    ],
+  ];
+
+  for (const [tab, expected] of cases) assert.equal(tidyPanelName(tab), expected);
+
+  assert.equal(compactUrlForAI(' chrome://extensions/?secret=1#hash '), 'chrome://extensions/?secret=1#hash');
+  assert.equal(compactUrlForAI(`not a URL?${'x'.repeat(600)}`).length, 512);
+  assert.equal(titleForDomain('', ''), 'Tabs');
 });

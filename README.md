@@ -10,13 +10,14 @@ what data is involved and what will change before anything is applied.
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
 - Arc migration: choose `StorableSidebar.json` for each import, preview selected Spaces, review conflicts and counts, and undo the latest import. Space Tabs reads the chosen file locally and never modifies it.
-- Ask Page: ask about the current HTTP(S) page when you send a question. Before anything goes to the provider, Space Tabs shows the provider, page, extracted character count, and stored text from recent conversation messages. Responses stream, can be stopped, and include a clickable link to the single source page.
+- Ask Page: ask about the current HTTP(S) page when you send a question. Selected text is prioritized when present. Before anything goes to the provider, Space Tabs shows the provider, page, total extracted character count (including selected text), and stored text from recent conversation messages. Responses stream, can be stopped, and include a clickable link to the single source page.
 - Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
-- Folders: show locally stored nested folders, up to three levels deep.
+- Folders: show locally stored nested folders derived from slash-separated Tag names.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
+- Pinned tabs: stay open across Space switches and are never silently renamed, grouped, dragged, cleared, or closed by Space actions. Deleting their Space moves their ownership to the fallback Space.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Tidy Names and Auto Group: clicking either action sends the relevant tab metadata to the configured provider and generates one final, reviewable preview. Nothing is applied until you choose Apply. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
+- Tidy Names and Auto Group: Tidy uses the configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and open one final, reviewable preview. Nothing is applied until you choose Apply. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
 - Recovery: use the 10-second Undo prompt after Tidy, Auto Group, or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
 - Command palette: switch Spaces, find tabs, and open Ask with `Cmd/Ctrl+K`.
 - Drag sorting: reorder tab groups and tabs inside a Space.
@@ -55,6 +56,11 @@ Store preparation docs:
 6. Select the unzipped extension folder.
 7. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
 
+If a backup or Arc import contains local `file://` pages, also enable **Allow
+access to file URLs** on Space Tabs' Chrome extension details page. Until that
+manual Chrome permission is enabled, saved local-file rows remain stored but
+cannot be opened or cleared by the extension.
+
 ## Install From Source
 
 1. Clone or download this repository.
@@ -81,9 +87,17 @@ The setup step and full-page Workbench Settings use the same provider options:
   edit it.
 - `Model`: choose a provider model, or pick `Custom model...` for compatible
   endpoints and local Ollama models.
+- `Thinking`: available only for DeepSeek V4 and compatible GLM models. Space
+  Tabs sends Enabled or Disabled explicitly; unsupported providers show the
+  control as unavailable instead of ignoring it.
 - `API Key`: stored locally by Chrome for the current extension session; Ollama
   runs locally and does not require one.
 - `Language`: controls Ask Page output language.
+
+The built-in `Z.ai / GLM` option uses Z.ai's general API endpoint. A GLM Coding
+Plan endpoint can still be entered deliberately through `Custom
+OpenAI-compatible`; Space Tabs never switches products or billing pools after
+an account error.
 
 If no API key is configured, normal Space, folder, and tab management features continue to work.
 
@@ -91,7 +105,8 @@ If no API key is configured, normal Space, folder, and tab management features c
 
 Open `Settings` and use `Export Backup` to write a portable JSON file. Restore
 shows a preview, replaces the current Spaces while keeping local AI settings,
-shortcuts, and API keys unchanged, and creates an Undo record. The exported
+shortcuts, and API keys unchanged, keeps current browser tabs open in the
+restored active Space, and creates an Undo record. The exported
 file can contain saved page URLs and Ask history, so treat it as personal data.
 
 ## Product, Privacy, and Support Site
@@ -108,8 +123,8 @@ Default bindings:
 | Action | Shortcut |
 | --- | --- |
 | Toggle panel | `Alt+S` |
-| Ask submit | `Cmd+Enter` |
-| Abort Ask | `Ctrl+C` |
+| Ask submit | `Ctrl/Cmd+Enter` |
+| Stop Ask | `Escape` |
 | Open Ask Page | `Alt+A` |
 | Tidy names | `Ctrl+Alt+T` |
 | Auto group | `Ctrl+Alt+G` |

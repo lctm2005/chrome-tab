@@ -1,7 +1,7 @@
 export const SHORTCUT_ACTIONS = [
   { id: 'togglePanel', label: 'Toggle panel', defaultShortcut: 'Alt+S' },
-  { id: 'askSubmit', label: 'Submit Ask', defaultShortcut: 'Meta+Enter' },
-  { id: 'askAbort', label: 'Stop Ask', defaultShortcut: 'Control+C' },
+  { id: 'askSubmit', label: 'Submit Ask', defaultShortcut: 'Primary+Enter' },
+  { id: 'askAbort', label: 'Stop Ask', defaultShortcut: 'Escape' },
   { id: 'openAsk', label: 'Open Ask Page', defaultShortcut: 'Alt+A' },
   { id: 'tidyNames', label: 'Tidy names', defaultShortcut: 'Control+Alt+T' },
   { id: 'autoGroup', label: 'Auto group', defaultShortcut: 'Control+Alt+G' },
@@ -14,6 +14,10 @@ export const DEFAULT_SHORTCUTS = Object.fromEntries(
   SHORTCUT_ACTIONS.map((action) => [action.id, action.defaultShortcut])
 );
 
+export const RESERVED_SHORTCUTS = [
+  { id: 'commandPalette', label: 'Command palette', shortcut: 'Primary+K' },
+];
+
 const MODIFIER_ALIASES = new Map([
   ['cmd', 'Meta'],
   ['command', 'Meta'],
@@ -22,6 +26,8 @@ const MODIFIER_ALIASES = new Map([
   ['ctrl', 'Control'],
   ['control', 'Control'],
   ['⌃', 'Control'],
+  ['mod', 'Primary'],
+  ['primary', 'Primary'],
   ['alt', 'Alt'],
   ['option', 'Alt'],
   ['opt', 'Alt'],
@@ -30,7 +36,7 @@ const MODIFIER_ALIASES = new Map([
   ['⇧', 'Shift'],
 ]);
 
-const MODIFIER_ORDER = ['Control', 'Alt', 'Shift', 'Meta'];
+const MODIFIER_ORDER = ['Control', 'Alt', 'Shift', 'Meta', 'Primary'];
 
 const KEY_ALIASES = new Map([
   ['return', 'Enter'],
@@ -74,8 +80,12 @@ export function normalizeShortcut(value) {
     key = normalizeKey(part);
   }
 
-  if (!key && rawParts.length === 1) key = normalizeKey(rawParts[0]);
   if (!key) return '';
+
+  if (modifiers.has('Primary')) {
+    modifiers.delete('Control');
+    modifiers.delete('Meta');
+  }
 
   return [
     ...MODIFIER_ORDER.filter((modifier) => modifiers.has(modifier)),
@@ -89,14 +99,16 @@ export function shortcutFromEvent(event) {
   const parts = [];
   if (event.ctrlKey) parts.push('Control');
   if (event.altKey) parts.push('Alt');
-  if (event.shiftKey && shouldKeepShift(event, key)) parts.push('Shift');
+  if (event.shiftKey && shouldKeepShift(key)) parts.push('Shift');
   if (event.metaKey) parts.push('Meta');
   parts.push(key);
   return parts.join('+');
 }
 
 export function shortcutMatchesEvent(shortcut, event) {
-  return normalizeShortcut(shortcut) === shortcutFromEvent(event);
+  if (event.repeat) return false;
+  const eventShortcut = shortcutFromEvent(event);
+  return shortcutVariants(shortcut).includes(eventShortcut);
 }
 
 export function shortcutActionFromEvent(event, shortcuts, options = {}) {
@@ -112,13 +124,35 @@ export function shouldIgnoreShortcutInEditable(event) {
   return !event.ctrlKey && !event.altKey && !event.metaKey;
 }
 
+export function shouldPreserveNativeCopy(event, selection = null) {
+  if (!shortcutMatchesEvent('Primary+C', event)) return false;
+  const target = event?.target;
+  const hasTextControlSelection = (
+    Number.isFinite(target?.selectionStart) &&
+    Number.isFinite(target?.selectionEnd) &&
+    target.selectionEnd > target.selectionStart
+  );
+  const hasDocumentSelection = Boolean(
+    selection && selection.isCollapsed === false && String(selection).length > 0
+  );
+  return hasTextControlSelection || hasDocumentSelection;
+}
+
 export function findShortcutConflict(shortcuts, actionId, candidate) {
   const normalized = normalizeShortcut(candidate);
   if (!normalized) return '';
   for (const [id, shortcut] of Object.entries(shortcuts || {})) {
-    if (id !== actionId && normalizeShortcut(shortcut) === normalized) return id;
+    if (id !== actionId && shortcutsOverlap(shortcut, normalized)) return id;
   }
   return '';
+}
+
+export function findReservedShortcutConflict(candidate) {
+  const normalized = normalizeShortcut(candidate);
+  if (!normalized) return '';
+  return RESERVED_SHORTCUTS.find((reserved) => (
+    shortcutsOverlap(reserved.shortcut, normalized)
+  ))?.id || '';
 }
 
 export function formatShortcut(shortcut) {
@@ -128,6 +162,7 @@ export function formatShortcut(shortcut) {
     .map((part) => {
       if (part === 'Meta') return 'Cmd';
       if (part === 'Control') return 'Ctrl';
+      if (part === 'Primary') return 'Ctrl/Cmd';
       if (part === 'ArrowLeft') return 'Left';
       if (part === 'ArrowRight') return 'Right';
       if (part === 'ArrowUp') return 'Up';
@@ -135,6 +170,21 @@ export function formatShortcut(shortcut) {
       return part;
     })
     .join('+');
+}
+
+function shortcutsOverlap(left, right) {
+  const rightVariants = new Set(shortcutVariants(right));
+  return shortcutVariants(left).some((variant) => rightVariants.has(variant));
+}
+
+function shortcutVariants(shortcut) {
+  const normalized = normalizeShortcut(shortcut);
+  if (!normalized) return [];
+  if (!normalized.split('+').includes('Primary')) return [normalized];
+  return [
+    normalized.replace('Primary', 'Control'),
+    normalized.replace('Primary', 'Meta'),
+  ];
 }
 
 function normalizeKey(value) {
@@ -153,6 +203,7 @@ function normalizeKey(value) {
 function normalizeEventKey(event) {
   if (event.key === ' ') return 'Space';
   if (event.key === '+') return '+';
+  if (MODIFIER_ALIASES.has(String(event.key || '').toLowerCase())) return '';
   if (event.key?.startsWith('Arrow')) return event.key;
   const physicalKey = keyFromEventCode(event.code);
   if ((event.ctrlKey || event.altKey || event.metaKey) && physicalKey) return physicalKey;
@@ -160,9 +211,8 @@ function normalizeEventKey(event) {
   return normalizeKey(event.key || event.code || '');
 }
 
-function shouldKeepShift(event, normalizedKey) {
-  if (!event.shiftKey) return false;
-  return normalizedKey.length > 1;
+function shouldKeepShift(normalizedKey) {
+  return normalizedKey.length > 1 || /^[A-Z]$/.test(normalizedKey);
 }
 
 function keyFromEventCode(code = '') {

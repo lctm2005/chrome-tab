@@ -80,10 +80,10 @@ function renderInline(value) {
   text = text
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\[\[(\d+)\](?:\s+([^\]]+))?\]\((https?:\/\/[^)\s]+)\)/g, (_, number, title, url) => (
+    .replace(/\[\[(\d+)\](?:\s+([^\]]+))?\]\((https?:\/\/[^)\s]+)\)/gi, (_, number, title, url) => (
       `<a href="${url}" target="_blank" rel="noreferrer">[${number}]${title ? ` ${title}` : ''}</a>`
     ))
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gi, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 
   return codePlaceholders.reduce((result, html, index) => (
     result.replace(`\u0000CODE${index}\u0000`, html)
@@ -91,7 +91,7 @@ function renderInline(value) {
 }
 
 function escapeHtml(value) {
-  return String(value ?? '')
+  return String(value)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')

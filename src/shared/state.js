@@ -1,11 +1,19 @@
 import { normalizeAIProviderSettings } from './ai-providers.js';
+import { normalizeArcImportToken } from './action-safety.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
+export const WINDOW_STATE_KEY = 'spaceTabsWindowState';
+export const BROWSER_SESSION_STORAGE_KEY = 'spaceTabsBrowserSession';
+export const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
+const LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT = 'Meta+Enter';
+const LEGACY_DEFAULT_ASK_ABORT_SHORTCUT = 'Control+C';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
+const MAX_BROWSER_SESSION_ID_LENGTH = 200;
+const LIVE_ID_OPERATION_TYPES = new Set(['tidy-names', 'auto-group', 'restore-backup']);
 
 export function createDefaultState(localConfig = {}) {
   const ai = localConfig.ai || {};
@@ -16,7 +24,8 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 8,
+    version: 10,
+    browserSessionId: normalizeBrowserSessionId(localConfig.browserSessionId),
     theme: 'purple',
     activeSpaceId: 'default',
     spaces: [
@@ -26,6 +35,7 @@ export function createDefaultState(localConfig = {}) {
     tabSpaces: {},
     virtualGroups: {},
     tabGroups: {},
+    tabLifecycle: {},
     ephemeralTabIds: [],
     renamedTabs: {},
     groupOrder: {},
@@ -56,6 +66,138 @@ export function createDefaultState(localConfig = {}) {
   };
 }
 
+/**
+ * Starts a state object in a new Chrome session without discarding portable
+ * user data. Chrome tab and group ids can be reused after a browser restart,
+ * so every map derived from those ids must be rebuilt from the live browser.
+ */
+export function resetChromeSessionBindings(state, sessionId) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return state;
+  const nextSessionId = normalizeBrowserSessionId(sessionId);
+  if (!nextSessionId || normalizeBrowserSessionId(state.browserSessionId) === nextSessionId) return state;
+
+  return {
+    ...state,
+    browserSessionId: nextSessionId,
+    groupSpaces: {},
+    tabSpaces: {},
+    renamedTabs: {},
+    tabGroups: {},
+    tabLifecycle: {},
+    virtualGroups: {},
+    ephemeralTabIds: [],
+    groupOrder: {},
+    tabOrder: {},
+    collapsedGroups: {},
+    operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
+      .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
+  };
+}
+
+export function normalizeWindowSpaceState(value, spaces = []) {
+  const source = value && typeof value === 'object' && value.activeSpaceIds && typeof value.activeSpaceIds === 'object'
+    ? value.activeSpaceIds
+    : {};
+  const validSpaceIds = new Set((Array.isArray(spaces) ? spaces : [])
+    .map((space) => typeof space?.id === 'string' ? space.id : '')
+    .filter(Boolean));
+  const activeSpaceIds = {};
+  for (const [windowId, spaceId] of Object.entries(source)) {
+    const key = normalizedWindowIdKey(windowId);
+    if (key === '' || !validSpaceIds.has(spaceId)) continue;
+    activeSpaceIds[key] = spaceId;
+  }
+  return { activeSpaceIds };
+}
+
+export function activeSpaceForWindow(windowState, windowId, spaces = [], fallbackSpaceId = '') {
+  const normalized = normalizeWindowSpaceState(windowState, spaces);
+  const key = normalizedWindowIdKey(windowId);
+  if (key !== '' && normalized.activeSpaceIds[key]) return normalized.activeSpaceIds[key];
+  const validSpaceIds = new Set((Array.isArray(spaces) ? spaces : [])
+    .map((space) => typeof space?.id === 'string' ? space.id : '')
+    .filter(Boolean));
+  if (validSpaceIds.has(fallbackSpaceId)) return fallbackSpaceId;
+  return validSpaceIds.values().next().value || '';
+}
+
+export function tabWindowBelongsToSpace(
+  tab,
+  windowState,
+  spaces = [],
+  spaceId = '',
+  fallbackSpaceId = '',
+) {
+  if (normalizedWindowIdKey(tab?.windowId) === '' || !spaceId) return false;
+  return activeSpaceForWindow(windowState, tab.windowId, spaces, fallbackSpaceId) === spaceId;
+}
+
+export function activeSpaceForStorage(spaces = [], durableSpaceId = '', windowSpaceId = '') {
+  const validSpaceIds = new Set((Array.isArray(spaces) ? spaces : [])
+    .map((space) => typeof space?.id === 'string' ? space.id : '')
+    .filter(Boolean));
+  if (validSpaceIds.has(durableSpaceId)) return durableSpaceId;
+  if (validSpaceIds.has(windowSpaceId)) return windowSpaceId;
+  return validSpaceIds.values().next().value || '';
+}
+
+export function rememberActiveSpaceForWindow(windowState, windowId, spaceId, spaces = []) {
+  const normalized = normalizeWindowSpaceState(windowState, spaces);
+  const key = normalizedWindowIdKey(windowId);
+  const validSpaceIds = new Set((Array.isArray(spaces) ? spaces : [])
+    .map((space) => typeof space?.id === 'string' ? space.id : '')
+    .filter(Boolean));
+  if (key !== '' && validSpaceIds.has(spaceId)) normalized.activeSpaceIds[key] = spaceId;
+  return normalized;
+}
+
+/**
+ * Moves every window that is still viewing a deleted Space to the same
+ * user-visible fallback while preserving independent choices in other
+ * windows. Invalid legacy entries are discarded at the same boundary.
+ */
+export function reassignDeletedSpaceWindows(
+  windowState,
+  deletedSpaceId,
+  fallbackSpaceId,
+  spaces = [],
+) {
+  const source = windowState && typeof windowState === 'object' &&
+    windowState.activeSpaceIds && typeof windowState.activeSpaceIds === 'object' &&
+    !Array.isArray(windowState.activeSpaceIds)
+    ? windowState.activeSpaceIds
+    : {};
+  const validSpaceIds = new Set((Array.isArray(spaces) ? spaces : [])
+    .map((space) => typeof space?.id === 'string' ? space.id : '')
+    .filter(Boolean));
+  const deletedId = String(deletedSpaceId || '');
+  const fallbackId = String(fallbackSpaceId || '');
+  const activeSpaceIds = {};
+
+  for (const [windowId, currentSpaceId] of Object.entries(source)) {
+    const key = normalizedWindowIdKey(windowId);
+    if (key === '') continue;
+    const nextSpaceId = deletedId && currentSpaceId === deletedId
+      ? fallbackId
+      : currentSpaceId;
+    if (validSpaceIds.has(nextSpaceId)) activeSpaceIds[key] = nextSpaceId;
+  }
+  return { activeSpaceIds };
+}
+
+export function forgetActiveSpaceForWindow(windowState, windowId) {
+  const source = windowState && typeof windowState === 'object' && !Array.isArray(windowState)
+    ? windowState
+    : {};
+  const activeSpaceIds = source.activeSpaceIds && typeof source.activeSpaceIds === 'object' &&
+    !Array.isArray(source.activeSpaceIds)
+    ? { ...source.activeSpaceIds }
+    : {};
+  const key = normalizedWindowIdKey(windowId);
+  if (key !== '') delete activeSpaceIds[key];
+  return { ...source, activeSpaceIds };
+}
+
 export function mergeStoredState(stored, defaults = createDefaultState()) {
   if (!stored || typeof stored !== 'object') return defaults;
   const compatibleSpaceModel = Number(stored.version) >= 4 && Number(stored.version) <= Number(defaults.version);
@@ -68,6 +210,8 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
 
   return {
     version: defaults.version,
+    browserSessionId: normalizeBrowserSessionId(stored.browserSessionId)
+      || normalizeBrowserSessionId(defaults.browserSessionId),
     theme: stored.theme || defaults.theme || 'purple',
     activeSpaceId,
     spaces,
@@ -75,6 +219,9 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     tabSpaces: compatibleSpaceModel ? { ...defaults.tabSpaces, ...(stored.tabSpaces || {}) } : defaults.tabSpaces,
     virtualGroups: compatibleSpaceModel ? { ...defaults.virtualGroups, ...(stored.virtualGroups || {}) } : defaults.virtualGroups,
     tabGroups: compatibleSpaceModel ? { ...defaults.tabGroups, ...(stored.tabGroups || {}) } : defaults.tabGroups,
+    tabLifecycle: compatibleSpaceModel && stored.tabLifecycle && typeof stored.tabLifecycle === 'object' && !Array.isArray(stored.tabLifecycle)
+      ? { ...defaults.tabLifecycle, ...stored.tabLifecycle }
+      : defaults.tabLifecycle,
     ephemeralTabIds: compatibleSpaceModel && Array.isArray(stored.ephemeralTabIds)
       ? stored.ephemeralTabIds.map(Number).filter(Number.isFinite)
       : defaults.ephemeralTabIds,
@@ -125,6 +272,8 @@ function normalizeLastArcImport(value) {
     spaceIds,
     importedAt: Number(value.importedAt) || 0,
   };
+  const token = normalizeArcImportToken(value.token);
+  if (token) normalized.token = token;
   const storedFingerprints = value.afterFingerprints && typeof value.afterFingerprints === 'object'
     ? value.afterFingerprints
     : {};
@@ -156,9 +305,15 @@ function normalizeOperationHistory(value) {
 }
 
 function migrateAISettings(storedAI = {}, defaultAI = {}) {
-  const ai = { ...defaultAI, ...(storedAI || {}) };
+  const normalizedStoredAI = storedAI && typeof storedAI === 'object' ? storedAI : {};
+  const ai = { ...defaultAI, ...normalizedStoredAI };
+  if (!normalizedStoredAI.provider && normalizedStoredAI.baseUrl) {
+    if (normalizeUrl(normalizedStoredAI.baseUrl) === LEGACY_DEFAULT_AI_BASE_URL) ai.provider = 'z-ai';
+    else delete ai.provider;
+  }
   delete ai.maxTokens;
-  if (isLegacyBuiltInAISettings(storedAI)) {
+  if (isLegacyBuiltInAISettings(normalizedStoredAI)) {
+    ai.provider = defaultAI.provider;
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';
   }
@@ -186,6 +341,20 @@ function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVer
   ) {
     shortcuts.togglePanel = defaultShortcuts.togglePanel;
   }
+  if (
+    Number(storedVersion) < 9 &&
+    Number(currentVersion) >= 9 &&
+    normalizeShortcut(storedShortcuts.askSubmit) === LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT
+  ) {
+    shortcuts.askSubmit = defaultShortcuts.askSubmit;
+  }
+  if (
+    Number(storedVersion) < 10 &&
+    Number(currentVersion) >= 10 &&
+    normalizeShortcut(storedShortcuts.askAbort) === LEGACY_DEFAULT_ASK_ABORT_SHORTCUT
+  ) {
+    shortcuts.askAbort = defaultShortcuts.askAbort;
+  }
   return shortcuts;
 }
 
@@ -193,7 +362,7 @@ export function serializeTab(tab) {
   return {
     id: tab.id,
     title: tab.title || 'Untitled',
-    url: tab.url || '',
+    url: tab.pendingUrl || tab.url || '',
     favIconUrl: tab.favIconUrl || '',
     pinned: Boolean(tab.pinned),
     muted: Boolean(tab.mutedInfo?.muted),
@@ -209,7 +378,7 @@ export function serializeTab(tab) {
 export function serializeGroup(group) {
   return {
     id: group.id,
-    title: group.title || 'Group',
+    title: Object.hasOwn(group, 'title') ? String(group.title) : 'Group',
     color: group.color || 'grey',
     collapsed: Boolean(group.collapsed),
   };
@@ -217,6 +386,25 @@ export function serializeGroup(group) {
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function normalizeBrowserSessionId(value) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim();
+  if (
+    !normalized ||
+    normalized.length > MAX_BROWSER_SESSION_ID_LENGTH ||
+    /[\u0000-\u001f\u007f]/.test(normalized) ||
+    !isSafeRecordKey(normalized)
+  ) return '';
+  return normalized;
+}
+
+function normalizedWindowIdKey(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? String(value) : '';
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return '';
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) ? String(numeric) : '';
 }
 
 function isSafeRecordKey(value) {
