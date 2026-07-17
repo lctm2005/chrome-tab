@@ -86,6 +86,8 @@ test('sidepanel exposes single-page Ask Page and portable backup controls withou
   for (const id of ['askScope', 'askProvider', 'askSourceSummary', 'askSourceList', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.match(html, /class="ask-scope" id="askScope" hidden/);
+  assert.match(html, /class="ask-disclosure" id="askDisclosure"[^>]* hidden/);
   assert.match(source, /askButton\.className = `space ask-page/);
   assert.match(html, />Ask Page</);
   assert.match(html, /Click Ask Page to read this page locally\. Nothing is sent to the provider until you confirm\./);

@@ -8,9 +8,9 @@ export const AI_PROVIDER_CATALOG = [
     editableBaseUrl: false,
     models: [
       {
-        id: 'glm-5.1',
-        label: 'GLM-5.1',
-        documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.1',
+        id: 'glm-5.2',
+        label: 'GLM-5.2',
+        documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
       },
     ],
   },
@@ -121,10 +121,8 @@ export function normalizeAIProviderSettings(settings = {}) {
 
 function normalizedProviderModel(provider, model) {
   const value = String(model || '').trim();
-  // A pre-release catalog accidentally advertised this nonexistent model id.
-  // Migrate it to the current official Z.ai flagship rather than repeatedly
-  // sending requests that the provider must reject.
-  if (provider.id === 'z-ai' && value.toLowerCase() === 'glm-5.2') {
+  // Keep built-in Z.ai users on the current flagship when the catalog advances.
+  if (provider.id === 'z-ai' && value.toLowerCase() === 'glm-5.1') {
     return provider.models[0]?.id || '';
   }
   if (value) return value;

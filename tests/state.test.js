@@ -410,7 +410,7 @@ test('keeps explicitly configured BYOK AI settings and migrates a retired model 
     ai: {
       provider: 'z-ai',
       baseUrl: 'https://api.z.ai/api/coding/paas/v4/',
-      model: 'glm-5.2',
+      model: 'glm-5.1',
       apiKey: 'secret',
       maxTokens: 131_072,
     },
@@ -418,7 +418,7 @@ test('keeps explicitly configured BYOK AI settings and migrates a retired model 
 
   assert.equal(state.ai.provider, 'z-ai');
   assert.equal(state.ai.baseUrl, 'https://api.z.ai/api/paas/v4');
-  assert.equal(state.ai.model, 'glm-5.1');
+  assert.equal(state.ai.model, 'glm-5.2');
   assert.equal(state.ai.apiKey, 'secret');
   assert.equal(Object.hasOwn(state.ai, 'maxTokens'), false);
 });
@@ -515,7 +515,7 @@ test('repairs malformed operation entries and null AI settings with user-safe de
   }, createDefaultState());
   assert.equal(incompleteLegacyAI.ai.provider, 'z-ai');
   assert.equal(incompleteLegacyAI.ai.baseUrl, 'https://api.z.ai/api/paas/v4');
-  assert.equal(incompleteLegacyAI.ai.model, 'glm-5.1');
+  assert.equal(incompleteLegacyAI.ai.model, 'glm-5.2');
 });
 
 test('recognizes stored built-in provider settings without losing explicit choice', () => {
@@ -524,14 +524,14 @@ test('recognizes stored built-in provider settings without losing explicit choic
     ai: {
       provider: 'z-ai',
       baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-      model: 'glm-5.2',
+      model: 'glm-5.1',
       apiKey: '',
     },
   }, createDefaultState());
 
   assert.equal(merged.ai.provider, 'z-ai');
   assert.equal(merged.ai.baseUrl, 'https://api.z.ai/api/paas/v4');
-  assert.equal(merged.ai.model, 'glm-5.1');
+  assert.equal(merged.ai.model, 'glm-5.2');
 });
 
 test('preserves unknown stored BYOK endpoints as custom providers', () => {

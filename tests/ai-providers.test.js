@@ -22,9 +22,9 @@ test('catalog exposes built-in providers and custom OpenAI-compatible settings',
   ]);
   assert.equal(providerById('z-ai').baseUrl, 'https://api.z.ai/api/paas/v4');
   assert.deepEqual(providerById('z-ai').models[0], {
-    id: 'glm-5.1',
-    label: 'GLM-5.1',
-    documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.1',
+    id: 'glm-5.2',
+    label: 'GLM-5.2',
+    documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
   });
   assert.equal(providerById('openai').baseUrl, 'https://api.openai.com/v1');
   assert.ok(providerById('openai').models.some((model) => model.id === 'gpt-5.4-mini'));
@@ -142,8 +142,8 @@ test('preserves valid provider models and normalizes custom request endpoints', 
 
   assert.equal(normalizeAIProviderSettings({
     provider: 'z-ai',
-    model: 'glm-5.2',
-  }).model, 'glm-5.1', 'the retired pre-release catalog id must migrate to the official model');
+    model: 'glm-5.1',
+  }).model, 'glm-5.2', 'the retired catalog id must migrate to the current model');
 });
 
 test('keeps Coding Plan explicit and exposes Thinking only for compatible models', () => {

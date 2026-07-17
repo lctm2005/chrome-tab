@@ -8,8 +8,8 @@ export function createPreviewTabs() {
   return [
     {
       id: 1,
-      title: 'Z.AI GLM-5.1 Documentation',
-      url: 'https://docs.z.ai/guides/llm/glm-5.1',
+      title: 'Z.AI GLM-5.2 Documentation',
+      url: 'https://docs.z.ai/guides/llm/glm-5.2',
       favIconUrl: '',
       pinned: false,
       muted: false,
