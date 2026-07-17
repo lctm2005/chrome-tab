@@ -11,6 +11,7 @@ const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 const LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT = 'Meta+Enter';
 const LEGACY_DEFAULT_ASK_ABORT_SHORTCUT = 'Control+C';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const DOMESTIC_CODING_AI_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
 const MAX_BROWSER_SESSION_ID_LENGTH = 200;
 const LIVE_ID_OPERATION_TYPES = new Set(['tidy-names', 'auto-group', 'restore-backup']);
@@ -24,7 +25,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 11,
+    version: 12,
     browserSessionId: normalizeBrowserSessionId(localConfig.browserSessionId),
     theme: 'purple',
     activeSpaceId: 'default',
@@ -317,13 +318,13 @@ function migrateAISettings(storedAI = {}, defaultAI = {}, storedVersion = 0) {
     ai.baseUrl = defaultAI.baseUrl || '';
     ai.model = defaultAI.model || '';
   }
+  const normalizedBaseUrl = normalizeUrl(ai.baseUrl);
+  if (normalizedBaseUrl === LEGACY_DEFAULT_AI_BASE_URL) ai.baseUrl = DOMESTIC_CODING_AI_BASE_URL;
   if (
-    Number(storedVersion) < 11 &&
-    normalizeUrl(ai.baseUrl) === LEGACY_DEFAULT_AI_BASE_URL &&
+    Number(storedVersion) < 12 &&
+    [LEGACY_DEFAULT_AI_BASE_URL, DOMESTIC_CODING_AI_BASE_URL].includes(normalizedBaseUrl) &&
     String(ai.model || '').trim().toLowerCase() === 'glm-5.1'
-  ) {
-    ai.model = 'glm-5.2';
-  }
+  ) ai.model = 'glm-5.2';
   return normalizeAIProviderSettings({
     ...ai,
     baseUrl: normalizeUrl(ai.baseUrl || ''),

@@ -14,6 +14,7 @@ import {
 test('catalog exposes built-in providers and custom OpenAI-compatible settings', () => {
   assert.deepEqual(AI_PROVIDER_CATALOG.map((provider) => provider.id), [
     'z-ai',
+    'glm',
     'openai',
     'gemini',
     'deepseek',
@@ -26,6 +27,8 @@ test('catalog exposes built-in providers and custom OpenAI-compatible settings',
     label: 'GLM-5.2',
     documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
   });
+  assert.equal(providerById('glm').baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+  assert.equal(providerById('glm').models[0].id, 'glm-5.2');
   assert.equal(providerById('openai').baseUrl, 'https://api.openai.com/v1');
   assert.ok(providerById('openai').models.some((model) => model.id === 'gpt-5.4-mini'));
   assert.equal(providerById('gemini').baseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai');
@@ -48,6 +51,7 @@ test('detects a built-in provider from an existing base URL', () => {
   const provider = providerForBaseUrl('https://api.z.ai/api/paas/v4/');
 
   assert.equal(provider.id, 'z-ai');
+  assert.equal(providerForBaseUrl('https://open.bigmodel.cn/api/paas/v4/').id, 'glm');
 });
 
 test('detects built-in providers from user-pasted request endpoints and URL casing', () => {
@@ -58,6 +62,10 @@ test('detects built-in providers from user-pasted request endpoints and URL casi
   assert.equal(
     providerForBaseUrl(new URL('https://api.z.ai/api/paas/v4/')).id,
     'z-ai',
+  );
+  assert.equal(
+    providerForBaseUrl(new URL('https://open.bigmodel.cn/api/paas/v4/')).id,
+    'glm',
   );
 });
 
@@ -82,6 +90,16 @@ test('normalizes built-in provider settings with provider-owned URL and model', 
   assert.equal(settings.baseUrl, 'https://api.z.ai/api/paas/v4');
   assert.equal(settings.model, 'unknown-model');
   assert.equal(settings.apiKey, 'secret');
+
+  const glm = normalizeAIProviderSettings({
+    provider: 'glm',
+    baseUrl: 'https://ignored.example/custom',
+    model: 'unknown-model',
+  });
+  assert.equal(glm.baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+
+  const migratedGlm = normalizeAIProviderSettings({ provider: 'glm', model: 'glm-5.1' });
+  assert.equal(migratedGlm.model, 'glm-5.2');
 });
 
 test('keeps unknown endpoints as custom OpenAI-compatible settings', () => {
@@ -150,15 +168,16 @@ test('keeps Coding Plan explicit and exposes Thinking only for compatible models
   assert.equal(providerForBaseUrl('https://api.z.ai/api/coding/paas/v4'), null);
   const coding = normalizeAIProviderSettings({
     provider: CUSTOM_AI_PROVIDER_ID,
-    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
     model: 'glm-5.2',
   });
   assert.equal(coding.provider, CUSTOM_AI_PROVIDER_ID);
-  assert.equal(coding.baseUrl, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(coding.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
 
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-5.2' }), true);
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.5-air' }), true);
   assert.equal(providerSupportsThinking({ provider: 'z-ai', model: 'glm-4.4' }), false);
+  assert.equal(providerSupportsThinking({ provider: 'glm', model: 'glm-5.2' }), true);
   assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v4-flash' }), true);
   assert.equal(providerSupportsThinking({ provider: 'deepseek', model: 'deepseek-v3' }), false);
   assert.equal(providerSupportsThinking({ provider: 'openai', model: 'deepseek-v4-pro' }), false);

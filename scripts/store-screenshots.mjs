@@ -627,7 +627,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 11,
+    version: 12,
     theme: 'ocean',
     activeSpaceId,
     spaces,

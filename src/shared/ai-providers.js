@@ -3,7 +3,7 @@ export const CUSTOM_AI_PROVIDER_ID = 'openai-compatible';
 export const AI_PROVIDER_CATALOG = [
   {
     id: 'z-ai',
-    label: 'Z.ai / GLM',
+    label: 'Z.ai',
     baseUrl: 'https://api.z.ai/api/paas/v4',
     editableBaseUrl: false,
     models: [
@@ -11,6 +11,18 @@ export const AI_PROVIDER_CATALOG = [
         id: 'glm-5.2',
         label: 'GLM-5.2',
         documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
+      },
+    ],
+  },
+  {
+    id: 'glm',
+    label: 'GLM（国内）',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    editableBaseUrl: false,
+    models: [
+      {
+        id: 'glm-5.2',
+        label: 'GLM-5.2',
       },
     ],
   },
@@ -90,7 +102,7 @@ export function providerSupportsThinking(settings = {}) {
     : providerForBaseUrl(value.baseUrl) || customProvider();
   const model = String(value.model || '').trim().toLowerCase();
   if (provider.id === 'deepseek') return /^deepseek-v4(?:-|$)/.test(model);
-  if (provider.id === 'z-ai') return supportsGlmThinking(model);
+  if (provider.id === 'z-ai' || provider.id === 'glm') return supportsGlmThinking(model);
   if (provider.id !== CUSTOM_AI_PROVIDER_ID) return false;
   return /^deepseek-v4(?:-|$)/.test(model) || supportsGlmThinking(model);
 }
@@ -122,7 +134,7 @@ export function normalizeAIProviderSettings(settings = {}) {
 function normalizedProviderModel(provider, model) {
   const value = String(model || '').trim();
   // Keep built-in Z.ai users on the current flagship when the catalog advances.
-  if (provider.id === 'z-ai' && value.toLowerCase() === 'glm-5.1') {
+  if ((provider.id === 'z-ai' || provider.id === 'glm') && value.toLowerCase() === 'glm-5.1') {
     return provider.models[0]?.id || '';
   }
   if (value) return value;
