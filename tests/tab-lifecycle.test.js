@@ -6,6 +6,7 @@ import {
   bindLiveTabsToSnapshot,
   claimViewSnapshotLifecycleId,
   ensureSnapshotLifecycleIds,
+  remapTabLifecycleGroupReferences,
   reduceTabLifecycleEvent,
   resolveViewSnapshotGroupId,
   sanitizeSnapshotWithLifecycleIds,
@@ -74,6 +75,46 @@ function lifecycleState(overrides = {}) {
     ...overrides,
   };
 }
+
+test('Tidy remaps merged snapshot and live Chrome group lifecycle references without losing binding metadata', () => {
+  const bindings = {
+    10: {
+      tabId: 10,
+      snapshotTabId: 'row-10',
+      snapshotGroupId: 'duplicate-snapshot',
+      groupId: 202,
+      spaceId: 'work',
+      url: 'https://example.test/10',
+      custom: { retained: true },
+    },
+    11: {
+      tabId: 11,
+      snapshotTabId: 'row-11',
+      snapshotGroupId: 'canonical-snapshot',
+      groupId: 101,
+      spaceId: 'work',
+      url: 'https://example.test/11',
+    },
+    12: { tabId: 12, custom: 'binding without group references' },
+  };
+  const frozen = structuredClone(bindings);
+
+  const remapped = remapTabLifecycleGroupReferences(bindings, {
+    snapshotGroupIds: { 'duplicate-snapshot': 'canonical-snapshot' },
+    chromeGroupIds: { 202: 101 },
+  });
+
+  assert.deepEqual(bindings, frozen);
+  assert.deepEqual(remapped[10], {
+    ...bindings[10],
+    snapshotGroupId: 'canonical-snapshot',
+    groupId: 101,
+  });
+  assert.deepEqual(remapped[11], bindings[11]);
+  assert.notStrictEqual(remapped[11], bindings[11]);
+  assert.deepEqual(remapped[12], bindings[12]);
+  assert.deepEqual(remapTabLifecycleGroupReferences(null), {});
+});
 
 test('adds stable unique local identities without mutating malformed or legacy snapshots', () => {
   assert.equal(ensureSnapshotLifecycleIds(null), null);
@@ -1663,7 +1704,42 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
       {
         id: 'tidy',
         type: 'tidy-names',
-        before: { renamedTabs: { 10: null, 11: 'Second panel' } },
+        before: {
+          renamedTabs: { 10: null, 11: 'Second panel' },
+          live: {
+            groups: [{ title: 'Docs', tabIds: [10, 11] }],
+            ungroupedTabIds: [10],
+            tabs: [
+              { tabId: 10, windowId: 3, index: 4, custom: 'position metadata' },
+              { tabId: 11, windowId: 3, index: 5 },
+              null,
+            ],
+          },
+          snapshotGroupReferences: {
+            tabLifecycle: {
+              10: {
+                snapshotGroupId: 'group-before',
+                mergedSnapshotGroupId: 'group-after',
+                snapshotTabId: 'row-first',
+              },
+              11: {
+                snapshotGroupId: 'group-before-other',
+                mergedSnapshotGroupId: 'group-after',
+                snapshotTabId: 'row-second',
+              },
+            },
+            virtualGroups: {
+              docs: {
+                snapshotGroupId: 'group-before',
+                mergedSnapshotGroupId: 'group-after',
+              },
+            },
+            recentlyOpenedDormantTabs: [
+              { tabId: 10, snapshotTabId: 'row-first', snapshotGroupId: 'group-before' },
+              { tabId: 11, snapshotTabId: 'row-second', snapshotGroupId: 'group-before-other' },
+            ],
+          },
+        },
         after: { renamedTabs: { 10: 'First panel' }, targetFingerprint: 'tidy-fingerprint' },
       },
       {
@@ -1673,6 +1749,30 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
           live: {
             groups: [{ title: 'Docs', tabIds: [10, 11] }, null],
             ungroupedTabIds: [10],
+          },
+          snapshotGroupReferences: {
+            tabLifecycle: {
+              10: {
+                snapshotGroupId: 'auto-group-before',
+                mergedSnapshotGroupId: 'auto-group-after',
+                snapshotTabId: 'row-first',
+              },
+              11: {
+                snapshotGroupId: 'auto-group-before-other',
+                mergedSnapshotGroupId: 'auto-group-after',
+                snapshotTabId: 'row-second',
+              },
+            },
+            virtualGroups: {
+              auto: {
+                snapshotGroupId: 'auto-group-before',
+                mergedSnapshotGroupId: 'auto-group-after',
+              },
+            },
+            recentlyOpenedDormantTabs: [
+              { tabId: 10, snapshotTabId: 'row-first', snapshotGroupId: 'auto-group-before' },
+              { tabId: 11, snapshotTabId: 'row-second', snapshotGroupId: 'auto-group-before-other' },
+            ],
           },
         },
         after: { organizationFingerprint: 'organization-fingerprint' },
@@ -1738,11 +1838,62 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
   const [tidy, autoGroup, restore, unrelatedTidy, sparseRestore, portable, sparse] =
     replaced.operationHistory;
   assert.deepEqual(tidy.before.renamedTabs, { 11: 'Second panel', 20: null });
+  assert.deepEqual(tidy.before.live.groups[0].tabIds, [20, 11]);
+  assert.deepEqual(tidy.before.live.ungroupedTabIds, [20]);
+  assert.deepEqual(tidy.before.live.tabs, [
+    { tabId: 20, windowId: 3, index: 4, custom: 'position metadata' },
+    { tabId: 11, windowId: 3, index: 5 },
+    null,
+  ]);
+  assert.deepEqual(tidy.before.snapshotGroupReferences.tabLifecycle, {
+    11: {
+      snapshotGroupId: 'group-before-other',
+      mergedSnapshotGroupId: 'group-after',
+      snapshotTabId: 'row-second',
+    },
+    20: {
+      snapshotGroupId: 'group-before',
+      mergedSnapshotGroupId: 'group-after',
+      snapshotTabId: 'row-first',
+    },
+  });
+  assert.deepEqual(tidy.before.snapshotGroupReferences.virtualGroups, {
+    docs: {
+      snapshotGroupId: 'group-before',
+      mergedSnapshotGroupId: 'group-after',
+    },
+  });
+  assert.deepEqual(tidy.before.snapshotGroupReferences.recentlyOpenedDormantTabs, [
+    { tabId: 20, snapshotTabId: 'row-first', snapshotGroupId: 'group-before' },
+    { tabId: 11, snapshotTabId: 'row-second', snapshotGroupId: 'group-before-other' },
+  ]);
   assert.deepEqual(tidy.after.renamedTabs, { 20: 'First panel' });
   assert.deepEqual(tidy.after.tabIdAliases, { 20: 10 });
   assert.deepEqual(autoGroup.before.live.groups[0].tabIds, [20, 11]);
   assert.deepEqual(autoGroup.before.live.groups[1], { tabIds: [] });
   assert.deepEqual(autoGroup.before.live.ungroupedTabIds, [20]);
+  assert.deepEqual(autoGroup.before.snapshotGroupReferences.tabLifecycle, {
+    11: {
+      snapshotGroupId: 'auto-group-before-other',
+      mergedSnapshotGroupId: 'auto-group-after',
+      snapshotTabId: 'row-second',
+    },
+    20: {
+      snapshotGroupId: 'auto-group-before',
+      mergedSnapshotGroupId: 'auto-group-after',
+      snapshotTabId: 'row-first',
+    },
+  });
+  assert.deepEqual(autoGroup.before.snapshotGroupReferences.virtualGroups, {
+    auto: {
+      snapshotGroupId: 'auto-group-before',
+      mergedSnapshotGroupId: 'auto-group-after',
+    },
+  });
+  assert.deepEqual(autoGroup.before.snapshotGroupReferences.recentlyOpenedDormantTabs, [
+    { tabId: 20, snapshotTabId: 'row-first', snapshotGroupId: 'auto-group-before' },
+    { tabId: 11, snapshotTabId: 'row-second', snapshotGroupId: 'auto-group-before-other' },
+  ]);
   assert.deepEqual(autoGroup.after.tabIdAliases, { 20: 10 });
   assert.deepEqual(restore.before.liveOwnership.tabs, [
     { id: 20, spaceId: 'work' },
@@ -1766,6 +1917,18 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
   } });
   assert.deepEqual(replacedAgain.operationHistory[0].after.tabIdAliases, { 30: 10 });
   assert.deepEqual(replacedAgain.operationHistory[1].after.tabIdAliases, { 30: 10 });
+  assert.ok(replacedAgain.operationHistory[0].before.snapshotGroupReferences.tabLifecycle[30]);
+  assert.ok(replacedAgain.operationHistory[1].before.snapshotGroupReferences.tabLifecycle[30]);
+  assert.equal(
+    replacedAgain.operationHistory[0].before.snapshotGroupReferences
+      .recentlyOpenedDormantTabs[0].tabId,
+    30,
+  );
+  assert.equal(
+    replacedAgain.operationHistory[1].before.snapshotGroupReferences
+      .recentlyOpenedDormantTabs[0].tabId,
+    30,
+  );
   assert.equal(replacedAgain.askSessions['tab:30:https://same.test/page'].tabId, 30);
 
   const orphanActiveKey = 'tab:10:https://missing-session.test/';
@@ -1806,6 +1969,44 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
     tab: { url: 'https://only-url.test' },
   }, now: 6 });
   assert.equal(urlOnly.spaceSnapshots.work.groups[0].tabs[0].url, 'https://only-url.test');
+});
+
+test('Auto Group replacement migrates live ids without inventing snapshot group references', () => {
+  const operation = {
+    id: 'auto-without-snapshot-references',
+    type: 'auto-group',
+    before: {
+      live: {
+        groups: [{ title: 'Docs', tabIds: [10, 11] }],
+        ungroupedTabIds: [10],
+        tabs: [
+          { tabId: 10, windowId: 1, custom: 'keep' },
+          { tabId: 11, windowId: 1 },
+        ],
+      },
+    },
+    after: { organizationFingerprint: 'organization-fingerprint' },
+  };
+  const originalOperation = structuredClone(operation);
+
+  const replaced = reduceTabLifecycleEvent({
+    state: lifecycleState({ operationHistory: [operation] }),
+    event: { type: 'replaced', removedTabId: 10, addedTabId: 20, tab: {} },
+  });
+  const [migrated] = replaced.operationHistory;
+
+  assert.deepEqual(operation, originalOperation);
+  assert.deepEqual(migrated.before.live.groups, [{ title: 'Docs', tabIds: [20, 11] }]);
+  assert.deepEqual(migrated.before.live.ungroupedTabIds, [20]);
+  assert.deepEqual(migrated.before.live.tabs, [
+    { tabId: 20, windowId: 1, custom: 'keep' },
+    { tabId: 11, windowId: 1 },
+  ]);
+  assert.equal(Object.hasOwn(migrated.before, 'snapshotGroupReferences'), false);
+  assert.deepEqual(migrated.after, {
+    organizationFingerprint: 'organization-fingerprint',
+    tabIdAliases: { 20: 10 },
+  });
 });
 
 test('invalid events, stale sessions, and stale bindings cannot mutate current state', () => {

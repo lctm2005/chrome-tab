@@ -6,10 +6,12 @@ import { chromeGroupTitle } from '../src/shared/group-title.js';
 import {
   clearableUngroupedTabs,
   buildSpaceSnapshot,
+  combineDuplicateTagMergePlans,
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
   isUngroupedSnapshotGroup,
+  mergeDuplicateSnapshotTags,
   mergeOpenSpaceSnapshot,
   mergeSpaceSnapshot,
   removeSnapshotTabs,
@@ -21,8 +23,266 @@ import {
   snapshotGroupShouldPersist,
   snapshotTabIdentitiesConflict,
   snapshotTabCount,
+  uniqueSnapshotGroupForTabId,
   updateSnapshotTab,
 } from '../src/shared/space-snapshot.js';
+
+test('stable saved row lookup survives Chrome-shortened long Tag titles', () => {
+  const groups = [{
+    title: 'Auto Group Canonical Duplicate E2E',
+    snapshotGroupId: 'group:canonical',
+    tabs: [{ snapshotTabId: 'tab:stable', url: 'https://example.com' }],
+  }];
+
+  assert.equal(uniqueSnapshotGroupForTabId(groups, 'tab:stable'), groups[0]);
+  assert.notEqual(groups[0].title, chromeGroupTitle(groups[0].title));
+});
+
+test('stable saved row lookup refuses missing and ambiguous identities', () => {
+  const duplicate = { tabs: [{ snapshotTabId: 'tab:duplicate' }] };
+  assert.equal(uniqueSnapshotGroupForTabId([duplicate], ''), null);
+  assert.equal(uniqueSnapshotGroupForTabId([duplicate], 'tab:missing'), null);
+  assert.equal(uniqueSnapshotGroupForTabId([null, {}, { tabs: [null] }], 'tab:missing'), null);
+  assert.equal(
+    uniqueSnapshotGroupForTabId([duplicate, structuredClone(duplicate)], 'tab:duplicate'),
+    null,
+  );
+});
+
+test('Tidy merges normalized duplicate Tags into the first Tag without losing rows or metadata', () => {
+  const snapshot = {
+    version: 1,
+    identityVersion: 1,
+    preserveGroups: true,
+    updatedAt: 10,
+    customRoot: { retained: true },
+    groups: [
+      {
+        snapshotGroupId: 'tag-docs-first',
+        title: '  Project   Docs ',
+        color: 'purple',
+        collapsed: true,
+        customGroup: { owner: 'first' },
+        tabs: [{
+          snapshotTabId: 'row-first',
+          title: 'First',
+          url: 'https://example.test/first',
+          panelTitle: 'Pinned name',
+          customRow: { retained: 'first' },
+        }],
+      },
+      {
+        snapshotGroupId: 'tag-other',
+        title: 'Other',
+        color: 'green',
+        collapsed: false,
+        tabs: [{ snapshotTabId: 'row-other', title: 'Other', url: 'https://example.test/other' }],
+      },
+      {
+        snapshotGroupId: 'tag-docs-second',
+        title: 'project docs',
+        color: 'red',
+        collapsed: false,
+        customGroup: { owner: 'duplicate-must-not-win' },
+        tabs: [{
+          snapshotTabId: 'row-second',
+          title: 'Second',
+          url: 'https://example.test/second?query=kept#hash',
+          panelTitle: 'Second panel name',
+          snapshotGroupId: 'tag-docs-second',
+          customRow: { retained: 'second' },
+        }],
+      },
+      {
+        snapshotGroupId: 'tag-docs-third',
+        title: 'PROJECT DOCS',
+        color: 'yellow',
+        tabs: [{
+          snapshotTabId: 'row-third',
+          title: 'Third',
+          url: 'https://example.test/third',
+          customRow: { retained: 'third' },
+        }],
+      },
+    ],
+  };
+  const frozen = structuredClone(snapshot);
+
+  const result = mergeDuplicateSnapshotTags(snapshot, 99);
+
+  assert.deepEqual(snapshot, frozen, 'planning must not mutate saved user data');
+  assert.equal(result.mergedCount, 2);
+  assert.deepEqual(result.merges, [{
+    title: '  Project   Docs ',
+    mergedCount: 2,
+    appendedRowCount: 2,
+  }]);
+  assert.deepEqual(result.snapshotGroupIdReplacements, {
+    'tag-docs-second': 'tag-docs-first',
+    'tag-docs-third': 'tag-docs-first',
+  });
+  assert.equal(result.snapshot.updatedAt, 99);
+  assert.deepEqual(result.snapshot.customRoot, { retained: true });
+  assert.deepEqual(result.snapshot.groups.map((group) => group.snapshotGroupId), [
+    'tag-docs-first',
+    'tag-other',
+  ]);
+  assert.deepEqual(result.snapshot.groups[0], {
+    ...snapshot.groups[0],
+    tabs: [
+      snapshot.groups[0].tabs[0],
+      { ...snapshot.groups[2].tabs[0], snapshotGroupId: 'tag-docs-first' },
+      snapshot.groups[3].tabs[0],
+    ],
+  }, 'the first Tag metadata wins while every complete row stays in source order');
+  assert.deepEqual(result.snapshot.groups[1], snapshot.groups[1]);
+});
+
+test('Tidy Tag merging leaves Ungrouped, unnamed, unique, and already tidy snapshots untouched', () => {
+  const invalid = { version: 1, groups: null };
+  assert.deepEqual(mergeDuplicateSnapshotTags(null, 1), {
+    snapshot: null,
+    mergedCount: 0,
+    merges: [],
+    snapshotGroupIdReplacements: {},
+  });
+  assert.deepEqual(mergeDuplicateSnapshotTags(invalid, 1), {
+    snapshot: invalid,
+    mergedCount: 0,
+    merges: [],
+    snapshotGroupIdReplacements: {},
+  });
+
+  const snapshot = {
+    version: 1,
+    updatedAt: 10,
+    preserveGroups: true,
+    groups: [
+      { title: 'Ungrouped', color: 'grey', tabs: [{ title: 'A', url: 'https://a.test' }] },
+      { title: ' ungrouped ', color: 'grey', tabs: [{ title: 'B', url: 'https://b.test' }] },
+      { title: '', color: 'blue', tabs: [{ title: 'C', url: 'https://c.test' }] },
+      { title: '   ', color: 'red', tabs: [{ title: 'D', url: 'https://d.test' }] },
+      { title: 'Unique', color: 'green', tabs: [] },
+    ],
+  };
+  const result = mergeDuplicateSnapshotTags(snapshot, Number.NaN);
+  assert.strictEqual(result.snapshot, snapshot);
+  assert.deepEqual(result, {
+    snapshot,
+    mergedCount: 0,
+    merges: [],
+    snapshotGroupIdReplacements: {},
+  });
+});
+
+test('Tidy Tag merging keeps the canonical identity when duplicate legacy metadata has no safe remap', () => {
+  const snapshot = {
+    version: 1,
+    updatedAt: 4,
+    groups: [
+      { snapshotGroupId: 'canonical', title: 'Docs', color: 'blue', tabs: [] },
+      { title: ' docs ', color: 'red', tabs: { malformed: true } },
+      { snapshotGroupId: 'canonical', title: 'DOCS', color: 'yellow', tabs: [] },
+      { title: 'Legacy', color: 'green', tabs: [] },
+      { snapshotGroupId: 'later-legacy-id', title: ' legacy ', color: 'cyan', tabs: [] },
+    ],
+  };
+  const result = mergeDuplicateSnapshotTags(snapshot, 'invalid');
+  assert.equal(result.snapshot.updatedAt, 4);
+  assert.equal(result.mergedCount, 3);
+  assert.deepEqual(result.snapshotGroupIdReplacements, {});
+  assert.deepEqual(result.snapshot.groups, [snapshot.groups[0], snapshot.groups[3]]);
+});
+
+test('Tidy previews the union of saved and live duplicate Tags without double-counting a shared title', () => {
+  assert.deepEqual(combineDuplicateTagMergePlans(
+    [
+      { title: ' Docs ', mergedCount: 1, appendedRowCount: 2 },
+      { title: 'Saved only', mergedCount: 2, appendedRowCount: 0 },
+    ],
+    [
+      { title: 'docs', mergedCount: 2 },
+      { title: 'Live only', mergedCount: 1 },
+    ],
+  ), {
+    mergedCount: 5,
+    merges: [
+      {
+        title: ' Docs ',
+        snapshotMergedCount: 1,
+        liveMergedCount: 2,
+        appendedRowCount: 2,
+        mergedCount: 2,
+      },
+      {
+        title: 'Saved only',
+        snapshotMergedCount: 2,
+        liveMergedCount: 0,
+        appendedRowCount: 0,
+        mergedCount: 2,
+      },
+      {
+        title: 'Live only',
+        snapshotMergedCount: 0,
+        liveMergedCount: 1,
+        appendedRowCount: 0,
+        mergedCount: 1,
+      },
+    ],
+  });
+
+  assert.deepEqual(combineDuplicateTagMergePlans(
+    [
+      null,
+      { title: '', mergedCount: 9 },
+      { title: 'No count' },
+      { title: 'Docs', mergedCount: -2, appendedRowCount: -1 },
+      { title: ' docs ', mergedCount: 1.9, appendedRowCount: 3.8 },
+    ],
+    { malformed: true },
+  ), {
+    mergedCount: 1,
+    merges: [{
+      title: 'Docs',
+      snapshotMergedCount: 1,
+      liveMergedCount: 0,
+      appendedRowCount: 3,
+      mergedCount: 1,
+    }],
+  });
+  assert.deepEqual(combineDuplicateTagMergePlans(null, null), { mergedCount: 0, merges: [] });
+});
+
+test('live snapshot refresh keeps stored extension metadata while Chrome fields stay authoritative', () => {
+  const merged = mergeSpaceSnapshot({
+    version: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'docs',
+      title: 'Docs',
+      color: 'green',
+      collapsed: false,
+      tabs: [{ snapshotTabId: 'open', title: 'Open', url: 'https://example.test/open' }],
+    }],
+  }, {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'docs',
+      title: 'Old title',
+      color: 'purple',
+      collapsed: true,
+      customGroup: { retained: true },
+      tabs: [{ snapshotTabId: 'open', title: 'Saved', url: 'https://example.test/open' }],
+    }],
+  });
+
+  assert.equal(merged.groups[0].title, 'Docs');
+  assert.equal(merged.groups[0].color, 'green');
+  assert.equal(merged.groups[0].collapsed, false);
+  assert.deepEqual(merged.groups[0].customGroup, { retained: true });
+});
 
 test('snapshots a Space as TabGroup -> Tab restore data', () => {
   const snapshot = buildSpaceSnapshot({
@@ -577,6 +837,46 @@ test('keeps restorable ungrouped tabs from a stored snapshot', () => {
 
   assert.deepEqual(dropTemporarySnapshotGroups(snapshot), snapshot);
   assert.deepEqual(mergeOpenSpaceSnapshot([], snapshot), snapshot);
+});
+
+test('open Space refresh preserves portable top-level snapshot metadata', () => {
+  const snapshot = mergeOpenSpaceSnapshot([{
+    key: 'group:7',
+    snapshotGroupId: 'stable-docs',
+    title: 'Docs',
+    color: 'blue',
+    collapsed: false,
+    tabs: [{
+      id: 7,
+      snapshotTabId: 'stable-row',
+      snapshotGroupId: 'stable-docs',
+      title: 'Spec',
+      url: 'https://example.com/spec',
+    }],
+  }], {
+    version: 1,
+    identityVersion: 1,
+    preserveGroups: true,
+    updatedAt: 1,
+    customMetadata: { importer: 'future-version', revision: 9 },
+    groups: [{
+      snapshotGroupId: 'stable-docs',
+      title: 'Docs',
+      color: 'blue',
+      collapsed: false,
+      tabs: [{
+        snapshotTabId: 'stable-row',
+        title: 'Spec',
+        url: 'https://example.com/spec',
+      }],
+    }],
+  });
+
+  assert.deepEqual(snapshot.customMetadata, {
+    importer: 'future-version',
+    revision: 9,
+  });
+  assert.equal(snapshot.groups[0].tabs[0].snapshotTabId, 'stable-row');
 });
 
 test('open Space snapshots preserve live ungrouped tabs while dropping stored-only ungrouped rows', () => {
@@ -1267,6 +1567,7 @@ test('explicitly retitles preserved snapshot history with its live Chrome group'
       title: 'Deep Work',
       color: 'blue',
       collapsed: false,
+      custom: 'keep-source-metadata',
       tabs: [
         { title: 'Spec', url: 'https://example.com/spec' },
         { title: 'Archive', url: 'https://example.com/archive' },
@@ -2615,6 +2916,60 @@ test('does not guess a renamed merge target when two live groups overlap equally
     { title: 'One', urls: [sharedUrl] },
     { title: 'Two', urls: [sharedUrl] },
   ]);
+});
+
+test('matching a live row refreshes browser fields without dropping saved row metadata', () => {
+  const stored = {
+    version: 1,
+    updatedAt: 1,
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'saved-docs',
+      title: 'Docs',
+      color: 'purple',
+      customGroup: 'keep-group',
+      tabs: [{
+        snapshotTabId: 'saved-spec',
+        title: 'Saved title',
+        panelTitle: 'My spec alias',
+        url: 'https://example.com/spec',
+        customRow: 'keep-row',
+      }],
+    }],
+  };
+  const live = {
+    version: 1,
+    updatedAt: 2,
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'saved-docs',
+      title: 'Docs',
+      color: 'blue',
+      tabs: [{
+        snapshotTabId: 'saved-spec',
+        title: 'Current browser title',
+        url: 'https://example.com/spec',
+      }],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+
+  assert.deepEqual(merged.groups[0], {
+    snapshotGroupId: 'saved-docs',
+    title: 'Docs',
+    color: 'blue',
+    customGroup: 'keep-group',
+    tabs: [{
+      snapshotTabId: 'saved-spec',
+      title: 'Current browser title',
+      panelTitle: 'My spec alias',
+      url: 'https://example.com/spec',
+      customRow: 'keep-row',
+    }],
+  });
+  assert.equal(stored.groups[0].tabs[0].title, 'Saved title');
+  assert.equal(Object.hasOwn(live.groups[0].tabs[0], 'customRow'), false);
 });
 
 test('advances duplicate URL cursors while preserving one-to-one group-aware removal', () => {

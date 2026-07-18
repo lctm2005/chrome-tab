@@ -707,10 +707,23 @@ function restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups, m
 
     const hasExistingOwner = state.groupSpaces[group.id] !== undefined;
     const existingSpaceId = String(state.groupSpaces[group.id] || '');
+    const identifiedGroupTabs = groupTabs.map((tab) => {
+      const binding = state.tabLifecycle?.[tab.id];
+      const bindingMatches = binding &&
+        Number(binding.groupId) === Number(group.id) &&
+        (!existingSpaceId || String(binding.spaceId || '') === existingSpaceId);
+      return bindingMatches
+        ? {
+          ...tab,
+          snapshotTabId: binding.snapshotTabId,
+          snapshotGroupId: binding.snapshotGroupId,
+        }
+        : tab;
+    });
     const candidates = hasExistingOwner
       ? snapshotGroups.filter((candidate) => candidate.spaceId === existingSpaceId)
       : snapshotGroups;
-    const match = bestSnapshotGroupMatch(group, groupTabs, candidates);
+    const match = bestSnapshotGroupMatch(group, identifiedGroupTabs, candidates);
     if (!match) continue;
 
     // Known ownership is authoritative, but a fresh side panel still needs
@@ -718,7 +731,7 @@ function restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups, m
     // Chrome's physical group title can be a compact collision-safe label.
     if (!hasExistingOwner) state.groupSpaces[group.id] = match.spaceId;
     rememberGroupOrderKey(state, match.spaceId, `group:${group.id}`);
-    restoreMatchedGroupMetadata(state, group, groupTabs, match.candidates, metadata);
+    restoreMatchedGroupMetadata(state, group, identifiedGroupTabs, match.candidates, metadata);
   }
 }
 

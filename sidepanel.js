@@ -169,7 +169,10 @@ import {
   captureChromeGroupMutationMemory,
   captureChromeGroupTitleRollback,
   captureTabGroupMembership,
+  orderDuplicateChromeGroups,
   projectChromeGroupRollbackMemory,
+  remapChromeGroupBindings,
+  remapLogicalChromeGroupTitles,
   resolveChromeGroupIdReplacement,
   restoreTabGroupMembership,
   restoreTabPositions,
@@ -190,16 +193,19 @@ import {
   bindLiveTabsToSnapshot,
   claimViewSnapshotLifecycleId,
   ensureSnapshotLifecycleIds,
+  remapTabLifecycleGroupReferences,
   reduceTabLifecycleEvent,
   resolveViewSnapshotGroupId,
   sanitizeSnapshotWithLifecycleIds,
 } from './src/shared/tab-lifecycle.js';
 import {
   clearableUngroupedTabs,
+  combineDuplicateTagMergePlans,
   comparableSnapshotUrl,
   dropTemporarySnapshotGroups,
   isRestorableSnapshotTab,
   isUngroupedSnapshotGroup,
+  mergeDuplicateSnapshotTags,
   mergeOpenSpaceSnapshot,
   removeSnapshotTabs,
   retitleSnapshotGroup,
@@ -207,8 +213,13 @@ import {
   snapshotGroupShouldPersist,
   snapshotHasPersistentContent,
   snapshotTabCount,
+  uniqueSnapshotGroupForTabId,
   updateSnapshotTab,
 } from './src/shared/space-snapshot.js';
+import {
+  orderSpaceSwitchPhysicalIds,
+  planSpaceSwitch,
+} from './src/shared/space-switch.js';
 import {
   collectSpaceDeletionRollbackFailures,
   createCommittedSpaceDeletionError,
@@ -252,6 +263,7 @@ import {
   transferSnapshotGroupsBetweenSpaces,
 } from './src/shared/space-transfer.js';
 import {
+  assertCompleteAutoGroupPlan,
   buildGroupPreviewItems,
   buildSpaceView,
   compactTabForAI,
@@ -284,9 +296,7 @@ const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const OPERATION_UNDO_VISIBLE_MS = 10_000;
 const LIFECYCLE_CLEANUP_GRACE_MS = 500;
 const TIDY_NAMES_ICON = `
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-  </svg>
+  <span class="tidy-icon" aria-hidden="true">🧹</span>
 `;
 const AUTO_GROUP_ICON = `
   <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -572,10 +582,12 @@ async function init() {
     // reverting a newer attach event.
     await confirmPanelHostBindingAfterInit();
     bindEvents();
+    document.documentElement.dataset.initialized = 'true';
     renderSettings();
     await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
+    document.documentElement.dataset.initialized = 'failed';
     els.syncStatus.textContent = 'Failed to initialize';
     if (activeView === 'ask') {
       try {
@@ -598,7 +610,10 @@ function clearLegacyArcFileHandleStorage() {
 }
 
 async function currentPanelHostBinding() {
-  if (!extensionRuntime) return resolvePanelHostBinding(null, null);
+  // The standalone preview models one Chrome window whose tabs all use id 1.
+  // Give the panel the same identity so transactional Space-switch guards are
+  // exercised instead of rejecting the preview as a cross-window mismatch.
+  if (!extensionRuntime) return resolvePanelHostBinding(null, { id: 1 });
   const [hostTab, currentWindow] = await Promise.all([
     chrome.tabs?.getCurrent
       ? chrome.tabs.getCurrent().catch(() => null)
@@ -1037,7 +1052,7 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
     if (loaded === false || !isCurrentPanelWindowBinding(windowBinding)) {
       throw new Error(staleMessage);
     }
-    const resolved = resolveCommandPaletteTabSelection(reference, {
+    let resolved = resolveCommandPaletteTabSelection(reference, {
       spaces: state.spaces,
       spaceView: commandPaletteSpaceView(),
       liveTabs: [...tabs, ...foreignLiveTabs],
@@ -1053,10 +1068,32 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
     if (switched) {
       const activated = await activateSpace(resolved.spaceId, {
         stateLocked: true,
-        preserveBrowserFocus: resolved.mode === 'live',
+        preferredTabId: resolved.mode === 'live' ? resolved.tab.id : null,
+        preferredSnapshotTabId: reference.snapshotTabId,
         windowBinding,
       });
       if (activated === false || !isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(staleMessage);
+      }
+      // switchSpace can be durably committed even when its final best-effort
+      // refresh fails. Never resolve a saved row from the pre-switch cache:
+      // that could classify an already materialized tab as dormant and open a
+      // duplicate. A fresh authoritative read is required before any open.
+      const reloaded = await loadTabs({ adopt: false, windowBinding });
+      if (reloaded === false || !isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(staleMessage);
+      }
+      await loadDormantSpaceView(resolved.spaceId, { force: true });
+      // A dormant selection may have been materialized by the Space switch.
+      // Resolve it again so the palette never opens a duplicate saved row.
+      resolved = resolveCommandPaletteTabSelection(reference, {
+        spaces: state.spaces,
+        spaceView: commandPaletteSpaceView(),
+        liveTabs: [...tabs, ...foreignLiveTabs],
+      });
+      if (!resolved) {
+        await loadDormantSpaceView(state.activeSpaceId, { force: true });
+        render();
         throw new Error(staleMessage);
       }
     } else if (resolved.mode === 'dormant') {
@@ -1079,12 +1116,11 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
       skipChanged: true,
     }, { windowBinding });
     if (!response.tab || response.skipped) {
-      if (switched && state.spaces.some((space) => space.id === previousSpaceId)) {
-        await activateSpace(previousSpaceId, { stateLocked: true, windowBinding });
-      } else {
-        await loadDormantSpaceView(state.activeSpaceId, { force: true });
-        render();
-      }
+      // The Space switch is already durable and its previous live tabs may
+      // have closed. Never churn both Spaces by switching back after a later
+      // palette-focus race; keep the committed target and show its fresh view.
+      await loadDormantSpaceView(state.activeSpaceId, { force: true });
+      render();
       throw new Error(staleMessage);
     }
     const refreshed = await refreshTabs({
@@ -1446,7 +1482,7 @@ function render() {
     tabOrder: state.tabOrder,
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
-  });
+  }).map((group) => projectLifecycleAwareLiveGroup(group, state.activeSpaceId));
   const crossWindowAwareDormantView = markDormantTabsOpenInOtherWindows(
     dormantSpaceView,
     foreignLiveTabs,
@@ -1502,13 +1538,13 @@ function updateOrganizationActionDisclosures() {
   const provider = providerById(state.ai.provider);
   const hasAI = hasUsableAISettings(state.ai);
   const tidyDisclosure = hasAI
-    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. If the provider is unavailable, it falls back to local naming. One preview opens before applying.`
-    : 'Tidy Names uses local naming only: no tab metadata is sent. One preview opens before applying.';
+    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. It also merges duplicate Tags locally. If the provider is unavailable, it falls back to local naming. One preview opens before applying.`
+    : 'Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent. One preview opens before applying.';
   els.tidyNamesButton.title = tidyDisclosure;
   els.tidyNamesButton.setAttribute('aria-label', tidyDisclosure);
   const disclosure = hasAI
-    ? `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status, then opens one preview before applying.`
-    : 'Auto Group needs a configured AI provider. Until then, no tab metadata is sent and no groups are changed.';
+    ? `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status. It also merges duplicate Tags locally, then opens one preview before applying.`
+    : 'Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent. If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview.';
   els.autoGroupButton.title = disclosure;
   els.autoGroupButton.setAttribute('aria-label', disclosure);
 }
@@ -1578,6 +1614,7 @@ function captureChromeGroupMutationRollback() {
     }),
     membership: null,
     titles: [],
+    recentlyOpenedDormantTabs: structuredClone(recentlyOpenedDormantTabs),
   };
 }
 
@@ -1596,6 +1633,7 @@ function restoreChromeGroupMutationMemory(rollback, groupIdReplacements = new Ma
   selectionAnchorTabId = restored.selectionAnchorTabId;
   dormantSpaceView = restored.dormantSpaceView;
   dormantSpaceViewSpaceId = restored.dormantSpaceViewSpaceId;
+  recentlyOpenedDormantTabs = structuredClone(rollback.recentlyOpenedDormantTabs || []);
   lastRenderedGroupsSignature = '';
 }
 
@@ -1628,6 +1666,25 @@ async function restoreChromeGroupMutationAfterFailure(rollback, options = {}) {
       }, replacements);
     } catch (error) {
       failures.push({ stage: 'restoring tab group membership', error });
+    }
+  }
+
+  for (const group of rollback.membership?.groups || []) {
+    try {
+      const restoredGroupId = resolveChromeGroupIdReplacement(group.groupId, replacements);
+      if (restoredGroupId === null) throw new Error('The saved Chrome group id is invalid.');
+      const logicalTitle = group.title === '' ? '' : normalizeGroupTitle(group.title, 'Group');
+      const result = await send('groups:update', {
+        groupId: restoredGroupId,
+        update: {
+          title: logicalTitle === '' ? '' : chromeGroupTitle(logicalTitle, 'Group'),
+          color: group.color || 'blue',
+          collapsed: Boolean(group.collapsed),
+        },
+      }, messageOptions);
+      if (!result.group) throw new Error(`Chrome group ${restoredGroupId} no longer exists.`);
+    } catch (error) {
+      failures.push({ stage: `restoring Chrome group ${group.groupId} metadata`, error });
     }
   }
 
@@ -1833,19 +1890,42 @@ async function assertOperationUndoIsFresh(operation, options = {}) {
   await loadTabs({ adopt: false, windowBinding: options.windowBinding });
   if (operation.type === 'tidy-names') {
     const expectedFingerprint = operation.after?.targetFingerprint;
+    const expectedOrganizationFingerprint = operation.after?.organizationFingerprint;
     const targetIds = Object.keys(operation.after?.renamedTabs || {})
       .map(Number)
       .filter(Number.isSafeInteger);
-    if (!expectedFingerprint || targetIds.length === 0) {
+    if (!expectedFingerprint && !expectedOrganizationFingerprint) {
       throw new Error('This Tidy Names record does not contain the safety data required for Undo.');
     }
-    const targetIdSet = new Set(targetIds);
-    const currentTargets = tabs.filter((tab) => targetIdSet.has(Number(tab.id)));
-    const currentFingerprint = fingerprintTidyNameTargets(currentTargets, state.renamedTabs, {
-      tabIdAliases: operation.after?.tabIdAliases,
-    });
-    if (currentFingerprint !== expectedFingerprint) {
-      throw new Error('These tabs changed after Tidy Names was applied. Undo was stopped to preserve the newer names or pages.');
+    if (expectedFingerprint) {
+      const targetIdSet = new Set(targetIds);
+      const currentTargets = tabs.filter((tab) => targetIdSet.has(Number(tab.id)));
+      const currentFingerprint = fingerprintTidyNameTargets(currentTargets, state.renamedTabs, {
+        tabIdAliases: operation.after?.tabIdAliases,
+      });
+      if (currentFingerprint !== expectedFingerprint) {
+        throw new Error('These tabs changed after Tidy Names was applied. Undo was stopped to preserve the newer names or pages.');
+      }
+    }
+    if (expectedOrganizationFingerprint) {
+      const currentOrganization = organizationForCurrentSpaceState(operation.spaceId, {
+        tabIdAliases: operation.after?.tabIdAliases,
+      });
+      if (currentOrganization.fingerprint !== expectedOrganizationFingerprint) {
+        const expectedParts = operation.after?.organizationFingerprintParts || {};
+        const changedParts = [
+          ...(expectedParts.live && expectedParts.live !== currentOrganization.fingerprintParts?.live
+            ? ['open tabs or Chrome Tags']
+            : []),
+          ...(expectedParts.snapshot && expectedParts.snapshot !== currentOrganization.fingerprintParts?.snapshot
+            ? ['saved Tags or pages']
+            : []),
+        ];
+        const changed = changedParts.length > 0
+          ? changedParts.join(' and ')
+          : 'organization';
+        throw new Error(`This Space's ${changed} changed after Tidy Names merged Tags. Undo was stopped to preserve the newer organization.`);
+      }
     }
     return;
   }
@@ -1874,6 +1954,56 @@ async function undoLastOperation(expectedOperationId = '', options = {}) {
     operation = undoTarget.operation;
     await assertOperationUndoIsFresh(operation, { windowBinding });
     if (operation.type === 'tidy-names') {
+      if (operation.before?.tagMerge === true) {
+        const rollback = captureChromeGroupMutationRollback();
+        rollback.live = captureLiveOrganization(operation.spaceId);
+        rollback.spaceId = operation.spaceId;
+        await runChromeGroupMutationTransaction({
+          apply: async () => {
+            if (operation.before?.snapshot) {
+              state.spaceSnapshots[operation.spaceId] = structuredClone(operation.before.snapshot);
+            } else {
+              delete state.spaceSnapshots[operation.spaceId];
+            }
+            dormantSpaceViewSpaceId = '';
+            for (const [tabId, previousName] of Object.entries(operation.before?.renamedTabs || {})) {
+              setLiveTabPanelTitle(state, tabId, previousName);
+            }
+            await restoreLiveOrganization(operation.before?.live, operation.spaceId, {
+              windowBinding,
+            });
+            restoreMergedSnapshotGroupReferences(
+              operation.before?.snapshotGroupReferences,
+            );
+            operation.status = 'undone';
+            operation.undoneAt = Date.now();
+          },
+          checkpoint: async () => {
+            const saved = await saveState({ persistWindowState: false, windowBinding });
+            if (saved !== true) {
+              throw new Error('This panel moved before Tidy Names Undo could save its checkpoint.');
+            }
+          },
+          rollback: () => restoreAutoGroupUndoAfterFailure(rollback, { windowBinding }),
+        });
+        if (!isCurrentPanelWindowBinding(windowBinding)) {
+          postCommitWarning =
+            'Tidy Names Undo was saved, but this panel moved before its view could refresh.';
+        } else {
+          try {
+            const refreshed = await refreshTabs({ reloadDormant: true, windowBinding });
+            if (refreshed === false) {
+              postCommitWarning =
+                'Tidy Names Undo was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
+            }
+          } catch (error) {
+            console.error(error);
+            postCommitWarning =
+              'Tidy Names Undo was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
+          }
+        }
+        return;
+      }
       const beforeUndo = captureWorkspaceMemoryCheckpoint();
       const transaction = await runDurableCommitBoundary({
         mutate: async () => {
@@ -1911,15 +2041,36 @@ async function undoLastOperation(expectedOperationId = '', options = {}) {
           await restoreLiveOrganization(operation.before?.live, operation.spaceId, {
             windowBinding,
           });
+          restoreMergedSnapshotGroupReferences(
+            operation.before?.snapshotGroupReferences,
+          );
           operation.status = 'undone';
           operation.undoneAt = Date.now();
         },
         checkpoint: async () => {
-          await saveState({ persistWindowState: false });
-          await refreshTabs({ reloadDormant: true, windowBinding });
+          const saved = await saveState({ persistWindowState: false, windowBinding });
+          if (saved !== true) {
+            throw new Error('This panel moved before Auto Group Undo could save its checkpoint.');
+          }
         },
         rollback: () => restoreAutoGroupUndoAfterFailure(rollback, { windowBinding }),
       });
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        postCommitWarning =
+          'Auto Group Undo was saved, but this panel moved before its view could refresh.';
+      } else {
+        try {
+          const refreshed = await refreshTabs({ reloadDormant: true, windowBinding });
+          if (refreshed === false) {
+            postCommitWarning =
+              'Auto Group Undo was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
+          }
+        } catch (error) {
+          console.error(error);
+          postCommitWarning =
+            'Auto Group Undo was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
+        }
+      }
       return;
     } else if (operation.type === 'restore-backup') {
       const beforeUndoState = structuredClone(state);
@@ -3605,11 +3756,19 @@ async function applyFreshOnboardingFromCurrentState(name, options = {}) {
     activeView = workbenchMode ? 'ask' : 'space';
     lastRenderedSpacesSignature = '';
 
-    const saved = canReuseDefault
-      ? await saveState({ windowBinding: options.windowBinding })
-      : await switchSpace(targetSpace.id, { windowBinding: options.windowBinding });
-    if (saved !== true || !isCurrentPanelWindowBinding(options.windowBinding)) {
-      throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
+    if (canReuseDefault) {
+      const saved = await saveState({ windowBinding: options.windowBinding });
+      if (saved !== true || !isCurrentPanelWindowBinding(options.windowBinding)) {
+        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
+      }
+    } else {
+      const switched = await switchSpace(targetSpace.id, {
+        rollbackCheckpoint: checkpoint,
+        windowBinding: options.windowBinding,
+      });
+      if (switched !== true) {
+        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
+      }
     }
   } catch (error) {
     restoreWorkspaceMemoryCheckpoint(checkpoint);
@@ -3941,6 +4100,7 @@ async function addSpace(options = {}) {
           // durable active Space, and this window's mapping therefore commit or
           // roll back together, including an apply-then-reject storage failure.
           const activated = await activateSpace(space.id, {
+            rollbackCheckpoint: beforeCreate,
             stateLocked: true,
             windowBinding,
           });
@@ -4429,7 +4589,10 @@ function captureReviewedTabCloseTarget(tab, targetSpaceId, targetGroupKey) {
 async function liveReviewedTabCloseMismatch(target, options = {}) {
   if (!target?.tab) return 'missing-or-replaced';
   const [inventory, stored] = await Promise.all([
-    send('tabs:listAll', {}, { windowBinding: options.windowBinding }),
+    send('tabs:listAll', {}, {
+      windowBinding: options.windowBinding,
+      allowStaleWindowBinding: options.allowStaleWindowBinding === true,
+    }),
     storageGet(),
   ]);
   const currentState = mergeStoredState(
@@ -4451,6 +4614,12 @@ function guardedReviewedTabClose(target, options = {}) {
     tabId: target.tab.id,
     closeGuard: tabCloseGuardFor(target.tab),
     skipChanged: true,
+    ...(Number.isSafeInteger(Number(options.requiredActiveSurvivorTabId))
+      ? { requiredActiveSurvivorTabId: Number(options.requiredActiveSurvivorTabId) }
+      : {}),
+    ...(Array.isArray(options.requiredTargetTabGuards)
+      ? { requiredTargetTabGuards: options.requiredTargetTabGuards }
+      : {}),
   }, {
     windowBinding: options.windowBinding,
     allowStaleWindowBinding: options.allowStaleWindowBinding,
@@ -6012,66 +6181,1056 @@ async function switchSpace(spaceId, options = {}) {
   const windowBinding = options.windowBinding || capturePanelWindowBinding();
   if (!isCurrentPanelWindowBinding(windowBinding)) return false;
   const previousSpaceId = state.activeSpaceId;
-  const preserveBrowserFocus = workbenchMode || options.preserveBrowserFocus === true;
   const nextSpaceName = state.spaces.find((space) => space.id === spaceId)?.name || 'Space';
-  const checkpoint = captureWorkspaceMemoryCheckpoint();
+  // Add Space and fresh onboarding insert their target into memory before
+  // entering this transaction. Their caller-supplied checkpoint is the only
+  // state that can safely compensate an apply-then-reject storage write;
+  // taking a new checkpoint here would preserve an uncommitted ghost Space.
+  const checkpoint = options.rollbackCheckpoint || captureWorkspaceMemoryCheckpoint();
+  const createdTabIds = [];
+  const openedDormantTabIds = [];
+  const movedTargetGroupIds = [];
+  let storageMayBeDirty = false;
+  let switchPlan = null;
+  let materializedTarget = null;
+  let activatedTarget = null;
+  let activeSurvivorTabId = null;
+  let activeSurvivorGuard = null;
+  let originalFocusTabId = null;
+  let reviewedCloseTargets = new Map();
+  let targetMembershipRollback = null;
   try {
-    const loaded = await loadTabs({ adopt: false, windowBinding });
-    if (loaded === false || !isCurrentPanelWindowBinding(windowBinding)) {
-      throw new Error('This panel moved to another Chrome window before the Space could switch.');
-    }
-    snapshotOpenSpace(previousSpaceId);
-    activeView = 'space';
-    state.activeSpaceId = spaceId;
-    durableActiveSpaceId = spaceId;
-    await loadDormantSpaceView(spaceId, { force: true });
-    // saveState atomically persists the durable active Space and this window's
-    // Space mapping. No live Chrome tab is changed before that commit succeeds.
-    const saved = await saveState({ windowBinding });
-    if (saved !== true) {
-      throw new Error('This panel moved to another Chrome window before the Space could switch.');
-    }
+    await withCreatedTabCheckpointRollback(createdTabIds, async () => {
+      const loaded = await loadTabs({ adopt: false, windowBinding });
+      if (loaded === false || !isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error('This panel moved to another Chrome window before the Space could switch.');
+      }
+      fileSchemeAccessAllowed = await currentFileSchemeAccess();
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error('This panel moved to another Chrome window before the Space could switch.');
+      }
+
+      originalFocusTabId = spaceSwitchOriginalFocusTabId(windowBinding);
+      snapshotOpenSpace(previousSpaceId);
+      const sourceSnapshot = sanitizeStoredSpaceSnapshot(previousSpaceId);
+      const targetSnapshot = sanitizeStoredSpaceSnapshot(spaceId);
+      const sourceCleanupTabs = uniqueSpaceSwitchTabs([
+        ...tabs.filter(isEphemeralTab),
+        ...(!snapshotHasPersistentContent(sourceSnapshot)
+          ? tabs.filter((tab) => (
+            !tab.pinned &&
+            !isGroupedTab(tab) &&
+            isChromeNewTabUrl(tab.url) &&
+            tabBelongsToSpace(tab, previousSpaceId)
+          ))
+          : []),
+      ]);
+      switchPlan = planSpaceSwitch({
+        tabs,
+        state,
+        sourceSpaceId: previousSpaceId,
+        sourceSnapshot,
+        targetSpaceId: spaceId,
+        targetSnapshot,
+        foreignLiveTabs,
+        fileSchemeAccess: fileSchemeAccessAllowed,
+      });
+      reviewedCloseTargets = captureSpaceSwitchCloseTargets(
+        switchPlan.sourceClosableTabs,
+        sourceCleanupTabs,
+        previousSpaceId,
+      );
+      targetMembershipRollback = captureTabGroupMembership(
+        tabs,
+        groups,
+        spaceSwitchMembershipRollbackTabIds(switchPlan.targetLiveTabs, tabs),
+      );
+
+      // Hard safety boundary: the target is completely materialized and then
+      // made active before the durable active-Space pair is written. Source
+      // tabs are not even eligible for closing until all three steps succeed.
+      materializedTarget = await materializeSpaceSwitchTarget(switchPlan, {
+        createdTabIds,
+        openedDormantTabIds,
+        movedTargetGroupIds,
+        sourceSpaceId: previousSpaceId,
+        targetSnapshot,
+        windowBinding,
+      });
+      activatedTarget = await activateSpaceSwitchTarget(materializedTarget.tabs, {
+        preferredTabId: options.preferredTabId,
+        preferredSnapshotTabId: options.preferredSnapshotTabId,
+        windowBinding,
+      });
+      activeSurvivorTabId = Number(activatedTarget.tab.id);
+      activeSurvivorGuard = spaceSwitchFocusGuard(activatedTarget.tab);
+      await verifyMaterializedSpaceSwitchTarget(materializedTarget, {
+        activeTabId: activeSurvivorTabId,
+        windowBinding,
+      });
+
+      activeView = 'space';
+      state.activeSpaceId = spaceId;
+      durableActiveSpaceId = spaceId;
+      await loadDormantSpaceView(spaceId, { force: true });
+      storageMayBeDirty = true;
+      const saved = await saveState({ windowBinding });
+      if (saved !== true) {
+        throw new Error('This panel moved to another Chrome window before the Space could switch.');
+      }
+    }, { windowBinding });
   } catch (error) {
-    // Nothing was rendered before the durable commit, so restoring only the
-    // in-memory checkpoint also preserves Settings drafts and panel scroll.
-    restoreWorkspaceMemoryCheckpoint(checkpoint);
+    for (const tabId of openedDormantTabIds) forgetRecentlyOpenedDormantTab(tabId);
+    const rollbackFailures = [];
+    let rollbackCheckpoint = checkpoint;
+    if (targetMembershipRollback?.tabs?.length > 0) {
+      try {
+        const replacements = await restoreSpaceSwitchTargetMembership(targetMembershipRollback, {
+          restoreGroupPositions: movedTargetGroupIds.length > 0,
+          spaceId,
+          windowBinding,
+        });
+        rollbackCheckpoint = remapWorkspaceCheckpointGroups(checkpoint, replacements);
+      } catch (membershipError) {
+        rollbackFailures.push({ stage: 'restoring target Tag membership', error: membershipError });
+      }
+    }
+    try {
+      await rollbackWindowBoundCreatedTabMutation(rollbackCheckpoint, {
+        error,
+        stateMayHaveBeenPersisted: storageMayBeDirty,
+        windowBinding,
+      });
+    } catch (rollbackError) {
+      rollbackFailures.push({ stage: 'restoring the workspace state', error: rollbackError });
+    }
+    if (Number.isSafeInteger(originalFocusTabId)) {
+      try {
+        await focusSpaceSwitchSurvivor({
+          tabId: originalFocusTabId,
+          windowBinding,
+          allowStaleWindowBinding: true,
+        });
+      } catch (focusError) {
+        rollbackFailures.push({ stage: 'reactivating the original Space tab', error: focusError });
+      }
+    }
+    if (rollbackFailures.length > 0) {
+      throw createRollbackFailureError(error, rollbackFailures);
+    }
     throw error;
   }
 
-  // Render from the browser snapshot loaded before the commit. Calling
-  // loadTabs here would run snapshot/metadata cleanup after persistence without
-  // saving those changes, and could make a successful switch look like a
-  // failure. Routine switching never creates, closes, regroups, collapses, or
-  // discards a live Chrome tab.
-  let postCommitWarning = '';
-  if (!isCurrentPanelWindowBinding(windowBinding)) {
-    // The pair write already committed for the gesture's window. A host move
-    // after that boundary is a stale-view condition, never a failed switch:
-    // restoring the checkpoint here would contradict storage and a retry could
-    // create or apply the same user action twice. The queued rebind owns the
-    // destination window's truthful refresh.
-    postCommitWarning = `Switched to ${nextSpaceName}, but this panel moved before its view could refresh.`;
-  } else {
-    try {
-      render();
-    } catch (error) {
-      console.error(error);
-      postCommitWarning = `Switched to ${nextSpaceName}, but the panel could not refresh yet.`;
-    }
+  // The durable target commit is the point of no return. Every destructive
+  // source close is guarded by the still-active target Space survivor in
+  // the original window. A post-commit failure is reported as partial cleanup;
+  // it must never roll the user back into a Space whose live tabs may be gone.
+  const closeOutcome = await closeSpaceSwitchSourceTabs({
+    activeSurvivorGuard,
+    activeSurvivorTabId,
+    materializedTarget,
+    reviewedCloseTargets,
+    switchPlan,
+    windowBinding,
+  });
+  const postCommitWarnings = [];
+  if (closeOutcome.error) {
+    console.error(closeOutcome.error);
+    postCommitWarnings.push('Chrome stopped the old Space cleanup safely before every tab could close.');
   }
-  if (!postCommitWarning && !preserveBrowserFocus) {
-    try {
-      await focusFirstTabInSpace(spaceId, { force: true, reload: false });
-    } catch (error) {
-      console.error(error);
-      postCommitWarning = `Switched to ${nextSpaceName}, but Chrome could not focus its first tab.`;
-    }
+  if (closeOutcome.skippedTabs.length > 0) {
+    postCommitWarnings.push(
+      `${closeOutcome.skippedTabs.length} old Space ${closeOutcome.skippedTabs.length === 1 ? 'tab was' : 'tabs were'} changed and left open.`,
+    );
   }
-  if (postCommitWarning) {
-    setStatus(postCommitWarning);
-    showStatusToast(postCommitWarning, 'error');
+  try {
+    activatedTarget = await activateSpaceSwitchTarget(materializedTarget.tabs, {
+      preferredTabId: activatedTarget.tab.id,
+      windowBinding,
+      allowStaleWindowBinding: true,
+    });
+  } catch (error) {
+    console.error(error);
+    postCommitWarnings.push(`Chrome could not keep ${nextSpaceName}'s target tab active.`);
+  }
+  try {
+    await loadTabs({
+      adopt: false,
+      skipSnapshotCleanupForTabIds: closeOutcome.closedTabIds,
+      windowBinding,
+      allowStaleWindowBinding: true,
+    });
+    await loadDormantSpaceView(spaceId, { force: true });
+    if (isCurrentPanelWindowBinding(windowBinding)) render();
+    else postCommitWarnings.push('This panel moved before its switched view could refresh.');
+  } catch (error) {
+    console.error(error);
+    postCommitWarnings.push('The switched tab list could not refresh yet.');
+  }
+  if (postCommitWarnings.length > 0) {
+    const message = `Switched to ${nextSpaceName}, but ${postCommitWarnings.join(' ')}`;
+    setStatus(message);
+    showStatusToast(message, 'error');
   }
   return true;
+}
+
+function spaceSwitchOriginalFocusTabId(windowBinding) {
+  const activeTabId = Number(tabs.find((tab) => tab.active)?.id);
+  if (Number.isSafeInteger(activeTabId)) return activeTabId;
+  const hostTabId = Number(windowBinding?.hostTabId);
+  return Number.isSafeInteger(hostTabId) ? hostTabId : null;
+}
+
+function spaceSwitchFocusGuard(tab = {}) {
+  const tabId = Number(tab.id);
+  if (!Number.isSafeInteger(tabId)) return null;
+  return {
+    tabId,
+    windowId: tab.windowId,
+    groupId: tab.groupId,
+  };
+}
+
+function captureSpaceSwitchCloseTargets(sourceTabs, sourceCleanupTabs, sourceSpaceId) {
+  const targets = new Map();
+  for (const tab of sourceTabs || []) {
+    const groupKey = isGroupedTab(tab)
+      ? `group:${Number(tab.groupId)}`
+      : String(state.tabGroups?.[tab.id] || 'ungrouped');
+    const target = captureReviewedTabCloseTarget(tab, sourceSpaceId, groupKey);
+    targets.set(Number(tab.id), target);
+  }
+  for (const tab of sourceCleanupTabs || []) {
+    if (targets.has(Number(tab.id))) continue;
+    targets.set(Number(tab.id), captureReviewedTabCloseTarget(tab, '', ''));
+  }
+  return targets;
+}
+
+function spaceSwitchMembershipRollbackTabIds(targetTabs, allTabs) {
+  const targetIds = new Set((targetTabs || []).map((tab) => Number(tab.id)));
+  const targetGroupIds = new Set((targetTabs || [])
+    .filter(isGroupedTab)
+    .map((tab) => Number(tab.groupId)));
+  return uniqueNumberIds((allTabs || [])
+    .filter((tab) => (
+      targetIds.has(Number(tab.id)) || targetGroupIds.has(Number(tab.groupId))
+    ))
+    .map((tab) => Number(tab.id)));
+}
+
+async function materializeSpaceSwitchTarget(plan, options = {}) {
+  const targetSpaceId = plan.targetSpaceId;
+  const targetTabs = (plan.targetLiveTabs || []).map((tab) => ({ ...tab }));
+  const requiredGroupAssignments = [];
+  const snapshotPhysicalGroupIds = [];
+  let retainedFallbackTabId = null;
+  prepareSpaceSwitchTargetOrder(targetSpaceId, options.targetSnapshot, targetTabs);
+  const snapshotGroups = Array.isArray(options.targetSnapshot?.groups)
+    ? options.targetSnapshot.groups
+    : [];
+  for (let snapshotGroupIndex = 0; snapshotGroupIndex < snapshotGroups.length; snapshotGroupIndex += 1) {
+    const sourceGroup = { group: snapshotGroups[snapshotGroupIndex], index: snapshotGroupIndex };
+    const snapshotGroup = spaceSwitchPlannedRestoreGroup(plan, sourceGroup);
+    const localSnapshotTabs = spaceSwitchLocalTabsForSnapshotGroup(sourceGroup.group, targetTabs);
+    if (!snapshotGroup && localSnapshotTabs.length === 0) continue;
+    const groupKey = snapshotGroupKey(sourceGroup.index, sourceGroup.group, targetSpaceId);
+    const createdForGroup = [];
+    for (const snapshotTab of snapshotGroup?.tabs || []) {
+      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
+        throw new Error('This panel moved before the target Space could finish opening.');
+      }
+      const created = await send('tabs:create', {
+        url: snapshotTab.url,
+        active: false,
+      }, { windowBinding: options.windowBinding });
+      const tabId = Number(created.tab?.id);
+      if (Number.isSafeInteger(tabId)) options.createdTabIds.push(tabId);
+      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
+        throw new Error('This panel moved before the target Space could finish opening.');
+      }
+      if (!Number.isSafeInteger(tabId)) {
+        throw new Error('Chrome did not return a target tab it opened.');
+      }
+      const createdTab = {
+        ...created.tab,
+        id: tabId,
+        groupId: -1,
+        windowId: Number.isSafeInteger(Number(created.tab?.windowId))
+          ? Number(created.tab.windowId)
+          : options.windowBinding.windowId,
+      };
+      options.openedDormantTabIds.push(tabId);
+      createdForGroup.push({ tab: createdTab, snapshotTab });
+      targetTabs.push(createdTab);
+      state.tabSpaces[tabId] = targetSpaceId;
+      preserveDormantPanelName(snapshotTab, tabId);
+      if (!state.tabLifecycle || typeof state.tabLifecycle !== 'object') state.tabLifecycle = {};
+      state.tabLifecycle[tabId] = {
+        tabId,
+        snapshotTabId: snapshotTab.snapshotTabId,
+        snapshotGroupId: snapshotTab.snapshotGroupId || sourceGroup.group.snapshotGroupId,
+        spaceId: targetSpaceId,
+        url: String(createdTab.url || snapshotTab.url),
+        title: String(createdTab.title || snapshotTab.title || snapshotTab.url),
+        panelTitle: cleanPanelName(snapshotTab.panelTitle),
+        windowId: createdTab.windowId,
+        groupId: -1,
+        trackingMode: 'saved-target',
+        sessionId: state.browserSessionId,
+      };
+      rememberOpenedDormantTab(snapshotTab, {
+        ...sourceGroup.group,
+        key: groupKey,
+        spaceId: targetSpaceId,
+      }, tabId);
+    }
+
+    const tabIds = createdForGroup.map((entry) => Number(entry.tab.id));
+    const snapshotTabs = uniqueSpaceSwitchTabs([...localSnapshotTabs, ...createdForGroup.map((entry) => entry.tab)]);
+    if (snapshotTabs.length === 0) continue;
+    if (isUngroupedSnapshotGroup(sourceGroup.group)) {
+      const groupedTabIds = snapshotTabs
+        .filter(isGroupedTab)
+        .map((tab) => Number(tab.id));
+      if (groupedTabIds.length > 0) {
+        const ungrouped = await send('tabs:ungroup', { tabIds: groupedTabIds }, {
+          windowBinding: options.windowBinding,
+        });
+        if (ungrouped.missing) {
+          throw new Error('A target Space tab changed before its saved Ungrouped position could be restored.');
+        }
+      }
+      for (const tab of snapshotTabs) {
+        tab.groupId = -1;
+        state.tabSpaces[tab.id] = targetSpaceId;
+        delete state.tabGroups?.[tab.id];
+        ensureSpaceSwitchTargetLifecycle(tab, sourceGroup.group, -1, targetSpaceId);
+      }
+      transferGroupLocalState(groupKey, 'ungrouped', targetSpaceId);
+      for (const tabId of tabIds) removeTabFromSavedOrder(tabId, targetSpaceId);
+      const targetOrder = ensureTabOrderForSpace(targetSpaceId);
+      const ungroupedIds = targetTabs
+        .filter((tab) => !isGroupedTab(tab))
+        .map((tab) => Number(tab.id));
+      targetOrder.ungrouped = uniqueKeys([
+        ...spaceSwitchSnapshotTabOrder(sourceGroup.group, targetTabs, (tab) => !isGroupedTab(tab)),
+        ...(targetOrder.ungrouped || []).filter((tabId) => ungroupedIds.includes(Number(tabId))),
+        ...ungroupedIds,
+      ]);
+      continue;
+    }
+
+    const groupableTabs = snapshotTabs.filter((tab) => !tab.pinned);
+    const groupableTabIds = groupableTabs.map((tab) => Number(tab.id));
+    if (groupableTabIds.length === 0) continue;
+    const existingGroup = chromeGroupForSnapshotIdentity(
+      sourceGroup.group,
+      targetSpaceId,
+      targetTabs,
+    );
+    const idsToAdd = existingGroup
+      ? groupableTabs
+        .filter((tab) => Number(tab.groupId) !== Number(existingGroup.id))
+        .map((tab) => Number(tab.id))
+      : groupableTabIds;
+    const groupId = existingGroup
+      ? idsToAdd.length > 0
+        ? await addTabsToChromeGroup(existingGroup.id, idsToAdd, targetSpaceId, {
+          windowBinding: options.windowBinding,
+        })
+        : Number(existingGroup.id)
+      : await createChromeGroup(idsToAdd, {
+        title: sourceGroup.group.title,
+        color: sourceGroup.group.color,
+        collapsed: Boolean(state.collapsedGroups[groupKey] ?? sourceGroup.group.collapsed ?? true),
+        spaceId: targetSpaceId,
+        sourceKey: groupKey,
+        windowBinding: options.windowBinding,
+      });
+    if (!isCurrentPanelWindowBinding(options.windowBinding)) {
+      throw new Error('This panel moved before the target Space could finish grouping.');
+    }
+    if (!Number.isSafeInteger(Number(groupId)) || Number(groupId) < 0) {
+      throw new Error(`Chrome could not restore the target Tag "${sourceGroup.group.title || 'Tabs'}".`);
+    }
+    if (existingGroup) {
+      await normalizeSpaceSwitchChromeGroup(groupId, sourceGroup.group, {
+        groupKey,
+        windowBinding: options.windowBinding,
+      });
+    }
+    for (const tab of groupableTabs) {
+      tab.groupId = Number(groupId);
+      ensureSpaceSwitchTargetLifecycle(
+        tab,
+        sourceGroup.group,
+        Number(groupId),
+        targetSpaceId,
+      );
+    }
+    if (existingGroup) {
+      transferGroupLocalState(groupKey, `group:${Number(groupId)}`, targetSpaceId);
+    }
+    const physicalGroupTabs = targetTabs.filter((tab) => Number(tab.groupId) === Number(groupId));
+    const orderedPhysicalGroupTabIds = uniqueKeys([
+      ...spaceSwitchSnapshotTabOrder(sourceGroup.group, physicalGroupTabs),
+      ...physicalGroupTabs.map((tab) => Number(tab.id)),
+    ]);
+    await reorderSpaceSwitchChromeGroup(groupId, orderedPhysicalGroupTabIds, {
+      windowBinding: options.windowBinding,
+    });
+    rememberRestoredGroupTabOrder(groupId, orderedPhysicalGroupTabIds, targetSpaceId);
+    requiredGroupAssignments.push({
+      groupId: Number(groupId),
+      tabIds: physicalGroupTabs.map((tab) => Number(tab.id)),
+    });
+    snapshotPhysicalGroupIds.push(Number(groupId));
+  }
+
+  const movableUngroupedTabIds = targetTabs
+    .filter((tab) => !tab.pinned && !isGroupedTab(tab))
+    .map((tab) => Number(tab.id));
+  const orderedUngroupedTabIds = orderSpaceSwitchPhysicalIds(
+    movableUngroupedTabIds,
+    state.tabOrder?.[targetSpaceId]?.ungrouped || [],
+  );
+  await reorderSpaceSwitchUngroupedTabs(orderedUngroupedTabIds, {
+    windowBinding: options.windowBinding,
+  });
+  await reorderSpaceSwitchChromeGroups(snapshotPhysicalGroupIds, {
+    movedGroupIds: options.movedTargetGroupIds,
+    windowBinding: options.windowBinding,
+  });
+
+  if (targetTabs.length === 0 && plan.needsFallback) {
+    const reusable = tabs.find((tab) => (
+      !tab.pinned &&
+      !isGroupedTab(tab) &&
+      isChromeNewTabUrl(tab.url) &&
+      (isEphemeralTab(tab) || tabBelongsToSpace(tab, options.sourceSpaceId))
+    ));
+    let fallback = reusable ? { ...reusable } : null;
+    if (!fallback) {
+      const created = await send('tabs:create', {
+        url: 'chrome://newtab',
+        active: false,
+      }, { windowBinding: options.windowBinding });
+      const tabId = Number(created.tab?.id);
+      if (Number.isSafeInteger(tabId)) options.createdTabIds.push(tabId);
+      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
+        throw new Error('This panel moved before the target Space fallback could open.');
+      }
+      if (!Number.isSafeInteger(tabId)) {
+        throw new Error('Chrome did not return the target Space fallback tab.');
+      }
+      fallback = {
+        ...created.tab,
+        id: tabId,
+        groupId: -1,
+        windowId: Number.isSafeInteger(Number(created.tab?.windowId))
+          ? Number(created.tab.windowId)
+          : options.windowBinding.windowId,
+      };
+    }
+    retainedFallbackTabId = Number(fallback.id);
+    delete state.tabGroups?.[retainedFallbackTabId];
+    delete state.tabLifecycle?.[retainedFallbackTabId];
+    delete state.renamedTabs?.[retainedFallbackTabId];
+    removeTabFromSavedOrder(retainedFallbackTabId, options.sourceSpaceId);
+    if (snapshotHasPersistentContent(options.targetSnapshot)) {
+      delete state.tabSpaces[retainedFallbackTabId];
+      rememberEphemeralTab(retainedFallbackTabId);
+    } else {
+      forgetEphemeralTab(retainedFallbackTabId);
+      state.tabSpaces[retainedFallbackTabId] = targetSpaceId;
+      const targetOrder = ensureTabOrderForSpace(targetSpaceId);
+      targetOrder.ungrouped = uniqueKeys([...(targetOrder.ungrouped || []), retainedFallbackTabId]);
+    }
+    targetTabs.push(fallback);
+  }
+
+  if (targetTabs.length === 0) {
+    throw new Error('The target Space has no local tab that Chrome can activate safely.');
+  }
+  return { requiredGroupAssignments, retainedFallbackTabId, tabs: targetTabs };
+}
+
+function prepareSpaceSwitchTargetOrder(spaceId, snapshot, targetTabs) {
+  if (!state.groupOrder || typeof state.groupOrder !== 'object') state.groupOrder = {};
+  if (!state.tabOrder || typeof state.tabOrder !== 'object') state.tabOrder = {};
+  const snapshotGroups = Array.isArray(snapshot?.groups) ? snapshot.groups : [];
+  const snapshotKeys = snapshotGroups.map((group, index) => snapshotGroupKey(index, group, spaceId));
+  const snapshotTabIds = new Set(snapshotGroups.flatMap((group) => (
+    (group?.tabs || []).map((row) => validSnapshotLifecycleId(row?.snapshotTabId))
+  )).filter(Boolean));
+  const liveGroupKeys = uniqueKeys((targetTabs || [])
+    .filter(isGroupedTab)
+    .map((tab) => `group:${Number(tab.groupId)}`));
+  const snapshotOwnedLiveKeys = new Set((targetTabs || [])
+    .filter((tab) => (
+      isGroupedTab(tab) && snapshotTabIds.has(spaceSwitchSnapshotTabId(tab))
+    ))
+    .map((tab) => `group:${Number(tab.groupId)}`));
+  const liveOnlyKeys = liveGroupKeys.filter((key) => !snapshotOwnedLiveKeys.has(key));
+  const previousGroupOrder = state.groupOrder[spaceId] || [];
+  const orderedLiveOnlyKeys = uniqueKeys([
+    ...previousGroupOrder.filter((key) => liveOnlyKeys.includes(key)),
+    ...liveOnlyKeys,
+  ]);
+  const hasLiveUngrouped = (targetTabs || []).some((tab) => !isGroupedTab(tab));
+  state.groupOrder[spaceId] = uniqueKeys([
+    ...snapshotKeys,
+    ...orderedLiveOnlyKeys,
+    ...(hasLiveUngrouped ? ['ungrouped'] : []),
+  ]);
+
+  const previousTabOrder = state.tabOrder[spaceId] || {};
+  const targetTabIds = new Set((targetTabs || []).map((tab) => Number(tab.id)));
+  const nextTabOrder = {};
+  for (const key of orderedLiveOnlyKeys) {
+    const ids = (previousTabOrder[key] || [])
+      .map(Number)
+      .filter((tabId) => targetTabIds.has(tabId));
+    if (ids.length > 0) nextTabOrder[key] = uniqueKeys(ids);
+  }
+  const ungroupedIds = (targetTabs || [])
+    .filter((tab) => !isGroupedTab(tab))
+    .map((tab) => Number(tab.id));
+  if (ungroupedIds.length > 0) {
+    nextTabOrder.ungrouped = uniqueKeys([
+      ...(previousTabOrder.ungrouped || []).filter((tabId) => ungroupedIds.includes(Number(tabId))),
+      ...ungroupedIds,
+    ]);
+  }
+  state.tabOrder[spaceId] = nextTabOrder;
+}
+
+function spaceSwitchPlannedRestoreGroup(plan, sourceGroup) {
+  const plannedIndex = (plan.restoreGroupIndexes || []).findIndex((index) => (
+    Number(index) === Number(sourceGroup.index)
+  ));
+  if (plannedIndex >= 0) return plan.restoreGroups?.[plannedIndex] || null;
+  const stableId = validSnapshotLifecycleId(sourceGroup.group?.snapshotGroupId);
+  return stableId
+    ? (plan.restoreGroups || []).find((group) => (
+      validSnapshotLifecycleId(group?.snapshotGroupId) === stableId
+    )) || null
+    : null;
+}
+
+function spaceSwitchLocalTabsForSnapshotGroup(snapshotGroup, candidateTabs) {
+  const result = [];
+  for (const row of snapshotGroup?.tabs || []) {
+    const snapshotTabId = validSnapshotLifecycleId(row?.snapshotTabId);
+    if (!snapshotTabId) continue;
+    const matches = (candidateTabs || []).filter((tab) => (
+      spaceSwitchSnapshotTabId(tab) === snapshotTabId
+    ));
+    if (matches.length > 1) {
+      throw new Error('The target Space has duplicate live copies of one saved tab identity.');
+    }
+    if (matches.length === 1) result.push(matches[0]);
+  }
+  return uniqueSpaceSwitchTabs(result);
+}
+
+function spaceSwitchSnapshotTabId(tab) {
+  return validSnapshotLifecycleId(
+    state.tabLifecycle?.[tab?.id]?.snapshotTabId || tab?.snapshotTabId,
+  );
+}
+
+function ensureSpaceSwitchTargetLifecycle(tab, snapshotGroup, groupId, spaceId) {
+  if (!state.tabLifecycle || typeof state.tabLifecycle !== 'object') state.tabLifecycle = {};
+  const existing = state.tabLifecycle[tab.id];
+  const snapshotTabId = spaceSwitchSnapshotTabId(tab);
+  const snapshotRow = (snapshotGroup?.tabs || []).find((row) => (
+    validSnapshotLifecycleId(row?.snapshotTabId) === snapshotTabId
+  ));
+  if (!existing && !snapshotRow) return;
+  state.tabLifecycle[tab.id] = {
+    ...(existing || {}),
+    tabId: Number(tab.id),
+    snapshotTabId: snapshotTabId || existing?.snapshotTabId,
+    snapshotGroupId: validSnapshotLifecycleId(
+      snapshotRow?.snapshotGroupId || snapshotGroup?.snapshotGroupId ||
+        existing?.snapshotGroupId || tab.snapshotGroupId,
+    ),
+    spaceId,
+    url: String(tab.url || existing?.url || snapshotRow?.url || ''),
+    title: String(tab.title || existing?.title || snapshotRow?.title || tab.url || ''),
+    panelTitle: cleanPanelName(existing?.panelTitle || snapshotRow?.panelTitle),
+    windowId: Number(tab.windowId),
+    groupId,
+    trackingMode: existing?.trackingMode || 'live',
+    sessionId: state.browserSessionId,
+  };
+}
+
+function uniqueSpaceSwitchTabs(candidateTabs) {
+  const seen = new Set();
+  return (candidateTabs || []).filter((tab) => {
+    const tabId = Number(tab?.id);
+    if (!Number.isSafeInteger(tabId) || seen.has(tabId)) return false;
+    seen.add(tabId);
+    return true;
+  });
+}
+
+async function verifyMaterializedSpaceSwitchTarget(materializedTarget, options = {}) {
+  const listed = await send('tabs:listAll', {}, {
+    windowBinding: options.windowBinding,
+    allowStaleWindowBinding: options.allowStaleWindowBinding === true,
+  });
+  const allTabs = listed.allChromeTabs || listed.tabs || [];
+  const currentById = new Map(allTabs.map((tab) => [Number(tab.id), tab]));
+  for (const target of materializedTarget?.tabs || []) {
+    const current = currentById.get(Number(target.id));
+    if (!current || Number(current.windowId) !== Number(options.windowBinding?.windowId)) {
+      throw new Error('A target Space tab closed or moved before the source Space could be cleaned up.');
+    }
+  }
+  for (const assignment of materializedTarget?.requiredGroupAssignments || []) {
+    for (const tabId of assignment.tabIds || []) {
+      const current = currentById.get(Number(tabId));
+      if (!current || Number(current.groupId) !== Number(assignment.groupId)) {
+        throw new Error('A target Space Tag changed before the source Space could be cleaned up.');
+      }
+    }
+  }
+  if (Number.isSafeInteger(Number(options.activeTabId))) {
+    const active = currentById.get(Number(options.activeTabId));
+    if (!active?.active) {
+      throw new Error('The target Space was not active before the source Space cleanup checkpoint.');
+    }
+  }
+  return true;
+}
+
+async function restoreSpaceSwitchTargetMembership(membership, options = {}) {
+  const messageOptions = {
+    windowBinding: options.windowBinding,
+    allowStaleWindowBinding: true,
+  };
+  const replacements = new Map();
+  await restoreTabGroupMembership(membership, {
+    listTabs: async () => (await send('tabs:listAll', {}, messageOptions)).tabs || [],
+    ungroupTabs: (tabIds) => send('tabs:ungroup', { tabIds }, messageOptions),
+    moveTab: (tabId, position) => send('tabs:move', { tabId, ...position }, messageOptions),
+    addTabsToGroup: (groupId, tabIds) => addTabsToChromeGroup(
+      groupId,
+      tabIds,
+      options.spaceId,
+      messageOptions,
+    ),
+    createGroup: (tabIds, group) => createChromeGroup(tabIds, {
+      ...group,
+      spaceId: options.spaceId,
+      ...messageOptions,
+    }),
+  }, replacements);
+  for (const group of membership.groups || []) {
+    const restoredGroupId = resolveChromeGroupIdReplacement(group.groupId, replacements);
+    if (restoredGroupId === null) {
+      throw new Error('The saved target Tag identity is invalid during rollback.');
+    }
+    const logicalTitle = group.title === '' ? '' : normalizeGroupTitle(group.title, 'Group');
+    const restored = await send('groups:update', {
+      groupId: restoredGroupId,
+      update: {
+        title: logicalTitle === '' ? '' : chromeGroupTitle(logicalTitle, 'Group'),
+        color: group.color || 'blue',
+        collapsed: Boolean(group.collapsed),
+      },
+    }, messageOptions);
+    if (!restored.group) {
+      throw new Error(`Chrome group ${restoredGroupId} no longer exists during rollback.`);
+    }
+  }
+  if (options.restoreGroupPositions === true) {
+    await restoreSpaceSwitchChromeGroupPositions(membership, replacements, {
+      windowBinding: options.windowBinding,
+    });
+  }
+  return replacements;
+}
+
+async function restoreSpaceSwitchChromeGroupPositions(membership, replacements, options = {}) {
+  const capturedTabs = Array.isArray(membership?.tabs) ? membership.tabs : [];
+  const positions = (membership?.groups || [])
+    .map((group) => {
+      const originalGroupId = Number(group?.groupId);
+      const groupId = resolveChromeGroupIdReplacement(originalGroupId, replacements);
+      const indexes = capturedTabs
+        .filter((tab) => Number(tab?.groupId) === originalGroupId)
+        .map((tab) => Number(tab?.index))
+        .filter((index) => Number.isSafeInteger(index) && index >= 0);
+      const windowIds = uniqueKeys(capturedTabs
+        .filter((tab) => Number(tab?.groupId) === originalGroupId)
+        .map((tab) => Number(tab?.windowId))
+        .filter((windowId) => Number.isSafeInteger(windowId) && windowId >= 0));
+      if (groupId === null || indexes.length === 0 || windowIds.length !== 1) return null;
+      return { groupId, index: Math.min(...indexes), windowId: windowIds[0] };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.index - right.index || left.groupId - right.groupId);
+  if (positions.length === 0) return;
+
+  const messageOptions = {
+    windowBinding: options.windowBinding,
+    allowStaleWindowBinding: true,
+  };
+  for (const position of positions) {
+    const listed = await send('tabs:listAll', {}, messageOptions);
+    const groupTabs = (listed.tabs || [])
+      .filter((tab) => Number(tab.groupId) === Number(position.groupId));
+    if (
+      groupTabs.length === 0 ||
+      groupTabs.some((tab) => Number(tab.windowId) !== Number(position.windowId))
+    ) {
+      throw new Error('A saved target Tag changed while its original position was restored.');
+    }
+    const currentIndex = Math.min(...groupTabs.map((tab) => Number(tab.index)));
+    if (currentIndex === position.index) continue;
+    const moved = await send('groups:move', {
+      groupId: position.groupId,
+      index: position.index,
+    }, messageOptions);
+    if (moved.missing) {
+      throw new Error('A saved target Tag disappeared while its original position was restored.');
+    }
+  }
+
+  const verified = await send('tabs:listAll', {}, messageOptions);
+  for (const position of positions) {
+    const groupTabs = (verified.tabs || [])
+      .filter((tab) => Number(tab.groupId) === Number(position.groupId));
+    const actualIndex = groupTabs.length > 0
+      ? Math.min(...groupTabs.map((tab) => Number(tab.index)))
+      : -1;
+    if (
+      actualIndex !== position.index ||
+      groupTabs.some((tab) => Number(tab.windowId) !== Number(position.windowId))
+    ) {
+      throw new Error('Chrome did not restore the original target TagGroup position.');
+    }
+  }
+}
+
+function remapWorkspaceCheckpointGroups(checkpoint, replacements) {
+  if (!(replacements instanceof Map) || replacements.size === 0) return checkpoint;
+  const remapped = structuredClone(checkpoint);
+  remapChromeGroupBindings(remapped.state, replacements);
+  remapped.logicalChromeGroupTitles = [...remapLogicalChromeGroupTitles(
+    new Map(remapped.logicalChromeGroupTitles),
+    replacements,
+  )];
+  return remapped;
+}
+
+async function normalizeSpaceSwitchChromeGroup(groupId, snapshotGroup, options = {}) {
+  const logicalTitle = Object.hasOwn(snapshotGroup || {}, 'title')
+    ? String(snapshotGroup.title ?? '').trim()
+    : 'Tabs';
+  const physicalTitle = logicalTitle === '' ? '' : chromeGroupTitle(logicalTitle, 'Tabs');
+  const collapsed = Boolean(
+    state.collapsedGroups?.[options.groupKey] ?? snapshotGroup?.collapsed ?? true,
+  );
+  const result = await send('groups:update', {
+    groupId: Number(groupId),
+    update: {
+      title: physicalTitle,
+      color: snapshotGroup?.color || 'blue',
+      collapsed,
+    },
+  }, { windowBinding: options.windowBinding });
+  if (!result.group) {
+    throw new Error(`Chrome could not restore the target Tag "${logicalTitle || 'Tabs'}" metadata.`);
+  }
+  const current = groups.find((group) => Number(group.id) === Number(groupId));
+  if (current) Object.assign(current, result.group);
+  logicalChromeGroupTitles.set(Number(groupId), logicalTitle);
+  state.collapsedGroups[`group:${Number(groupId)}`] = collapsed;
+}
+
+async function reorderSpaceSwitchChromeGroup(groupId, orderedTabIds, options = {}) {
+  const numericGroupId = Number(groupId);
+  const messageOptions = { windowBinding: options.windowBinding };
+  const listed = await send('tabs:listAll', {}, messageOptions);
+  const currentGroupTabs = (listed.tabs || [])
+    .filter((tab) => Number(tab.groupId) === numericGroupId)
+    .sort((left, right) => Number(left.index) - Number(right.index));
+  const currentIds = currentGroupTabs.map((tab) => Number(tab.id));
+  const desiredIds = uniqueKeys([
+    ...(orderedTabIds || []).map(Number).filter((tabId) => currentIds.includes(tabId)),
+    ...currentIds,
+  ]);
+  if (
+    desiredIds.length < 2 ||
+    desiredIds.every((tabId, index) => tabId === currentIds[index])
+  ) return;
+  const firstIndex = Math.min(...currentGroupTabs.map((tab) => Number(tab.index)));
+  const windowId = Number(currentGroupTabs[0]?.windowId);
+  for (let index = 0; index < desiredIds.length; index += 1) {
+    const moved = await send('tabs:move', {
+      tabId: desiredIds[index],
+      index: firstIndex + index,
+      windowId,
+    }, messageOptions);
+    if (moved.missing) {
+      throw new Error('A target Space tab changed while its saved Tag order was restored.');
+    }
+  }
+  const verified = await send('tabs:listAll', {}, messageOptions);
+  const verifiedIds = (verified.tabs || [])
+    .filter((tab) => Number(tab.groupId) === numericGroupId)
+    .sort((left, right) => Number(left.index) - Number(right.index))
+    .map((tab) => Number(tab.id));
+  if (JSON.stringify(verifiedIds) !== JSON.stringify(desiredIds)) {
+    throw new Error('Chrome did not preserve the saved target Tag order.');
+  }
+}
+
+async function reorderSpaceSwitchUngroupedTabs(orderedTabIds, options = {}) {
+  const requestedIds = uniqueNumberIds(orderedTabIds);
+  if (requestedIds.length < 2) return;
+  const requestedSet = new Set(requestedIds);
+  const expectedWindowId = Number(options.windowBinding?.windowId);
+  const messageOptions = { windowBinding: options.windowBinding };
+  const readCurrent = async () => {
+    const listed = await send('tabs:listAll', {}, messageOptions);
+    const current = (listed.tabs || [])
+      .filter((tab) => requestedSet.has(Number(tab.id)))
+      .sort((left, right) => Number(left.index) - Number(right.index));
+    if (
+      current.length !== requestedIds.length ||
+      current.some((tab) => (
+        Number(tab.windowId) !== expectedWindowId ||
+        Number(tab.groupId) !== -1 ||
+        tab.pinned === true
+      ))
+    ) {
+      throw new Error('A target Space Ungrouped tab changed before its saved order could be restored.');
+    }
+    return current;
+  };
+
+  const current = await readCurrent();
+  const currentIds = current.map((tab) => Number(tab.id));
+  const desiredIds = orderSpaceSwitchPhysicalIds(currentIds, requestedIds);
+  if (desiredIds.every((tabId, index) => tabId === currentIds[index])) return;
+  const firstIndex = Math.min(...current.map((tab) => Number(tab.index)));
+  for (let index = 0; index < desiredIds.length; index += 1) {
+    const moved = await send('tabs:move', {
+      tabId: desiredIds[index],
+      index: firstIndex + index,
+      windowId: expectedWindowId,
+    }, messageOptions);
+    if (moved.missing) {
+      throw new Error('A target Space Ungrouped tab changed while its saved order was restored.');
+    }
+  }
+  const verified = await readCurrent();
+  const verifiedIds = verified.map((tab) => Number(tab.id));
+  if (JSON.stringify(verifiedIds) !== JSON.stringify(desiredIds)) {
+    throw new Error('Chrome did not preserve the saved target Ungrouped tab order.');
+  }
+}
+
+async function reorderSpaceSwitchChromeGroups(orderedGroupIds, options = {}) {
+  const normalizedGroupIds = (orderedGroupIds || [])
+    .map(Number)
+    .filter((groupId) => Number.isSafeInteger(groupId) && groupId >= 0);
+  const desiredGroupIds = uniqueKeys(normalizedGroupIds);
+  if (desiredGroupIds.length !== normalizedGroupIds.length) {
+    throw new Error('Two saved target Tags resolved to the same Chrome group.');
+  }
+  if (desiredGroupIds.length < 2) return;
+  const desiredSet = new Set(desiredGroupIds);
+  const expectedWindowId = Number(options.windowBinding?.windowId);
+  const messageOptions = { windowBinding: options.windowBinding };
+  const readCurrent = async () => {
+    const listed = await send('tabs:listAll', {}, messageOptions);
+    const relevantTabs = (listed.tabs || [])
+      .filter((tab) => desiredSet.has(Number(tab.groupId)))
+      .sort((left, right) => Number(left.index) - Number(right.index));
+    if (
+      relevantTabs.some((tab) => Number(tab.windowId) !== expectedWindowId) ||
+      new Set(relevantTabs.map((tab) => Number(tab.groupId))).size !== desiredGroupIds.length
+    ) {
+      throw new Error('A target Space Tag changed before its saved group order could be restored.');
+    }
+    return {
+      tabs: relevantTabs,
+      groupIds: uniqueKeys(relevantTabs.map((tab) => Number(tab.groupId))),
+    };
+  };
+
+  let current = await readCurrent();
+  if (desiredGroupIds.every((groupId, index) => groupId === current.groupIds[index])) return;
+  let nextIndex = Math.min(...current.tabs.map((tab) => Number(tab.index)));
+  for (const groupId of desiredGroupIds) {
+    current = await readCurrent();
+    const groupTabs = current.tabs.filter((tab) => Number(tab.groupId) === groupId);
+    const currentIndex = Math.min(...groupTabs.map((tab) => Number(tab.index)));
+    if (currentIndex !== nextIndex) {
+      if (
+        Array.isArray(options.movedGroupIds) &&
+        !options.movedGroupIds.includes(groupId)
+      ) options.movedGroupIds.push(groupId);
+      const moved = await send('groups:move', { groupId, index: nextIndex }, messageOptions);
+      if (moved.missing) {
+        throw new Error('A target Space Tag changed while its saved group order was restored.');
+      }
+    }
+    current = await readCurrent();
+    const movedGroupTabs = current.tabs.filter((tab) => Number(tab.groupId) === groupId);
+    nextIndex = Math.max(...movedGroupTabs.map((tab) => Number(tab.index))) + 1;
+  }
+  const verified = await readCurrent();
+  if (JSON.stringify(verified.groupIds) !== JSON.stringify(desiredGroupIds)) {
+    throw new Error('Chrome did not preserve the saved target TagGroup order.');
+  }
+}
+
+function spaceSwitchSnapshotTabOrder(snapshotGroup, candidateTabs, predicate = () => true) {
+  const candidatesBySnapshotId = new Map();
+  for (const tab of candidateTabs || []) {
+    if (!predicate(tab)) continue;
+    const snapshotTabId = validSnapshotLifecycleId(
+      state.tabLifecycle?.[tab.id]?.snapshotTabId || tab.snapshotTabId,
+    );
+    if (snapshotTabId && !candidatesBySnapshotId.has(snapshotTabId)) {
+      candidatesBySnapshotId.set(snapshotTabId, Number(tab.id));
+    }
+  }
+  return (snapshotGroup?.tabs || [])
+    .map((row) => candidatesBySnapshotId.get(validSnapshotLifecycleId(row?.snapshotTabId)))
+    .filter(Number.isSafeInteger);
+}
+
+async function activateSpaceSwitchTarget(targetTabs, options = {}) {
+  const localTargets = (targetTabs || []).filter((tab) => Number.isSafeInteger(Number(tab?.id)));
+  const preferredTabId = Number(options.preferredTabId);
+  const preferredSnapshotTabId = String(options.preferredSnapshotTabId || '');
+  const target = localTargets.find((tab) => Number(tab.id) === preferredTabId) ||
+    localTargets.find((tab) => (
+      preferredSnapshotTabId &&
+      String(state.tabLifecycle?.[tab.id]?.snapshotTabId || tab.snapshotTabId || '') === preferredSnapshotTabId
+    )) ||
+    preferredFocusableTab(localTargets.filter(isGroupedTab)) ||
+    preferredFocusableTab(localTargets);
+  if (!target) throw new Error('The target Space has no local tab that Chrome can activate safely.');
+  return focusSpaceSwitchSurvivor({
+    tabId: Number(target.id),
+    guard: spaceSwitchFocusGuard(target),
+    windowBinding: options.windowBinding,
+    allowStaleWindowBinding: options.allowStaleWindowBinding,
+  });
+}
+
+async function focusSpaceSwitchSurvivor(options = {}) {
+  const response = await send('tabs:focus', {
+    tabId: options.tabId,
+    ...(options.guard ? { focusGuard: options.guard, skipChanged: true } : {}),
+  }, {
+    windowBinding: options.windowBinding,
+    allowStaleWindowBinding: options.allowStaleWindowBinding === true,
+  });
+  if (!response.tab || response.skipped) {
+    throw new Error('The tab required to keep Chrome open changed before it could be activated.');
+  }
+  if (Number(response.tab.id) !== Number(options.tabId) || response.tab.active === false) {
+    throw new Error('Chrome did not activate the tab required to keep the window open.');
+  }
+  return response;
+}
+
+async function closeSpaceSwitchSourceTabs(options = {}) {
+  const retainedFallbackTabId = Number(options.materializedTarget?.retainedFallbackTabId);
+  const requiredTargetTabGuards = spaceSwitchTargetTabGuards(
+    options.materializedTarget,
+    options.windowBinding,
+  );
+  const candidateIds = [...options.reviewedCloseTargets.keys()]
+    .filter((tabId) => Number(tabId) !== retainedFallbackTabId);
+  if (candidateIds.length === 0) {
+    return { closedTabIds: [], skippedTabs: [], error: null };
+  }
+  let lastOutcome = { closedTabIds: [], skippedTabs: [] };
+  const persistOutcome = async (outcome = {}) => {
+    lastOutcome = {
+      closedTabIds: [...(outcome.closedTabIds || [])],
+      skippedTabs: [...(outcome.skippedTabs || [])],
+    };
+    for (const tabId of lastOutcome.closedTabIds) {
+      forgetRecentlyOpenedDormantTab(tabId);
+      forgetClosedTabMetadata(options.reviewedCloseTargets.get(Number(tabId))?.tab);
+      removeTabFromSavedOrder(tabId, options.switchPlan?.sourceSpaceId);
+    }
+    await loadTabs({
+      adopt: false,
+      skipSnapshotCleanupForTabIds: lastOutcome.closedTabIds,
+      windowBinding: options.windowBinding,
+      allowStaleWindowBinding: true,
+    });
+    const saved = await saveState({ persistWindowState: false });
+    if (saved !== true) throw new Error('The old Space cleanup could not be saved.');
+  };
+
+  try {
+    return await runGuardedDestructiveTabClose({
+      tabIds: candidateIds,
+      checkpoint: async () => {},
+      inspectTab: async (tabId) => {
+        await verifyMaterializedSpaceSwitchTarget(options.materializedTarget, {
+          windowBinding: options.windowBinding,
+          allowStaleWindowBinding: true,
+        });
+        await focusSpaceSwitchSurvivor({
+          tabId: options.activeSurvivorTabId,
+          guard: options.activeSurvivorGuard,
+          windowBinding: options.windowBinding,
+          allowStaleWindowBinding: true,
+        });
+        return liveReviewedTabCloseMismatch(
+          options.reviewedCloseTargets.get(Number(tabId)),
+          { windowBinding: options.windowBinding, allowStaleWindowBinding: true },
+        );
+      },
+      closeTab: (tabId) => guardedReviewedTabClose(
+        options.reviewedCloseTargets.get(Number(tabId)),
+        {
+          windowBinding: options.windowBinding,
+          allowStaleWindowBinding: true,
+          requiredActiveSurvivorTabId: options.activeSurvivorTabId,
+          requiredTargetTabGuards,
+        },
+      ),
+      commit: persistOutcome,
+      reconcile: persistOutcome,
+    });
+  } catch (error) {
+    return { ...lastOutcome, error };
+  }
+}
+
+function spaceSwitchTargetTabGuards(materializedTarget, windowBinding) {
+  const requiredGroups = new Map();
+  for (const assignment of materializedTarget?.requiredGroupAssignments || []) {
+    for (const tabId of assignment.tabIds || []) {
+      requiredGroups.set(Number(tabId), Number(assignment.groupId));
+    }
+  }
+  return uniqueSpaceSwitchTabs(materializedTarget?.tabs).map((tab) => ({
+    tabId: Number(tab.id),
+    windowId: Number(windowBinding?.windowId),
+    groupId: requiredGroups.has(Number(tab.id))
+      ? requiredGroups.get(Number(tab.id))
+      : Number(tab.groupId),
+  }));
 }
 
 async function closeTabsAndForgetMetadata(tabsToClose = [], options = {}) {
@@ -6490,19 +7649,66 @@ function syncSpaceDeletionPlaceholderMemory({
 }
 
 async function withCreatedTabCheckpointRollback(createdTabIds, checkpoint, options = {}) {
+  const pendingCreatedTabIds = new Set(
+    createdTabIds.map(Number).filter(Number.isSafeInteger),
+  );
   return rollbackCreatedTabsOnCheckpointFailure(
     createdTabIds,
     checkpoint,
-    async (tabId) => {
-      await send('tabs:close', { tabId, preserveSnapshot: false }, {
-        windowBinding: options.windowBinding,
-        // The tab already exists in the captured window. A later host move
-        // must neither redirect nor suppress this compensating close.
-        allowStaleWindowBinding: true,
-      });
-      forgetClosedTabMetadata({ id: tabId });
+    (tabId) => {
+      for (const createdTabId of createdTabIds) {
+        const numericTabId = Number(createdTabId);
+        if (Number.isSafeInteger(numericTabId)) pendingCreatedTabIds.add(numericTabId);
+      }
+      return closeCreatedTabWithoutEmptyingWindow(tabId, pendingCreatedTabIds, options);
     },
   );
+}
+
+async function closeCreatedTabWithoutEmptyingWindow(tabId, pendingCreatedTabIds, options = {}) {
+  const messageOptions = {
+    windowBinding: options.windowBinding,
+    // The tab already exists in the captured window. A later host move must
+    // neither redirect nor suppress this compensating close.
+    allowStaleWindowBinding: true,
+  };
+  const listed = await send('tabs:listAll', {}, messageOptions);
+  const allTabs = listed.allChromeTabs || listed.tabs || [];
+  const closingTab = allTabs.find((tab) => Number(tab.id) === Number(tabId));
+  if (!closingTab) {
+    pendingCreatedTabIds.delete(Number(tabId));
+    forgetClosedTabMetadata({ id: tabId });
+    return;
+  }
+  const sameWindowSurvivors = allTabs.filter((tab) => (
+    Number(tab.windowId) === Number(closingTab.windowId) &&
+    Number(tab.id) !== Number(tabId)
+  ));
+  const survivor = sameWindowSurvivors.find((tab) => (
+    !pendingCreatedTabIds.has(Number(tab.id)) && tab.active
+  )) || sameWindowSurvivors.find((tab) => !pendingCreatedTabIds.has(Number(tab.id))) ||
+    sameWindowSurvivors.find((tab) => tab.active) || sameWindowSurvivors[0];
+  if (!survivor) {
+    // External activity can remove the original source after a checkpoint
+    // fails. Keeping one newly-created page is safer than closing Chrome's
+    // final tab and potentially exiting the browser on macOS.
+    return;
+  }
+  const focused = await focusSpaceSwitchSurvivor({
+    tabId: Number(survivor.id),
+    guard: spaceSwitchFocusGuard(survivor),
+    ...messageOptions,
+  });
+  const response = await send('tabs:close', {
+    tabId,
+    preserveSnapshot: false,
+    requiredActiveSurvivorTabId: Number(focused.tab.id),
+  }, messageOptions);
+  if (response.skipped) {
+    throw new Error('Chrome could not safely clean up a newly-created tab after the checkpoint failed.');
+  }
+  pendingCreatedTabIds.delete(Number(tabId));
+  forgetClosedTabMetadata({ id: tabId });
 }
 
 async function closeEphemeralTabs(options = {}) {
@@ -7343,13 +8549,16 @@ function snapshotGroupRecords(snapshot, spaceId = state.activeSpaceId) {
   }));
 }
 
-function replaceActiveSpaceSnapshotGroups(groups) {
+function replaceActiveSpaceSnapshotGroups(groups, snapshotUpdates = null) {
   const snapshot = activeSpaceSnapshot();
   if (!snapshot) return;
+  const baseSnapshot = snapshotUpdates && typeof snapshotUpdates === 'object'
+    ? { ...snapshot, ...snapshotUpdates }
+    : snapshot;
   const nextSnapshot = {
-    ...snapshot,
+    ...baseSnapshot,
     updatedAt: Date.now(),
-    groups: groups.filter((group) => snapshotGroupShouldPersist(snapshot, group)),
+    groups: groups.filter((group) => snapshotGroupShouldPersist(baseSnapshot, group)),
   };
   const persistedSnapshot = snapshotHasPersistentContent(nextSnapshot) ? nextSnapshot : null;
   const remapped = remapSnapshotGroupIndexedState({
@@ -7900,18 +9109,37 @@ async function tidyTabNames(options = {}) {
     });
     if (refreshed === false) return;
     const sourceSpaceId = state.activeSpaceId;
+    snapshotOpenSpace(sourceSpaceId);
+    const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [],
+    });
+    const duplicateTagPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
+    const duplicateLiveBuckets = duplicateActiveGroupBuckets();
+    const duplicateLiveGroupCount = duplicateLiveBuckets
+      .reduce((sum, bucket) => sum + bucket.length - 1, 0);
+    const duplicateTagSummary = combineDuplicateTagMergePlans(
+      duplicateTagPlan.merges,
+      duplicateLiveBuckets.map((bucket) => ({
+        title: bucket[0]?.title,
+        mergedCount: bucket.length - 1,
+      })),
+    );
+    const duplicateTagCount = duplicateTagSummary.mergedCount;
+    const duplicateTagFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
     const visibleTabs = spaceView
       .flatMap((group) => group.tabs)
       .filter((tab) => (
         !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
       ));
-    if (visibleTabs.length === 0) {
-      setStatus('No tabs in this Space to rename.');
+    if (visibleTabs.length === 0 && duplicateTagCount === 0) {
+      setStatus('No tabs or duplicate Tags in this Space to tidy.');
       return;
     }
 
     const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
-    if (renameableTabs.length === 0) {
+    if (renameableTabs.length === 0 && duplicateTagCount === 0) {
       setStatus('No unpinned tabs in this Space to rename.');
       return;
     }
@@ -7934,6 +9162,12 @@ async function tidyTabNames(options = {}) {
         windowBinding,
       })
       : { names: {}, sourceLabel: 'Local naming' };
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      throw new Error(
+        'This panel moved to another Chrome window before Tidy Names could create a preview. ' +
+        'Nothing was changed; run Tidy Names again in the current window.',
+      );
+    }
     const plannedNames = { ...localNames, ...namingResult.names };
     const renameItems = renameableTabs
       .map((tab) => ({
@@ -7950,7 +9184,7 @@ async function tidyTabNames(options = {}) {
         result: 'Unchanged',
         meta: tab.domain,
       }));
-    if (renameItems.length === 0) {
+    if (renameItems.length === 0 && duplicateTagCount === 0) {
       setStatus('Tidy Names found no changes to apply.');
       return;
     }
@@ -7960,25 +9194,67 @@ async function tidyTabNames(options = {}) {
       state.renamedTabs,
     );
 
+    const previewSections = [];
+    if (renameItems.length > 0) {
+      previewSections.push({ title: 'Rename in panel', items: renameItems });
+    }
+    if (duplicateTagCount > 0) {
+      const mergeItems = duplicateTagSummary.merges.map((merge) => ({
+        title: merge.title || 'Tag',
+        result: 'Merge into first Tag',
+        meta: merge.snapshotMergedCount > 0
+          ? `${merge.mergedCount + 1} Tags · ${merge.appendedRowCount} ${merge.appendedRowCount === 1 ? 'saved row' : 'saved rows'} appended`
+          : `${merge.liveMergedCount + 1} live Tags`,
+      }));
+      previewSections.push({ title: 'Merge duplicate Tags', items: mergeItems });
+    }
+    if (renameItems.length > 0 && untouchedItems.length > 0) {
+      previewSections.push({ title: 'Remain untouched', items: untouchedItems });
+    }
+    const previewSummary = [];
+    if (renameItems.length > 0) {
+      previewSummary.push(`${renameItems.length} ${renameItems.length === 1 ? 'name' : 'names'}`);
+      previewSummary.push(namingResult.sourceLabel);
+    }
+    if (duplicateTagCount > 0) {
+      previewSummary.push(`${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'} merged`);
+    }
+    previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
     const confirmed = await showPlanPreview({
       title: 'Preview Tidy Names',
-      message: `${renameItems.length} ${renameItems.length === 1 ? 'name' : 'names'} · ${namingResult.sourceLabel} · ${formatPreviewDuration(performance.now() - startedAt)}`,
+      message: previewSummary.join(' · '),
       confirmText: 'Apply tidy',
-      sections: [
-        { title: 'Rename in panel', items: renameItems },
-        { title: 'Remain untouched', items: untouchedItems },
-      ],
+      sections: previewSections,
     });
     if (!confirmed) return;
 
+    let committed = false;
+    let postCommitWarning = '';
     await withSharedStateLock(async () => {
       const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) return;
+      if (synchronized === false) {
+        throw new Error(
+          'This panel moved before Tidy Names could apply the reviewed changes. ' +
+          'Nothing was changed; review a fresh preview in the current window.',
+        );
+      }
       if (state.activeSpaceId !== sourceSpaceId) {
         throw new Error('The active Space changed while Tidy Names was open. Run it again in the current Space.');
       }
+      const rollback = captureChromeGroupMutationRollback();
       const loaded = await loadTabs({ adopt: false, windowBinding });
-      if (loaded === false) return;
+      if (loaded === false) {
+        throw new Error(
+          'This panel moved before Tidy Names could apply the reviewed changes. ' +
+          'Nothing was changed; review a fresh preview in the current window.',
+        );
+      }
+      snapshotOpenSpace(sourceSpaceId);
+      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+        version: 1,
+        updatedAt: Date.now(),
+        groups: [],
+      });
       const targetIds = new Set(renameItems.map((item) => item.id));
       const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
       if (
@@ -7988,55 +9264,150 @@ async function tidyTabNames(options = {}) {
       ) {
         throw new Error('Tabs changed while Tidy Names was open. Review a fresh preview before applying names.');
       }
+      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateTagFingerprint) {
+        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
+      }
+      const currentDuplicateTagPlan = mergeDuplicateSnapshotTags(currentSnapshot);
+      if (
+        currentDuplicateTagPlan.mergedCount !== duplicateTagPlan.mergedCount ||
+        countDuplicateActiveGroups() !== duplicateLiveGroupCount
+      ) {
+        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
+      }
       const beforeNames = Object.fromEntries(renameItems.map((item) => [
         item.id,
         Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
       ]));
       const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
-      let operationId = '';
-      try {
-        for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
-        await saveState({ persistWindowState: false, windowBinding });
-        await refreshTabs({ windowBinding });
-
-        const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-        if (refreshedTargets.length !== renameItems.length) {
-          throw new Error('Tabs changed while Tidy Names was being applied. The rename was rolled back.');
-        }
-        const operation = recordOperation({
-          type: 'tidy-names',
-          spaceId: sourceSpaceId,
-          summary: `Tidy Names renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
-          before: { renamedTabs: beforeNames },
-          after: {
-            renamedTabs: afterNames,
-            targetFingerprint: fingerprintTidyNameTargets(refreshedTargets, state.renamedTabs),
-          },
-        });
-        operationId = operation.id;
-        await saveState({ persistWindowState: false, windowBinding });
-        renderOperationRecord();
-      } catch (error) {
-        state.operationHistory = withoutOperationRecord(state.operationHistory, operationId);
-        for (const [tabId, previousName] of Object.entries(beforeNames)) {
-          setLiveTabPanelTitle(state, tabId, previousName);
-        }
-        const rollbackFailures = [];
+      const beforeSnapshot = structuredClone(currentSnapshot);
+      const beforeLive = captureLiveOrganization(sourceSpaceId);
+      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
+      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
+        currentDuplicateTagPlan.snapshotGroupIdReplacements,
+      );
+      rollback.membership = captureTabGroupMembership(
+        tabs,
+        groups,
+        beforeLive.tabs.map((tab) => tab.tabId),
+      );
+      await runChromeGroupMutationTransaction({
+        apply: async () => {
+          if (currentDuplicateTagPlan.mergedCount > 0) {
+            replaceActiveSpaceSnapshotGroups(currentDuplicateTagPlan.snapshot.groups);
+          }
+          // Select and merge the canonical physical Tag while each live group
+          // still carries its original saved identity. If references are
+          // remapped first, both groups appear canonical and display order can
+          // incorrectly preserve the duplicate's Chrome group and metadata.
+          await mergeDuplicateGroupsInActiveSpace({
+            windowBinding,
+            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
+          });
+          remapMergedSnapshotGroupReferences(
+            currentDuplicateTagPlan.snapshotGroupIdReplacements,
+          );
+          // Merge the saved Tag records before writing names. Otherwise the
+          // pre-preview merged clone can overwrite a just-written panelTitle,
+          // which is especially visible for opened saved-target rows that are
+          // intentionally excluded from passive snapshot refreshes.
+          for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
+          const refreshed = await refreshTabsView({
+            reloadDormant: true,
+            render: false,
+            windowBinding,
+          });
+          if (refreshed === false) {
+            throw new Error('This panel moved before Tidy Names could verify the merged Tags.');
+          }
+          const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+          if (refreshedTargets.length !== renameItems.length) {
+            throw new Error('Tabs changed while Tidy Names was being applied. The change was rolled back.');
+          }
+          if (
+            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
+            countDuplicateActiveGroups() > 0
+          ) {
+            throw new Error('Tidy Names could not finish merging duplicate Tags. The change was rolled back.');
+          }
+          const summaryParts = [];
+          if (renameItems.length > 0) {
+            summaryParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`);
+          }
+          if (duplicateTagCount > 0) {
+            summaryParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
+          }
+          const appliedOrganization = duplicateTagCount > 0
+            ? organizationForCurrentSpaceState(sourceSpaceId)
+            : null;
+          recordOperation({
+            type: 'tidy-names',
+            spaceId: sourceSpaceId,
+            summary: `Tidy Names ${summaryParts.join(' and ')}`,
+            before: {
+              renamedTabs: beforeNames,
+              ...(duplicateTagCount > 0 ? {
+                tagMerge: true,
+                snapshot: beforeSnapshot,
+                live: beforeLive,
+                snapshotGroupReferences: beforeSnapshotGroupReferences,
+              } : {}),
+            },
+            after: {
+              renamedTabs: afterNames,
+              ...(renameItems.length > 0 ? {
+                targetFingerprint: fingerprintTidyNameTargets(
+                  refreshedTargets,
+                  state.renamedTabs,
+                ),
+              } : {}),
+              ...(duplicateTagCount > 0 ? {
+                organizationFingerprint: appliedOrganization.fingerprint,
+                organizationFingerprintParts: appliedOrganization.fingerprintParts,
+              } : {}),
+            },
+          });
+        },
+        checkpoint: async () => {
+          const saved = await saveState({ persistWindowState: false, windowBinding });
+          if (saved !== true) {
+            throw new Error('This panel moved before Tidy Names could save the merged Tags.');
+          }
+        },
+        rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
+          windowBinding,
+          persistRestoredState: true,
+        }),
+      });
+      committed = true;
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        postCommitWarning = 'Tidy Names was saved, but this panel moved before its view could refresh.';
+      } else {
         try {
-          await saveState({ persistWindowState: false });
-        } catch (rollbackError) {
-          rollbackFailures.push({ stage: 'saving restored Tidy Names state', error: rollbackError });
+          render();
+          renderOperationRecord();
+        } catch (error) {
+          console.error(error);
+          postCommitWarning =
+            'Tidy Names was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
         }
-        try {
-          await refreshTabs({ windowBinding });
-        } catch (rollbackError) {
-          rollbackFailures.push({ stage: 'refreshing restored Tidy Names view', error: rollbackError });
-        }
-        if (rollbackFailures.length > 0) throw createRollbackFailureError(error, rollbackFailures);
-        throw error;
       }
     });
-    setStatus(`Renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel only · ${namingResult.sourceLabel}.`);
+    if (!committed) {
+      throw new Error('Tidy Names stopped before its reviewed changes could be committed. Nothing was changed.');
+    }
+    if (postCommitWarning) {
+      setStatus(postCommitWarning);
+      showStatusToast(postCommitWarning, 'info');
+      return;
+    }
+    const statusParts = [];
+    if (renameItems.length > 0) {
+      statusParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel`);
+    }
+    if (duplicateTagCount > 0) {
+      statusParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
+    }
+    setStatus(`Tidy ${statusParts.join(' and ')}${renameItems.length > 0 ? ` · ${namingResult.sourceLabel}` : ''}.`);
   } finally {
     endPanelAction();
   }
@@ -8126,40 +9497,54 @@ async function autoGroupTabs(options = {}) {
       windowBinding,
     });
     if (refreshed === false) return;
-  const sourceSpaceId = state.activeSpaceId;
-  snapshotOpenSpace(sourceSpaceId);
-  const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-    version: 1,
-    updatedAt: Date.now(),
-    groups: [],
-  });
-  const organization = buildOrganizationCandidates({
-    liveGroups: buildSpaceViewForSpace(sourceSpaceId),
-    snapshot: sourceSnapshot,
-  });
-  const foreignCandidateIds = foreignOpenOrganizationCandidateIds(organization, sourceSpaceId);
-  const candidates = organization.candidates.filter((tab) => (
-    !foreignCandidateIds.has(Number(tab.id)) &&
-    !tab.pinned &&
-    isPageShortcutCapableUrl(tab.url)
-  ));
-  const duplicateGroupCount = countDuplicateActiveGroups();
-  const duplicateGroupFingerprint = fingerprintDuplicateActiveGroups();
-  if (candidates.length === 0 && duplicateGroupCount === 0) {
-    const message = foreignCandidateIds.size > 0
-      ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
-      : 'No live or saved http(s) tabs are available to organize in this Space.';
-    setStatus(message);
-    showStatusToast(message, 'error');
-    return;
-  }
-  if (extensionRuntime && candidates.length > 0 && !hasUsableAISettings(aiSettings)) {
-    const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
-    setStatus(message);
-    showStatusToast(message, 'error');
-    return;
-  }
-  let plannedGroups = [];
+    const sourceSpaceId = state.activeSpaceId;
+    snapshotOpenSpace(sourceSpaceId);
+    const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [],
+    });
+    const organization = buildOrganizationCandidates({
+      liveGroups: buildSpaceViewForSpace(sourceSpaceId),
+      snapshot: sourceSnapshot,
+    });
+    const foreignCandidateIds = foreignOpenOrganizationCandidateIds(organization, sourceSpaceId);
+    const candidates = organization.candidates.filter((tab) => (
+      !foreignCandidateIds.has(Number(tab.id)) &&
+      !tab.pinned &&
+      isPageShortcutCapableUrl(tab.url)
+    ));
+    const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(
+      sourceSnapshot,
+      sourceSnapshot.updatedAt,
+    );
+    const duplicateLiveBuckets = duplicateActiveGroupBuckets();
+    const duplicateLiveGroupCount = duplicateLiveBuckets
+      .reduce((sum, bucket) => sum + bucket.length - 1, 0);
+    const duplicateTagSummary = combineDuplicateTagMergePlans(
+      duplicateSnapshotPlan.merges,
+      duplicateLiveBuckets.map((bucket) => ({
+        title: bucket[0]?.title,
+        mergedCount: bucket.length - 1,
+      })),
+    );
+    const duplicateGroupCount = duplicateTagSummary.mergedCount;
+    const duplicateGroupFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
+    if (candidates.length === 0 && duplicateGroupCount === 0) {
+      const message = foreignCandidateIds.size > 0
+        ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
+        : 'No live or saved http(s) tabs are available to organize in this Space.';
+      setStatus(message);
+      showStatusToast(message, 'error');
+      return;
+    }
+    if (extensionRuntime && candidates.length > 0 && !hasUsableAISettings(aiSettings)) {
+      const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
+      setStatus(message);
+      showStatusToast(message, 'error');
+      return;
+    }
+    let plannedGroups = [];
     if (candidates.length > 0) {
       try {
         const provider = providerById(aiSettings.provider);
@@ -8178,6 +9563,11 @@ async function autoGroupTabs(options = {}) {
             })),
           }),
         }, { windowBinding });
+        if (!isCurrentPanelWindowBinding(windowBinding)) {
+          throw new Error(
+            'This panel moved to another Chrome window before Auto Group could create a preview.',
+          );
+        }
         if (response.finishReason === 'length') {
           throw new Error('The provider reached the Auto Group output limit. No groups were changed; try again with fewer tabs.');
         }
@@ -8185,6 +9575,7 @@ async function autoGroupTabs(options = {}) {
         if (plannedGroups.length === 0) {
           throw new Error('AI returned no valid groups. Check the configured model and try again.');
         }
+        assertCompleteAutoGroupPlan(plannedGroups, candidates);
       } catch (error) {
         throw new Error(`${formatAIError(error)} Auto Group stopped without making changes.`);
       }
@@ -8195,6 +9586,7 @@ async function autoGroupTabs(options = {}) {
       candidates,
       existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
     });
+    const previewGroups = resolvedPlan.previewGroups;
     plannedGroups = resolvedPlan.plannedGroups;
     if (plannedGroups.length === 0 && duplicateGroupCount === 0) {
       const message = 'Auto Group proposed no changes. These tabs are already organized.';
@@ -8205,8 +9597,9 @@ async function autoGroupTabs(options = {}) {
     const regroupedTabIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
     const regroupedCount = regroupedTabIds.size;
     const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
-    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
-    const previewSections = plannedGroups.map((group) => ({
+    let groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const previewGroupedCount = previewGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const previewSections = previewGroups.map((group) => ({
       title: group.title,
       color: group.color,
       kind: 'group',
@@ -8220,30 +9613,18 @@ async function autoGroupTabs(options = {}) {
         };
       }),
     }));
-    const untouchedCandidates = candidates.filter((candidate) => !regroupedTabIds.has(Number(candidate.id)));
-    if (untouchedCandidates.length > 0) {
-      previewSections.push({
-        title: 'Remain untouched',
-        color: 'grey',
-        kind: 'notice',
-        items: untouchedCandidates.map((candidate) => ({
-          title: candidate.title || candidate.url || 'Untitled',
-          meta: candidate.currentGroup?.title || 'Ungrouped',
-          badge: candidate.dormant ? 'Saved' : 'Live',
-        })),
-      });
-    }
     const candidateIds = new Set(candidates.map((candidate) => Number(candidate.id)));
     const notSentCandidates = organization.candidates.filter((candidate) => !candidateIds.has(Number(candidate.id)));
     const plannedTargetTitleKeys = new Set(plannedGroups.map((group) => groupTitleKey(group.title)));
+    const mergedDuplicateTitleKeys = new Set(
+      duplicateTagSummary.merges.map((merge) => groupTitleKey(merge.title)),
+    );
     const emptySnapshotTags = (sourceSnapshot.groups || []).filter((group) => (
       !isUngroupedSnapshotGroup(group) && (group.tabs || []).length === 0
     ));
     const emptyHistoricalTags = emptySnapshotTags.filter((group) => (
-      !plannedTargetTitleKeys.has(groupTitleKey(group.title))
-    ));
-    const mergedEmptyHistoricalTags = emptySnapshotTags.filter((group) => (
-      plannedTargetTitleKeys.has(groupTitleKey(group.title))
+      !plannedTargetTitleKeys.has(groupTitleKey(group.title)) &&
+      !mergedDuplicateTitleKeys.has(groupTitleKey(group.title))
     ));
     if (notSentCandidates.length > 0 || emptyHistoricalTags.length > 0) {
       previewSections.push({
@@ -8275,36 +9656,22 @@ async function autoGroupTabs(options = {}) {
         title: 'Merge duplicates',
         color: 'yellow',
         kind: 'notice',
-        countLabel: `${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'group' : 'groups'}`,
-        items: [{
-          title: `${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'group' : 'groups'}`,
-          meta: 'Groups with the same name will be combined.',
-        }],
-      });
-    }
-    if (mergedEmptyHistoricalTags.length > 0) {
-      previewSections.push({
-        title: 'Merge empty duplicates',
-        color: 'yellow',
-        kind: 'notice',
-        countLabel: `${mergedEmptyHistoricalTags.length} ${mergedEmptyHistoricalTags.length === 1 ? 'Tag' : 'Tags'}`,
-        items: mergedEmptyHistoricalTags.map((group) => ({
-          title: group.title || 'Historical Tag',
-          meta: 'Empty duplicate Tag will be absorbed into the populated planned group.',
-          badge: 'Saved Tag',
+        countLabel: `${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`,
+        items: duplicateTagSummary.merges.map((merge) => ({
+          title: merge.title || 'Tag',
+          meta: merge.snapshotMergedCount > 0
+            ? `${merge.mergedCount + 1} Tags · ${merge.appendedRowCount} ${merge.appendedRowCount === 1 ? 'saved row' : 'saved rows'} appended`
+            : `${merge.liveMergedCount + 1} live Tags will be combined`,
         })),
       });
     }
     const previewSummary = [];
     if (plannedGroups.length > 0) {
-      previewSummary.push(`${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'} → ${plannedGroups.length} ${plannedGroups.length === 1 ? 'group' : 'groups'}`);
+      previewSummary.push(`${previewGroupedCount} ${previewGroupedCount === 1 ? 'tab' : 'tabs'} → ${previewGroups.length} ${previewGroups.length === 1 ? 'group' : 'groups'}`);
     }
     if (regroupedCount > 0) previewSummary.push(`${regroupedCount} moving`);
     if (duplicateGroupCount > 0) {
       previewSummary.push(`${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'merge' : 'merges'}`);
-    }
-    if (mergedEmptyHistoricalTags.length > 0) {
-      previewSummary.push(`${mergedEmptyHistoricalTags.length} empty ${mergedEmptyHistoricalTags.length === 1 ? 'duplicate' : 'duplicates'} merged`);
     }
     previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
     const confirmed = await showPlanPreview({
@@ -8316,12 +9683,18 @@ async function autoGroupTabs(options = {}) {
     });
     if (!confirmed) return;
 
+    let committed = false;
     let createdGroups = 0;
     let mergedGroups = 0;
     let postCommitWarning = '';
     await withSharedStateLock(async () => {
       const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) return;
+      if (synchronized === false) {
+        throw new Error(
+          'This panel moved before Auto Group could apply the reviewed changes. ' +
+          'Nothing was changed; review a fresh preview in the current window.',
+        );
+      }
       if (state.activeSpaceId !== sourceSpaceId) {
         throw new Error('The active Space changed while Auto Group was open. Run it again in the current Space.');
       }
@@ -8332,7 +9705,12 @@ async function autoGroupTabs(options = {}) {
       // is captured separately after the authoritative tab refresh below.
       const rollback = captureChromeGroupMutationRollback();
       const loaded = await loadTabs({ adopt: true, windowBinding });
-      if (loaded === false) return;
+      if (loaded === false) {
+        throw new Error(
+          'This panel moved before Auto Group could apply the reviewed changes. ' +
+          'Nothing was changed; review a fresh preview in the current window.',
+        );
+      }
       snapshotOpenSpace(sourceSpaceId);
       const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
         version: 1,
@@ -8343,28 +9721,36 @@ async function autoGroupTabs(options = {}) {
         liveGroups: buildSpaceViewForSpace(sourceSpaceId),
         snapshot: currentSnapshot,
       });
-      if (fingerprintDuplicateActiveGroups() !== duplicateGroupFingerprint) {
+      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateGroupFingerprint) {
         throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
       }
-      let rebasedPlannedGroups = rebaseOrganizationPlan({
+      const currentDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(currentSnapshot);
+      if (
+        currentDuplicateSnapshotPlan.mergedCount !== duplicateSnapshotPlan.mergedCount ||
+        countDuplicateActiveGroups() !== duplicateLiveGroupCount
+      ) {
+        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
+      }
+      const rebasedPreviewGroups = rebaseOrganizationPlan({
         previewCandidates: organization.candidates,
         currentCandidates: currentOrganization.candidates,
-        plannedGroups,
+        plannedGroups: previewGroups,
       });
       const currentResolvedPlan = resolveOrganizationPlanChanges({
-        plannedGroups: rebasedPlannedGroups,
+        plannedGroups: rebasedPreviewGroups,
         candidates: currentOrganization.candidates,
         existingGroups: organizationTargetGroups(sourceSpaceId, currentSnapshot),
       });
-      if (JSON.stringify(currentResolvedPlan.plannedGroups) !== JSON.stringify(rebasedPlannedGroups)) {
+      if (JSON.stringify(currentResolvedPlan.previewGroups) !== JSON.stringify(rebasedPreviewGroups)) {
         throw new Error('An Auto Group target changed while the preview was open. Review a fresh preview before applying groups.');
       }
-      rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
+      const rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
+      groupedCount = rebasedPlannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
       const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds(
         currentOrganization,
         sourceSpaceId,
       );
-      if (rebasedPlannedGroups.some((group) => (
+      if (rebasedPreviewGroups.some((group) => (
         group.tabIds.some((candidateId) => currentForeignCandidateIds.has(Number(candidateId)))
       ))) {
         throw new Error(
@@ -8372,9 +9758,50 @@ async function autoGroupTabs(options = {}) {
           'Open Space Tabs there or review a fresh preview before applying groups.',
         );
       }
+      const currentEligibleCandidateIds = new Set(currentOrganization.candidates
+        .filter((candidate) => (
+          !currentForeignCandidateIds.has(Number(candidate.id)) &&
+          !candidate.pinned &&
+          isPageShortcutCapableUrl(candidate.url)
+        ))
+        .map((candidate) => Number(candidate.id)));
+      const rebasedCandidateIds = rebasedPreviewGroups
+        .flatMap((group) => group.tabIds.map(Number));
+      const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
+      if (
+        rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
+        rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
+        rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
+        [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId))
+      ) {
+        throw new Error(
+          'The eligible tabs changed while Auto Group was open. ' +
+          'Review a fresh preview before applying groups.',
+        );
+      }
 
       const beforeSnapshot = structuredClone(currentSnapshot);
       const beforeLive = captureLiveOrganization(sourceSpaceId);
+      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
+      const organizedSnapshot = applyOrganizationPlanToSnapshot({
+        snapshot: currentSnapshot,
+        candidates: currentOrganization.candidates,
+        plannedGroups: rebasedPlannedGroups,
+      });
+      // Auto Group can create a new saved target (including when Chrome's
+      // compact physical title differs from the logical saved Tag title).
+      // Give every new target a durable identity before lifecycle bindings are
+      // checkpointed and before duplicate Tags are merged.
+      const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds(
+        organizedSnapshot,
+        createSnapshotLifecycleId,
+      );
+      const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(
+        identifiedOrganizedSnapshot,
+      );
+      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
+        appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+      );
       rollback.membership = captureTabGroupMembership(
         tabs,
         groups,
@@ -8392,14 +9819,22 @@ async function autoGroupTabs(options = {}) {
 
       await runChromeGroupMutationTransaction({
         apply: async () => {
-          state.spaceSnapshots[sourceSpaceId] = applyOrganizationPlanToSnapshot({
-            snapshot: currentSnapshot,
-            candidates: currentOrganization.candidates,
-            plannedGroups: rebasedPlannedGroups,
-          });
+          replaceActiveSpaceSnapshotGroups(
+            appliedDuplicateSnapshotPlan.snapshot.groups,
+            appliedDuplicateSnapshotPlan.snapshot,
+          );
           dormantSpaceViewSpaceId = '';
 
-          mergedGroups = await mergeDuplicateGroupsInActiveSpace({ windowBinding });
+          // Preserve the physical Tag whose live tabs still own the canonical
+          // snapshot identity. Remapping every duplicate reference first would
+          // erase that distinction and let incidental display order win.
+          mergedGroups = await mergeDuplicateGroupsInActiveSpace({
+            windowBinding,
+            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
+          });
+          remapMergedSnapshotGroupReferences(
+            appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+          );
           if (mergedGroups) {
             const reloaded = await loadTabs({ adopt: false, windowBinding });
             if (reloaded === false) {
@@ -8458,13 +9893,29 @@ async function autoGroupTabs(options = {}) {
           if (refreshed === false) {
             throw new Error('This panel moved before Auto Group could verify the saved Space view.');
           }
+          if (
+            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
+            countDuplicateActiveGroups() > 0
+          ) {
+            throw new Error('Auto Group could not finish merging duplicate Tags. The change was rolled back.');
+          }
           assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
 
+          const operationSummary = groupedCount > 0
+            ? `Auto Group organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}` +
+              (duplicateGroupCount > 0
+                ? ` and merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`
+                : '')
+            : `Auto Group merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`;
           recordOperation({
             type: 'auto-group',
             spaceId: sourceSpaceId,
-            summary: `Auto Group organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}`,
-            before: { snapshot: beforeSnapshot, live: beforeLive },
+            summary: operationSummary,
+            before: {
+              snapshot: beforeSnapshot,
+              live: beforeLive,
+              snapshotGroupReferences: beforeSnapshotGroupReferences,
+            },
             after: {
               organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
             },
@@ -8481,7 +9932,11 @@ async function autoGroupTabs(options = {}) {
           persistRestoredState: true,
         }),
       });
-      if (isCurrentPanelWindowBinding(windowBinding)) {
+      committed = true;
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        postCommitWarning =
+          'Auto Group was saved, but this panel moved before its view could refresh.';
+      } else {
         try {
           render();
         } catch (error) {
@@ -8491,15 +9946,22 @@ async function autoGroupTabs(options = {}) {
         }
       }
     });
+    if (!committed) {
+      throw new Error('Auto Group stopped before its reviewed changes could be committed. Nothing was changed.');
+    }
     if (postCommitWarning) {
       setStatus(postCommitWarning);
-      showStatusToast(postCommitWarning, 'error');
+      showStatusToast(postCommitWarning, 'info');
       return;
     }
     const parts = [];
     if (createdGroups) parts.push(`created ${createdGroups}`);
     if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
-    if (mergedGroups) parts.push(`merged ${mergedGroups} duplicate groups`);
+    if (duplicateGroupCount) {
+      parts.push(
+        `merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`,
+      );
+    }
     setStatus(`Auto group updated ${currentSpace().name}: ${parts.join(', ') || 'nothing changed'}.`);
   } finally {
     endPanelAction();
@@ -8518,21 +9980,58 @@ function foreignOpenOrganizationCandidateIds(organization, spaceId) {
 
 function activeChromeGroupsByTitle() {
   const byTitle = new Map();
+  const snapshotGroups = state.spaceSnapshots?.[state.activeSpaceId]?.groups || [];
+  const visibleGroups = buildSpaceViewForSpace(state.activeSpaceId);
+  const visibleGroupById = new Map(visibleGroups
+    .map((group) => [Number(group.id), group])
+    .filter(([groupId]) => Number.isSafeInteger(groupId) && groupId >= 0));
   for (const group of groups) {
     if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
-    const titleKey = chromeGroupTitleKey(group.title);
+    const logicalTitle = logicalDuplicateChromeGroupTitle(
+      group,
+      snapshotGroups,
+      visibleGroupById.get(Number(group.id)),
+    );
+    const titleKey = groupTitleKey(logicalTitle);
     if (!titleKey || byTitle.has(titleKey)) continue;
-    byTitle.set(titleKey, group);
+    byTitle.set(titleKey, {
+      ...group,
+      title: logicalTitle,
+      displayTitle: logicalTitle,
+    });
   }
   return byTitle;
 }
 
 function organizationTargetGroups(spaceId, snapshot) {
+  const snapshotGroups = snapshot?.groups || [];
+  const duplicateBuckets = spaceId === state.activeSpaceId
+    ? duplicateActiveGroupBuckets()
+    : [];
+  const duplicateGroupIds = new Set(duplicateBuckets
+    .flatMap((bucket) => bucket.map((group) => Number(group.id))));
+  const duplicateTargets = duplicateBuckets.map((bucket) => {
+    const canonicalLiveGroup = bucket[0];
+    const canonicalSnapshotTag = snapshotGroups.find((group) => (
+      !isUngroupedSnapshotGroup(group) &&
+      groupTitleKey(group?.title) === groupTitleKey(canonicalLiveGroup?.title)
+    ));
+    if (!canonicalSnapshotTag) return canonicalLiveGroup;
+    return {
+      ...canonicalLiveGroup,
+      title: Object.hasOwn(canonicalSnapshotTag, 'title')
+        ? String(canonicalSnapshotTag.title ?? '')
+        : canonicalLiveGroup.title,
+      color: canonicalSnapshotTag.color || canonicalLiveGroup.color || 'blue',
+      collapsed: Boolean(canonicalSnapshotTag.collapsed),
+    };
+  });
   const liveGroups = groups
     .filter((group) => state.groupSpaces[group.id] === spaceId)
+    .filter((group) => !duplicateGroupIds.has(Number(group.id)))
     .sort((left, right) => Number(left.id) - Number(right.id))
     .map((group) => ({ ...group, ...logicalChromeGroupTitleOverride(group) }));
-  return [...liveGroups, ...(snapshot?.groups || [])];
+  return [...duplicateTargets, ...liveGroups, ...snapshotGroups];
 }
 
 function countDuplicateActiveGroups() {
@@ -8541,43 +10040,258 @@ function countDuplicateActiveGroups() {
 
 function duplicateActiveGroupBuckets() {
   const buckets = new Map();
+  const snapshotGroups = state.spaceSnapshots?.[state.activeSpaceId]?.groups || [];
+  const visibleGroups = buildSpaceViewForSpace(state.activeSpaceId);
+  const visibleGroupById = new Map(visibleGroups
+    .map((group) => [Number(group.id), group])
+    .filter(([groupId]) => Number.isSafeInteger(groupId) && groupId >= 0));
   for (const group of groups) {
     if (state.groupSpaces[group.id] !== state.activeSpaceId) continue;
-    const titleKey = groupTitleKey(group.title);
+    const logicalTitle = logicalDuplicateChromeGroupTitle(
+      group,
+      snapshotGroups,
+      visibleGroupById.get(Number(group.id)),
+    );
+    const titleKey = groupTitleKey(logicalTitle);
     if (!titleKey) continue;
     if (!buckets.has(titleKey)) buckets.set(titleKey, []);
-    buckets.get(titleKey).push({ ...group, key: `group:${group.id}` });
+    buckets.get(titleKey).push({
+      ...group,
+      title: logicalTitle,
+      displayTitle: logicalTitle,
+      key: `group:${group.id}`,
+    });
   }
-  return [...buckets.values()].filter((bucket) => bucket.length > 1);
+  const visibleGroupKeys = visibleGroups.map((group) => group.key);
+  const durableGroupOrder = state.groupOrder?.[state.activeSpaceId] || [];
+  return [...buckets.entries()]
+    .filter(([, bucket]) => bucket.length > 1)
+    .map(([titleKey, bucket]) => {
+      const canonicalSnapshotGroup = snapshotGroups.find((group) => (
+        !isUngroupedSnapshotGroup(group) && groupTitleKey(group?.title) === titleKey
+      ));
+      const canonicalSnapshotGroupId = String(
+        canonicalSnapshotGroup?.snapshotGroupId || '',
+      ).trim();
+      const canonicalSnapshotTabIds = new Set((canonicalSnapshotGroup?.tabs || [])
+        .map((tab) => String(tab?.snapshotTabId || '').trim())
+        .filter(Boolean));
+      const canonicalGroupIds = tabs
+        .filter((tab) => canonicalSnapshotTabIds.has(String(
+          state.tabLifecycle?.[tab.id]?.snapshotTabId || tab.snapshotTabId || '',
+        ).trim()))
+        .map((tab) => Number(tab.groupId))
+        .filter((groupId) => Number.isSafeInteger(groupId) && groupId >= 0);
+      return orderDuplicateChromeGroups(bucket, {
+        canonicalSnapshotGroupId,
+        canonicalGroupIds,
+        tabLifecycle: state.tabLifecycle,
+        visibleGroupKeys,
+        groupOrder: durableGroupOrder,
+      });
+    });
+}
+
+function logicalDuplicateChromeGroupTitle(group, snapshotGroups = [], visibleGroup = null) {
+  const physicalTitle = String(group?.title ?? '');
+  const visibleTitle = String(visibleGroup?.title ?? '');
+  if (groupTitleKey(visibleTitle)) {
+    const visibleMatch = resolveChromeGroupTitleMatch(
+      [group],
+      visibleTitle,
+      [visibleTitle],
+    );
+    if (Number(visibleMatch?.group?.id) === Number(group?.id)) return visibleTitle;
+  }
+
+  const boundSnapshotGroupIds = new Set(tabs
+    .filter((tab) => Number(tab.groupId) === Number(group?.id))
+    .map((tab) => String(
+      state.tabLifecycle?.[tab.id]?.snapshotGroupId || tab.snapshotGroupId || '',
+    ).trim())
+    .filter(Boolean));
+  if (boundSnapshotGroupIds.size === 1) {
+    const [snapshotGroupId] = boundSnapshotGroupIds;
+    const boundSnapshotGroup = snapshotGroups.find((snapshotGroup) => (
+      String(snapshotGroup?.snapshotGroupId || '').trim() === snapshotGroupId
+    ));
+    if (boundSnapshotGroup && Object.hasOwn(boundSnapshotGroup, 'title')) {
+      return String(boundSnapshotGroup.title ?? '');
+    }
+  }
+
+  const logicalTitles = snapshotGroups
+    .filter((snapshotGroup) => !isUngroupedSnapshotGroup(snapshotGroup))
+    .map((snapshotGroup) => String(snapshotGroup?.title ?? ''));
+  const physicalMatches = new Map();
+  for (const logicalTitle of logicalTitles) {
+    const match = resolveChromeGroupTitleMatch([group], logicalTitle, logicalTitles);
+    if (Number(match?.group?.id) === Number(group?.id)) {
+      physicalMatches.set(groupTitleKey(logicalTitle), logicalTitle);
+    }
+  }
+  if (physicalMatches.size === 1) return physicalMatches.values().next().value;
+  return physicalTitle;
 }
 
 function fingerprintDuplicateActiveGroups() {
   const buckets = duplicateActiveGroupBuckets().map((bucket) => ({
     title: groupTitleKey(bucket[0]?.title),
-    groups: bucket
-      .map((group) => ({
-        id: Number(group.id),
-        tabIds: tabs
-          .filter((tab) => Number(tab.groupId) === Number(group.id))
-          .map((tab) => Number(tab.id))
-          .filter(Number.isFinite)
-          .sort((left, right) => left - right),
-      }))
-      .sort((left, right) => left.id - right.id),
+    groups: bucket.map((group) => ({
+      id: Number(group.id),
+      title: String(group.title ?? ''),
+      color: String(group.color || ''),
+      collapsed: Boolean(group.collapsed),
+      tabIds: orderedLiveTabIdsForChromeGroup(group.id),
+    })),
   }));
   buckets.sort((left, right) => left.title.localeCompare(right.title));
   return JSON.stringify(buckets);
 }
 
+function fingerprintTidyDuplicateTags(snapshot) {
+  const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(snapshot, snapshot?.updatedAt);
+  const liveGroups = JSON.parse(fingerprintDuplicateActiveGroups());
+  const duplicateTitleKeys = new Set([
+    ...duplicateSnapshotPlan.merges.map((merge) => groupTitleKey(merge.title)),
+    ...liveGroups.map((bucket) => groupTitleKey(bucket.title)),
+  ]);
+  const duplicatePhysicalTitleKeys = new Set(liveGroups
+    .map((bucket) => chromeGroupTitleKey(bucket.title)));
+  return JSON.stringify({
+    snapshotGroups: (snapshot?.groups || [])
+      .filter((group) => (
+        duplicateTitleKeys.has(groupTitleKey(group?.title)) ||
+        duplicatePhysicalTitleKeys.has(chromeGroupTitleKey(group?.title))
+      )),
+    liveGroups,
+  });
+}
+
+function remapMergedSnapshotGroupReferences(snapshotGroupIds) {
+  if (!snapshotGroupIds || Object.keys(snapshotGroupIds).length === 0) return;
+  state.tabLifecycle = remapTabLifecycleGroupReferences(state.tabLifecycle, {
+    snapshotGroupIds,
+  });
+  for (const virtualGroup of Object.values(state.virtualGroups || {})) {
+    const snapshotGroupId = String(virtualGroup?.snapshotGroupId || '').trim();
+    if (Object.hasOwn(snapshotGroupIds, snapshotGroupId)) {
+      virtualGroup.snapshotGroupId = snapshotGroupIds[snapshotGroupId];
+    }
+  }
+  recentlyOpenedDormantTabs = recentlyOpenedDormantTabs.map((record) => {
+    const snapshotGroupId = String(record?.snapshotGroupId || '').trim();
+    return Object.hasOwn(snapshotGroupIds, snapshotGroupId)
+      ? { ...record, snapshotGroupId: snapshotGroupIds[snapshotGroupId] }
+      : record;
+  });
+}
+
+function captureMergedSnapshotGroupReferences(snapshotGroupIds) {
+  const replacements = snapshotGroupIds && typeof snapshotGroupIds === 'object'
+    ? snapshotGroupIds
+    : {};
+  const capturedLifecycle = {};
+  for (const [tabId, binding] of Object.entries(state.tabLifecycle || {})) {
+    const snapshotGroupId = String(binding?.snapshotGroupId || '').trim();
+    if (!Object.hasOwn(replacements, snapshotGroupId)) continue;
+    capturedLifecycle[tabId] = {
+      snapshotGroupId,
+      mergedSnapshotGroupId: replacements[snapshotGroupId],
+      snapshotTabId: String(binding?.snapshotTabId || '').trim(),
+    };
+  }
+  const capturedVirtualGroups = {};
+  for (const [virtualGroupId, virtualGroup] of Object.entries(state.virtualGroups || {})) {
+    const snapshotGroupId = String(virtualGroup?.snapshotGroupId || '').trim();
+    if (!Object.hasOwn(replacements, snapshotGroupId)) continue;
+    capturedVirtualGroups[virtualGroupId] = {
+      snapshotGroupId,
+      mergedSnapshotGroupId: replacements[snapshotGroupId],
+    };
+  }
+  const capturedRecentlyOpened = recentlyOpenedDormantTabs
+    .filter((record) => Object.hasOwn(
+      replacements,
+      String(record?.snapshotGroupId || '').trim(),
+    ))
+    .map((record) => ({
+      tabId: Number(record?.tabId),
+      snapshotTabId: String(record?.snapshotTabId || '').trim(),
+      url: String(record?.url || ''),
+      snapshotGroupId: String(record?.snapshotGroupId || '').trim(),
+      mergedSnapshotGroupId: replacements[String(record?.snapshotGroupId || '').trim()],
+    }));
+  return {
+    tabLifecycle: capturedLifecycle,
+    virtualGroups: capturedVirtualGroups,
+    recentlyOpenedDormantTabs: capturedRecentlyOpened,
+  };
+}
+
+function restoreMergedSnapshotGroupReferences(captured = {}) {
+  for (const [tabId, reference] of Object.entries(captured.tabLifecycle || {})) {
+    const binding = state.tabLifecycle?.[tabId];
+    if (
+      !binding ||
+      String(binding.snapshotGroupId || '').trim() !==
+        String(reference?.mergedSnapshotGroupId || '').trim() ||
+      (
+        reference?.snapshotTabId &&
+        String(binding.snapshotTabId || '').trim() !== String(reference.snapshotTabId)
+      )
+    ) continue;
+    binding.snapshotGroupId = reference.snapshotGroupId;
+  }
+  for (const [virtualGroupId, reference] of Object.entries(captured.virtualGroups || {})) {
+    const virtualGroup = state.virtualGroups?.[virtualGroupId];
+    if (
+      virtualGroup &&
+      String(virtualGroup.snapshotGroupId || '').trim() ===
+        String(reference?.mergedSnapshotGroupId || '').trim()
+    ) {
+      virtualGroup.snapshotGroupId = reference.snapshotGroupId;
+    }
+  }
+  recentlyOpenedDormantTabs = recentlyOpenedDormantTabs.map((record) => {
+    const reference = (captured.recentlyOpenedDormantTabs || []).find((candidate) => (
+      (
+        Number.isSafeInteger(Number(candidate?.tabId)) &&
+        Number(candidate.tabId) === Number(record?.tabId)
+      ) ||
+      (
+        candidate?.snapshotTabId &&
+        candidate.snapshotTabId === String(record?.snapshotTabId || '').trim()
+      )
+    ));
+    return reference &&
+      String(record?.snapshotGroupId || '').trim() ===
+        String(reference.mergedSnapshotGroupId || '').trim()
+      ? { ...record, snapshotGroupId: reference.snapshotGroupId }
+      : record;
+  });
+}
+
 async function mergeDuplicateGroupsInActiveSpace(options = {}) {
   let merged = 0;
   for (const bucket of duplicateActiveGroupBuckets()) {
-    const [keep, ...duplicates] = [...bucket]
-      .sort((left, right) => Number(left.id) - Number(right.id));
+    const reviewedCanonicalGroupId = Number(
+      options.canonicalGroupIdsByTitle?.get(groupTitleKey(bucket[0]?.title)),
+    );
+    const reviewedKeep = Number.isSafeInteger(reviewedCanonicalGroupId)
+      ? bucket.find((group) => Number(group.id) === reviewedCanonicalGroupId)
+      : null;
+    const keep = reviewedKeep || bucket[0];
+    const duplicates = bucket.filter((group) => Number(group.id) !== Number(keep.id));
+    const canonicalSnapshotTag = (state.spaceSnapshots?.[state.activeSpaceId]?.groups || [])
+      .find((group) => (
+        !isUngroupedSnapshotGroup(group) &&
+        groupTitleKey(group?.title) === groupTitleKey(keep?.title)
+      ));
+    let mergedTabOrder = orderedLiveTabIdsForChromeGroup(keep.id);
     for (const duplicate of duplicates) {
-      const tabIds = tabs
-        .filter((tab) => Number(tab.groupId) === Number(duplicate.id))
-        .map((tab) => tab.id);
+      const tabIds = orderedLiveTabIdsForChromeGroup(duplicate.id);
+      mergedTabOrder = uniqueKeys([...mergedTabOrder, ...tabIds]);
       if (tabIds.length) {
         const mergedGroupId = await addTabsToChromeGroup(
           keep.id,
@@ -8589,6 +10303,9 @@ async function mergeDuplicateGroupsInActiveSpace(options = {}) {
           throw new Error(`Chrome could not merge duplicate group "${keep.title || 'Tabs'}".`);
         }
       }
+      state.tabLifecycle = remapTabLifecycleGroupReferences(state.tabLifecycle, {
+        chromeGroupIds: { [duplicate.id]: keep.id },
+      });
       delete state.groupSpaces[duplicate.id];
       delete state.collapsedGroups[duplicate.key];
       delete state.tabOrder[state.activeSpaceId]?.[duplicate.key];
@@ -8596,9 +10313,88 @@ async function mergeDuplicateGroupsInActiveSpace(options = {}) {
         .filter((key) => key !== duplicate.key);
       merged += 1;
     }
+    if (canonicalSnapshotTag) {
+      const logicalTitle = Object.hasOwn(canonicalSnapshotTag, 'title')
+        ? String(canonicalSnapshotTag.title ?? '')
+        : String(keep.title || 'Tabs');
+      const normalizedLogicalTitle = logicalTitle === ''
+        ? ''
+        : normalizeGroupTitle(logicalTitle, 'Tabs');
+      const physicalTitle = normalizedLogicalTitle === ''
+        ? ''
+        : chromeGroupTitle(normalizedLogicalTitle, 'Tabs');
+      const canonicalColor = canonicalSnapshotTag.color || keep.color || 'blue';
+      const canonicalCollapsed = Boolean(canonicalSnapshotTag.collapsed);
+      if (
+        String(keep.title ?? '') !== physicalTitle ||
+        String(keep.color || '') !== canonicalColor ||
+        Boolean(keep.collapsed) !== canonicalCollapsed
+      ) {
+        const result = await send('groups:update', {
+          groupId: keep.id,
+          update: {
+            title: physicalTitle,
+            color: canonicalColor,
+            collapsed: canonicalCollapsed,
+          },
+        }, { windowBinding: options.windowBinding });
+        if (!result.group) {
+          throw new Error(`Chrome could not preserve the first duplicate Tag "${logicalTitle || 'Tabs'}".`);
+        }
+        Object.assign(keep, result.group);
+      }
+      logicalChromeGroupTitles.set(Number(keep.id), normalizedLogicalTitle);
+      state.collapsedGroups[keep.key] = canonicalCollapsed;
+    }
+    if (mergedTabOrder.length > 0) {
+      ensureTabOrderForSpace(state.activeSpaceId)[keep.key] = mergedTabOrder;
+    }
     addGroupOrderKey(state.activeSpaceId, keep.key);
   }
   return merged;
+}
+
+function canonicalLiveChromeGroupIdsByTitle(snapshot = null) {
+  const canonicalByTitle = new Map();
+  const liveTabById = new Map(tabs.map((tab) => [Number(tab.id), tab]));
+  for (const snapshotGroup of snapshot?.groups || []) {
+    if (isUngroupedSnapshotGroup(snapshotGroup)) continue;
+    const titleKey = groupTitleKey(snapshotGroup?.title);
+    if (!titleKey || canonicalByTitle.has(titleKey)) continue;
+    const snapshotGroupId = String(snapshotGroup?.snapshotGroupId || '').trim();
+    const snapshotTabIds = new Set((snapshotGroup?.tabs || [])
+      .map((tab) => String(tab?.snapshotTabId || '').trim())
+      .filter(Boolean));
+    const matchingGroupIds = new Set(Object.values(state.tabLifecycle || {})
+      .filter((binding) => (
+        String(binding?.snapshotGroupId || '').trim() === snapshotGroupId &&
+        snapshotTabIds.has(String(binding?.snapshotTabId || '').trim())
+      ))
+      .map((binding) => {
+        const liveTab = liveTabById.get(Number(binding?.tabId));
+        return liveTab && Number(liveTab.groupId) === Number(binding?.groupId)
+          ? Number(binding.groupId)
+          : null;
+      })
+      .filter((groupId) => Number.isSafeInteger(groupId) && groupId >= 0));
+    if (matchingGroupIds.size === 1) {
+      canonicalByTitle.set(titleKey, matchingGroupIds.values().next().value);
+    }
+  }
+  return canonicalByTitle;
+}
+
+function orderedLiveTabIdsForChromeGroup(groupId) {
+  const numericGroupId = Number(groupId);
+  const visibleGroup = buildSpaceViewForSpace(state.activeSpaceId)
+    .find((group) => Number(group.id) === numericGroupId);
+  const visibleIds = liveTabsForOrdering(visibleGroup).map((tab) => Number(tab.id));
+  if (visibleIds.length > 0) return visibleIds;
+  return tabs
+    .filter((tab) => Number(tab.groupId) === numericGroupId)
+    .sort((left, right) => Number(left.index) - Number(right.index))
+    .map((tab) => Number(tab.id))
+    .filter(Number.isFinite);
 }
 
 function assertLivePlannedGroupsApplied(livePlannedGroups, spaceId) {
@@ -8632,21 +10428,27 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
       const snapshotTabId = validSnapshotLifecycleId(
         candidate?.source?.snapshot?.snapshotTabId || binding?.snapshotTabId,
       );
-      const matchingSnapshotGroups = snapshotGroups.filter((group) => (
-        groupTitleKey(group?.title) === groupTitleKey(plannedGroup.title) &&
-        (group?.tabs || []).some((tab) => (
-          validSnapshotLifecycleId(tab?.snapshotTabId) === snapshotTabId
-        ))
-      ));
-      const targetSnapshotGroupId = matchingSnapshotGroups.length === 1
-        ? validSnapshotLifecycleId(matchingSnapshotGroups[0]?.snapshotGroupId)
+      const matchingSnapshotGroup = uniqueSnapshotGroupForTabId(
+        snapshotGroups,
+        snapshotTabId,
+      );
+      const targetSnapshotGroupId = matchingSnapshotGroup
+        ? validSnapshotLifecycleId(matchingSnapshotGroup.snapshotGroupId)
         : '';
       if (
         !currentTab || !isGroupedTab(currentTab) || !binding ||
         !snapshotTabId || !targetSnapshotGroupId
       ) {
+        const stableMatchCount = snapshotGroups.filter((group) => (
+          (group?.tabs || []).some((tab) => (
+            validSnapshotLifecycleId(tab?.snapshotTabId) === snapshotTabId
+          ))
+        )).length;
         throw new Error(
-          `The stable saved row for "${plannedGroup.title || 'Tabs'}" could not be checkpointed. ` +
+          `The stable saved row for "${plannedGroup.title || 'Tabs'}" could not be checkpointed ` +
+          `(row ${snapshotTabId || 'missing'}, matches ${stableMatchCount}, ` +
+          `live ${Boolean(currentTab)}, grouped ${Boolean(currentTab && isGroupedTab(currentTab))}, ` +
+          `binding ${Boolean(binding)}, target ${targetSnapshotGroupId || 'missing'}). ` +
           'The Auto Group change was rolled back.',
         );
       }
@@ -11193,29 +12995,69 @@ function buildSpaceViewForSpace(spaceId, options = {}) {
     collapsedGroups: state.collapsedGroups,
     includeUngrouped: true,
   })
-    .map((group) => {
-      const contentTabs = group.tabs.filter((tab) => !isEphemeralTab(tab));
-      const lifecycleGroupIds = new Set(contentTabs
-        .map((tab) => String(tab.snapshotGroupId || ''))
-        .filter(Boolean));
-      return {
-        ...group,
-        ...logicalChromeGroupTitleOverride(group),
-        spaceId,
-        ...(lifecycleGroupIds.size === 1
-          ? { snapshotGroupId: lifecycleGroupIds.values().next().value }
-          : {}),
-        tabs: contentTabs.map((tab) => ({ ...tab, spaceId })),
-      };
-    })
+    .map((group) => projectLifecycleAwareLiveGroup(group, spaceId, {
+      attachSpaceId: true,
+      filterEphemeral: true,
+    }))
     .filter((group) => group.tabs.length > 0 || group.key === 'ungrouped');
+}
+
+function projectLifecycleAwareLiveGroup(group = {}, spaceId = '', options = {}) {
+  const identityTabs = (group.tabs || []).filter((tab) => !isEphemeralTab(tab));
+  const visibleTabs = options.filterEphemeral ? identityTabs : (group.tabs || []);
+  const lifecycleGroupIds = new Set(identityTabs
+    .map((tab) => String(tab.snapshotGroupId || '').trim())
+    .filter(Boolean));
+  return {
+    ...group,
+    ...logicalChromeGroupTitleOverride(group),
+    ...snapshotLogicalChromeGroupTitleOverride(group, identityTabs, spaceId),
+    ...(options.attachSpaceId ? { spaceId } : {}),
+    ...(lifecycleGroupIds.size === 1
+      ? { snapshotGroupId: lifecycleGroupIds.values().next().value }
+      : {}),
+    tabs: options.attachSpaceId
+      ? visibleTabs.map((tab) => ({ ...tab, spaceId }))
+      : visibleTabs,
+  };
+}
+
+function snapshotLogicalChromeGroupTitleOverride(group = {}, contentTabs = [], spaceId = '') {
+  if (!Number.isSafeInteger(Number(group.id)) || Number(group.id) < 0) return {};
+  const snapshotGroupIds = new Set((contentTabs || [])
+    .map((tab) => String(tab?.snapshotGroupId || '').trim())
+    .filter(Boolean));
+  if (snapshotGroupIds.size !== 1) return {};
+  const snapshotGroupId = snapshotGroupIds.values().next().value;
+  const snapshotGroup = (state.spaceSnapshots?.[spaceId]?.groups || []).find((candidate) => (
+    String(candidate?.snapshotGroupId || '').trim() === snapshotGroupId
+  ));
+  if (!snapshotGroup || !Object.hasOwn(snapshotGroup, 'title')) return {};
+  const logicalTitle = String(snapshotGroup.title ?? '');
+  if (logicalTitle === '') {
+    if (String(group.title ?? '') !== '') return {};
+  } else {
+    const match = resolveChromeGroupTitleMatch(
+      [group],
+      logicalTitle,
+      logicalGroupTitlesForSpace(spaceId),
+    );
+    if (Number(match?.group?.id) !== Number(group.id)) return {};
+  }
+  logicalChromeGroupTitles.set(Number(group.id), logicalTitle);
+  return { title: logicalTitle, displayTitle: logicalTitle };
 }
 
 function logicalChromeGroupTitleOverride(group = {}) {
   const groupId = Number(group.id);
   if (!Number.isFinite(groupId) || !logicalChromeGroupTitles.has(groupId)) return {};
   const logicalTitle = String(logicalChromeGroupTitles.get(groupId) ?? '');
-  if (chromeGroupTitleKey(group.title) !== chromeGroupTitleKey(logicalTitle)) return {};
+  if (logicalTitle === '') {
+    if (String(group.title ?? '') !== '') return {};
+  } else {
+    const match = resolveChromeGroupTitleMatch([group], logicalTitle, [logicalTitle]);
+    if (Number(match?.group?.id) !== groupId) return {};
+  }
   return { title: logicalTitle, displayTitle: logicalTitle };
 }
 
@@ -11458,21 +13300,38 @@ async function chromeGroupForTitle(title, spaceId = state.activeSpaceId, options
   return match.group;
 }
 
-function chromeGroupForSnapshotIdentity(snapshotGroup, spaceId = state.activeSpaceId) {
+function chromeGroupForSnapshotIdentity(
+  snapshotGroup,
+  spaceId = state.activeSpaceId,
+  sourceTabs = tabs,
+) {
   const snapshotGroupId = validSnapshotLifecycleId(snapshotGroup?.snapshotGroupId);
   if (!snapshotGroupId) return null;
-  const counts = new Map();
-  for (const tab of tabs) {
+  const candidates = new Map();
+  for (const tab of sourceTabs) {
     const binding = state.tabLifecycle?.[tab.id];
+    const tabSnapshotGroupId = validSnapshotLifecycleId(
+      binding?.snapshotGroupId || tab.snapshotGroupId,
+    );
     if (
       !isGroupedTab(tab) ||
-      validSnapshotLifecycleId(binding?.snapshotGroupId || tab.snapshotGroupId) !== snapshotGroupId ||
       (binding?.spaceId || tab.spaceId) !== spaceId
     ) continue;
-    counts.set(Number(tab.groupId), (counts.get(Number(tab.groupId)) || 0) + 1);
+    const groupId = Number(tab.groupId);
+    if (!candidates.has(groupId)) {
+      candidates.set(groupId, { matching: 0, snapshotGroupIds: new Set() });
+    }
+    const candidate = candidates.get(groupId);
+    if (tabSnapshotGroupId) candidate.snapshotGroupIds.add(tabSnapshotGroupId);
+    if (tabSnapshotGroupId === snapshotGroupId) candidate.matching += 1;
   }
-  const groupId = [...counts.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0];
+  const groupId = [...candidates.entries()]
+    .filter(([, candidate]) => (
+      candidate.matching > 0 &&
+      candidate.snapshotGroupIds.size === 1 &&
+      candidate.snapshotGroupIds.has(snapshotGroupId)
+    ))
+    .sort((left, right) => right[1].matching - left[1].matching || left[0] - right[0])[0]?.[0];
   if (!Number.isSafeInteger(groupId)) return null;
   const group = groups.find((candidate) => Number(candidate.id) === groupId);
   if (!group) return null;

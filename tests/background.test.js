@@ -532,6 +532,7 @@ function jsonResponse(payload, options = {}) {
   return {
     ok: options.ok ?? true,
     status: options.status ?? 200,
+    statusText: options.statusText ?? '',
     headers: { get: (name) => name.toLowerCase() === 'content-type' ? (options.contentType || 'application/json') : null },
     async json() { return payload; },
     async text() { return options.rawBody ?? JSON.stringify(payload); },
@@ -1542,6 +1543,283 @@ test('guarded batch closes report changed targets as protected skips with exact 
   assert.deepEqual([...background.tabs.keys()].sort((left, right) => left - right), [14, 15, 16, 17]);
 });
 
+test('required active close survivors protect both snapshot preservation paths before removal', async () => {
+  const targetId = 60;
+  const cases = [
+    {
+      name: 'active survivor',
+      survivorId: 61,
+      tabs: [makeTab(targetId), makeTab(61, { active: true })],
+      reason: null,
+    },
+    {
+      name: 'missing survivor',
+      survivorId: 62,
+      tabs: [makeTab(targetId)],
+      reason: 'survivor-missing',
+    },
+    {
+      name: 'inactive survivor',
+      survivorId: 63,
+      tabs: [makeTab(targetId), makeTab(63)],
+      reason: 'survivor-not-active',
+    },
+    {
+      name: 'cross-window survivor',
+      survivorId: 64,
+      tabs: [makeTab(targetId), makeTab(64, { active: true, windowId: 2 })],
+      reason: 'survivor-wrong-window',
+    },
+    {
+      name: 'closing tab as survivor',
+      survivorId: targetId,
+      tabs: [makeTab(targetId, { active: true })],
+      reason: 'survivor-same-tab',
+    },
+  ];
+
+  for (const preserveSnapshot of [true, false]) {
+    for (const entry of cases) {
+      const background = await loadBackground({
+        tabs: entry.tabs,
+        storage: preserveSnapshot ? { local: {}, session: {} } : false,
+      });
+      const response = await background.send({
+        type: 'tabs:close',
+        tabId: targetId,
+        preserveSnapshot,
+        requiredActiveSurvivorTabId: entry.survivorId,
+        skipChanged: true,
+        closeGuard: {
+          tabId: targetId,
+          requireUnpinned: true,
+          windowId: 1,
+          groupId: -1,
+          url: `https://example.test/${targetId}`,
+        },
+      });
+      const label = `${entry.name}, preserveSnapshot=${preserveSnapshot}`;
+      const removeIndex = background.calls.findIndex(([name]) => name === 'tabs.remove');
+
+      if (entry.reason) {
+        assert.deepEqual(response, {
+          ok: true,
+          skipped: true,
+          reason: entry.reason,
+        }, label);
+        assert.equal(background.tabs.has(targetId), true, label);
+        assert.equal(removeIndex, -1, label);
+        if (preserveSnapshot) {
+          assert.equal(
+            background.calls.some(([name]) => name === 'storage.session.remove'),
+            true,
+            `${label} cleans its suppression marker`,
+          );
+        }
+        continue;
+      }
+
+      assert.deepEqual(response, { ok: true }, label);
+      assert.equal(background.tabs.has(targetId), false, label);
+      assert.equal(background.tabs.has(entry.survivorId), true, label);
+      const survivorReadIndex = background.calls.findLastIndex(([name, id]) => (
+        name === 'tabs.get' && Number(id) === entry.survivorId
+      ));
+      assert.ok(survivorReadIndex >= 0 && survivorReadIndex < removeIndex, label);
+    }
+  }
+});
+
+test('active survivor checks follow close guards and fail closed on invalid or unreadable identities', async () => {
+  const invalid = await loadBackground({
+    tabs: [makeTab(70), makeTab(71, { active: true })],
+    storage: false,
+  });
+  assert.deepEqual(await invalid.send({
+    type: 'tabs:close',
+    tabId: 70,
+    preserveSnapshot: false,
+    requiredActiveSurvivorTabId: 'not-a-tab',
+    skipChanged: true,
+    closeGuard: {
+      tabId: 70,
+      requireUnpinned: true,
+      windowId: 1,
+      groupId: -1,
+      url: 'https://example.test/70',
+    },
+  }), { ok: true, skipped: true, reason: 'survivor-missing' });
+  assert.equal(invalid.calls.some(([name]) => name === 'tabs.remove'), false);
+
+  const staleGuard = await loadBackground({
+    tabs: [makeTab(72), makeTab(73, { active: true })],
+    storage: false,
+  });
+  assert.deepEqual(await staleGuard.send({
+    type: 'tabs:close',
+    tabId: 72,
+    preserveSnapshot: false,
+    requiredActiveSurvivorTabId: 73,
+    skipChanged: true,
+    closeGuard: {
+      tabId: 72,
+      requireUnpinned: true,
+      windowId: 1,
+      groupId: -1,
+      url: 'https://stale.test/',
+    },
+  }), { ok: true, skipped: true, reason: 'navigated' });
+  assert.deepEqual(
+    staleGuard.calls.filter(([name]) => name === 'tabs.get').map(([, id]) => id),
+    [72],
+  );
+  assert.equal(staleGuard.calls.some(([name]) => name === 'tabs.remove'), false);
+
+  let denied;
+  denied = await loadBackground({
+    tabs: [makeTab(74), makeTab(75, { active: true })],
+    storage: false,
+    behavior: {
+      'tabs.get': async (tabId) => {
+        if (Number(tabId) === 75) throw new Error('Survivor lookup denied');
+        return { ...denied.tabs.get(Number(tabId)) };
+      },
+    },
+  });
+  assert.deepEqual(await denied.send({
+    type: 'tabs:close',
+    tabId: 74,
+    preserveSnapshot: false,
+    requiredActiveSurvivorTabId: 75,
+    closeGuard: {
+      tabId: 74,
+      requireUnpinned: true,
+      windowId: 1,
+      groupId: -1,
+      url: 'https://example.test/74',
+    },
+  }), { ok: false, error: 'Survivor lookup denied' });
+  assert.equal(denied.calls.some(([name]) => name === 'tabs.remove'), false);
+
+  let lateInactive;
+  lateInactive = await loadBackground({
+    tabs: [makeTab(76), makeTab(77, { active: true })],
+    storage: { local: {}, session: {} },
+    behavior: {
+      'storage.session.set': async () => {
+        lateInactive.tabs.get(77).active = false;
+      },
+    },
+  });
+  assert.deepEqual(await lateInactive.send({
+    type: 'tabs:close',
+    tabId: 76,
+    requiredActiveSurvivorTabId: 77,
+    skipChanged: true,
+    closeGuard: {
+      tabId: 76,
+      requireUnpinned: true,
+      windowId: 1,
+      groupId: -1,
+      url: 'https://example.test/76',
+    },
+  }), { ok: true, skipped: true, reason: 'survivor-not-active' });
+  assert.equal(lateInactive.calls.some(([name]) => name === 'tabs.remove'), false);
+  assert.equal(lateInactive.calls.some(([name]) => name === 'storage.session.remove'), true);
+});
+
+test('required target guards keep every materialized Space sibling in place until physical removal', async () => {
+  const targetGuard = { tabId: 82, windowId: 1, groupId: 7 };
+  for (const preserveSnapshot of [true, false]) {
+    const valid = await loadBackground({
+      tabs: [makeTab(80), makeTab(81, { active: true }), makeTab(82, { groupId: 7 })],
+      storage: preserveSnapshot ? { local: {}, session: {} } : false,
+    });
+    assert.deepEqual(await valid.send({
+      type: 'tabs:close',
+      tabId: 80,
+      preserveSnapshot,
+      requiredActiveSurvivorTabId: 81,
+      requiredTargetTabGuards: [targetGuard],
+      skipChanged: true,
+    }), { ok: true });
+    assert.equal(valid.tabs.has(80), false);
+
+    const changed = await loadBackground({
+      tabs: [makeTab(80), makeTab(81, { active: true }), makeTab(82, { groupId: 8 })],
+      storage: preserveSnapshot ? { local: {}, session: {} } : false,
+    });
+    assert.deepEqual(await changed.send({
+      type: 'tabs:close',
+      tabId: 80,
+      preserveSnapshot,
+      requiredActiveSurvivorTabId: 81,
+      requiredTargetTabGuards: [targetGuard],
+      skipChanged: true,
+    }), { ok: true, skipped: true, reason: 'target-wrong-group' });
+    assert.equal(changed.tabs.has(80), true);
+    assert.equal(changed.calls.some(([name]) => name === 'tabs.remove'), false);
+    if (preserveSnapshot) {
+      assert.equal(changed.calls.some(([name]) => name === 'storage.session.remove'), true);
+    }
+  }
+
+  const invalidCases = [
+    { guards: {}, reason: 'target-missing' },
+    { guards: Array.from({ length: 513 }, () => targetGuard), reason: 'target-missing' },
+    { guards: [{ ...targetGuard, tabId: 'invalid' }], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, tabId: 80 }], reason: 'target-missing' },
+    { guards: [targetGuard, targetGuard], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, windowId: 'invalid' }], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, groupId: 1.5 }], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, groupId: -2 }], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, tabId: 99 }], reason: 'target-missing' },
+    { guards: [{ ...targetGuard, windowId: 2 }], reason: 'target-wrong-window' },
+    { guards: [{ ...targetGuard, groupId: -1 }], reason: 'target-wrong-group' },
+  ];
+  for (const entry of invalidCases) {
+    const background = await loadBackground({
+      tabs: [makeTab(80), makeTab(82, { groupId: 7 })],
+      storage: false,
+    });
+    assert.deepEqual(await background.send({
+      type: 'tabs:close',
+      tabId: 80,
+      preserveSnapshot: false,
+      requiredTargetTabGuards: entry.guards,
+      skipChanged: true,
+    }), { ok: true, skipped: true, reason: entry.reason });
+    assert.equal(background.tabs.has(80), true);
+  }
+
+  const empty = await loadBackground({ tabs: [makeTab(80)], storage: false });
+  assert.deepEqual(await empty.send({
+    type: 'tabs:close',
+    tabId: 80,
+    preserveSnapshot: false,
+    requiredTargetTabGuards: [],
+  }), { ok: true });
+
+  let denied;
+  denied = await loadBackground({
+    tabs: [makeTab(80), makeTab(82, { groupId: 7 })],
+    storage: false,
+    behavior: {
+      'tabs.get': async (tabId) => {
+        if (Number(tabId) === 82) throw new Error('Target lookup denied');
+        return { ...denied.tabs.get(Number(tabId)) };
+      },
+    },
+  });
+  assert.deepEqual(await denied.send({
+    type: 'tabs:close',
+    tabId: 80,
+    preserveSnapshot: false,
+    requiredTargetTabGuards: [targetGuard],
+  }), { ok: false, error: 'Target lookup denied' });
+  assert.equal(denied.tabs.has(80), true);
+});
+
 test('guarded close rechecks after suppression persistence and cleans suppression on a late race', async () => {
   let background;
   background = await loadBackground({
@@ -1809,6 +2087,18 @@ test('creates and extends Chrome groups only with live same-window tabs and pres
     tabIds: [1],
   });
   assert.deepEqual(extended, { ok: true, groupId: grouped.groupId });
+
+  const callsAfterExtension = background.calls.filter((call) => call[0] === 'tabs.group').length;
+  assert.deepEqual(await background.send({
+    type: 'tabs:groupExisting',
+    groupId: grouped.groupId,
+    tabIds: [1],
+  }), { ok: true, groupId: grouped.groupId });
+  assert.equal(
+    background.calls.filter((call) => call[0] === 'tabs.group').length,
+    callsAfterExtension,
+    'extending a group with tabs already in that group must be a physical no-op',
+  );
 
   const groupCallCount = background.calls.filter((call) => call[0] === 'tabs.group').length;
   assert.deepEqual(await background.send({
@@ -2251,6 +2541,12 @@ test('AI HTTP failures preserve provider messages, invalid bodies, and generic s
     jsonResponse({ message: 'Account disabled' }, { ok: false, status: 403 }),
     jsonResponse(null, { ok: false, status: 502, rawBody: '<html>gateway down</html>' }),
     jsonResponse({}, { ok: false, status: 503, rawBody: '{}' }),
+    jsonResponse({ error: 'Quota unavailable' }, { ok: false, status: 429 }),
+    jsonResponse({ message: 'Null code', code: null }, { ok: false, status: 400 }),
+    jsonResponse({ error: { message: 'Blank code', code: '   ' } }, { ok: false, status: 400 }),
+    jsonResponse({ message: 'Denied', code: 'request_denied' }, { ok: false, status: 401 }),
+    jsonResponse(null, { ok: false, status: 503, rawBody: '', statusText: 'Service unavailable' }),
+    jsonResponse(null, { ok: false, status: 520, rawBody: '', statusText: '' }),
   ];
   const background = await loadBackground({ fetch: async () => responses.shift() });
   const request = { type: 'ai:chat', settings: aiSettings, messages: [], purpose: 'test-ai' };
@@ -2269,6 +2565,30 @@ test('AI HTTP failures preserve provider messages, invalid bodies, and generic s
   assert.deepEqual(await background.send(request), {
     ok: false,
     error: 'AI provider rejected the request (HTTP 503): {}',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 429): Quota unavailable',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 400): Null code',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 400): Blank code',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 401, code request_denied): Denied',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 503): Service unavailable',
+  });
+  assert.deepEqual(await background.send(request), {
+    ok: false,
+    error: 'AI provider rejected the request (HTTP 520): Request failed',
   });
 });
 
@@ -3769,6 +4089,8 @@ test('a compact Chrome title uniquely resolves its full logical snapshot Tag', a
   state.spaceSnapshots.work.groups[0].title = logicalTitle;
   state.spaceSnapshots.work.groups[0].color = 'purple';
   state.groupSpaces[999] = 'work';
+  state.tabLifecycle[10].groupId = 999;
+  state.tabLifecycle[10].snapshotGroupId = '';
   const background = await loadBackground({
     tabs: [makeTab(10, { groupId: 999 })],
     groups: [makeGroup(999, { title: chromeGroupTitle(logicalTitle), color: 'purple' })],
@@ -5549,6 +5871,35 @@ test('lifecycle group fallbacks handle invalid records, missing APIs, and duplic
   assert.notEqual(
     ambiguousMetadata.storageLocal[STORAGE_KEY].tabLifecycle[50].snapshotGroupId,
     'group-docs-copy',
+  );
+});
+
+test('an exact restored tab-group binding keeps its historical Tag identity', async () => {
+  const state = lifecycleWorkspace();
+  state.groupSpaces[300] = 'work';
+  state.tabLifecycle[50] = {
+    tabId: 50,
+    snapshotTabId: 'restored-row',
+    snapshotGroupId: 'restored-historical-group',
+    spaceId: 'work',
+    groupId: 300,
+    sessionId: LIFECYCLE_SESSION_ID,
+  };
+  const background = await loadBackground({
+    tabs: [makeTab(50, { groupId: 300 })],
+    groups: [makeGroup(300, { title: 'Restored physical Tag', color: 'purple' })],
+    storage: lifecycleStorage(state),
+  });
+
+  await emitAndDrain(background, () => background.emitUpdated(
+    50,
+    { groupId: 300 },
+    background.tabs.get(50),
+  ));
+
+  assert.equal(
+    background.storageLocal[STORAGE_KEY].tabLifecycle[50].snapshotGroupId,
+    'restored-historical-group',
   );
 });
 

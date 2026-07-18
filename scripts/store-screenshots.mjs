@@ -441,10 +441,16 @@ function storeShotHtml(shot) {
       const scenario = ${JSON.stringify(scenario)};
       const STORAGE_KEY = 'spaceTabsState';
       const RUNTIME_KEY = 'spaceTabsPreviewRuntime';
+      const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
       localStorage.clear();
       sessionStorage.clear();
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: scenario.state }));
       sessionStorage.setItem(RUNTIME_KEY, JSON.stringify(scenario.runtime));
+      if (scenario.secrets) {
+        sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify({
+          [SECRET_STORAGE_KEY]: { ai: scenario.secrets },
+        }));
+      }
 
       const panel = document.querySelector('#panel');
       panel.addEventListener('load', async () => {
@@ -591,8 +597,15 @@ function storeShotHtml(shot) {
 function scenarioFor(shot) {
   const state = baseState(shot.activeSpaceId);
   const runtime = baseRuntime();
+  let secrets = null;
   if (shot.id === 'arc-import') state.onboarding = { version: 2, completed: false, stage: 'choose' };
-  if (shot.id === 'ask') state.ai.apiKey = 'store-preview-fixture-key';
+  if (shot.id === 'ask' || shot.id === 'auto-group') {
+    secrets = {
+      provider: state.ai.provider,
+      baseUrl: state.ai.baseUrl,
+      apiKey: 'store-preview-fixture-key',
+    };
+  }
   if (shot.id === 'auto-group') {
     state.spaceSnapshots.launch = {
       version: 1,
@@ -614,6 +627,7 @@ function scenarioFor(shot) {
   return {
     state,
     runtime,
+    secrets,
     action: shot.id,
   };
 }

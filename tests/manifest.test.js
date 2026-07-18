@@ -272,27 +272,82 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
-test('Workbench setup and Space switching preserve the Workbench surface', async () => {
+test('Workbench setup preserves its surface while Space switching keeps the target active', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const switchSource = source.slice(
-    source.indexOf('async function switchSpace'),
-    source.indexOf('async function closeTabsAndForgetMetadata'),
-  );
+  const switchSource = functionSource(source, 'switchSpace');
+  const materializeSource = functionSource(source, 'materializeSpaceSwitchTarget');
+  const closeSource = functionSource(source, 'closeSpaceSwitchSourceTabs');
 
   assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
   assert.match(source, /async function activateSpace\(spaceId, options = \{\}\)[\s\S]*return switchSpace\(spaceId, \{ \.\.\.options, windowBinding \}\)/);
   assert.match(source, /if \(spaceId === state\.activeSpaceId\) \{[\s\S]*activeView = 'space';[\s\S]*render\(\);[\s\S]*return true;[\s\S]*\}\s*return switchSpace/);
-  assert.match(switchSource, /captureWorkspaceMemoryCheckpoint\(\)[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*state\.activeSpaceId = spaceId[\s\S]*durableActiveSpaceId = spaceId[\s\S]*loadDormantSpaceView\(spaceId, \{ force: true \}\)[\s\S]*saveState\(\{ windowBinding \}\)/);
-  assert.match(switchSource, /restoreWorkspaceMemoryCheckpoint\(checkpoint\);/);
-  assert.match(switchSource, /saveState\(\{ windowBinding \}\)[\s\S]*try \{\s*render\(\)[\s\S]*if \(!postCommitWarning && !preserveBrowserFocus\)[\s\S]*focusFirstTabInSpace\(spaceId, \{ force: true, reload: false \}\)/);
-  assert.match(switchSource, /saved !== true[\s\S]*restoreWorkspaceMemoryCheckpoint\(checkpoint\)/,
-    'only a stale-before-write result may roll the switch memory back');
-  assert.doesNotMatch(switchSource, /saved\s*===\s*false\s*\|\|\s*!isCurrentPanelWindowBinding/);
-  assert.match(switchSource, /if \(!isCurrentPanelWindowBinding\(windowBinding\)\) \{[\s\S]*pair write already committed[\s\S]*postCommitWarning[\s\S]*\} else \{[\s\S]*render\(\)/,
-    'a host move after the pair commit is a stale-view warning, not a failed switch');
-  assert.doesNotMatch(switchSource, /ensureSwitchKeepAliveTab|withCreatedTabCheckpointRollback|closeSpaceTabs|closeEphemeralTabsExcept|closeTabsOutsideActiveSpace|closeExtraFallbackTabs|ensureSpaceOpenFromSnapshot|collapseGroupsInSpace|discardInactiveTabsInSpace|tabs:create|tabs:close|groups:update|tabs:discard/);
-  assert.equal((switchSource.match(/loadTabs\(\{ adopt: false, windowBinding \}\)/g) || []).length, 1);
+  assert.match(switchSource, /options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)[\s\S]*withCreatedTabCheckpointRollback\(createdTabIds[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*planSpaceSwitch\(/);
+  assert.match(switchSource, /const sourceCleanupTabs = uniqueSpaceSwitchTabs\([\s\S]*tabs\.filter\(isEphemeralTab\)[\s\S]*!snapshotHasPersistentContent\(sourceSnapshot\)[\s\S]*isChromeNewTabUrl\(tab\.url\)[\s\S]*tabBelongsToSpace\(tab, previousSpaceId\)[\s\S]*captureSpaceSwitchCloseTargets\([\s\S]*sourceCleanupTabs/,
+    'an empty Space fallback must close only after the next target is active instead of accumulating old New Tabs');
+  assert.doesNotMatch(switchSource, /preserveBrowserFocus|tabId: originalFocusTabId[\s\S]*state\.activeSpaceId = spaceId/,
+    'no layout may reactivate the source or Workbench before source cleanup');
+  assert.match(switchSource, /state\.activeSpaceId = spaceId[\s\S]*durableActiveSpaceId = spaceId[\s\S]*loadDormantSpaceView\(spaceId, \{ force: true \}\)[\s\S]*saveState\(\{ windowBinding \}\)/);
+  const materializeIndex = switchSource.indexOf('materializedTarget = await materializeSpaceSwitchTarget');
+  const activateIndex = switchSource.indexOf('activatedTarget = await activateSpaceSwitchTarget');
+  const saveIndex = switchSource.indexOf('const saved = await saveState({ windowBinding })');
+  const closeIndex = switchSource.indexOf('const closeOutcome = await closeSpaceSwitchSourceTabs');
+  assert.ok(materializeIndex >= 0 && materializeIndex < activateIndex,
+    'the complete target must exist before any activation attempt');
+  assert.ok(activateIndex < saveIndex && saveIndex < closeIndex,
+    'target activation and its durable commit must precede every source close');
+  assert.match(closeSource, /verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\(/,
+    'every source close must revalidate and reactivate the target survivor');
+  assert.match(switchSource, /const closeOutcome = await closeSpaceSwitchSourceTabs[\s\S]*activatedTarget = await activateSpaceSwitchTarget/,
+    'the target Space must remain active after source cleanup');
+  assert.match(switchSource, /restoreSpaceSwitchTargetMembership\(targetMembershipRollback[\s\S]*remapWorkspaceCheckpointGroups\(checkpoint, replacements\)[\s\S]*rollbackWindowBoundCreatedTabMutation\(rollbackCheckpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty[\s\S]*reactivating the original Space tab/);
+  assert.doesNotMatch(switchSource.slice(closeIndex), /rollbackWindowBoundCreatedTabMutation|restoreWorkspaceMemoryCheckpoint/,
+    'a committed switch must not roll back after physical source cleanup starts');
+  assert.match(materializeSource, /tabs:create[\s\S]*chromeGroupForSnapshotIdentity[\s\S]*addTabsToChromeGroup[\s\S]*createChromeGroup[\s\S]*rememberRestoredGroupTabOrder/);
+  assert.match(materializeSource, /retainedFallbackTabId[\s\S]*delete state\.tabLifecycle\?\.\[retainedFallbackTabId\][\s\S]*delete state\.renamedTabs\?\.\[retainedFallbackTabId\]/,
+    'a reused New Tab must not carry its old Space-only name into an empty target');
+  assert.match(materializeSource, /if \(existingGroup\)[\s\S]*normalizeSpaceSwitchChromeGroup\(groupId, sourceGroup\.group/,
+    'reused physical Tags must adopt the saved target title, color, and collapse state');
+  assert.match(materializeSource, /spaceSwitchSnapshotTabOrder[\s\S]*reorderSpaceSwitchChromeGroup\(groupId, orderedPhysicalGroupTabIds/,
+    'partial-live Tags must restore the physical Chrome order, not only the panel order');
+  assert.match(source, /async function reorderSpaceSwitchChromeGroup[\s\S]*tabs:move[\s\S]*tabs:listAll[\s\S]*Chrome did not preserve the saved target Tag order/);
+  assert.match(materializeSource, /orderSpaceSwitchPhysicalIds\([\s\S]*reorderSpaceSwitchUngroupedTabs\(orderedUngroupedTabIds[\s\S]*reorderSpaceSwitchChromeGroups\(snapshotPhysicalGroupIds/,
+    'partial Ungrouped rows and multiple saved Tags must restore physical Chrome order before activation');
+  assert.match(source, /async function reorderSpaceSwitchUngroupedTabs[\s\S]*tabs:listAll[\s\S]*tabs:move[\s\S]*Chrome did not preserve the saved target Ungrouped tab order/);
+  assert.match(source, /async function reorderSpaceSwitchChromeGroups[\s\S]*tabs:listAll[\s\S]*groups:move[\s\S]*Chrome did not preserve the saved target TagGroup order/);
+  assert.match(source, /async function restoreSpaceSwitchTargetMembership[\s\S]*restoreTabGroupMembership[\s\S]*groups:update[\s\S]*group\.color[\s\S]*group\.collapsed/,
+    'a failed partial-live switch must restore physical Tag membership and metadata');
+  assert.match(source, /async function restoreSpaceSwitchTargetMembership[\s\S]*restoreSpaceSwitchChromeGroupPositions\(membership, replacements[\s\S]*async function restoreSpaceSwitchChromeGroupPositions[\s\S]*groups:move[\s\S]*Chrome did not restore the original target TagGroup position/,
+    'failed physical TagGroup reordering must restore checkpointed group positions after id remap');
+  assert.match(switchSource, /verifyMaterializedSpaceSwitchTarget\(materializedTarget,[\s\S]*activeTabId: activeSurvivorTabId[\s\S]*saveState/,
+    'every materialized target sibling must still exist in its Tag before commit');
+  assert.match(closeSource, /spaceSwitchTargetTabGuards\([\s\S]*verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\([\s\S]*requiredActiveSurvivorTabId[\s\S]*requiredTargetTabGuards/,
+    'every destructive close must re-activate and atomically require a survivor');
   assert.match(source, /async function focusFirstTabInSpace\(spaceId, options = \{\}\)[\s\S]*options\.reload !== false[\s\S]*send\('tabs:focus'/);
+});
+
+test('new Space transactions roll back to pre-insert storage without undoing a committed switch', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const onboardingSource = functionSource(source, 'applyFreshOnboardingFromCurrentState');
+  const switchSource = functionSource(source, 'switchSpace');
+
+  const checkpointIndex = onboardingSource.indexOf('const checkpoint = captureWorkspaceMemoryCheckpoint()');
+  const insertIndex = onboardingSource.indexOf('state.spaces.push(targetSpace)');
+  const switchIndex = onboardingSource.indexOf('const switched = await switchSpace(targetSpace.id');
+  assert.ok(
+    checkpointIndex >= 0 && checkpointIndex < insertIndex && insertIndex < switchIndex,
+    'fresh onboarding must checkpoint the durable workspace before inserting its new Space',
+  );
+  assert.match(onboardingSource, /const switched = await switchSpace\(targetSpace\.id, \{[\s\S]*rollbackCheckpoint: checkpoint,[\s\S]*windowBinding: options\.windowBinding[\s\S]*if \(switched !== true\)/,
+    'fresh onboarding must give Space switching the pre-insert checkpoint');
+  assert.doesNotMatch(onboardingSource, /switched !== true \|\| !isCurrentPanelWindowBinding/,
+    'a host-window change after switchSpace reports success must not roll back its committed Space');
+  assert.match(onboardingSource, /if \(canReuseDefault\) \{[\s\S]*saved !== true \|\| !isCurrentPanelWindowBinding/,
+    'the direct-save onboarding path must retain its pre-commit window guard');
+
+  assert.match(switchSource, /const checkpoint = options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)/,
+    'switchSpace must prefer a caller checkpoint that predates a newly inserted target');
+  assert.match(switchSource, /remapWorkspaceCheckpointGroups\(checkpoint, replacements\)[\s\S]*rollbackWindowBoundCreatedTabMutation\(rollbackCheckpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty/,
+    'apply-then-reject failures must compensate storage from that selected checkpoint');
 });
 
 test('stored Space snapshots discard legacy temporary Ungrouped rows before first render', async () => {
@@ -681,7 +736,7 @@ test('deleting a Space previews and closes its tabs across every Chrome window',
   assert.match(closeAcrossWindowsSource, /tabIds: \(\) => transactionClosingTabs\.map[\s\S]*checkpointInventory = await liveSpaceDeletionInventory\(spaceId, \{ windowBinding \}\)[\s\S]*assertFreshSpaceDeletionPlan\(checkpointInventory\.plan[\s\S]*planSpaceDeletionWindowKeepalives\([\s\S]*sourceTabs: checkpointInventory\.allTabs[\s\S]*sourceGroups: checkpointInventory\.response\.groups/);
   assert.match(sidepanel, /beforeClose: async \(tabId, \{ closedTabIds \}\)[\s\S]*expectedRemainingTabs[\s\S]*for \(const expectedTab of expectedRemainingTabs\)[\s\S]*spaceDeletionCloseCandidateMismatch/);
   assert.match(sidepanel, /closeTab: \(tabId\) => \{[\s\S]*send\('tabs:close', \{[\s\S]*closeGuard:[\s\S]*requireUnpinned: true[\s\S]*url:/);
-  assert.match(background, /async function closeTab[\s\S]*assertCurrentTabMatchesCloseGuard[\s\S]*removeTabsPanelManaged\(\[id\], \{ closeGuard: options\.closeGuard \}\)/);
+  assert.match(background, /async function closeTab[\s\S]*assertCurrentTabMatchesCloseGuard[\s\S]*removeTabsPanelManaged\(\[id\], \{[\s\S]*closeGuard: options\.closeGuard/);
   assert.match(background, /async function removeTabsPanelManaged[\s\S]*storage\.session\.set[\s\S]*assertCurrentTabMatchesCloseGuard\(tabId, options\.closeGuard\)[\s\S]*chrome\.tabs\.remove/);
   assert.match(deletionProjection, /function spaceDeletionCloseCandidateMismatch[\s\S]*snapshotTabId[\s\S]*liveTabBelongsToSpace/);
   assert.match(sidepanel, /const transitionRollback = createSpaceDeletionRollbackJournal\(\{[\s\S]*beforeState: state,[\s\S]*deletingSpaceId: space\.id,[\s\S]*durableActiveSpaceId,[\s\S]*windowSpaceState,[\s\S]*activeView,[\s\S]*deletingActiveSpace/);
@@ -799,7 +854,8 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
     'Add Space must bind the confirmation window and checkpoint the newest shared state before mutating',
   );
   assert.match(addSpaceSource, /if \(synchronized === false\) \{[\s\S]*throw new Error/);
-  assert.match(addSpaceSource, /state\.spaces\.push\(space\)[\s\S]*activated = await activateSpace\(space\.id, \{[\s\S]*stateLocked: true,[\s\S]*windowBinding/);
+  assert.match(addSpaceSource, /state\.spaces\.push\(space\)[\s\S]*activated = await activateSpace\(space\.id, \{[\s\S]*rollbackCheckpoint: beforeCreate,[\s\S]*stateLocked: true,[\s\S]*windowBinding/,
+    'Add Space must compensate storage with the checkpoint captured before its new Space existed');
   assert.equal((addSpaceSource.match(/activateSpace\(space\.id/g) || []).length, 1);
   assert.doesNotMatch(addSpaceSource, /saveState\(\{\s*persistWindowState:\s*false/,
     'Add Space must not durably create an orphan before its active-Space pair commit');
@@ -881,11 +937,22 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /currentTargets\.some\(\(tab\) => tab\.pinned\)/);
 });
 
+test('Tidy Names renders the original broom initially and after busy state', async () => {
+  const [html, source, css] = await Promise.all([
+    readFile(new URL('../sidepanel.html', import.meta.url), 'utf8'),
+    readFile(new URL('../sidepanel.js', import.meta.url), 'utf8'),
+    readFile(new URL('../sidepanel.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(html, /<button class="icon-button compact" id="tidyNamesButton" title="Tidy names" aria-label="Tidy Names">\s*<span class="tidy-icon" aria-hidden="true">🧹<\/span>\s*<\/button>/);
+  assert.match(source, /const TIDY_NAMES_ICON = `[^`]*<span class="tidy-icon" aria-hidden="true">🧹<\/span>[^`]*`;/);
+  assert.match(source, /els\.tidyNamesButton\.innerHTML = tidyBusy \? '\.\.\.' : TIDY_NAMES_ICON/);
+  assert.match(css, /\.tidy-icon\s*\{[^}]*font-size:\s*15px;[^}]*line-height:\s*1;/);
+});
+
 test('Tidy Names and Auto Group preview changes before applying them', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /const TIDY_NAMES_ICON = `[\s\S]*m12 3-1\.912 5\.813[\s\S]*`;/);
-  assert.doesNotMatch(source, /🧹|tidy-icon/);
   assert.match(source, /title: 'Preview Tidy Names'/);
   assert.match(source, /title: 'Rename in panel'/);
   assert.match(source, /type: 'tidy-names'/);
@@ -894,11 +961,11 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
   assert.match(source, /candidate\.currentGroup\?\.title/);
   assert.match(source, /title: 'Auto Group Preview'/);
-  assert.match(source, /title: 'Remain untouched'/);
   assert.match(source, /title: 'Untouched'/);
   assert.match(source, /const plannedTargetTitleKeys = new Set\(plannedGroups\.map/);
-  assert.match(source, /title: 'Merge empty duplicates'/);
-  assert.match(source, /Empty duplicate Tag will be absorbed into the populated planned group/);
+  assert.match(source, /title: 'Merge duplicates'/);
+  assert.match(source, /const mergedDuplicateTitleKeys = new Set/);
+  assert.doesNotMatch(source, /title: 'Merge empty duplicates'/);
   assert.match(source, /variant: 'groups'/);
   assert.match(source, /AI returned no valid groups/);
   assert.match(source, /applyOrganizationPlanToSnapshot/);
@@ -910,6 +977,13 @@ test('Tidy Names and Auto Group preview changes before applying them', async () 
   assert.match(source, /showStatusToast\(message, 'error'\)/);
   assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
   assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
+  const autoSource = source.slice(
+    source.indexOf('async function autoGroupTabs(options = {})'),
+    source.indexOf('function foreignOpenOrganizationCandidateIds'),
+  );
+  assert.match(autoSource, /assertCompleteAutoGroupPlan\(plannedGroups, candidates\)/);
+  assert.match(autoSource, /resolvedPlan\.previewGroups/);
+  assert.doesNotMatch(autoSource, /title: 'Remain untouched'/);
 });
 
 test('Auto Group delegates cross-window candidate safety and revalidates it after confirmation', async () => {
@@ -933,9 +1007,45 @@ test('Auto Group delegates cross-window candidate safety and revalidates it afte
     autoSource.indexOf('const foreignCandidateIds = foreignOpenOrganizationCandidateIds') <
       autoSource.indexOf("send('ai:chat'"),
   );
-  assert.match(autoSource, /rebaseOrganizationPlan\([\s\S]*const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds/);
-  assert.match(autoSource, /rebasedPlannedGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
+  assert.match(autoSource, /const rebasedPreviewGroups = rebaseOrganizationPlan\(\{[\s\S]*plannedGroups: previewGroups/);
+  assert.match(autoSource, /resolveOrganizationPlanChanges\(\{[\s\S]*plannedGroups: rebasedPreviewGroups/);
+  assert.match(autoSource, /currentResolvedPlan\.previewGroups\)[\s\S]*JSON\.stringify\(rebasedPreviewGroups\)/);
+  assert.match(autoSource, /const rebasedPlannedGroups = currentResolvedPlan\.plannedGroups/);
+  assert.match(autoSource, /rebasedPreviewGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
   assert.match(autoSource, /An Auto Group target is now open in another window[\s\S]*review a fresh preview/);
+});
+
+test('Auto Group identifies newly organized saved Tags before lifecycle checkpointing', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const autoSource = source.slice(
+    source.indexOf('async function autoGroupTabs(options = {})'),
+    source.indexOf('function activeChromeGroupsByTitle'),
+  );
+  assert.match(
+    autoSource,
+    /ensureSnapshotLifecycleIds\(\s*organizedSnapshot,\s*createSnapshotLifecycleId,?\s*\)[\s\S]*mergeDuplicateSnapshotTags\([\s\S]*checkpointAutoGroupLifecycleBindings/,
+  );
+  assert.ok(
+    autoSource.indexOf('mergedGroups = await mergeDuplicateGroupsInActiveSpace') <
+      autoSource.indexOf('remapMergedSnapshotGroupReferences(\n            appliedDuplicateSnapshotPlan'),
+    'Auto Group must choose the canonical physical Tag before remapping duplicate saved identities',
+  );
+  assert.match(
+    functionSource(source, 'activeChromeGroupsByTitle'),
+    /buildSpaceViewForSpace\(state\.activeSpaceId\)[\s\S]*logicalDuplicateChromeGroupTitle\([\s\S]*groupTitleKey\(logicalTitle\)/,
+  );
+  assert.match(
+    functionSource(source, 'logicalDuplicateChromeGroupTitle'),
+    /resolveChromeGroupTitleMatch\([\s\S]*state\.tabLifecycle\?\.\[tab\.id\]\?\.snapshotGroupId \|\| tab\.snapshotGroupId/,
+  );
+  assert.match(
+    functionSource(source, 'canonicalLiveChromeGroupIdsByTitle'),
+    /snapshotTabIds[\s\S]*state\.tabLifecycle[\s\S]*Number\(liveTab\.groupId\) === Number\(binding\?\.groupId\)/,
+  );
+  assert.match(
+    functionSource(source, 'mergeDuplicateGroupsInActiveSpace'),
+    /canonicalGroupIdsByTitle[\s\S]*reviewedKeep \|\| bucket\[0\]/,
+  );
 });
 
 test('Tidy Names and Auto Group generate first and open only their final previews', async () => {
@@ -953,7 +1063,7 @@ test('Tidy Names and Auto Group generate first and open only their final preview
   assert.match(tidySource, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
   assert.match(tidySource, /tidyTabNamesWithAI\([\s\S]*showPlanPreview\(\{/);
   assert.match(tidySource, /title: 'Preview Tidy Names'/);
-  assert.match(tidySource, /message: `\$\{renameItems\.length\} [\s\S]*formatPreviewDuration/);
+  assert.match(tidySource, /previewSummary\.push\(formatPreviewDuration[\s\S]*message: previewSummary\.join\(' · '\)/);
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
   assert.match(tidySource, /showPlanPreview\(\{[\s\S]*namingResult\.sourceLabel/);
   assert.match(source, /sourceLabel: `Local fallback \(AI unavailable: \$\{reason\}\)`/);
@@ -967,9 +1077,10 @@ test('Tidy Names and Auto Group generate first and open only their final preview
   assert.match(autoSource, /message: previewSummary\.join\(' · '\)/);
   assert.doesNotMatch(autoSource, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
   assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
-  assert.match(source, /Tidy Names uses local naming only: no tab metadata is sent/);
+  assert.match(source, /Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent/);
   assert.match(source, /If the provider is unavailable, it falls back to local naming/);
-  assert.match(source, /Auto Group needs a configured AI provider\. Until then, no tab metadata is sent and no groups are changed/);
+  assert.match(source, /Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent/);
+  assert.match(source, /only duplicate Tags to clean up, they can still be merged locally after one preview/);
   assert.match(source, /function hasUsableAISettings[\s\S]*baseUrl[\s\S]*model[\s\S]*providerRequiresApiKey/);
   assert.ok(autoSource.indexOf("send('ai:chat'") < autoSource.indexOf("title: 'Auto Group Preview'"));
 });
@@ -1020,6 +1131,8 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
   assert.match(source, /groups\.push\(\{[\s\S]*title: physicalTitle/);
   assert.match(source, /\.\.\.logicalChromeGroupTitleOverride\(group\)/);
+  assert.match(source, /\.\.\.snapshotLogicalChromeGroupTitleOverride\(group, identityTabs, spaceId\)/);
+  assert.match(source, /function snapshotLogicalChromeGroupTitleOverride[\s\S]*snapshotGroupId[\s\S]*resolveChromeGroupTitleMatch\([\s\S]*logicalGroupTitlesForSpace\(spaceId\)[\s\S]*Number\(match\?\.group\?\.id\) !== Number\(group\.id\)[\s\S]*displayTitle: logicalTitle/);
   assert.match(source, /function captureLiveOrganization[\s\S]*Object\.hasOwn\(group, 'title'\) \? String\(group\.title \?\? ''\) : 'Tabs'[\s\S]*captureTabGroupMembership\(tabs, groups, tabIds\)\.tabs/);
   assert.match(source, /function dormantGroupsFromSnapshot[\s\S]*Object\.hasOwn\(group, 'title'\) \? String\(group\.title \?\? ''\) : 'Ungrouped'/);
   assert.match(source, /async function renameGroup[\s\S]*value: Object\.hasOwn\(group, 'title'\)[\s\S]*const clean = nextName\.trim\(\);[\s\S]*update: \{ title: clean \}[\s\S]*if \(!result\.group\)/);
@@ -1057,7 +1170,19 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /fingerprintTidyNameTargets\(currentTargets, state\.renamedTabs, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
   assert.match(source, /organizationForCurrentSpaceState\(operation\.spaceId, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
   assert.match(tidySource, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
-  assert.ok(tidySource.indexOf('await refreshTabs({ windowBinding });') < tidySource.indexOf('const operation = recordOperation({'));
+  assert.ok(
+    tidySource.indexOf('const refreshed = await refreshTabsView({') <
+      tidySource.indexOf('recordOperation({'),
+    'Tidy must verify the merged live/snapshot view before recording Undo',
+  );
+  assert.match(tidySource, /renameItems\.length === 0 && duplicateTagCount === 0/);
+  assert.match(tidySource, /title: 'Merge duplicate Tags'/);
+  assert.match(tidySource, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== duplicateTagFingerprint/);
+  assert.match(tidySource, /replaceActiveSpaceSnapshotGroups\(currentDuplicateTagPlan\.snapshot\.groups\)[\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences[\s\S]*setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
+  assert.match(tidySource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(tidySource, /This panel moved before Tidy Names could apply the reviewed changes/);
+  assert.match(tidySource, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
+  assert.match(tidySource, /Tidy Names was saved, but this view could not refresh[\s\S]*showStatusToast\(postCommitWarning, 'info'\)/);
   const rollbackCapture = autoSource.indexOf('const rollback = captureChromeGroupMutationRollback();');
   const authoritativeLoad = autoSource.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
   const snapshotRefresh = autoSource.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
@@ -1078,6 +1203,11 @@ test('organization commits validate freshness and record Undo only after the app
   assert.equal(autoSource.match(/saveState\(/g)?.length, 1, 'Auto Group has one durable workspace checkpoint');
   assert.match(autoSource, /checkpoint: async \(\) => \{[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true/);
   assert.match(autoSource, /rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding,[\s\S]*persistRestoredState: true/);
+  assert.match(autoSource, /const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds\([\s\S]*const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags\([\s\S]*identifiedOrganizedSnapshot/);
+  assert.match(autoSource, /replaceActiveSpaceSnapshotGroups\([\s\S]*appliedDuplicateSnapshotPlan\.snapshot\.groups,[\s\S]*appliedDuplicateSnapshotPlan\.snapshot,[\s\S]*remapMergedSnapshotGroupReferences/);
+  assert.match(autoSource, /mergeDuplicateSnapshotTags\(state\.spaceSnapshots\?\.\[sourceSpaceId\]\)\.mergedCount > 0/);
+  assert.match(autoSource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(autoSource, /Auto Group was saved, but this panel moved before its view could refresh/);
   assert.match(autoSource, /Auto Group was saved, but this view could not refresh/);
   assert.match(autoSource, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
   assert.match(autoSource, /Chrome could not (?:apply|create) the proposed group/);
@@ -1087,6 +1217,10 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /operation\.type === 'tidy-names'[\s\S]*setLiveTabPanelTitle\(state, tabId, previousName\)/);
   assert.match(undoSource, /operation\.type === 'tidy-names'[\s\S]*runDurableCommitBoundary\(\{[\s\S]*commit: \(\) => saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*rollbackBeforeCommit:[\s\S]*restoreWorkspaceMemoryCheckpoint\(beforeUndo, \{ renderView: true \}\)[\s\S]*afterCommit: \(\) => refreshTabs\(\{ reloadDormant: true, windowBinding \}\)[\s\S]*restoreCommittedMemory/);
   assert.match(undoSource, /Tidy Names Undo was saved, but this view could not refresh/);
+  assert.match(undoSource, /operation\.type === 'auto-group'[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true[\s\S]*Auto Group Undo could save its checkpoint/);
+  assert.match(undoSource, /Auto Group Undo was saved, but this panel moved before its view could refresh[\s\S]*Auto Group Undo was saved, but this view could not refresh/);
+  assert.match(source, /Auto Group with \$\{provider\.label\}:[^`]+merges duplicate Tags locally/);
+  assert.match(source, /If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview/);
   assert.match(source, /type: 'restore-backup'[\s\S]*after: \{ portableFingerprint: fingerprintPortableWorkspaceContent\(state\) \}/);
   assert.match(source, /snapshotIdentities: beforeSnapshotIdentities/);
   assert.match(source, /restoreSnapshotIdentityOverlay\([\s\S]*operation\.before\?\.snapshotIdentities/);
@@ -1275,7 +1409,9 @@ test('fallback tabs created for destructive checkpoints are compensated when per
   const transactionSource = await readFile(new URL('../src/shared/tab-close-transaction.js', import.meta.url), 'utf8');
 
   assert.match(transactionSource, /function rollbackCreatedTabsOnCheckpointFailure[\s\S]*await checkpoint\(\)[\s\S]*closeCreatedTab\(tabId\)[\s\S]*AggregateError/);
-  assert.match(source, /function withCreatedTabCheckpointRollback[\s\S]*rollbackCreatedTabsOnCheckpointFailure\([\s\S]*send\('tabs:close', \{ tabId, preserveSnapshot: false \}, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*allowStaleWindowBinding: true/);
+  assert.match(source, /function withCreatedTabCheckpointRollback[\s\S]*rollbackCreatedTabsOnCheckpointFailure\([\s\S]*closeCreatedTabWithoutEmptyingWindow/);
+  assert.match(source, /async function closeCreatedTabWithoutEmptyingWindow[\s\S]*tabs:listAll[\s\S]*if \(!survivor\)[\s\S]*return;[\s\S]*focusSpaceSwitchSurvivor[\s\S]*requiredActiveSurvivorTabId/,
+    'created-tab compensation must retain the final tab or atomically require an active same-window survivor');
   assert.match(source, /async function clearUngroupedTabs[\s\S]*withCreatedTabCheckpointRollback\(checkpointCreatedTabIds[\s\S]*tabs:create[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
   assert.match(source, /async function deleteGroupsAndTabs[\s\S]*withCreatedTabCheckpointRollback\(checkpointCreatedTabIds[\s\S]*ensureActiveSpaceHasOpenTabAfterClosing\([\s\S]*liveTabIds,[\s\S]*checkpointCreatedTabIds,[\s\S]*checkpointCreatedTabs,[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
   assert.match(source, /async function closeSpaceTabsAcrossWindows[\s\S]*withCreatedTabCheckpointRollback\(checkpointCreatedTabIds[\s\S]*windowId[\s\S]*checkpointCreatedTabIds\.push\(tabId\)[\s\S]*await saveState\(\{ windowBinding \}\)/);
@@ -1337,6 +1473,19 @@ test('every dialog exposes a stable accessible name', async () => {
   assert.match(html, /<dialog id="commandPaletteDialog"[^>]*aria-labelledby="commandPaletteTitle"[\s\S]*id="commandPaletteTitle"/);
 });
 
+test('main Space rendering keeps lifecycle Tag identity and logical titles', async () => {
+  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const renderSource = functionSource(sidepanel, 'render');
+  const projectionSource = functionSource(sidepanel, 'projectLifecycleAwareLiveGroup');
+
+  assert.match(
+    renderSource,
+    /buildSpaceView\(\{[\s\S]*\.map\(\(group\) => projectLifecycleAwareLiveGroup\(group, state\.activeSpaceId\)\)/,
+  );
+  assert.match(projectionSource, /snapshotGroupId/);
+  assert.match(projectionSource, /snapshotLogicalChromeGroupTitleOverride/);
+});
+
 test('sidepanel delegates the complete Command Palette UI lifecycle to its shared controller', async () => {
   const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const controller = await readFile(
@@ -1355,7 +1504,16 @@ test('sidepanel delegates the complete Command Palette UI lifecycle to its share
   assert.match(sidepanel, /prepareSelection: prepareCommandPaletteSelectionFromUserGesture/);
   assert.match(sidepanel, /onSelect: \(prepared\) => void runTask\(\(windowBinding\) => runSelectedCommandPaletteItem\(\{[\s\S]*\.\.\.prepared,[\s\S]*windowBinding: prepared\?\.windowBinding \|\| windowBinding,[\s\S]*\}\)\)/);
   assert.match(sidepanel, /tabSelection: item\?\.kind === 'tab'[\s\S]*captureCommandPaletteTabSelection\(item, \[\.\.\.tabs, \.\.\.foreignLiveTabs\]\)/);
-  assert.match(sidepanel, /async function runSelectedCommandPaletteTab\(reference, preparedWindowBinding = null\)[\s\S]*preparedWindowBinding \|\| capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*loadTabs\(\{ adopt: false, windowBinding \}\)[\s\S]*resolveCommandPaletteTabSelection[\s\S]*preserveBrowserFocus: resolved\.mode === 'live'[\s\S]*focusGuard: commandPaletteFocusGuard\(resolved\.tab\)[\s\S]*activateSpace\(previousSpaceId, \{ stateLocked: true, windowBinding \}\)/);
+  const paletteTabSource = functionSource(sidepanel, 'runSelectedCommandPaletteTab');
+  assert.match(paletteTabSource, /preparedWindowBinding \|\| capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*loadTabs\(\{ adopt: false, windowBinding \}\)[\s\S]*resolveCommandPaletteTabSelection/);
+  assert.match(paletteTabSource, /preferredTabId: resolved\.mode === 'live' \? resolved\.tab\.id : null[\s\S]*preferredSnapshotTabId: reference\.snapshotTabId/);
+  assert.match(paletteTabSource, /const activated = await activateSpace[\s\S]*const reloaded = await loadTabs\(\{ adopt: false, windowBinding \}\)[\s\S]*if \(reloaded === false[\s\S]*resolveCommandPaletteTabSelection/,
+    'a committed switch must obtain authoritative live tabs before it can open a saved palette row');
+  assert.ok((paletteTabSource.match(/resolveCommandPaletteTabSelection/g) || []).length >= 2,
+    'a dormant palette selection must be re-resolved after bulk Space materialization');
+  assert.match(paletteTabSource, /focusGuard: commandPaletteFocusGuard\(resolved\.tab\)/);
+  assert.doesNotMatch(paletteTabSource, /activateSpace\(previousSpaceId/,
+    'a committed switch must not churn back after a later palette focus race');
   assert.match(selection, /same durable identity and URL/);
   assert.match(selection, /foreignWindowTabId/);
   assert.match(sidepanel, /commandPaletteInput\.addEventListener\('input', commandPaletteController\.handleInput\)/);

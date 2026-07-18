@@ -43,6 +43,57 @@ export function captureTabGroupMembership(tabs = [], groups = [], tabIds = []) {
   };
 }
 
+/**
+ * Selects the canonical live Tag without relying on Chrome's incidental group
+ * ids. A durable snapshot identity wins; otherwise the user-visible/durable
+ * group order wins and the original input order is the final stable fallback.
+ */
+export function orderDuplicateChromeGroups(groups = [], options = {}) {
+  const canonicalSnapshotGroupId = String(options.canonicalSnapshotGroupId || '').trim();
+  const explicitCanonicalGroupIds = new Set((options.canonicalGroupIds || [])
+    .map(chromeGroupId)
+    .filter((groupId) => groupId !== null));
+  const lifecycleCanonicalGroupIds = new Set(Object.values(options.tabLifecycle || {})
+    .filter((binding) => (
+      canonicalSnapshotGroupId &&
+      String(binding?.snapshotGroupId || '').trim() === canonicalSnapshotGroupId
+    ))
+    .map((binding) => chromeGroupId(binding?.groupId))
+    .filter((groupId) => groupId !== null));
+  // A live stable row is stronger evidence than a binding's cached physical
+  // group id. Native Chrome events can update that cache asynchronously while
+  // the snapshot row identity remains exact.
+  const canonicalGroupIds = explicitCanonicalGroupIds.size > 0
+    ? explicitCanonicalGroupIds
+    : lifecycleCanonicalGroupIds;
+  const visibleIndexes = new Map((options.visibleGroupKeys || [])
+    .map((key, index) => [String(key), index]));
+  const durableIndexes = new Map((options.groupOrder || [])
+    .map((key, index) => [String(key), index]));
+  const missingIndex = Number.MAX_SAFE_INTEGER;
+
+  return (groups || []).map((group, sourceIndex) => {
+    const groupId = chromeGroupId(group.id);
+    const key = String(group.key);
+    return {
+      group,
+      sourceIndex,
+      canonicalRank: Number(!canonicalGroupIds.has(groupId)),
+      visibleRank: visibleIndexes.has(key) ? visibleIndexes.get(key) : missingIndex,
+      durableRank: durableIndexes.has(key) ? durableIndexes.get(key) : missingIndex,
+    };
+  })
+    .sort((left, right) => {
+      return (
+        left.canonicalRank - right.canonicalRank ||
+        left.visibleRank - right.visibleRank ||
+        left.durableRank - right.durableRank ||
+        left.sourceIndex - right.sourceIndex
+      );
+    })
+    .map(({ group }) => group);
+}
+
 export function captureChromeGroupMutationMemory({
   state,
   logicalTitles,

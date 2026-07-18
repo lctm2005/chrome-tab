@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { chromeGroupTitle } from '../src/shared/group-title.js';
 
 import {
+  assertCompleteAutoGroupPlan,
   buildGroupPreviewItems,
   buildSpaceView,
   countPlannedRegroups,
@@ -221,6 +222,37 @@ test('keeps AI topic groups intact across different domains', () => {
 
   assert.deepEqual(groups.map((group) => group.title), ['Claude Code', 'Monica']);
   assert.deepEqual(groups.map((group) => group.tabIds), [[1, 2, 4], [3]]);
+});
+
+test('keeps complete logical Auto Group titles instead of persisting Chrome display truncation', () => {
+  const longTitle = 'Auto Group Canonical Duplicate E2E';
+  const groups = sanitizeTidyGroups([
+    { title: longTitle, tabIds: [1] },
+  ], [{ id: 1 }]);
+
+  assert.equal(groups[0].title, longTitle);
+});
+
+test('rejects an AI group plan that silently leaves eligible tabs unassigned', () => {
+  const tabs = [{ id: 1 }, { id: 2 }, { id: 3 }];
+  const completePlan = [
+    { title: 'Research', tabIds: [1, 2] },
+    { title: 'Later', tabIds: [3] },
+  ];
+
+  assert.equal(assertCompleteAutoGroupPlan(completePlan, tabs), completePlan);
+  assert.throws(
+    () => assertCompleteAutoGroupPlan([
+      { title: 'Research', tabIds: [1, 2] },
+    ], tabs),
+    /incomplete group plan.*1 eligible tab unassigned/i,
+  );
+  assert.throws(
+    () => assertCompleteAutoGroupPlan([null], [{ id: 1 }, null, { id: 2 }]),
+    /incomplete group plan.*2 eligible tabs unassigned/i,
+  );
+  assert.deepEqual(assertCompleteAutoGroupPlan(), []);
+  assert.equal(assertCompleteAutoGroupPlan(null, null), null);
 });
 
 test('searches tabs by title, URL, and domain', () => {

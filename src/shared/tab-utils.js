@@ -1,4 +1,9 @@
-import { chromeGroupTitle, chromeGroupTitleKey, groupTitleKey } from './group-title.js';
+import {
+  chromeGroupTitle,
+  chromeGroupTitleKey,
+  groupTitleKey,
+  normalizeGroupTitle,
+} from './group-title.js';
 
 export { groupTitleKey } from './group-title.js';
 
@@ -237,6 +242,20 @@ export function sanitizeTidyGroups(plannedGroups, tabs) {
   }));
 }
 
+export function assertCompleteAutoGroupPlan(plannedGroups = [], tabs = []) {
+  const eligibleIds = uniqueNumbers((tabs || []).map((tab) => tab?.id));
+  const assignedIds = new Set((plannedGroups || [])
+    .flatMap((group) => uniqueNumbers(group?.tabIds)));
+  const missingCount = eligibleIds.filter((id) => !assignedIds.has(id)).length;
+  if (missingCount > 0) {
+    throw new Error(
+      `AI returned an incomplete group plan with ${missingCount} eligible ` +
+      `${missingCount === 1 ? 'tab' : 'tabs'} unassigned. Try Auto Group again.`,
+    );
+  }
+  return plannedGroups;
+}
+
 export function plannedRegroupTabIds(plannedGroups = [], candidateTabs = [], liveGroups = []) {
   const plannedTitleByTabId = new Map();
   for (const group of plannedGroups) {
@@ -269,7 +288,11 @@ function uniqueNumbers(values = []) {
 }
 
 function compactGroupTitle(title) {
-  return chromeGroupTitle(title);
+  // Auto Group plans are durable user data, not Chrome presentation data.
+  // Keep the complete logical title here and compact it only at the boundary
+  // that writes tabGroups; otherwise snapshots, duplicate detection, and Undo
+  // can never recover the user's original name.
+  return normalizeGroupTitle(title);
 }
 
 export function buildSpaceView({

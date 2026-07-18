@@ -25,6 +25,10 @@ test('previews only real Auto Group moves and preserves existing target presenta
   });
 
   assert.deepEqual(resolved, {
+    previewGroups: [
+      { title: 'Docs', color: 'red', collapsed: true, tabIds: [1, 2] },
+      { title: 'New group', color: 'blue', collapsed: true, tabIds: [3] },
+    ],
     plannedGroups: [
       { title: 'Docs', color: 'red', collapsed: true, tabIds: [1] },
       { title: 'New group', color: 'blue', collapsed: true, tabIds: [3] },
@@ -40,7 +44,11 @@ test('does not preview a group when every proposed assignment is already true', 
     existingGroups: [null, { title: '' }, { title: 'Docs', color: '', collapsed: false }],
   });
 
-  assert.deepEqual(resolved, { plannedGroups: [], unchangedCandidateIds: [1] });
+  assert.deepEqual(resolved, {
+    previewGroups: [{ title: 'Docs', color: 'purple', collapsed: false, tabIds: [1] }],
+    plannedGroups: [],
+    unchangedCandidateIds: [1],
+  });
 });
 
 test('builds stable numeric candidates from live and one-to-one dormant snapshot rows', () => {
@@ -96,7 +104,7 @@ test('builds stable numeric candidates from live and one-to-one dormant snapshot
   const second = buildOrganizationCandidates(input);
 
   assert.deepEqual(first, second);
-  assert.match(first.fingerprint, /^organization-v2-[0-9a-f]{8}-5$/);
+  assert.match(first.fingerprint, /^organization-v3-[0-9a-f]{8}-5$/);
   assert.deepEqual(first.candidates.map((candidate) => candidate.id), [1, 2, 3, 4, 5]);
   assert.deepEqual(first.candidates.map((candidate) => candidate.dormant), [false, false, true, false, false]);
   assert.equal(first.candidates[0].source.live.tabId, 101);
@@ -112,6 +120,305 @@ test('builds stable numeric candidates from live and one-to-one dormant snapshot
   assert.equal(first.candidates[2].currentGroup.title, 'Docs');
   assert.equal(first.candidates[2].source.kind, 'snapshot');
   assert.equal(first.candidates[4].source.snapshot, null);
+});
+
+test('fingerprints transient empty groups and legacy rows linked only by tab identity', () => {
+  const liveGroups = [
+    null,
+    { id: -1, tabs: [] },
+    {
+      id: 10,
+      title: null,
+      tabs: [{
+        id: 101,
+        snapshotTabId: 'legacy-row',
+        title: 'Legacy page',
+        url: 'https://example.com/legacy',
+        index: 2,
+      }],
+    },
+  ];
+  const snapshot = {
+    groups: [{
+      title: 'Legacy history',
+      tabs: [{
+        snapshotTabId: 'legacy-row',
+        title: 'Legacy page',
+        url: 'https://example.com/legacy',
+      }],
+    }],
+  };
+
+  const first = buildOrganizationCandidates({ liveGroups, snapshot });
+  const second = buildOrganizationCandidates({ liveGroups, snapshot });
+
+  assert.equal(first.candidates.length, 1);
+  assert.equal(first.candidates[0].source.live.tabId, 101);
+  assert.equal(first.fingerprint, second.fingerprint);
+  assert.notEqual(buildOrganizationCandidates({
+    liveGroups,
+    snapshot: {
+      groups: [{
+        ...snapshot.groups[0],
+        custom: 'changed while preview was open',
+      }],
+    },
+  }).fingerprint, first.fingerprint);
+});
+
+test('organization freshness ignores transient Chrome grouping coordinates but keeps physical tab order', () => {
+  const snapshot = {
+    version: 1,
+    groups: [{
+      snapshotGroupId: 'saved-docs',
+      title: 'Docs',
+      color: 'purple',
+      collapsed: true,
+      tabs: [
+        { snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a' },
+        { snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b' },
+      ],
+    }],
+  };
+  const built = (group) => buildOrganizationCandidates({ liveGroups: [group], snapshot });
+  const before = built({
+    id: 10,
+    key: 'group:10',
+    title: 'Docs',
+    color: 'purple',
+    collapsed: true,
+    tabs: [
+      { id: 101, snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a', windowId: 7, index: 4 },
+      { id: 102, snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b', windowId: 7, index: 5 },
+    ],
+  });
+  const afterReload = built({
+    id: 999,
+    key: 'group:999',
+    title: 'Docs',
+    color: 'purple',
+    collapsed: true,
+    tabs: [
+      { id: 102, snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b', windowId: 7, index: 5 },
+      { id: 101, snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a', windowId: 7, index: 4 },
+    ],
+  });
+
+  assert.equal(afterReload.fingerprint, before.fingerprint);
+  assert.equal(built({
+    id: 999,
+    key: 'group:999',
+    title: 'Docs',
+    color: 'purple',
+    collapsed: true,
+    tabs: [
+      { id: 101, snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a', windowId: 7, index: 40 },
+      { id: 102, snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b', windowId: 7, index: 41 },
+    ],
+  }).fingerprint, before.fingerprint, 'unrelated tabs may shift every absolute Chrome index');
+  assert.notEqual(built({
+    id: 999,
+    key: 'group:999',
+    title: 'Docs',
+    color: 'purple',
+    collapsed: true,
+    tabs: [
+      { id: 102, snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b', windowId: 7, index: 4 },
+      { id: 101, snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a', windowId: 7, index: 5 },
+    ],
+  }).fingerprint, before.fingerprint);
+  assert.notEqual(buildOrganizationCandidates({
+    liveGroups: [{
+      id: 999,
+      key: 'group:999',
+      title: 'Docs',
+      color: 'orange',
+      collapsed: true,
+      tabs: [
+        { id: 101, snapshotTabId: 'saved-a', title: 'A', url: 'https://example.com/a', windowId: 7, index: 4 },
+        { id: 102, snapshotTabId: 'saved-b', title: 'B', url: 'https://example.com/b', windowId: 7, index: 5 },
+      ],
+    }],
+    snapshot: {
+      ...snapshot,
+      groups: [{ ...snapshot.groups[0], color: 'orange' }],
+    },
+  }).fingerprint, before.fingerprint);
+});
+
+test('organization freshness ignores a lifecycle rebind between indistinguishable saved rows', () => {
+  const snapshot = {
+    identityVersion: 1,
+    groups: [{
+      snapshotGroupId: 'saved-docs',
+      title: 'Docs',
+      color: 'blue',
+      tabs: [
+        { snapshotTabId: 'saved-a', title: 'Same', url: 'https://example.com/same' },
+        { snapshotTabId: 'saved-b', title: 'Same', url: 'https://example.com/same' },
+      ],
+    }],
+  };
+  const liveGroup = {
+    id: 10,
+    title: 'Docs',
+    color: 'blue',
+    tabs: [
+      { id: 101, snapshotTabId: 'saved-a', title: 'Same', url: 'https://example.com/same', index: 2 },
+      { id: 102, snapshotTabId: 'saved-b', title: 'Same', url: 'https://example.com/same', index: 3 },
+    ],
+  };
+  const before = buildOrganizationCandidates({ snapshot, liveGroups: [liveGroup] });
+  const rebound = buildOrganizationCandidates({
+    snapshot,
+    liveGroups: [{
+      ...liveGroup,
+      id: 50,
+      tabs: [
+        { ...liveGroup.tabs[0], snapshotTabId: 'saved-b' },
+        { ...liveGroup.tabs[1], snapshotTabId: 'saved-a' },
+      ],
+    }],
+  });
+
+  assert.equal(rebound.fingerprint, before.fingerprint);
+  assert.notDeepEqual(
+    rebound.candidates.map((candidate) => candidate.source.live?.tabId),
+    before.candidates.map((candidate) => candidate.source.live?.tabId),
+    'candidate matching may change even though saved and live user data did not',
+  );
+});
+
+test('organization freshness follows physical order for open Tags but preserves saved-only Tag order', () => {
+  const liveGroups = [
+    {
+      id: 10,
+      snapshotGroupId: 'saved-a',
+      title: 'A',
+      color: 'blue',
+      tabs: [{
+        id: 101,
+        snapshotGroupId: 'saved-a',
+        snapshotTabId: 'row-a',
+        title: 'A page',
+        url: 'https://example.com/a',
+        index: 2,
+      }],
+    },
+    {
+      id: 20,
+      snapshotGroupId: 'saved-b',
+      title: 'B',
+      color: 'green',
+      tabs: [{
+        id: 102,
+        snapshotGroupId: 'saved-b',
+        snapshotTabId: 'row-b',
+        title: 'B page',
+        url: 'https://example.com/b',
+        index: 3,
+      }],
+    },
+  ];
+  const openA = {
+    snapshotGroupId: 'saved-a',
+    title: 'A',
+    color: 'blue',
+    tabs: [{ snapshotTabId: 'row-a', title: 'A page', url: 'https://example.com/a' }],
+  };
+  const openB = {
+    snapshotGroupId: 'saved-b',
+    title: 'B',
+    color: 'green',
+    tabs: [{ snapshotTabId: 'row-b', title: 'B page', url: 'https://example.com/b' }],
+  };
+  const savedC = { snapshotGroupId: 'saved-c', title: 'Saved C', color: 'orange', tabs: [] };
+  const savedD = { snapshotGroupId: 'saved-d', title: 'Saved D', color: 'pink', tabs: [] };
+  const before = buildOrganizationCandidates({
+    liveGroups,
+    snapshot: { groups: [openA, openB, savedC, savedD] },
+  }).fingerprint;
+
+  assert.equal(buildOrganizationCandidates({
+    liveGroups,
+    snapshot: { groups: [openB, openA, savedC, savedD] },
+  }).fingerprint, before, 'background refresh may reorder live-backed snapshot records');
+  assert.notEqual(buildOrganizationCandidates({
+    liveGroups,
+    snapshot: { groups: [openA, openB, savedD, savedC] },
+  }).fingerprint, before, 'saved-only Tag order remains user data');
+});
+
+test('organization freshness ignores mirrored open-row order but preserves dormant positions and row metadata', () => {
+  const liveGroups = [{
+    id: 10,
+    snapshotGroupId: 'saved-docs',
+    title: 'Docs',
+    color: 'blue',
+    tabs: [
+      {
+        id: 101,
+        snapshotGroupId: 'saved-docs',
+        snapshotTabId: 'row-a',
+        title: 'A',
+        url: 'https://example.com/a',
+        index: 2,
+      },
+      {
+        id: 102,
+        snapshotGroupId: 'saved-docs',
+        snapshotTabId: 'row-b',
+        title: 'B',
+        url: 'https://example.com/b',
+        index: 3,
+      },
+    ],
+  }];
+  const rowA = {
+    snapshotTabId: 'row-a',
+    title: 'A',
+    url: 'https://example.com/a',
+    custom: 'keep-a',
+  };
+  const rowB = {
+    snapshotTabId: 'row-b',
+    title: 'B',
+    url: 'https://example.com/b',
+  };
+  const dormant = {
+    snapshotTabId: 'row-dormant',
+    title: 'Saved',
+    url: 'https://example.com/saved',
+  };
+  const built = (tabs) => buildOrganizationCandidates({
+    liveGroups,
+    snapshot: {
+      identityVersion: 1,
+      groups: [{
+        snapshotGroupId: 'saved-docs',
+        title: 'Docs',
+        color: 'blue',
+        tabs,
+      }],
+    },
+  });
+  const before = built([rowA, rowB, dormant]);
+
+  assert.equal(
+    built([rowB, rowA, dormant]).fingerprint,
+    before.fingerprint,
+    'a lifecycle refresh may mirror physical order for rows that are already open',
+  );
+  assert.notEqual(
+    built([dormant, rowA, rowB]).fingerprint,
+    before.fingerprint,
+    'moving a dormant saved row remains an organization change',
+  );
+  assert.notEqual(
+    built([{ ...rowA, custom: 'changed-a' }, rowB, dormant]).fingerprint,
+    before.fingerprint,
+    'metadata stored on an open row remains protected',
+  );
 });
 
 test('foreign matching reserves local snapshot rows before consuming equal-URL dormant siblings', () => {
@@ -1261,7 +1568,7 @@ test('candidate building gives malformed or untitled live and saved rows stable 
   assert.equal(built.candidates[2].url, '');
   assert.equal(built.candidates[2].source.live.tabId, null);
   assert.equal(built.candidates[2].source.live.groupId, null);
-  assert.match(built.fingerprint, /^organization-v2-/);
+  assert.match(built.fingerprint, /^organization-v3-/);
   assert.deepEqual(buildOrganizationCandidates(), buildOrganizationCandidates({ liveGroups: null }));
 });
 

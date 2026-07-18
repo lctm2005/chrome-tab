@@ -202,6 +202,8 @@ async function handleMessage(message, sender = {}) {
         preserveSnapshot: message.preserveSnapshot !== false,
         closeGuard: message.closeGuard,
         skipChanged: message.skipChanged === true,
+        requiredActiveSurvivorTabId: message.requiredActiveSurvivorTabId,
+        requiredTargetTabGuards: message.requiredTargetTabGuards,
       });
     case 'tabs:group':
       return groupTabs(message.tabIds, message.title, message.color, message.collapsed);
@@ -549,8 +551,17 @@ async function closeTab(tabId, options = {}) {
     const id = Number(tabId);
     if (!Number.isSafeInteger(id) || id < 0) return {};
     if (options.closeGuard) await assertCurrentTabMatchesCloseGuard(id, options.closeGuard);
-    if (options.preserveSnapshot === false) await chrome.tabs.remove(id);
-    else await removeTabsPanelManaged([id], { closeGuard: options.closeGuard });
+    if (options.preserveSnapshot === false) {
+      await assertRequiredActiveSurvivorTab(id, options.requiredActiveSurvivorTabId);
+      await assertRequiredTargetTabGuards(id, options.requiredTargetTabGuards);
+      await chrome.tabs.remove(id);
+    } else {
+      await removeTabsPanelManaged([id], {
+        closeGuard: options.closeGuard,
+        requiredActiveSurvivorTabId: options.requiredActiveSurvivorTabId,
+        requiredTargetTabGuards: options.requiredTargetTabGuards,
+      });
+    }
     return {};
   } catch (error) {
     if (options.skipChanged && error?.code === 'TAB_CLOSE_GUARD_CHANGED') {
@@ -585,10 +596,71 @@ async function assertCurrentTabMatchesCloseGuard(tabId, closeGuard) {
   if (mismatch) throw guardedTabCloseChangedError(mismatch);
 }
 
+async function assertRequiredActiveSurvivorTab(tabId, requiredActiveSurvivorTabId) {
+  if (requiredActiveSurvivorTabId === undefined) return;
+  const survivorTabId = normalizeLifecycleTabId(requiredActiveSurvivorTabId);
+  if (survivorTabId === null) throw guardedTabCloseChangedError('survivor-missing');
+
+  const closingTab = await chrome.tabs.get(tabId);
+  let survivorTab;
+  try {
+    survivorTab = await chrome.tabs.get(survivorTabId);
+  } catch (error) {
+    if (isMissingChromeEntityError(error)) {
+      throw guardedTabCloseChangedError('survivor-missing');
+    }
+    throw error;
+  }
+  if (survivorTabId === tabId) throw guardedTabCloseChangedError('survivor-same-tab');
+  if (Number(survivorTab.windowId) !== Number(closingTab.windowId)) {
+    throw guardedTabCloseChangedError('survivor-wrong-window');
+  }
+  if (survivorTab.active !== true) {
+    throw guardedTabCloseChangedError('survivor-not-active');
+  }
+}
+
+async function assertRequiredTargetTabGuards(closingTabId, requiredTargetTabGuards) {
+  if (requiredTargetTabGuards === undefined) return;
+  if (!Array.isArray(requiredTargetTabGuards) || requiredTargetTabGuards.length > 512) {
+    throw guardedTabCloseChangedError('target-missing');
+  }
+  const seen = new Set();
+  for (const guard of requiredTargetTabGuards) {
+    const tabId = normalizeLifecycleTabId(guard?.tabId);
+    const windowId = normalizePanelWindowId(guard?.windowId);
+    const groupId = Number(guard?.groupId);
+    if (
+      tabId === null || tabId === Number(closingTabId) || seen.has(tabId) || windowId === null ||
+      !Number.isSafeInteger(groupId) || groupId < -1
+    ) {
+      throw guardedTabCloseChangedError('target-missing');
+    }
+    seen.add(tabId);
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (error) {
+      if (isMissingChromeEntityError(error)) {
+        throw guardedTabCloseChangedError('target-missing');
+      }
+      throw error;
+    }
+    if (Number(tab.windowId) !== windowId) {
+      throw guardedTabCloseChangedError('target-wrong-window');
+    }
+    if (Number(tab.groupId) !== groupId) {
+      throw guardedTabCloseChangedError('target-wrong-group');
+    }
+  }
+}
+
 async function removeTabsPanelManaged(tabIds, options = {}) {
   const ids = [...new Set(tabIds.map(Number).filter((id) => Number.isSafeInteger(id) && id >= 0))];
   if (!chrome.storage?.session) {
     if (options.closeGuard) await assertCurrentTabMatchesCloseGuard(ids[0], options.closeGuard);
+    await assertRequiredActiveSurvivorTab(ids[0], options.requiredActiveSurvivorTabId);
+    await assertRequiredTargetTabGuards(ids[0], options.requiredTargetTabGuards);
     await chrome.tabs.remove(ids.length === 1 ? ids[0] : ids);
     return;
   }
@@ -604,6 +676,8 @@ async function removeTabsPanelManaged(tabIds, options = {}) {
     });
     try {
       if (options.closeGuard) await assertCurrentTabMatchesCloseGuard(tabId, options.closeGuard);
+      await assertRequiredActiveSurvivorTab(tabId, options.requiredActiveSurvivorTabId);
+      await assertRequiredTargetTabGuards(tabId, options.requiredTargetTabGuards);
       await chrome.tabs.remove(tabId);
     } catch (error) {
       await chrome.storage.session.remove(suppressionKey).catch(() => undefined);
@@ -1229,14 +1303,15 @@ async function lifecycleTargetGroup(state, event, rawGroupId, fallbackSpaceId = 
   const snapshotGroups = state.spaceSnapshots?.[spaceId]?.groups || [];
   let snapshotGroupId = peerSnapshotGroupIds[0] || '';
   // A side-panel checkpoint can commit the binding before the matching native
-  // groupId event reaches this worker. In that delayed-event case the binding
-  // already describes the final Chrome group, so retain its stable snapshot
-  // identity instead of inventing a second Tag from Chrome's compact title.
+  // groupId event reaches this worker. Rollback can also restore an exact
+  // tab/group binding whose historical Tag is intentionally absent from the
+  // current snapshot. In both cases the binding describes this exact live
+  // entity, so retain its stable identity instead of inventing a second Tag.
   if (
     !snapshotGroupId &&
     Number(binding.groupId) === groupId &&
     String(binding.spaceId || '') === spaceId &&
-    snapshotGroups.some((group) => group.snapshotGroupId === binding.snapshotGroupId)
+    String(binding.snapshotGroupId || '').trim()
   ) {
     snapshotGroupId = binding.snapshotGroupId;
   }
@@ -1356,11 +1431,20 @@ async function groupTabs(tabIds, title = 'Tabs', color = 'blue', collapsed = fal
 
 async function addTabsToGroup(groupId, tabIds) {
   const ids = normalizedRequestedTabIds(tabIds);
-  if (!Number.isFinite(Number(groupId))) return { groupId: null, missing: false };
+  const targetGroupId = Number(groupId);
+  if (!Number.isFinite(targetGroupId)) return { groupId: null, missing: false };
   const tabs = await existingTabs(ids);
   if (ids.length === 0 || tabs.length !== ids.length) return { groupId: null, missing: true };
+  // Re-submitting every member of an existing group is not a harmless no-op in
+  // Chrome: it can replace the physical group id. That breaks the stable saved
+  // Tag identity and can reduce a long logical title to Chrome's compact title.
+  // Only move tabs whose authoritative browser membership actually differs.
+  const movingIds = tabs
+    .filter((tab) => Number(tab.groupId) !== targetGroupId)
+    .map((tab) => Number(tab.id));
+  if (movingIds.length === 0) return { groupId: targetGroupId };
   try {
-    const nextGroupId = await chrome.tabs.group({ groupId: Number(groupId), tabIds: ids });
+    const nextGroupId = await chrome.tabs.group({ groupId: targetGroupId, tabIds: movingIds });
     return { groupId: nextGroupId };
   } catch (error) {
     if (isMissingChromeEntityError(error)) return { groupId: null, missing: true };

@@ -98,15 +98,19 @@ test('a Space pair committed before a host move is never rolled back as stale vi
   const switchSource = source.slice(switchSpace.start, switchSpace.end);
   const save = switchSource.indexOf('const saved = await saveState({ windowBinding })');
   const preCommitFailure = switchSource.indexOf('if (saved !== true)');
-  const rollback = switchSource.indexOf('restoreWorkspaceMemoryCheckpoint(checkpoint)');
-  const postCommitMove = switchSource.lastIndexOf('if (!isCurrentPanelWindowBinding(windowBinding))');
+  const rollback = switchSource.indexOf('rollbackWindowBoundCreatedTabMutation(rollbackCheckpoint');
+  const postCommitClose = switchSource.indexOf('const closeOutcome = await closeSpaceSwitchSourceTabs');
 
   assert.ok(
-    save >= 0 && save < preCommitFailure && preCommitFailure < rollback && rollback < postCommitMove,
+    save >= 0 && save < preCommitFailure && preCommitFailure < rollback && rollback < postCommitClose,
     'binding changes observed after a successful pair write belong outside the rollback region',
   );
   assert.doesNotMatch(switchSource, /saved\s*===\s*false\s*\|\|\s*!isCurrentPanelWindowBinding/);
-  assert.match(switchSource.slice(postCommitMove), /postCommitWarning[\s\S]*return true/);
+  assert.doesNotMatch(
+    switchSource.slice(postCommitClose),
+    /rollbackWindowBoundCreatedTabMutation|restoreWorkspaceMemoryCheckpoint/,
+  );
+  assert.match(switchSource.slice(postCommitClose), /This panel moved before its switched view could refresh[\s\S]*return true/);
 });
 
 test('window-derived user mutations explicitly scope reads, browser commands, and checkpoints', () => {

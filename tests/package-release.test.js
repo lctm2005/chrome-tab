@@ -17,6 +17,7 @@ test('release allowlist contains only explicit runtime files and the generated e
   assert.ok(RELEASE_FILES.includes('src/shared/ai-auth.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/group-title.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/space-deletion.js'));
+  assert.ok(RELEASE_FILES.includes('src/shared/space-switch.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/space-view-merge.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/tab-lifecycle.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/tab-close-transaction.js'));

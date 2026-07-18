@@ -138,6 +138,29 @@ export function bindLiveTabsToSnapshot(view, snapshot, existingBindings = {}) {
 }
 
 /**
+ * Rebinds durable lifecycle references after two Tags become one. Snapshot
+ * identities and physical Chrome group ids are independent, so callers can
+ * apply either replacement set without reconstructing any other binding data.
+ */
+export function remapTabLifecycleGroupReferences(
+  bindings = {},
+  { snapshotGroupIds = {}, chromeGroupIds = {} } = {},
+) {
+  return Object.fromEntries(Object.entries(bindings || {}).map(([tabId, binding]) => {
+    const next = { ...binding };
+    const snapshotGroupId = String(binding?.snapshotGroupId || '').trim();
+    const chromeGroupId = String(binding?.groupId ?? '');
+    if (Object.hasOwn(snapshotGroupIds, snapshotGroupId)) {
+      next.snapshotGroupId = snapshotGroupIds[snapshotGroupId];
+    }
+    if (Object.hasOwn(chromeGroupIds, chromeGroupId)) {
+      next.groupId = Number(chromeGroupIds[chromeGroupId]);
+    }
+    return [tabId, next];
+  }));
+}
+
+/**
  * Applies one enriched Chrome tab lifecycle event to durable workspace state.
  * The reducer is deterministic and replay-safe; callers persist/ack events.
  */
@@ -589,6 +612,14 @@ function replaceOperationHistoryTabId(history, removedTabId, addedTabId) {
         before: {
           ...before,
           renamedTabs: replaceRecordId(before.renamedTabs, removedTabId, addedTabId),
+          live: replaceLiveOrganizationTabId(before.live, removedTabId, addedTabId),
+          ...(hasOwn(before, 'snapshotGroupReferences') ? {
+            snapshotGroupReferences: replaceSnapshotGroupReferenceTabId(
+              before.snapshotGroupReferences,
+              removedTabId,
+              addedTabId,
+            ),
+          } : {}),
         },
         after: {
           ...after,
@@ -603,6 +634,13 @@ function replaceOperationHistoryTabId(history, removedTabId, addedTabId) {
         before: {
           ...before,
           live: replaceLiveOrganizationTabId(before.live, removedTabId, addedTabId),
+          ...(hasOwn(before, 'snapshotGroupReferences') ? {
+            snapshotGroupReferences: replaceSnapshotGroupReferenceTabId(
+              before.snapshotGroupReferences,
+              removedTabId,
+              addedTabId,
+            ),
+          } : {}),
         },
         after: {
           ...after,
@@ -646,11 +684,34 @@ function replaceLiveOrganizationTabId(value, removedTabId, addedTabId) {
   const live = recordValue(value);
   return {
     ...live,
+    tabs: arrayValue(live.tabs).map((record) => (
+      Number(record?.tabId) === removedTabId
+        ? { ...record, tabId: addedTabId }
+        : record
+    )),
     groups: arrayValue(live.groups).map((group) => ({
       ...recordValue(group),
       tabIds: replaceNumericId(group?.tabIds, removedTabId, addedTabId),
     })),
     ungroupedTabIds: replaceNumericId(live.ungroupedTabIds, removedTabId, addedTabId),
+  };
+}
+
+function replaceSnapshotGroupReferenceTabId(value, removedTabId, addedTabId) {
+  const references = recordValue(value);
+  return {
+    ...references,
+    tabLifecycle: replaceRecordId(
+      references.tabLifecycle,
+      removedTabId,
+      addedTabId,
+    ),
+    recentlyOpenedDormantTabs: arrayValue(references.recentlyOpenedDormantTabs)
+      .map((record) => (
+        Number(record?.tabId) === removedTabId
+          ? { ...record, tabId: addedTabId }
+          : record
+      )),
   };
 }
 

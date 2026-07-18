@@ -890,8 +890,7 @@ async function main() {
       if (fault && this === localStorage && key === 'spaceTabsState') {
         try {
           const stored = JSON.parse(value || '{}').spaceTabsState || {};
-          candidate = (stored.spaces || []).some((space) => space.name === 'E2E Space') &&
-            stored.activeSpaceId === 'e2e-space';
+          candidate = (stored.spaces || []).some((space) => space.name === 'E2E Space');
         } catch {
           candidate = false;
         }
@@ -942,6 +941,17 @@ async function main() {
         .filter((command) => mutationCommands.has(command.type)),
     };
   })()`);
+  const addSpaceAttemptRolledBackSafely = (mutations, attempts) => {
+    if (mutations.length !== attempts * 5) return false;
+    return Array.from({ length: attempts }, (_, index) => mutations.slice(index * 5, index * 5 + 5))
+      .every((chunk) => (
+        chunk.map((command) => command.type).join(',') ===
+          'tabs:create,tabs:focus,tabs:focus,tabs:close,tabs:focus' &&
+        chunk[0]?.payload?.active === false &&
+        Number.isSafeInteger(Number(chunk[1]?.payload?.tabId)) &&
+        Number.isSafeInteger(Number(chunk[3]?.payload?.requiredActiveSurvivorTabId))
+      ));
+  };
   record(
     'Add Space pre-write failure is a focused, retryable no-op',
     addSpacePreWriteFailure.local === addSpaceAtomicityBaseline.local &&
@@ -955,7 +965,7 @@ async function main() {
       addSpacePreWriteFailure.status.includes('Add Space pre-write failure E2E') &&
       !/created|ready|saved/i.test(addSpacePreWriteFailure.status) &&
       addSpacePreWriteFailure.candidateWrites === 1 &&
-      addSpacePreWriteFailure.chromeMutations.length === 0,
+      addSpaceAttemptRolledBackSafely(addSpacePreWriteFailure.chromeMutations, 1),
     JSON.stringify({
       ...addSpacePreWriteFailure,
       local: undefined,
@@ -1008,7 +1018,7 @@ async function main() {
       addSpaceApplyThenRejectFailure.status.includes('Add Space apply-then-reject failure E2E') &&
       !/created|ready|saved/i.test(addSpaceApplyThenRejectFailure.status) &&
       addSpaceApplyThenRejectFailure.candidateWrites === 2 &&
-      addSpaceApplyThenRejectFailure.chromeMutations.length === 0,
+      addSpaceAttemptRolledBackSafely(addSpaceApplyThenRejectFailure.chromeMutations, 2),
     JSON.stringify({
       ...addSpaceApplyThenRejectFailure,
       local: undefined,
@@ -1040,14 +1050,19 @@ async function main() {
   })()`);
   await evaluate(client, `window.__ADD_SPACE_ATOMICITY_FAULT__?.restore()`);
   record(
-    'retrying Add Space commits one durable active Space without mutating browser tabs',
+    'retrying Add Space commits one durable active Space with a safe active target tab',
     newEmptySpaceState.activeSpaceId === 'e2e-space' &&
-      newEmptySpaceState.rows === 0 &&
+      newEmptySpaceState.rows === 1 &&
       !newEmptySpaceState.snapshot &&
       newEmptySpaceState.storedMatches === 1 &&
       newEmptySpaceState.railMatches === 1 &&
-      newEmptySpaceState.candidateWrites === 3 &&
-      newEmptySpaceState.chromeMutations.length === 0,
+      newEmptySpaceState.candidateWrites === 4 &&
+      newEmptySpaceState.chromeMutations.some((command) => command.type === 'tabs:create') &&
+      newEmptySpaceState.chromeMutations.some((command) => (
+        command.type === 'tabs:close' &&
+        Number.isSafeInteger(Number(command.payload?.requiredActiveSurvivorTabId)) &&
+        (command.payload?.requiredTargetTabGuards || []).length === 1
+      )),
     JSON.stringify(newEmptySpaceState)
   );
 
@@ -1074,9 +1089,8 @@ async function main() {
         let candidate = false;
         try {
           const stored = JSON.parse(value || '{}').spaceTabsState || {};
-          candidate = stored.activeSpaceId === 'unsafe-space' &&
-            (stored.spaces || []).some((space) =>
-              space.id === 'unsafe-space' && space.name === 'Unsafe Space');
+          candidate = (stored.spaces || []).some((space) =>
+            space.id === 'unsafe-space' && space.name === 'Unsafe Space');
         } catch {
           candidate = false;
         }
@@ -1100,7 +1114,7 @@ async function main() {
   const unsafeAddSpaceFailure = await waitFor(client, `(() => {
     const fault = window.__UNSAFE_ADD_SPACE_FAULT__;
     const status = document.querySelector('#syncStatus')?.textContent || '';
-    if (fault?.candidateWrites !== 1 || fault.rollbackWrites !== 1 ||
+    if (fault?.candidateWrites !== 2 || fault.rollbackWrites !== 2 ||
         !status.includes('Reload Space Tabs before trying Add Space again')) return null;
     const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
     return {
@@ -1130,8 +1144,8 @@ async function main() {
   })()`);
   record(
     'Add Space fails closed when storage compensation cannot verify a safe retry',
-    unsafeAddSpaceFailure.candidateWrites === 1 &&
-      unsafeAddSpaceFailure.rollbackWrites === 1 &&
+    unsafeAddSpaceFailure.candidateWrites === 2 &&
+      unsafeAddSpaceFailure.rollbackWrites === 2 &&
       unsafeAddSpaceFailure.storedMatches === 1 &&
       unsafeAddSpaceFailure.railMatches === 0 &&
       !unsafeAddSpaceFailure.dialogOpen &&
@@ -1167,7 +1181,10 @@ async function main() {
       emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
-      emptySpaceSwitchState.carrierMutations.length === 0 &&
+      emptySpaceSwitchState.carrierMutations.filter((command) => command.type === 'tabs:create').length === 5 &&
+      emptySpaceSwitchState.carrierMutations.filter((command) => command.type === 'tabs:close').length === 1 &&
+      emptySpaceSwitchState.carrierMutations.find((command) => command.type === 'tabs:close')
+        ?.payload?.requiredTargetTabGuards?.length === 5 &&
       !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab/i.test(text)),
     JSON.stringify(emptySpaceSwitchState)
   );
@@ -1834,19 +1851,19 @@ async function main() {
     };
   })()`, 7000);
   record(
-    'collapsed group preview search + Enter opens the exact dormant saved tab once',
+    'collapsed group preview search + Enter focuses the exact materialized saved identity once',
     dormantPreviewLaunch?.query === 'nested-plan' &&
       dormantPreviewLaunch.openPrevented &&
       dormantPreviewLaunch.enterPrevented &&
       dormantPreviewLaunch.before.length === 1 &&
-      dormantPreviewLaunch.before[0].title === 'Nested Plan' &&
-      dormantPreviewLaunch.before[0].dormant &&
-      dormantPreviewLaunch.before[0].state === 'Saved' &&
+      dormantPreviewLaunch.before[0].title === 'example.com' &&
+      !dormantPreviewLaunch.before[0].dormant &&
       dormantPreviewLaunchState.popoverHidden === true &&
       dormantPreviewLaunchState.previewOpen === 'false' &&
-      dormantPreviewLaunchState.createCommands.length === 1 &&
-      dormantPreviewLaunchState.createCommands[0]?.payload?.url === 'https://example.com/nested-plan' &&
-      dormantPreviewLaunchState.focusCommands.length === 0 &&
+      dormantPreviewLaunchState.createCommands.length === 0 &&
+      dormantPreviewLaunchState.focusCommands.length === 1 &&
+      Number(dormantPreviewLaunchState.focusCommands[0]?.payload?.tabId) ===
+        Number(dormantPreviewLaunchState.bindingTabId) &&
       dormantPreviewLaunchState.targetTabs[0]?.active === true &&
       dormantPreviewLaunchState.targetTabs[0]?.id === dormantPreviewLaunchState.bindingTabId &&
       dormantPreviewLaunchState.binding.snapshotTabId === dormantPreviewLaunch.snapshotTabId &&
@@ -2631,7 +2648,7 @@ async function main() {
     'dormant imported groups can be dragged into another group',
     dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
       dormantNestState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
-      dormantNestState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
+      dormantNestState.betaChildren.join(' > ') === 'group:Beta > group:Gamma' &&
       dormantNestState.gammaDepth === 1,
     JSON.stringify(dormantNestState)
   );
@@ -2672,7 +2689,7 @@ async function main() {
     'dormant imported group nesting keeps storage and DOM hierarchy after reload',
     dormantNestReloadState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
       dormantNestReloadState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
-      dormantNestReloadState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
+      dormantNestReloadState.betaChildren.join(' > ') === 'group:Beta > group:Gamma' &&
       dormantNestReloadState.gammaFolderTitle === 'Beta',
     JSON.stringify(dormantNestReloadState)
   );
@@ -2706,6 +2723,16 @@ async function main() {
       }],
     };
     localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: state }));
+    const storedWindowState = JSON.parse(
+      sessionStorage.getItem('spaceTabsWindowState') || '{}'
+    ).spaceTabsWindowState || { activeSpaceIds: {} };
+    storedWindowState.activeSpaceIds = {
+      ...(storedWindowState.activeSpaceIds || {}),
+      1: 'drop-demo',
+    };
+    sessionStorage.setItem('spaceTabsWindowState', JSON.stringify({
+      spaceTabsWindowState: storedWindowState,
+    }));
     sessionStorage.setItem('spaceTabsPreviewRuntime', JSON.stringify({
       tabs: [{
         id: 1202,
@@ -3409,11 +3436,28 @@ async function main() {
     bugs.push('Repeated Space switching destabilized saved Space snapshots.');
   }
 
+  // Space switching now materializes the complete target by design. Seed the
+  // active window directly so this separate scenario can still exercise the
+  // user opening one genuinely dormant saved row.
   await evaluate(client, `(() => {
-    const buttons = [...document.querySelectorAll('.space')];
-    buttons.find((button) => button.title === 'Dormant Demo').click();
+    const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
+    const stored = raw.spaceTabsState || {};
+    stored.activeSpaceId = 'dormant-demo';
+    localStorage.setItem('spaceTabsState', JSON.stringify({ spaceTabsState: stored }));
+    const windowState = JSON.parse(
+      sessionStorage.getItem('spaceTabsWindowState') || '{}'
+    ).spaceTabsWindowState || { activeSpaceIds: {} };
+    windowState.activeSpaceIds = {
+      ...(windowState.activeSpaceIds || {}),
+      1: 'dormant-demo',
+    };
+    sessionStorage.setItem('spaceTabsWindowState', JSON.stringify({
+      spaceTabsWindowState: windowState,
+    }));
     return true;
   })()`);
+  await checkpointPreviewCoverage(client, coverageSnapshots);
+  await client.send('Page.reload', { ignoreCache: true });
   await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Dormant Demo'`);
   await waitFor(client, `[...document.querySelectorAll('.group-header h2')].some((node) => node.textContent === 'Search')`);
   await evaluate(client, `(() => {
@@ -3787,24 +3831,18 @@ async function main() {
       };
     })()`, 7000);
     const movedTitles = moveToState.rows.map((row) => row.title);
-    const moveVirtualGroupKeys = [201, 202].map((tabId) => moveToState.tabGroups[tabId] || '');
-    const moveVirtualGroup = moveToState.virtualGroups[moveVirtualGroupKeys[0]];
     const moveToWorked = moveToState.activeSpaceId === 'move-target' &&
       moveToState.headers.includes('Move Source') &&
       ['Move Alpha', 'Move Beta'].every((title) => movedTitles.includes(title)) &&
       moveToState.rows.filter((row) => row.selected).length === 2 &&
-      [201, 202].every((tabId) => moveToState.tabSpaces[tabId] === 'move-target') &&
-      moveVirtualGroupKeys[0].startsWith('vgroup:') &&
-      moveVirtualGroupKeys.every((key) => key === moveVirtualGroupKeys[0]) &&
-      moveVirtualGroup?.spaceId === 'move-target' &&
-      moveVirtualGroup?.title === 'Move Source' &&
-      moveVirtualGroup?.color === 'blue' &&
       moveToState.runtimeGroupIds.length === 2 &&
-      moveToState.runtimeGroupIds.every((groupId) => groupId === -1) &&
-      moveToState.closedMovedTabIds.length === 0 &&
-      [201, 202].every((tabId) => moveToState.ungroupedTabIds.includes(tabId));
+      moveToState.runtimeGroupIds[0] >= 0 &&
+      moveToState.runtimeGroupIds.every((groupId) => groupId === moveToState.runtimeGroupIds[0]) &&
+      moveToState.groupSpaces[moveToState.runtimeGroupIds[0]] === 'move-target' &&
+      [201, 202].every((tabId) => !moveToState.tabSpaces[tabId] && !moveToState.tabGroups[tabId]) &&
+      moveToState.closedMovedTabIds.length === 0;
     record(
-      'Move to checkpoints selected tabs in one durable destination group before activation',
+      'Move to materializes selected tabs in one durable destination Tag before source cleanup',
       moveToWorked,
       JSON.stringify(moveToState)
     );
@@ -3847,7 +3885,7 @@ async function main() {
       moveMaterializedState.groupSpaceId === 'move-target' &&
       moveMaterializedState.tabSpaces.every((spaceId) => !spaceId) &&
       moveMaterializedState.tabGroups.every((groupKey) => !groupKey) &&
-      !moveMaterializedState.virtualGroupKeys.includes(moveVirtualGroupKeys[0]) &&
+      moveMaterializedState.virtualGroupKeys.length === 0 &&
       moveMaterializedState.headers.includes('Move Source');
     record(
       'Move to materializes the durable destination group in Chrome on refresh',
@@ -3895,7 +3933,7 @@ async function main() {
       'Tidy Names directly opens one concise final preview and Cancel has no side effects',
       tidyPreview.items > 0 &&
         tidyPreview.confirmText === 'Apply tidy' &&
-        /^\d+ names? · AI: Z\.ai \/ GLM · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
+        /^\d+ names? · AI: Z\.ai · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
         tidyPreview.providerRequests === 1 &&
         !tidyPreview.titles.includes('Generate Tidy Names preview?') &&
         tidyCancelState.mutations.length === 0 &&
@@ -3912,8 +3950,20 @@ async function main() {
         snapshot.preserveGroups = true;
         snapshot.groups = (snapshot.groups || []).filter((group) => group.title !== 'Planning');
         snapshot.groups.push(
-          { title: 'Planning', color: 'cyan', collapsed: false, tabs: [] },
-          { title: 'Planning', color: 'cyan', collapsed: false, tabs: [] },
+          {
+            snapshotGroupId: 'preview-planning-canonical',
+            title: 'Planning',
+            color: 'cyan',
+            collapsed: false,
+            tabs: [],
+          },
+          {
+            snapshotGroupId: 'preview-planning-duplicate',
+            title: 'Planning',
+            color: 'cyan',
+            collapsed: false,
+            tabs: [],
+          },
         );
         localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
       }
@@ -3937,6 +3987,8 @@ async function main() {
       return {
         message: document.querySelector('#actionDialogMessage')?.textContent || '',
         titles: [...new Set(window.__autoGroupPreviewTitles || [])],
+        sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
+          .map((heading) => heading.textContent || ''),
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
         sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
@@ -3950,7 +4002,9 @@ async function main() {
         providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => command.type === 'ai:chat').length,
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
-          .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)),
+          .filter((command) => [
+            'tabs:group', 'tabs:groupExisting', 'tabs:ungroup', 'groups:update',
+          ].includes(command.type)),
       };
     })()`);
     record(
@@ -3962,6 +4016,7 @@ async function main() {
         !autoGroupPreview.message.includes('sent ') &&
         !autoGroupPreview.message.includes('generated in') &&
         !autoGroupPreview.titles.includes('Generate Auto Group preview?') &&
+        !autoGroupPreview.sectionTitles.includes('Remain untouched') &&
         autoGroupPreview.items > 0 &&
         autoGroupPreview.sourceLabels > 0 &&
         autoGroupPreview.groupCards > 0 &&
@@ -3980,7 +4035,9 @@ async function main() {
       providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => command.type === 'ai:chat').length,
       mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
-        .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)).length,
+        .filter((command) => [
+          'tabs:group', 'tabs:groupExisting', 'tabs:ungroup', 'groups:update',
+        ].includes(command.type)).length,
     })`);
     record(
       'Auto Group final-preview Cancel leaves organization unchanged',
@@ -3997,7 +4054,9 @@ async function main() {
         sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
-          .filter((command) => ['tabs:group', 'tabs:groupExisting', 'tabs:ungroup'].includes(command.type)),
+          .filter((command) => [
+            'tabs:group', 'tabs:groupExisting', 'tabs:ungroup', 'groups:update',
+          ].includes(command.type)),
       };
     })()`);
     record(
@@ -4009,7 +4068,7 @@ async function main() {
     const groupApplyState = await waitFor(client, `(() => {
       if (document.querySelector('#actionDialog')?.open) return null;
       const mutations = (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
-        .filter((command) => ['tabs:group', 'tabs:groupExisting'].includes(command.type));
+        .filter((command) => ['tabs:group', 'tabs:groupExisting', 'groups:update'].includes(command.type));
       const matchingCards = [...document.querySelectorAll('#groupsList .group-card')]
         .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Planning')
         .map((card) => ({
@@ -4021,7 +4080,11 @@ async function main() {
         .filter((group) => group.title === 'Planning')
         .map((group) => ({ tabs: (group.tabs || []).length }));
       return mutations.length > 0 && matchingCards.length > 0
-        ? { mutations, matchingCards, planningSnapshotGroups }
+        ? {
+          mutations,
+          matchingCards,
+          planningSnapshotGroups,
+        }
         : null;
     })()`);
     record(
@@ -4030,8 +4093,156 @@ async function main() {
         groupApplyState.planningSnapshotGroups.length === 1 &&
         groupApplyState.planningSnapshotGroups[0].tabs === 2 &&
         groupApplyState.matchingCards.length === 1 &&
-        groupApplyState.matchingCards[0].rows === 2,
+      groupApplyState.matchingCards[0].rows === 2,
       JSON.stringify(groupApplyState)
+    );
+
+    const undoAvailability = await waitFor(client, `(() => {
+      const record = document.querySelector('#operationRecord');
+      const button = document.querySelector('#undoOrganizationButton');
+      const operationId = button?.dataset.operationId || '';
+      return record && !record.hidden && button && !button.disabled && operationId
+        ? {
+          operationId,
+          summary: document.querySelector('#operationRecordText')?.textContent || '',
+          text: button.textContent || '',
+        }
+        : null;
+    })()`);
+    await evaluate(client, `(() => {
+      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+      document.querySelector('#undoOrganizationButton').click();
+      return true;
+    })()`);
+    const groupUndoState = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const operation = (stored.operationHistory || [])
+        .find((candidate) => candidate?.id === ${JSON.stringify(undoAvailability.operationId)});
+      const movedTabs = (runtime.tabs || []).filter((tab) => tab.id === 201 || tab.id === 202);
+      const groupIds = [...new Set(movedTabs.map((tab) => Number(tab.groupId)))];
+      const liveGroup = groupIds.length === 1
+        ? (runtime.groups || []).find((group) => Number(group.id) === groupIds[0])
+        : null;
+      const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .filter((group) => group.title === 'Planning')
+        .map((group) => ({
+          snapshotGroupId: group.snapshotGroupId || '',
+          tabs: (group.tabs || []).length,
+        }));
+      const headers = [...document.querySelectorAll('#groupsList .group-header h2')]
+        .map((node) => node.textContent || '');
+      const planningCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Planning')
+        .map((card) => card.querySelectorAll('.tab-row').length);
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      if (operation?.status !== 'undone' || liveGroup?.title !== 'Move Source' ||
+          movedTabs.length !== 2 || !headers.includes('Move Source') ||
+          !status.startsWith('Undid:')) return null;
+      return {
+        operationStatus: operation.status,
+        liveGroup: {
+          title: liveGroup.title,
+          color: liveGroup.color,
+          tabs: movedTabs.length,
+        },
+        planningSnapshotGroups,
+        headers,
+        planningCards,
+        status,
+        mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => [
+            'tabs:group', 'tabs:groupExisting', 'tabs:ungroup', 'groups:update',
+          ].includes(command.type)),
+      };
+    })()`, 7000);
+    record(
+      'Auto Group Undo restores the original live Tag and both deduplicated saved Tags',
+      undoAvailability.text === 'Undo' &&
+        undoAvailability.summary.length > 0 &&
+        groupUndoState.operationStatus === 'undone' &&
+        groupUndoState.liveGroup.title === 'Move Source' &&
+        groupUndoState.liveGroup.color === 'blue' &&
+        groupUndoState.liveGroup.tabs === 2 &&
+        groupUndoState.planningSnapshotGroups.length === 2 &&
+        groupUndoState.planningSnapshotGroups.every((group) => group.tabs === 0) &&
+        new Set(groupUndoState.planningSnapshotGroups.map((group) => group.snapshotGroupId)).size === 2 &&
+        groupUndoState.headers.includes('Move Source') &&
+        groupUndoState.headers.filter((title) => title === 'Planning').length === 2 &&
+        groupUndoState.planningCards.length === 2 &&
+        groupUndoState.planningCards.every((rows) => rows === 0) &&
+        groupUndoState.mutations.length > 0,
+      JSON.stringify({ undoAvailability, groupUndoState })
+    );
+
+    await evaluate(client, `(() => {
+      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
+      document.querySelector('#tidyNamesButton').click();
+      return true;
+    })()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`);
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const tidyApplyState = await waitFor(client, `(() => {
+      if (document.querySelector('#actionDialog')?.open) return null;
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const button = document.querySelector('#undoOrganizationButton');
+      const operationId = button?.dataset.operationId || '';
+      const operation = (stored.operationHistory || [])
+        .find((candidate) => candidate?.id === operationId);
+      const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .filter((group) => group.title === 'Planning');
+      const renamedTabs = stored.renamedTabs || {};
+      if (operation?.type !== 'tidy-names' || operation.status !== 'applied' ||
+          planningSnapshotGroups.length !== 1 || Object.keys(renamedTabs).length === 0) return null;
+      return {
+        operationId,
+        operationSummary: operation.summary || '',
+        renamedTabs,
+        planningSnapshotGroups: planningSnapshotGroups.length,
+        planningCards: [...document.querySelectorAll('#groupsList .group-card')]
+          .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Planning').length,
+        status: document.querySelector('#syncStatus')?.textContent || '',
+      };
+    })()`, 7000);
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyUndoState = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || [])
+        .find((candidate) => candidate?.id === ${JSON.stringify(tidyApplyState.operationId)});
+      const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .filter((group) => group.title === 'Planning');
+      const planningCards = [...document.querySelectorAll('#groupsList .group-card')]
+        .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Planning');
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      if (operation?.status !== 'undone' || planningSnapshotGroups.length !== 2 ||
+          planningCards.length !== 2 || Object.keys(stored.renamedTabs || {}).length !== 0 ||
+          !status.startsWith('Undid:')) return null;
+      return {
+        operationStatus: operation.status,
+        renamedTabs: stored.renamedTabs || {},
+        snapshotGroupIds: planningSnapshotGroups.map((group) => group.snapshotGroupId || ''),
+        planningRows: planningCards.map((card) => card.querySelectorAll('.tab-row').length),
+        visibleTitles: [...document.querySelectorAll('#groupsList .tab-title')]
+          .map((node) => node.textContent || ''),
+        status,
+      };
+    })()`, 7000);
+    record(
+      'Tidy applies naming and Tag deduplication together, then Undo restores both exactly',
+      tidyApplyState.operationSummary.includes('renamed 1 tab') &&
+        tidyApplyState.operationSummary.includes('merged 1 duplicate Tag') &&
+        tidyApplyState.planningSnapshotGroups === 1 &&
+        tidyApplyState.planningCards === 1 &&
+        Object.keys(tidyApplyState.renamedTabs).length === 1 &&
+        tidyUndoState.operationStatus === 'undone' &&
+        Object.keys(tidyUndoState.renamedTabs).length === 0 &&
+        tidyUndoState.snapshotGroupIds.length === 2 &&
+        new Set(tidyUndoState.snapshotGroupIds).size === 2 &&
+        tidyUndoState.planningRows.every((rows) => rows === 0) &&
+        tidyUndoState.visibleTitles.some((title) => title.includes('deliberately long browser title')),
+      JSON.stringify({ tidyApplyState, tidyUndoState })
     );
   }
 

@@ -5,6 +5,7 @@ import {
   captureChromeGroupMutationMemory,
   captureChromeGroupTitleRollback,
   captureTabGroupMembership,
+  orderDuplicateChromeGroups,
   projectChromeGroupRollbackMemory,
   remapChromeGroupBindings,
   remapLogicalChromeGroupTitles,
@@ -13,6 +14,64 @@ import {
   restoreTabPositions,
   runChromeGroupMutationTransaction,
 } from '../src/shared/chrome-group-transaction.js';
+
+test('Tidy keeps the first durable live Tag metadata instead of the lowest Chrome group id', () => {
+  const lowChromeId = { id: 5, key: 'group:5', title: 'docs', color: 'red', collapsed: false };
+  const canonical = { id: 90, key: 'group:90', title: 'Docs', color: 'purple', collapsed: true };
+  const later = { id: 20, key: 'group:20', title: ' DOCS ', color: 'yellow', collapsed: false };
+  const byStableIdentity = orderDuplicateChromeGroups([lowChromeId, canonical, later], {
+    canonicalSnapshotGroupId: 'snapshot-first',
+    tabLifecycle: {
+      1: { groupId: 5, snapshotGroupId: 'snapshot-later' },
+      2: { groupId: 90, snapshotGroupId: 'snapshot-first' },
+      3: { groupId: 20, snapshotGroupId: 'snapshot-third' },
+    },
+    visibleGroupKeys: ['group:5', 'group:20', 'group:90'],
+    groupOrder: ['group:20', 'group:90', 'group:5'],
+  });
+  assert.deepEqual(byStableIdentity, [canonical, lowChromeId, later]);
+  assert.equal(byStableIdentity[0].color, 'purple');
+  assert.equal(byStableIdentity[0].collapsed, true);
+
+  const byLiveStableRow = orderDuplicateChromeGroups([lowChromeId, canonical], {
+    canonicalSnapshotGroupId: 'snapshot-first',
+    canonicalGroupIds: [90],
+    tabLifecycle: {
+      1: { groupId: 5, snapshotGroupId: 'snapshot-first' },
+      2: { groupId: 90, snapshotGroupId: 'snapshot-first' },
+    },
+    visibleGroupKeys: ['group:5', 'group:90'],
+  });
+  assert.deepEqual(
+    byLiveStableRow,
+    [canonical, lowChromeId],
+    'the physical group containing the canonical stable row outranks a stale cached group id',
+  );
+
+  const byVisibleOrder = orderDuplicateChromeGroups([lowChromeId, canonical, later], {
+    visibleGroupKeys: ['group:20', 'group:90'],
+    groupOrder: ['group:90', 'group:5', 'group:20'],
+  });
+  assert.deepEqual(byVisibleOrder, [later, canonical, lowChromeId]);
+
+  const byDurableOrder = orderDuplicateChromeGroups([lowChromeId, canonical], {
+    visibleGroupKeys: [],
+    groupOrder: ['group:90', 'group:5'],
+  });
+  assert.deepEqual(byDurableOrder, [canonical, lowChromeId]);
+  const unrankedA = { id: 200, key: 'group:200', color: 'cyan' };
+  const unrankedB = { id: 100, key: 'group:100', color: 'orange' };
+  assert.deepEqual(
+    orderDuplicateChromeGroups([unrankedA, unrankedB], {
+      canonicalSnapshotGroupId: 'missing-canonical',
+      tabLifecycle: { 9: { groupId: 9 } },
+    }),
+    [unrankedA, unrankedB],
+    'equal ranks preserve first-visible metadata instead of falling back to Chrome id',
+  );
+  assert.deepEqual(orderDuplicateChromeGroups(null), []);
+  assert.deepEqual(orderDuplicateChromeGroups(), []);
+});
 import { persistStorageStep } from '../src/shared/storage-transaction.js';
 
 function createGroupBrowser({ tabs = [], groups = [], nextGroupId = 100 } = {}) {

@@ -189,6 +189,7 @@ export function createPrompt(kind, context = {}) {
           'Group browser tabs into concise topic/work buckets using page titles first, then URLs only as supporting context.',
           'Do not group merely because tabs share a domain or website; mix different domains when their titles describe the same subject.',
           'Keep unrelated pages separate even when they are from the same domain.',
+          'Include every supplied tab id exactly once; do not omit tabs, invent ids, or repeat ids.',
           'Return only JSON: [{"title":"Topic","tabIds":[1,2],"color":"blue"}].',
         ].join(' '),
       },
@@ -258,7 +259,10 @@ export function parseTidyGroups(text) {
     const parsed = parseJsonArray(text);
     return parsed
       .map((group) => ({
-        title: String(group?.title || 'Tabs').slice(0, 32),
+        // Keep the provider's logical Tag name intact. Chrome's physical
+        // 32-character representation is an output concern handled when the
+        // group is written, not part of saved organization identity.
+        title: String(group?.title || 'Tabs').replace(/\s+/g, ' ').trim() || 'Tabs',
         color: normalizeGroupColor(group?.color),
         tabIds: Array.isArray(group?.tabIds)
           ? group.tabIds.map((id) => Number(id)).filter(Number.isFinite)

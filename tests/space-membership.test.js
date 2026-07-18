@@ -1759,6 +1759,52 @@ test('restores distinct same-prefix long groups after Chrome restarts with compa
   assert.deepEqual(metadata.renamedTabs, {});
 });
 
+test('owned long Tag uses lifecycle identity instead of an ambiguous physical-title shadow', () => {
+  const logicalTitle = 'Renamed Group E2E same-prefix identity 0123456789 alpha requested title';
+  const physicalTitle = chromeGroupTitle(logicalTitle);
+  const state = {
+    groupSpaces: { 101: 'default' },
+    tabSpaces: {},
+    tabLifecycle: {
+      1: {
+        tabId: 1,
+        groupId: 101,
+        spaceId: 'default',
+        snapshotGroupId: 'group:logical',
+        snapshotTabId: 'tab:logical',
+      },
+    },
+    groupOrder: { default: [] },
+    spaceSnapshots: {
+      default: {
+        groups: [
+          {
+            snapshotGroupId: 'group:logical',
+            title: logicalTitle,
+            color: 'blue',
+            tabs: [{ snapshotTabId: 'tab:logical', url: 'https://example.com/same' }],
+          },
+          {
+            snapshotGroupId: 'group:physical-shadow',
+            title: physicalTitle,
+            color: 'blue',
+            tabs: [{ snapshotTabId: 'tab:shadow', url: 'https://example.com/same' }],
+          },
+        ],
+      },
+    },
+  };
+
+  const metadata = restoreSnapshotOwnership(
+    state,
+    [{ id: 1, groupId: 101, url: 'https://example.com/same' }],
+    [{ id: 101, title: physicalTitle, color: 'blue' }],
+  );
+
+  assert.deepEqual(metadata.groupTitles, { 101: logicalTitle });
+  assert.deepEqual(state.groupOrder.default, ['group:101']);
+});
+
 test('restores a unique snapshot panel title for a newly owned live group tab', () => {
   const logicalTitle = `${'Design research '.repeat(3)}archive`;
   const state = {
@@ -1843,6 +1889,46 @@ test('grouped restore never steals ownership or a manual name across contradicto
   assert.deepEqual(state.renamedTabs, {});
   assert.deepEqual(state.groupOrder, { work: [], personal: [] });
   assert.deepEqual(metadata, { groupTitles: {}, renamedTabs: {} });
+});
+
+test('known group ownership ignores a stale lifecycle binding without a Space', () => {
+  const state = {
+    groupSpaces: { 99: 'work' },
+    tabSpaces: {},
+    tabLifecycle: {
+      501: {
+        groupId: 99,
+        spaceId: '',
+        snapshotGroupId: 'personal-group',
+        snapshotTabId: 'personal-row',
+      },
+    },
+    renamedTabs: {},
+    groupOrder: { work: [] },
+    spaceSnapshots: {
+      work: {
+        groups: [{
+          snapshotGroupId: 'work-group',
+          title: 'Docs',
+          color: 'blue',
+          tabs: [{
+            snapshotTabId: 'work-row',
+            url: 'https://example.com/shared',
+          }],
+        }],
+      },
+    },
+  };
+
+  const metadata = restoreSnapshotOwnership(state, [{
+    id: 501,
+    groupId: 99,
+    url: 'https://example.com/shared',
+  }], [{ id: 99, title: 'Docs', color: 'blue' }]);
+
+  assert.deepEqual(state.groupSpaces, { 99: 'work' });
+  assert.deepEqual(state.groupOrder, { work: ['group:99'] });
+  assert.deepEqual(metadata, { groupTitles: { 99: 'Docs' }, renamedTabs: {} });
 });
 
 test('matching stable group ownership cannot copy a panel name from a different stable row', () => {

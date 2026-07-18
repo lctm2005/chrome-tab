@@ -487,6 +487,8 @@ test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
   assert.match(prompt[0].content, /page titles first/);
   assert.match(prompt[0].content, /Do not group merely because tabs share a domain/);
   assert.match(prompt[0].content, /mix different domains/);
+  assert.match(prompt[0].content, /every supplied tab id exactly once/i);
+  assert.match(prompt[0].content, /do not omit tabs/i);
 });
 
 test('uses empty inputs for optional tidy and custom prompt context', () => {
@@ -532,12 +534,14 @@ test('keeps valid tidy groups when neighboring provider data is malformed', () =
     null,
     { title: longTitle, tabIds: ['1', 'bad'], color: 'Cyan' },
     { tabIds: [2], color: 'not-a-color' },
+    { title: '   ', tabIds: [3], color: 'green' },
     { title: 'No tabs', color: 'red' },
   ]));
 
   assert.deepEqual(groups, [
-    { title: 'A'.repeat(32), tabIds: [1], color: 'cyan' },
+    { title: longTitle, tabIds: [1], color: 'cyan' },
     { title: 'Tabs', tabIds: [2], color: 'blue' },
+    { title: 'Tabs', tabIds: [3], color: 'green' },
   ]);
 });
 

@@ -1,4 +1,4 @@
-import { chromeGroupTitleKey } from './group-title.js';
+import { chromeGroupTitleKey, groupTitleKey } from './group-title.js';
 import { isChromeNewTabUrl } from './tab-utils.js';
 
 export function shouldAutoCloseTab(tab = {}, options = {}) {
@@ -43,6 +43,20 @@ export function snapshotTabCount(snapshot = {}) {
   return (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0);
 }
 
+// Stable row identity must outrank the physical Chrome Tag title. Chrome
+// shortens long titles with a hash, while saved snapshots retain the user's
+// full logical title.
+export function uniqueSnapshotGroupForTabId(groups = [], snapshotTabId = '') {
+  const stableTabId = String(snapshotTabId || '').trim();
+  if (!stableTabId) return null;
+  const matches = groups.filter((group) => (
+    (group?.tabs || []).some((tab) => (
+      String(tab?.snapshotTabId || '').trim() === stableTabId
+    ))
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function snapshotGroupShouldPersist(snapshot = {}, group = {}) {
   return (group.tabs || []).length > 0 || Boolean(
     snapshot?.preserveGroups && !isUngroupedSnapshotGroup(group)
@@ -54,6 +68,131 @@ export function snapshotHasPersistentContent(snapshot = {}) {
     snapshot?.preserveGroups &&
     (snapshot.groups || []).some((group) => !isUngroupedSnapshotGroup(group))
   );
+}
+
+/**
+ * Combines saved Tags whose user-visible names normalize to the same value.
+ *
+ * The first Tag is the canonical one: its title, color, collapsed state,
+ * stable identity, and any future group metadata remain authoritative. Rows
+ * from later duplicates are appended in their original group/tab order and
+ * are copied whole so saved-page metadata is never reconstructed or dropped.
+ * Ungrouped and unnamed groups are excluded because neither represents an
+ * explicit, safely-identifiable Tag name.
+ */
+export function mergeDuplicateSnapshotTags(snapshot, now = Date.now()) {
+  if (!snapshot || !Array.isArray(snapshot.groups)) {
+    return { snapshot, mergedCount: 0, merges: [], snapshotGroupIdReplacements: {} };
+  }
+
+  const groups = [];
+  const canonicalByTitle = new Map();
+  const mergesByTitle = new Map();
+  const snapshotGroupIdReplacements = {};
+  let mergedCount = 0;
+
+  for (const sourceGroup of snapshot.groups) {
+    const sourceTabs = Array.isArray(sourceGroup?.tabs) ? sourceGroup.tabs : [];
+    const titleKey = isUngroupedSnapshotGroup(sourceGroup)
+      ? ''
+      : groupTitleKey(sourceGroup?.title);
+    const canonicalIndex = titleKey ? canonicalByTitle.get(titleKey) : undefined;
+    if (canonicalIndex === undefined) {
+      const group = {
+        ...sourceGroup,
+        tabs: sourceTabs.map((tab) => ({ ...tab })),
+      };
+      groups.push(group);
+      if (titleKey) canonicalByTitle.set(titleKey, groups.length - 1);
+      continue;
+    }
+
+    const canonical = groups[canonicalIndex];
+    const canonicalId = String(canonical.snapshotGroupId || '').trim();
+    const duplicateId = String(sourceGroup?.snapshotGroupId || '').trim();
+    canonical.tabs.push(...sourceTabs.map((tab) => {
+      const row = { ...tab };
+      if (
+        canonicalId && duplicateId && canonicalId !== duplicateId &&
+        String(row.snapshotGroupId || '').trim() === duplicateId
+      ) {
+        row.snapshotGroupId = canonicalId;
+      }
+      return row;
+    }));
+    mergedCount += 1;
+    const merge = mergesByTitle.get(titleKey) || {
+      title: String(canonical.title),
+      mergedCount: 0,
+      appendedRowCount: 0,
+    };
+    merge.mergedCount += 1;
+    merge.appendedRowCount += sourceTabs.length;
+    mergesByTitle.set(titleKey, merge);
+
+    if (canonicalId && duplicateId && canonicalId !== duplicateId) {
+      snapshotGroupIdReplacements[duplicateId] = canonicalId;
+    }
+  }
+
+  if (mergedCount === 0) {
+    return { snapshot, mergedCount: 0, merges: [], snapshotGroupIdReplacements: {} };
+  }
+  return {
+    snapshot: {
+      ...snapshot,
+      updatedAt: Number.isFinite(Number(now)) ? Number(now) : snapshot.updatedAt,
+      groups,
+    },
+    mergedCount,
+    merges: [...mergesByTitle.values()],
+    snapshotGroupIdReplacements,
+  };
+}
+
+/**
+ * Combines saved and physical duplicate-Tag summaries without double-counting
+ * the same named Tags represented in both views. Distinct normalized names are
+ * additive; for one name, the larger duplicate count is what will disappear.
+ */
+export function combineDuplicateTagMergePlans(snapshotMerges = [], liveMerges = []) {
+  const byTitle = new Map();
+  const include = (source, kind) => {
+    for (const candidate of Array.isArray(source) ? source : []) {
+      const titleKey = groupTitleKey(candidate?.title);
+      if (!titleKey) continue;
+      const mergedCount = Math.max(0, Math.trunc(Number(candidate?.mergedCount) || 0));
+      const existing = byTitle.get(titleKey) || {
+        title: String(candidate.title),
+        snapshotMergedCount: 0,
+        liveMergedCount: 0,
+        appendedRowCount: 0,
+      };
+      if (kind === 'snapshot') {
+        existing.snapshotMergedCount = Math.max(existing.snapshotMergedCount, mergedCount);
+        existing.appendedRowCount = Math.max(
+          existing.appendedRowCount,
+          Math.max(0, Math.trunc(Number(candidate?.appendedRowCount) || 0)),
+        );
+      } else {
+        existing.liveMergedCount = Math.max(existing.liveMergedCount, mergedCount);
+      }
+      byTitle.set(titleKey, existing);
+    }
+  };
+  include(snapshotMerges, 'snapshot');
+  include(liveMerges, 'live');
+
+  const merges = [...byTitle.values()]
+    .map((merge) => ({
+      ...merge,
+      mergedCount: Math.max(merge.snapshotMergedCount, merge.liveMergedCount),
+    }))
+    .filter((merge) => merge.mergedCount > 0);
+  return {
+    mergedCount: merges.reduce((sum, merge) => sum + merge.mergedCount, 0),
+    merges,
+  };
 }
 
 // Query/hash-insensitive fallback for navigation matching. Persisted rows use the
@@ -382,6 +521,7 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
     }
     if (liveGroup) {
       mergedGroups.push({
+        ...storedGroup,
         ...liveGroup,
         ...(preserveStoredTitle ? { title: storedGroup.title } : {}),
         tabs: mergeSnapshotTabsInStoredOrder({
@@ -410,6 +550,11 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
   }
 
   return {
+    // A snapshot is a portable record and may contain metadata written by a
+    // newer version or an importer. Refreshing its live rows must not silently
+    // strip those top-level extension fields during a Space round trip.
+    ...storedSnapshot,
+    ...liveSnapshot,
     version: liveSnapshot.version || storedSnapshot.version || 1,
     updatedAt: liveSnapshot.updatedAt || Date.now(),
     ...(liveSnapshot.identityVersion || storedSnapshot.identityVersion
@@ -434,7 +579,7 @@ function mergeSnapshotTabsInStoredOrder({
   for (const storedTab of storedTabs) {
     const matchingLiveTab = liveTabByStoredTab.get(storedTab);
     if (matchingLiveTab && availableLiveTabs.has(matchingLiveTab)) {
-      ordered.push(matchingLiveTab);
+      ordered.push({ ...storedTab, ...matchingLiveTab });
       consumedLiveTabs.add(matchingLiveTab);
     } else if (!liveStoredMatches.has(storedTab)) {
       ordered.push(storedTab);

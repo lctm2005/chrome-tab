@@ -42,6 +42,7 @@ export const RUNTIME_FILES = Object.freeze([
   'src/shared/space-deletion.js',
   'src/shared/space-membership.js',
   'src/shared/space-snapshot.js',
+  'src/shared/space-switch.js',
   'src/shared/space-transfer.js',
   'src/shared/space-view-merge.js',
   'src/shared/state.js',

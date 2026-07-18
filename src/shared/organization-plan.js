@@ -3,7 +3,7 @@ import {
   snapshotTabIdentitiesConflict,
 } from './space-snapshot.js';
 
-const ORGANIZATION_FINGERPRINT_VERSION = 2;
+const ORGANIZATION_FINGERPRINT_VERSION = 3;
 
 /**
  * Builds the logical Auto Group input without presenting saved snapshot rows as
@@ -36,10 +36,16 @@ export function buildOrganizationCandidates({
     candidates.push(candidateFromUnmatchedLive(candidates.length + 1, liveEntries[liveIndex]));
   }
 
-  return {
+  const fingerprinted = fingerprintCandidates(candidates, snapshot, tabIdAliases, liveGroups);
+  const result = {
     candidates,
-    fingerprint: fingerprintCandidates(candidates, snapshot, tabIdAliases),
+    fingerprint: fingerprinted.fingerprint,
   };
+  Object.defineProperty(result, 'fingerprintParts', {
+    value: fingerprinted.parts,
+    enumerable: false,
+  });
+  return result;
 }
 
 /**
@@ -155,10 +161,11 @@ export function rebaseOrganizationPlan({
 }
 
 /**
- * Turns an AI proposal into the changes the user will actually see. Assigning
- * a tab to its current titled group is a no-op, and an existing target keeps
- * its user-controlled title, color, and collapsed state instead of adopting
- * cosmetic metadata invented by the model.
+ * Turns an AI proposal into both the complete final-layout preview and the
+ * changes that must actually be applied. Assigning a tab to its current titled
+ * group is a no-op, and an existing target keeps its user-controlled title,
+ * color, and collapsed state instead of adopting cosmetic metadata invented
+ * by the model.
  */
 export function resolveOrganizationPlanChanges({
   plannedGroups = [],
@@ -174,13 +181,21 @@ export function resolveOrganizationPlanChanges({
   }
 
   const unchangedCandidateIds = [];
+  const previewGroups = [];
   const changes = [];
   for (const group of arrayValue(plannedGroups)) {
     const proposedTitle = cleanText(group?.title);
     const titleKey = normalizedGroupTitle(proposedTitle);
     const existing = existingByTitle.get(titleKey);
-    const tabIds = arrayValue(group?.tabIds)
-      .map(Number)
+    const presentation = {
+      ...group,
+      title: cleanText(existing?.title) || proposedTitle,
+      color: cleanText(existing?.color) || cleanText(group?.color) || 'blue',
+      collapsed: existing ? Boolean(existing.collapsed) : Boolean(group?.collapsed),
+    };
+    const proposedTabIds = arrayValue(group?.tabIds).map(Number);
+    previewGroups.push({ ...presentation, tabIds: proposedTabIds });
+    const tabIds = proposedTabIds
       .filter((candidateId) => {
         const candidate = candidateById.get(candidateId);
         if (normalizedGroupTitle(candidate?.currentGroup?.title) !== titleKey) return true;
@@ -189,15 +204,12 @@ export function resolveOrganizationPlanChanges({
       });
     if (tabIds.length === 0) continue;
     changes.push({
-      ...group,
-      title: cleanText(existing?.title) || proposedTitle,
-      color: cleanText(existing?.color) || cleanText(group?.color) || 'blue',
-      collapsed: existing ? Boolean(existing.collapsed) : Boolean(group?.collapsed),
+      ...presentation,
       tabIds,
     });
   }
 
-  return { plannedGroups: changes, unchangedCandidateIds };
+  return { previewGroups, plannedGroups: changes, unchangedCandidateIds };
 }
 
 /**
@@ -711,41 +723,132 @@ function groupIndexesByTitle(groups) {
   return byTitle;
 }
 
-function fingerprintCandidates(candidates, snapshot, tabIdAliases = {}) {
-  const value = JSON.stringify(stableValue({
-    candidates: candidates.map((candidate) => ({
-      id: candidate.id,
-      title: candidate.title,
-      pageTitle: candidate.pageTitle,
-      panelTitle: candidate.panelTitle,
-      url: candidate.url,
-      dormant: candidate.dormant,
-      currentGroup: candidate.currentGroup,
-      source: fingerprintCandidateSource(candidate.source, tabIdAliases),
-    })),
+function fingerprintCandidates(candidates, snapshot, tabIdAliases = {}, liveGroups = []) {
+  const fingerprintState = {
+    liveGroups: fingerprintLiveGroups(liveGroups, tabIdAliases),
     // Empty historical groups have no candidates, but are still user data.
     // Include the complete group records so deleting or renaming one while a
     // preview is open invalidates the proposal instead of being overwritten.
-    snapshotGroups: arrayValue(snapshot?.groups),
-  }));
+    snapshotGroups: fingerprintSnapshotGroups(snapshot, liveGroups),
+  };
+  const value = JSON.stringify(stableValue(fingerprintState));
+  const hash = fingerprintHash(value);
+  const parts = {
+    live: fingerprintHash(JSON.stringify(stableValue(fingerprintState.liveGroups))),
+    snapshot: fingerprintHash(JSON.stringify(stableValue(fingerprintState.snapshotGroups))),
+  };
+  return {
+    fingerprint: `organization-v${ORGANIZATION_FINGERPRINT_VERSION}-${hash}-${candidates.length}`,
+    parts,
+  };
+}
+
+function fingerprintHash(value) {
   let hash = 0x811c9dc5;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
   }
-  return `organization-v${ORGANIZATION_FINGERPRINT_VERSION}-${(hash >>> 0).toString(16).padStart(8, '0')}-${candidates.length}`;
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function fingerprintCandidateSource(source, tabIdAliases) {
-  if (!source?.live) return source;
-  const liveId = Number(source.live.tabId);
+function fingerprintLiveGroups(liveGroups, tabIdAliases) {
   const aliases = tabIdAliases && typeof tabIdAliases === 'object' ? tabIdAliases : {};
-  const alias = Number(aliases[liveId]);
+  return arrayValue(liveGroups)
+    .map((group, groupIndex) => {
+      const tabs = arrayValue(group?.tabs)
+        .map((tab, tabIndex) => {
+          const tabId = Number(tab?.id);
+          const alias = Number(aliases[tabId]);
+          const browserIndex = Number(tab?.index);
+          return {
+            order: Number.isSafeInteger(browserIndex) && browserIndex >= 0
+              ? browserIndex
+              : tabIndex,
+            value: {
+              tabId: Number.isSafeInteger(alias) && alias >= 0 ? alias : tab?.id ?? null,
+              title: String(tab?.title || ''),
+              displayTitle: cleanText(tab?.displayTitle),
+              panelTitle: cleanText(tab?.panelTitle),
+              url: String(tab?.url || ''),
+              pinned: Boolean(tab?.pinned),
+              windowId: tab?.windowId ?? null,
+            },
+          };
+        })
+        .sort((left, right) => left.order - right.order);
+      return {
+        order: tabs.length > 0 ? tabs[0].order : groupIndex,
+        value: {
+          title: Object.hasOwn(group || {}, 'title') ? String(group.title ?? '') : 'Ungrouped',
+          color: cleanText(group?.color) || 'blue',
+          collapsed: Boolean(group?.collapsed),
+          tabs: tabs.map((entry) => entry.value),
+        },
+      };
+    })
+    .sort((left, right) => left.order - right.order)
+    .map((entry) => entry.value);
+}
+
+function fingerprintSnapshotGroups(snapshot, liveGroups) {
+  const liveSnapshotGroupIds = new Set();
+  const liveSnapshotTabIds = new Set();
+  for (const group of arrayValue(liveGroups)) {
+    const snapshotGroupId = cleanText(group?.snapshotGroupId);
+    if (snapshotGroupId) liveSnapshotGroupIds.add(snapshotGroupId);
+    for (const tab of arrayValue(group?.tabs)) {
+      const tabGroupId = cleanText(tab?.snapshotGroupId);
+      const snapshotTabId = cleanText(tab?.snapshotTabId);
+      if (tabGroupId) liveSnapshotGroupIds.add(tabGroupId);
+      if (snapshotTabId) liveSnapshotTabIds.add(snapshotTabId);
+    }
+  }
+  const liveBacked = [];
+  const savedOnly = [];
+  arrayValue(snapshot?.groups).forEach((group, index) => {
+    const snapshotGroupId = cleanText(group?.snapshotGroupId);
+    const hasLiveIdentity = snapshotGroupId && liveSnapshotGroupIds.has(snapshotGroupId) ||
+      arrayValue(group?.tabs).some((tab) => (
+        liveSnapshotTabIds.has(cleanText(tab?.snapshotTabId))
+      ));
+    if (hasLiveIdentity) {
+      liveBacked.push({
+        key: snapshotGroupId || JSON.stringify(stableValue(group)),
+        value: fingerprintLiveBackedSnapshotGroup(group, liveSnapshotTabIds),
+      });
+    } else {
+      savedOnly.push({ index, value: group });
+    }
+  });
+  liveBacked.sort((left, right) => left.key.localeCompare(right.key));
   return {
-    ...source,
-    live: {
-      ...source.live,
-      tabId: Number.isSafeInteger(alias) && alias >= 0 ? alias : source.live.tabId,
+    liveBacked: liveBacked.map((entry) => entry.value),
+    savedOnly,
+  };
+}
+
+function fingerprintLiveBackedSnapshotGroup(group, liveSnapshotTabIds) {
+  const liveBackedTabs = [];
+  const savedOnlyTabs = [];
+  arrayValue(group?.tabs).forEach((tab, index) => {
+    const snapshotTabId = cleanText(tab?.snapshotTabId);
+    if (snapshotTabId && liveSnapshotTabIds.has(snapshotTabId)) {
+      liveBackedTabs.push({ key: snapshotTabId, value: tab });
+    } else {
+      // A dormant row's exact position among the open rows remains saved user
+      // data. Only the redundant order among identified open rows is ignored;
+      // their authoritative physical order is already covered by the live
+      // fingerprint above.
+      savedOnlyTabs.push({ index, value: tab });
+    }
+  });
+  liveBackedTabs.sort((left, right) => left.key.localeCompare(right.key));
+  return {
+    ...group,
+    tabs: {
+      liveBacked: liveBackedTabs.map((entry) => entry.value),
+      savedOnly: savedOnlyTabs,
     },
   };
 }
