@@ -224,11 +224,11 @@ export function adoptPortableAskSession(sessions = {}, tab = {}) {
 }
 
 /**
- * Materializes the conversation frozen for an Ask review into durable state.
+ * Materializes the conversation frozen while an Ask turn is prepared into durable state.
  * A portable session is adopted when it is still available. If another panel
- * already adopted that portable session after this review began, the reviewed
+ * already adopted that portable session after preparation began, the prepared
  * projection is cloned into this tab's live key instead of silently dropping
- * history the user already saw and confirmed.
+ * history that belongs to the turn being sent.
  */
 export function materializeAskSessionForTurn(sessions = {}, tab = {}, projectedSession = null) {
   const liveKey = sessionKeyForTab(tab);
@@ -253,25 +253,24 @@ export function materializeAskSessionForTurn(sessions = {}, tab = {}, projectedS
     return durable;
   }
 
-  const reviewed = isAskSessionRecord(projectedSession) &&
+  const prepared = isAskSessionRecord(projectedSession) &&
       String(projectedSession.key || '') === liveKey &&
       normalizeSessionUrl(projectedSession.url) === pageUrl
     ? cloneAskSession(projectedSession)
     : createAskSession(tab);
-  reviewed.key = liveKey;
-  reviewed.tabId = normalizeAskTabId(tab.id);
-  reviewed.title = tab.displayTitle || tab.title || reviewed.title || 'Current page';
-  reviewed.url = pageUrl;
-  delete reviewed.spaceId;
-  store[liveKey] = reviewed;
-  return reviewed;
+  prepared.key = liveKey;
+  prepared.tabId = normalizeAskTabId(tab.id);
+  prepared.title = tab.displayTitle || tab.title || prepared.title || 'Current page';
+  prepared.url = pageUrl;
+  delete prepared.spaceId;
+  store[liveKey] = prepared;
+  return prepared;
 }
 
 /**
  * Returns the conversation a tab would receive without mutating durable
- * session state. Passive renders and pre-confirmation Ask previews can show
- * restored history, while the actual adoption remains an explicit save-time
- * operation.
+ * session state. Passive renders and turn preparation can use restored history,
+ * while the actual adoption remains an explicit save-time operation.
  */
 export function projectAskSessionForTab(sessions = {}, tab = {}) {
   const source = sessions && typeof sessions === 'object' ? sessions : {};

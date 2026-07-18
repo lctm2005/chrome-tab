@@ -562,9 +562,6 @@ function storeShotHtml(shot) {
         input.value = 'What launch work is still missing from this brief?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
-        await waitFor(() => doc.querySelector('#actionDialog')?.open &&
-          /Review Ask Page/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000, 'Ask Page send review');
-        doc.querySelector('#actionDialogConfirm')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
           .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Page preview response');
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);

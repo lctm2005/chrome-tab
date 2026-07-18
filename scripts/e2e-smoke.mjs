@@ -3436,9 +3436,9 @@ async function main() {
     bugs.push('Repeated Space switching destabilized saved Space snapshots.');
   }
 
-  // Space switching now materializes the complete target by design. Seed the
-  // active window directly so this separate scenario can still exercise the
-  // user opening one genuinely dormant saved row.
+  // Seed the active window directly so this separate scenario can exercise
+  // the user opening one genuinely dormant saved row without a preceding
+  // switch changing the browser fixture.
   await evaluate(client, `(() => {
     const raw = JSON.parse(localStorage.getItem('spaceTabsState') || '{}');
     const stored = raw.spaceTabsState || {};

@@ -1848,10 +1848,10 @@ async function beginAskStreamTurn(value = {}) {
       value.projectedSession,
     );
     if (latestSession.key !== sessionKey) {
-      throw new Error('The reviewed Ask conversation no longer matches the current page. Review it again.');
+      throw new Error('The prepared Ask conversation no longer matches the current page. Nothing was sent; try again.');
     }
-    if (askSessionRevision(latestSession) !== String(value.reviewedSessionRevision || '')) {
-      throw new Error('The Ask conversation changed after Review opened. Nothing was sent; review the updated conversation and try again.');
+    if (askSessionRevision(latestSession) !== String(value.preparedSessionRevision || '')) {
+      throw new Error('The Ask conversation changed before it could be sent. Nothing was sent; try again.');
     }
 
     appendAskSessionMessage(latestSession, 'user', String(value.prompt || ''));

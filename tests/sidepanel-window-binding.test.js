@@ -98,7 +98,7 @@ test('a Space pair committed before a host move is never rolled back as stale vi
   const switchSource = source.slice(switchSpace.start, switchSpace.end);
   const save = switchSource.indexOf('const saved = await saveState({ windowBinding })');
   const preCommitFailure = switchSource.indexOf('if (saved !== true)');
-  const rollback = switchSource.indexOf('rollbackWindowBoundCreatedTabMutation(rollbackCheckpoint');
+  const rollback = switchSource.indexOf('rollbackWindowBoundCreatedTabMutation(checkpoint');
   const postCommitClose = switchSource.indexOf('const closeOutcome = await closeSpaceSwitchSourceTabs');
 
   assert.ok(

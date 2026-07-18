@@ -1,11 +1,5 @@
-import {
-  markDormantTabsOpenInOtherWindows,
-  tabsForSpace,
-} from './space-membership.js';
-import {
-  isRestorableSnapshotTab,
-  shouldAutoCloseTab,
-} from './space-snapshot.js';
+import { tabsForSpace } from './space-membership.js';
+import { shouldAutoCloseTab } from './space-snapshot.js';
 
 export const SPACE_SWITCH_PHASES = Object.freeze({
   MATERIALIZE_TARGET: 'materialize-target',
@@ -13,18 +7,9 @@ export const SPACE_SWITCH_PHASES = Object.freeze({
   CLOSE_SOURCE: 'close-source',
 });
 
-export const SPACE_SWITCH_SKIP_REASONS = Object.freeze({
-  INVALID_URL: 'invalid-url',
-  UNSUPPORTED_URL: 'unsupported-url',
-  FILE_ACCESS_REQUIRED: 'file-scheme-access-required',
-  OPEN_IN_OTHER_WINDOW: 'open-in-other-window',
-});
-
 /**
  * Keeps the saved portion of a physical Chrome order authoritative while
- * retaining live-only entities in their current relative order. Invalid and
- * duplicate ids are ignored so callers can safely project persisted order
- * over a freshly-read browser inventory.
+ * retaining live-only entities in their current relative order.
  */
 export function orderSpaceSwitchPhysicalIds(currentIds = [], preferredIds = []) {
   const current = uniqueChromeEntityIds(currentIds);
@@ -41,16 +26,16 @@ export function orderSpaceSwitchPhysicalIds(currentIds = [], preferredIds = []) 
 /**
  * Produces a side-effect-free Space switch plan.
  *
- * The execution contract is deliberately part of the result: a caller must
- * materialize and activate the target before it may close source tabs. This
- * prevents a switch from temporarily leaving Chrome without an activatable
- * tab, which can close the browser window (or the application on macOS).
+ * A switch deliberately does not restore or activate any saved Tag or
+ * TagGroup in the destination Space. The caller must first prepare and
+ * activate one temporary New Tab, then it may safely close source tabs without
+ * allowing Chrome to close the window (or the application on macOS).
  */
 export function planSpaceSwitch(options) {
   const input = validateOptions(options);
   const membershipState = stateForMembership(input.state);
   const closeOptions = { fileSchemeAccess: input.fileSchemeAccess };
-  const sourceClosableTabs = clone(tabsForSpace(
+  const sourceClosableTabs = structuredClone(tabsForSpace(
     input.tabs,
     membershipState,
     input.sourceSpaceId,
@@ -58,41 +43,17 @@ export function planSpaceSwitch(options) {
     shouldAutoCloseTab(tab, closeOptions) ||
     hasRecoverableSavedTarget(tab, input, closeOptions)
   )));
-  const rawTargetLiveTabs = tabsForSpace(
-    input.tabs,
-    membershipState,
-    input.targetSpaceId,
-  );
-  const localClaims = planLocalTargetSnapshotClaims(
-    input,
-    membershipState,
-    rawTargetLiveTabs,
-  );
-  const targetLiveTabs = localClaims.tabs;
-  const targetHasLiveTabs = targetLiveTabs.length > 0;
-  const restoration = planSnapshotRestoration(
-    input,
-    membershipState,
-    localClaims,
-  );
-  const restoreGroups = restoration.groups;
-  const restoreGroupIndexes = restoration.groupIndexes;
-  const skippedRows = restoration.skippedRows;
-  const needsFallback = !targetHasLiveTabs && restoreGroups.length === 0;
-  const materializationMode = restoreGroups.length > 0
-    ? targetHasLiveTabs ? 'snapshot-partial' : 'snapshot'
-    : targetHasLiveTabs ? 'existing-live-tabs' : 'fallback-tab';
 
   return {
     sourceSpaceId: input.sourceSpaceId,
     targetSpaceId: input.targetSpaceId,
     sourceClosableTabs,
-    targetLiveTabs,
-    restoreGroups,
-    restoreGroupIndexes,
-    skippedRows,
-    reasons: countSkipReasons(skippedRows),
-    needsFallback,
+    targetLiveTabs: [],
+    restoreGroups: [],
+    restoreGroupIndexes: [],
+    skippedRows: [],
+    reasons: {},
+    needsFallback: true,
     executionOrder: [
       SPACE_SWITCH_PHASES.MATERIALIZE_TARGET,
       SPACE_SWITCH_PHASES.ACTIVATE_TARGET,
@@ -101,8 +62,8 @@ export function planSpaceSwitch(options) {
     phases: [
       {
         phase: SPACE_SWITCH_PHASES.MATERIALIZE_TARGET,
-        required: restoreGroups.length > 0 || needsFallback,
-        mode: materializationMode,
+        required: true,
+        mode: 'fallback-tab',
       },
       {
         phase: SPACE_SWITCH_PHASES.ACTIVATE_TARGET,
@@ -117,132 +78,6 @@ export function planSpaceSwitch(options) {
     ],
     sourceClosePrecondition: 'target-activated',
   };
-}
-
-function planSnapshotRestoration(input, state, localClaims) {
-  const foreignMarkedGroups = markDormantTabsOpenInOtherWindows(
-    localClaims.markedGroups,
-    tabsWithLifecycleIdentity(input.foreignLiveTabs, state),
-    state,
-    input.targetSpaceId,
-  );
-  const groups = [];
-  const groupIndexes = [];
-  const skippedRows = [];
-  const snapshotGroups = Array.isArray(input.targetSnapshot?.groups)
-    ? input.targetSnapshot.groups
-    : [];
-
-  for (let groupIndex = 0; groupIndex < snapshotGroups.length; groupIndex += 1) {
-    const sourceGroup = recordValue(snapshotGroups[groupIndex]);
-    const sourceRows = Array.isArray(sourceGroup.tabs) ? sourceGroup.tabs : [];
-    const restoredRows = [];
-
-    for (let tabIndex = 0; tabIndex < sourceRows.length; tabIndex += 1) {
-      const row = sourceRows[tabIndex];
-      if (localClaims.rowKeys.has(snapshotRowKey(groupIndex, tabIndex))) continue;
-      const reason = snapshotRowSkipReason(
-        row,
-        input.fileSchemeAccess,
-        isForeignWindowMarker(foreignMarkedGroups[groupIndex]?.tabs?.[tabIndex]),
-      );
-      if (reason) {
-        skippedRows.push(skippedSnapshotRow(sourceGroup, row, groupIndex, tabIndex, reason));
-      } else {
-        restoredRows.push(clone(row));
-      }
-    }
-
-    if (restoredRows.length > 0) {
-      const restoredGroup = clone(sourceGroup);
-      restoredGroup.tabs = restoredRows;
-      groups.push(restoredGroup);
-      groupIndexes.push(groupIndex);
-    }
-  }
-
-  return { groups, groupIndexes, skippedRows };
-}
-
-function planLocalTargetSnapshotClaims(input, state, targetLiveTabs) {
-  const markedGroups = markDormantTabsOpenInOtherWindows(
-    snapshotGroupsForMatching(input.targetSnapshot),
-    tabsWithLifecycleIdentity(targetLiveTabs, state),
-    state,
-    input.targetSpaceId,
-  );
-  const identitiesByTabId = new Map();
-  const rowKeys = new Set();
-  for (let groupIndex = 0; groupIndex < markedGroups.length; groupIndex += 1) {
-    const group = recordValue(markedGroups[groupIndex]);
-    const rows = group.tabs;
-    for (let tabIndex = 0; tabIndex < rows.length; tabIndex += 1) {
-      const row = recordValue(rows[tabIndex]);
-      if (!isForeignWindowMarker(row)) continue;
-      identitiesByTabId.set(row.foreignWindowTabId, {
-        snapshotTabId: String(row.snapshotTabId || '').trim(),
-        snapshotGroupId: String(group.snapshotGroupId || row.snapshotGroupId || '').trim(),
-      });
-      rowKeys.add(snapshotRowKey(groupIndex, tabIndex));
-    }
-  }
-  return {
-    tabs: targetLiveTabs.map((tab) => {
-      const result = clone(tab);
-      const identity = identitiesByTabId.get(tab.id);
-      if (!identity) return result;
-      if (identity.snapshotTabId) result.snapshotTabId = identity.snapshotTabId;
-      else delete result.snapshotTabId;
-      if (identity.snapshotGroupId) result.snapshotGroupId = identity.snapshotGroupId;
-      else delete result.snapshotGroupId;
-      return result;
-    }),
-    markedGroups,
-    rowKeys,
-  };
-}
-
-function snapshotGroupsForMatching(snapshot) {
-  return (Array.isArray(snapshot?.groups) ? snapshot.groups : []).map((group) => {
-    const result = clone(recordValue(group));
-    result.tabs = (Array.isArray(recordValue(group).tabs) ? recordValue(group).tabs : [])
-      .map((row) => {
-        const cleanRow = clone(recordValue(row));
-        delete cleanRow.foreignWindowTabId;
-        delete cleanRow.foreignWindowId;
-        return cleanRow;
-      });
-    return result;
-  });
-}
-
-function tabsWithLifecycleIdentity(liveTabs, state) {
-  return liveTabs.map((tab) => {
-    const binding = currentLifecycleBinding(state, tab?.id);
-    if (!binding) return tab;
-    return {
-      ...tab,
-      snapshotTabId: String(tab?.snapshotTabId || binding.snapshotTabId || '').trim(),
-      snapshotGroupId: String(tab?.snapshotGroupId || binding.snapshotGroupId || '').trim(),
-    };
-  });
-}
-
-function snapshotRowKey(groupIndex, tabIndex) {
-  return `${groupIndex}:${tabIndex}`;
-}
-
-function snapshotRowSkipReason(row, fileSchemeAccess, openInForeignWindow) {
-  if (!isRestorableSnapshotTab(recordValue(row))) return invalidUrl(row?.url)
-    ? SPACE_SWITCH_SKIP_REASONS.INVALID_URL
-    : SPACE_SWITCH_SKIP_REASONS.UNSUPPORTED_URL;
-  if (!shouldAutoCloseTab({ ...recordValue(row), pinned: false }, { fileSchemeAccess })) {
-    return SPACE_SWITCH_SKIP_REASONS.FILE_ACCESS_REQUIRED;
-  }
-  if (openInForeignWindow) {
-    return SPACE_SWITCH_SKIP_REASONS.OPEN_IN_OTHER_WINDOW;
-  }
-  return '';
 }
 
 function hasRecoverableSavedTarget(tab, input, closeOptions) {
@@ -286,38 +121,6 @@ function currentLifecycleBinding(state, tabId) {
   return binding;
 }
 
-function isForeignWindowMarker(tab) {
-  return Number.isSafeInteger(tab?.foreignWindowTabId) && tab.foreignWindowTabId >= 0;
-}
-
-function skippedSnapshotRow(group, row, groupIndex, tabIndex, reason) {
-  const { tabs: _tabs, ...groupMetadata } = group;
-  return {
-    reason,
-    groupIndex,
-    tabIndex,
-    group: clone(groupMetadata),
-    row: clone(row),
-  };
-}
-
-function countSkipReasons(skippedRows) {
-  const reasons = {};
-  for (const skipped of skippedRows) {
-    reasons[skipped.reason] = (reasons[skipped.reason] || 0) + 1;
-  }
-  return reasons;
-}
-
-function invalidUrl(value) {
-  try {
-    new URL(String(value || '').trim());
-    return false;
-  } catch {
-    return true;
-  }
-}
-
 function stateForMembership(state) {
   return {
     ...state,
@@ -336,7 +139,7 @@ function validateOptions(options) {
     throw new TypeError('Source and target Spaces must be different.');
   }
   const sourceSnapshot = validatedSnapshot(options.sourceSnapshot, 'Source');
-  const targetSnapshot = validatedSnapshot(options.targetSnapshot, 'Target');
+  validatedSnapshot(options.targetSnapshot, 'Target');
   const foreignLiveTabs = options.foreignLiveTabs ?? [];
   if (!Array.isArray(foreignLiveTabs)) {
     throw new TypeError('Foreign live tabs must be an array.');
@@ -351,8 +154,6 @@ function validateOptions(options) {
     sourceSpaceId,
     targetSpaceId,
     sourceSnapshot,
-    targetSnapshot,
-    foreignLiveTabs,
     fileSchemeAccess,
   };
 }
@@ -381,10 +182,6 @@ function recordValue(value) {
 
 function recordValueOrNull(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function clone(value) {
-  return structuredClone(value);
 }
 
 function uniqueChromeEntityIds(values) {

@@ -90,7 +90,7 @@ test('sidepanel exposes single-page Ask Page and portable backup controls withou
   assert.match(html, /class="ask-disclosure" id="askDisclosure"[^>]* hidden/);
   assert.match(source, /askButton\.className = `space ask-page/);
   assert.match(html, />Ask Page</);
-  assert.match(html, /Click Ask Page to read this page locally\. Nothing is sent to the provider until you confirm\./);
+  assert.match(html, /Ask Page sends the current page and recent conversation context directly to your configured provider\./);
   assert.match(source, /createPrompt\('ask-page'/);
   assert.match(source, /purpose: 'ask-page'/);
   assert.match(source, /sessionKeyForTab\(sourceTab\)/);
@@ -111,26 +111,22 @@ test('sidepanel exposes single-page Ask Page and portable backup controls withou
     source.indexOf('async function beginAskTurn'),
   );
   assert.match(askCustomPrompt, /const sessionKey = sessionKeyForTab\(sourceTab\);\s*const session = projectAskSessionForTab\(state\.askSessions, sourceTab\)/);
-  assert.match(askCustomPrompt, /const reviewedSessionRevision = askSessionRevision\(session\)/);
+  assert.match(askCustomPrompt, /const preparedSessionRevision = askSessionRevision\(session\)/);
   assert.doesNotMatch(askCustomPrompt, /ensureAskSessionByKey\(|setActiveAskSessionKey\(/);
-  assert.match(askCustomPrompt, /const confirmed = await showPlanPreview[\s\S]*if \(!confirmed\) return;[\s\S]*assertReviewedAskPageStillCurrent\(page, sourceTab\)[\s\S]*beginAskTurn\([\s\S]*sessionKey,[\s\S]*prompt,[\s\S]*sourceTab,[\s\S]*session,[\s\S]*reviewedSessionRevision,[\s\S]*requestId/);
+  assert.doesNotMatch(askCustomPrompt, /showPlanPreview|Review Ask Page|Send to provider/);
+  assert.match(askCustomPrompt, /assertPreparedAskPageStillCurrent\(page, sourceTab\)[\s\S]*beginAskTurn\([\s\S]*sessionKey,[\s\S]*prompt,[\s\S]*sourceTab,[\s\S]*session,[\s\S]*preparedSessionRevision,[\s\S]*requestId/);
   assert.ok(
     askCustomPrompt.indexOf('statusMessage = await beginAskTurn') < askCustomPrompt.indexOf("send('ai:chat'"),
     'the durable Ask begin contract completes before provider dispatch',
   );
   assert.match(source, /materializeAskSessionForTurn,[\s\S]{0,320}from '.\/src\/shared\/ask-session\.js'/);
-  assert.match(source, /async function beginAskTurn[\s\S]*if \(extensionRuntime\) \{[\s\S]*await send\('ask:begin', \{[\s\S]*projectedSession,[\s\S]*reviewedSessionRevision,[\s\S]*requestId,[\s\S]*setActiveAskSessionKey\(started\.sessionKey\)[\s\S]*withSharedStateLock\(\(\) => syncAskSessionsFromStorage\(\)\)[\s\S]*return \{[\s\S]*messageId: started\.messageId/);
-  assert.match(source, /async function beginAskTurn[\s\S]*syncStateFromStorage\(\)[\s\S]*materializeAskSessionForTurn\([\s\S]*state\.askSessions,[\s\S]*sourceTab,[\s\S]*projectedSession,[\s\S]*askSessionRevision\(latestSession\) !== reviewedSessionRevision[\s\S]*Nothing was sent; review the updated conversation[\s\S]*setActiveAskSessionKey\(latestSession\.key\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*pruneCurrentAskSessions\(latestSession\.key\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
+  assert.match(source, /async function beginAskTurn[\s\S]*if \(extensionRuntime\) \{[\s\S]*await send\('ask:begin', \{[\s\S]*projectedSession,[\s\S]*preparedSessionRevision,[\s\S]*requestId,[\s\S]*setActiveAskSessionKey\(started\.sessionKey\)[\s\S]*withSharedStateLock\(\(\) => syncAskSessionsFromStorage\(\)\)[\s\S]*return \{[\s\S]*messageId: started\.messageId/);
+  assert.match(source, /async function beginAskTurn[\s\S]*syncStateFromStorage\(\)[\s\S]*materializeAskSessionForTurn\([\s\S]*state\.askSessions,[\s\S]*sourceTab,[\s\S]*projectedSession,[\s\S]*askSessionRevision\(latestSession\) !== preparedSessionRevision[\s\S]*Nothing was sent; try again[\s\S]*setActiveAskSessionKey\(latestSession\.key\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*pruneCurrentAskSessions\(latestSession\.key\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
   assert.match(background, /case 'ask:begin':[\s\S]*beginAskStreamTurn\(message\.askTurn\)/);
   assert.match(background, /async function beginAskStreamTurn[\s\S]*withLifecycleStateLock[\s\S]*askSessionRevision\(latestSession\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*storage\.local\.set[\s\S]*scheduleAskStreamRecoveryAlarm\(binding\.requestId\)/);
-  assert.match(source, /async function assertReviewedAskPageStillCurrent[\s\S]*send\('tabs:listAll'\)[\s\S]*normalizeSessionUrl\(current\.pendingUrl \|\| current\.url\)[\s\S]*normalizeSessionUrl\(page\.url\)[\s\S]*Nothing was sent/);
-  assert.match(source, /title: 'Review Ask Page'/);
-  assert.match(source, /title: 'Current page'/);
-  assert.match(source, /page\.contentMode === 'selection'[\s\S]*selected text only/);
-  assert.doesNotMatch(source, /selected text included/);
+  assert.match(source, /async function assertPreparedAskPageStillCurrent[\s\S]*send\('tabs:listAll'\)[\s\S]*normalizeSessionUrl\(current\.pendingUrl \|\| current\.url\)[\s\S]*normalizeSessionUrl\(page\.url\)[\s\S]*Nothing was sent/);
+  assert.doesNotMatch(source, /title: 'Review Ask Page'/);
   assert.match(source, /Switch to an http or https page before using Ask Page\./);
-  assert.match(source, /stored text from \$\{history\.length\} recent conversation/);
-  assert.match(source, /generated citation URLs and Sources appendix excluded/);
   const recentHistorySource = source.slice(
     source.indexOf('function recentAskHistory'),
     source.indexOf('async function beginAskTurn'),
@@ -272,7 +268,7 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
-test('Workbench setup preserves its surface while Space switching keeps the target active', async () => {
+test('Workbench setup preserves its surface while Space switching keeps target Tags dormant', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const switchSource = functionSource(source, 'switchSpace');
   const materializeSource = functionSource(source, 'materializeSpaceSwitchTarget');
@@ -282,47 +278,27 @@ test('Workbench setup preserves its surface while Space switching keeps the targ
   assert.match(source, /async function activateSpace\(spaceId, options = \{\}\)[\s\S]*return switchSpace\(spaceId, \{ \.\.\.options, windowBinding \}\)/);
   assert.match(source, /if \(spaceId === state\.activeSpaceId\) \{[\s\S]*activeView = 'space';[\s\S]*render\(\);[\s\S]*return true;[\s\S]*\}\s*return switchSpace/);
   assert.match(switchSource, /options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)[\s\S]*withCreatedTabCheckpointRollback\(createdTabIds[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*planSpaceSwitch\(/);
-  assert.match(switchSource, /const sourceCleanupTabs = uniqueSpaceSwitchTabs\([\s\S]*tabs\.filter\(isEphemeralTab\)[\s\S]*!snapshotHasPersistentContent\(sourceSnapshot\)[\s\S]*isChromeNewTabUrl\(tab\.url\)[\s\S]*tabBelongsToSpace\(tab, previousSpaceId\)[\s\S]*captureSpaceSwitchCloseTargets\([\s\S]*sourceCleanupTabs/,
-    'an empty Space fallback must close only after the next target is active instead of accumulating old New Tabs');
-  assert.doesNotMatch(switchSource, /preserveBrowserFocus|tabId: originalFocusTabId[\s\S]*state\.activeSpaceId = spaceId/,
-    'no layout may reactivate the source or Workbench before source cleanup');
+  assert.match(switchSource, /const sourceCleanupTabs = uniqueSpaceSwitchTabs\([\s\S]*tabs\.filter\(isEphemeralTab\)[\s\S]*!snapshotHasPersistentContent\(sourceSnapshot\)[\s\S]*isChromeNewTabUrl\(tab\.url\)[\s\S]*tabBelongsToSpace\(tab, previousSpaceId\)[\s\S]*captureSpaceSwitchCloseTargets\([\s\S]*sourceCleanupTabs/);
   assert.match(switchSource, /state\.activeSpaceId = spaceId[\s\S]*durableActiveSpaceId = spaceId[\s\S]*loadDormantSpaceView\(spaceId, \{ force: true \}\)[\s\S]*saveState\(\{ windowBinding \}\)/);
+
   const materializeIndex = switchSource.indexOf('materializedTarget = await materializeSpaceSwitchTarget');
   const activateIndex = switchSource.indexOf('activatedTarget = await activateSpaceSwitchTarget');
   const saveIndex = switchSource.indexOf('const saved = await saveState({ windowBinding })');
   const closeIndex = switchSource.indexOf('const closeOutcome = await closeSpaceSwitchSourceTabs');
-  assert.ok(materializeIndex >= 0 && materializeIndex < activateIndex,
-    'the complete target must exist before any activation attempt');
+  assert.ok(materializeIndex >= 0 && materializeIndex < activateIndex);
   assert.ok(activateIndex < saveIndex && saveIndex < closeIndex,
-    'target activation and its durable commit must precede every source close');
-  assert.match(closeSource, /verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\(/,
-    'every source close must revalidate and reactivate the target survivor');
-  assert.match(switchSource, /const closeOutcome = await closeSpaceSwitchSourceTabs[\s\S]*activatedTarget = await activateSpaceSwitchTarget/,
-    'the target Space must remain active after source cleanup');
-  assert.match(switchSource, /restoreSpaceSwitchTargetMembership\(targetMembershipRollback[\s\S]*remapWorkspaceCheckpointGroups\(checkpoint, replacements\)[\s\S]*rollbackWindowBoundCreatedTabMutation\(rollbackCheckpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty[\s\S]*reactivating the original Space tab/);
-  assert.doesNotMatch(switchSource.slice(closeIndex), /rollbackWindowBoundCreatedTabMutation|restoreWorkspaceMemoryCheckpoint/,
-    'a committed switch must not roll back after physical source cleanup starts');
-  assert.match(materializeSource, /tabs:create[\s\S]*chromeGroupForSnapshotIdentity[\s\S]*addTabsToChromeGroup[\s\S]*createChromeGroup[\s\S]*rememberRestoredGroupTabOrder/);
-  assert.match(materializeSource, /retainedFallbackTabId[\s\S]*delete state\.tabLifecycle\?\.\[retainedFallbackTabId\][\s\S]*delete state\.renamedTabs\?\.\[retainedFallbackTabId\]/,
-    'a reused New Tab must not carry its old Space-only name into an empty target');
-  assert.match(materializeSource, /if \(existingGroup\)[\s\S]*normalizeSpaceSwitchChromeGroup\(groupId, sourceGroup\.group/,
-    'reused physical Tags must adopt the saved target title, color, and collapse state');
-  assert.match(materializeSource, /spaceSwitchSnapshotTabOrder[\s\S]*reorderSpaceSwitchChromeGroup\(groupId, orderedPhysicalGroupTabIds/,
-    'partial-live Tags must restore the physical Chrome order, not only the panel order');
-  assert.match(source, /async function reorderSpaceSwitchChromeGroup[\s\S]*tabs:move[\s\S]*tabs:listAll[\s\S]*Chrome did not preserve the saved target Tag order/);
-  assert.match(materializeSource, /orderSpaceSwitchPhysicalIds\([\s\S]*reorderSpaceSwitchUngroupedTabs\(orderedUngroupedTabIds[\s\S]*reorderSpaceSwitchChromeGroups\(snapshotPhysicalGroupIds/,
-    'partial Ungrouped rows and multiple saved Tags must restore physical Chrome order before activation');
-  assert.match(source, /async function reorderSpaceSwitchUngroupedTabs[\s\S]*tabs:listAll[\s\S]*tabs:move[\s\S]*Chrome did not preserve the saved target Ungrouped tab order/);
-  assert.match(source, /async function reorderSpaceSwitchChromeGroups[\s\S]*tabs:listAll[\s\S]*groups:move[\s\S]*Chrome did not preserve the saved target TagGroup order/);
-  assert.match(source, /async function restoreSpaceSwitchTargetMembership[\s\S]*restoreTabGroupMembership[\s\S]*groups:update[\s\S]*group\.color[\s\S]*group\.collapsed/,
-    'a failed partial-live switch must restore physical Tag membership and metadata');
-  assert.match(source, /async function restoreSpaceSwitchTargetMembership[\s\S]*restoreSpaceSwitchChromeGroupPositions\(membership, replacements[\s\S]*async function restoreSpaceSwitchChromeGroupPositions[\s\S]*groups:move[\s\S]*Chrome did not restore the original target TagGroup position/,
-    'failed physical TagGroup reordering must restore checkpointed group positions after id remap');
-  assert.match(switchSource, /verifyMaterializedSpaceSwitchTarget\(materializedTarget,[\s\S]*activeTabId: activeSurvivorTabId[\s\S]*saveState/,
-    'every materialized target sibling must still exist in its Tag before commit');
-  assert.match(closeSource, /spaceSwitchTargetTabGuards\([\s\S]*verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\([\s\S]*requiredActiveSurvivorTabId[\s\S]*requiredTargetTabGuards/,
-    'every destructive close must re-activate and atomically require a survivor');
-  assert.match(source, /async function focusFirstTabInSpace\(spaceId, options = \{\}\)[\s\S]*options\.reload !== false[\s\S]*send\('tabs:focus'/);
+    'the New Tab keepalive must be active and committed before source cleanup');
+  assert.match(closeSource, /verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\(/);
+  assert.match(switchSource, /const closeOutcome = await closeSpaceSwitchSourceTabs[\s\S]*activatedTarget = await activateSpaceSwitchTarget/);
+  assert.match(switchSource, /rollbackWindowBoundCreatedTabMutation\(checkpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty[\s\S]*reactivating the original Space tab/);
+  assert.doesNotMatch(switchSource, /restoreSpaceSwitchTargetMembership|targetMembershipRollback/);
+  assert.doesNotMatch(switchSource.slice(closeIndex), /rollbackWindowBoundCreatedTabMutation|restoreWorkspaceMemoryCheckpoint/);
+
+  assert.match(materializeSource, /isChromeNewTabUrl\(tab\.url\)[\s\S]*url: 'chrome:\/\/newtab'[\s\S]*rememberEphemeralTab\(retainedFallbackTabId\)/);
+  assert.match(materializeSource, /delete state\.tabGroups\?\.\[retainedFallbackTabId\][\s\S]*delete state\.tabLifecycle\?\.\[retainedFallbackTabId\][\s\S]*delete state\.renamedTabs\?\.\[retainedFallbackTabId\][\s\S]*delete state\.tabSpaces\[retainedFallbackTabId\]/);
+  assert.doesNotMatch(materializeSource, /snapshotTab\.url|createChromeGroup|addTabsToChromeGroup|restoreGroups|targetSnapshot/);
+  assert.match(switchSource, /verifyMaterializedSpaceSwitchTarget\(materializedTarget,[\s\S]*activeTabId: activeSurvivorTabId[\s\S]*saveState/);
+  assert.match(closeSource, /spaceSwitchTargetTabGuards\([\s\S]*verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\([\s\S]*requiredActiveSurvivorTabId[\s\S]*requiredTargetTabGuards/);
 });
 
 test('new Space transactions roll back to pre-insert storage without undoing a committed switch', async () => {
@@ -346,7 +322,7 @@ test('new Space transactions roll back to pre-insert storage without undoing a c
 
   assert.match(switchSource, /const checkpoint = options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)/,
     'switchSpace must prefer a caller checkpoint that predates a newly inserted target');
-  assert.match(switchSource, /remapWorkspaceCheckpointGroups\(checkpoint, replacements\)[\s\S]*rollbackWindowBoundCreatedTabMutation\(rollbackCheckpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty/,
+  assert.match(switchSource, /rollbackWindowBoundCreatedTabMutation\(checkpoint,[\s\S]*stateMayHaveBeenPersisted: storageMayBeDirty/,
     'apply-then-reject failures must compensate storage from that selected checkpoint');
 });
 

@@ -4864,10 +4864,20 @@ async function main() {
       active: true,
     })`);
     await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
-        .some((group) => (group.tabs || []).some((tab) => tab.url === 'https://example.com/workbench-space-source'));
-    })()`, 10000);
+      const [stored, tab] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.tabs.get(${JSON.stringify(createdTab.id)}).catch(() => null),
+      ]);
+      const binding = stored.spaceTabsState?.tabLifecycle?.[${JSON.stringify(String(createdTab.id))}];
+      return tab?.status === 'complete' &&
+        tab.url === 'https://example.com/workbench-space-source' &&
+        Boolean(tab.title) && !['New Tab', '新标签页'].includes(tab.title) &&
+        binding?.url === tab.url && binding?.title === tab.title &&
+        (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
+          .some((group) => (group.tabs || []).some((row) =>
+            row.url === 'https://example.com/workbench-space-source' &&
+            row.title === tab.title));
+    })()`, 20000);
     await evaluate(client, `navigator.locks.request(
       'space-tabs-shared-state',
       { mode: 'exclusive' },
@@ -5225,9 +5235,8 @@ async function main() {
       windowId === String(workbenchAddAtomicityBaseline.currentWindowId) ||
       workbenchCreateState.activeSpaceIds[windowId] === spaceId
     ));
-    const workbenchAddTargetTab = workbenchCreateState.targetOwnedTabs.find((tab) => (
-      tab.windowId === workbenchAddAtomicityBaseline.currentWindowId && tab.active
-    ));
+    const workbenchAddTargetTab = workbenchCreateState.activeCurrentWindowTab;
+    const workbenchCreateWorkspace = JSON.parse(workbenchCreateState.workspace);
     const isChromeNewTabRecord = (tab) => {
       try {
         const url = new URL(String(tab?.url || ''));
@@ -5241,7 +5250,7 @@ async function main() {
     const createdOtherWindowTabs = workbenchCreateState.tabRecords
       .filter((tab) => tab.windowId !== workbenchAddAtomicityBaseline.currentWindowId);
     record(
-      'retrying Workbench Add Space commits once and leaves its target tab active',
+      'retrying Workbench Add Space commits once with only an ephemeral New Tab active',
       workbenchAddPreWriteNoOp && workbenchAddApplyThenRejectNoOp &&
         workbenchCreateState.storedMatches === 1 &&
         workbenchCreateState.railMatches === 1 &&
@@ -5257,10 +5266,12 @@ async function main() {
           String(workbenchAddAtomicityBaseline.currentWindowId)
         ] === 'workbench-e2e' &&
         baselineWindowEntriesPreserved &&
-        workbenchCreateState.targetOwnedTabs.length === 1 &&
+        workbenchCreateState.targetOwnedTabs.length === 0 &&
         Number.isSafeInteger(workbenchAddTargetTab?.id) &&
         isChromeNewTabRecord(workbenchAddTargetTab) &&
         workbenchAddTargetTab.groupId === -1 &&
+        (workbenchCreateWorkspace.ephemeralTabIds || []).includes(workbenchAddTargetTab.id) &&
+        !Object.hasOwn(workbenchCreateWorkspace.tabSpaces || {}, String(workbenchAddTargetTab.id)) &&
         workbenchCreateState.activeCurrentWindowTab?.id === workbenchAddTargetTab.id &&
         workbenchCreateState.workbenchTab?.id === openedWorkbench.id &&
         workbenchCreateState.workbenchTab?.active === false &&
@@ -5457,9 +5468,8 @@ async function main() {
     }
     await evaluate(client, `window.__workbenchSwitchTrace.setPhase('palette-to-remote', {
       targetSpaceId: 'remote-current',
-      mode: 'remote',
-      urlPrefix: 'https://example.net/remote-saved',
-      grouped: true,
+      mode: 'newtab',
+      grouped: false,
     })`);
     await pressKeyWithCDP(client, 'k', 'KeyK', 4);
     await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
@@ -5487,14 +5497,25 @@ async function main() {
       const activeTab = browserTabs.find((tab) => tab.active) || null;
       const remoteTabs = browserTabs.filter((tab) =>
         String(tab.url || tab.pendingUrl || '').startsWith('https://example.net/remote-saved'));
-      const remoteGroup = browserGroups.find((group) => group.id === remoteTabs[0]?.groupId) || null;
       const workbenchTab = browserTabs.find((tab) =>
         tab.id === ${JSON.stringify(openedWorkbench.id)}) || null;
+      const isNewTabUrl = (value) => {
+        try {
+          const url = new URL(String(value || ''));
+          return url.protocol === 'chrome:' && url.hostname === 'newtab';
+        } catch {
+          return false;
+        }
+      };
       if (document.querySelector('#activeSpaceName')?.textContent !== 'Remote Current' ||
-          remoteTabs.length !== 1 || !remoteTabs[0].active || remoteTabs[0].groupId < 0 ||
-          remoteGroup?.title !== 'Remote Saved' || activeTab?.id !== remoteTabs[0].id ||
+          remoteTabs.length !== 0 || !activeTab?.active || activeTab.groupId !== -1 ||
+          !isNewTabUrl(activeTab.url || activeTab.pendingUrl) ||
+          !(stored.spaceTabsState?.ephemeralTabIds || []).includes(activeTab.id) ||
+          Object.hasOwn(stored.spaceTabsState?.tabSpaces || {}, String(activeTab.id)) ||
           !workbenchTab || workbenchTab.active ||
-          browserTabs.some((tab) => tab.id === ${JSON.stringify(workbenchAddTargetTab.id)})) {
+          !browserTabs.some((tab) => tab.id === ${JSON.stringify(workbenchAddTargetTab.id)} &&
+            tab.id === activeTab.id) ||
+          browserGroups.some((group) => group.title === 'Remote Saved')) {
         return null;
       }
       return {
@@ -5508,25 +5529,18 @@ async function main() {
           groupId: tab.groupId,
           windowId: tab.windowId,
         })),
-        remoteGroup: remoteGroup ? {
-          id: remoteGroup.id,
-          title: remoteGroup.title || '',
-          color: remoteGroup.color || '',
-          windowId: remoteGroup.windowId,
-        } : null,
+        activeBrowserTab: activeTab,
         workbenchTab: {
           id: workbenchTab.id,
           active: workbenchTab.active,
           windowId: workbenchTab.windowId,
         },
-        sourceTabClosed: !browserTabs.some((tab) =>
-          tab.id === ${JSON.stringify(workbenchAddTargetTab.id)}),
+        sourceTabReused: activeTab.id === ${JSON.stringify(workbenchAddTargetTab.id)},
       };
     })()`, 20000);
     await waitFor(client, `(() => {
       const events = window.__workbenchSwitchTrace.snapshot('palette-to-remote').events;
-      return events.some((entry) => entry.kind === 'after-durable-save' && entry.candidateWrite) &&
-        events.some((entry) => entry.kind === 'after-command' && entry.type === 'tabs:close');
+      return events.some((entry) => entry.kind === 'after-durable-save' && entry.candidateWrite);
     })()`, 12000);
     const paletteSwitchTrace = await evaluate(client,
       `window.__workbenchSwitchTrace.snapshot('palette-to-remote')`);
@@ -5548,16 +5562,20 @@ async function main() {
         entry.workbenchTab?.id === openedWorkbench.id && entry.workbenchTab?.active === false;
       const targetReadyForEverySave = beforeSaves.length > 0 && afterSaves.length > 0 &&
         [...beforeSaves, ...afterSaves].every(targetIsReady);
-      const everyCloseIsGuarded = sourceCloses.length > 0 && sourceCloses.every((entry) =>
-        targetIsReady(entry) && entry.requiredSurvivorMatches && entry.guardsMatch &&
-        entry.closeSafe && Number.isSafeInteger(Number(entry.closingTab?.id)) &&
-        Number(entry.closingTab?.id) !== Number(entry.activeTarget?.id));
+      const expectsSourceCloses = expectedClosingIds.length > 0;
+      const everyCloseIsGuarded = expectsSourceCloses
+        ? sourceCloses.length > 0 && sourceCloses.every((entry) =>
+          targetIsReady(entry) && entry.requiredSurvivorMatches && entry.guardsMatch &&
+          entry.closeSafe && Number.isSafeInteger(Number(entry.closingTab?.id)) &&
+          Number(entry.closingTab?.id) !== Number(entry.activeTarget?.id))
+        : sourceCloses.length === 0;
       const firstFocusSequence = targetFocuses[0]?.sequence ?? Number.POSITIVE_INFINITY;
       const firstSaveStartSequence = beforeSaves[0]?.sequence ?? Number.POSITIVE_INFINITY;
       const firstSaveCompleteSequence = afterSaves[0]?.sequence ?? Number.POSITIVE_INFINITY;
       const firstCloseSequence = sourceCloses[0]?.sequence ?? Number.POSITIVE_INFINITY;
       const targetActivatedBeforeSave = firstFocusSequence < firstSaveStartSequence;
-      const durableSaveCompletedBeforeClose = firstSaveCompleteSequence < firstCloseSequence;
+      const durableSaveCompletedBeforeClose = !expectsSourceCloses ||
+        firstSaveCompleteSequence < firstCloseSequence;
       const exactSourceTabsClosed = JSON.stringify(actualClosingIds) ===
         JSON.stringify(expectedClosingIds);
       const chromeWindowAlwaysHadASurvivor = Number(trace?.minContentTabCount) >= 1 &&
@@ -5593,19 +5611,18 @@ async function main() {
     };
     const paletteSwitchAssessment = assessWorkbenchSwitchTrace(
       paletteSwitchTrace,
-      [workbenchAddTargetTab.id],
+      [],
     );
     record(
       'Command Palette activates and durably saves the target before guarded source cleanup',
       paletteSpaceSwitchState.activeSpaceName === 'Remote Current' &&
-        paletteSpaceSwitchState.remoteTabs.length === 1 &&
-        paletteSpaceSwitchState.activeBrowserTabId === paletteSpaceSwitchState.remoteTabs[0].id &&
-        paletteSpaceSwitchState.remoteTabs[0].active &&
-        paletteSpaceSwitchState.remoteTabs[0].groupId === paletteSpaceSwitchState.remoteGroup?.id &&
-        paletteSpaceSwitchState.remoteGroup?.title === 'Remote Saved' &&
+        paletteSpaceSwitchState.remoteTabs.length === 0 &&
+        paletteSpaceSwitchState.activeBrowserTabId ===
+          paletteSpaceSwitchState.activeBrowserTab.id &&
+        paletteSpaceSwitchState.activeBrowserTab.groupId === -1 &&
         paletteSpaceSwitchState.workbenchTab?.id === openedWorkbench.id &&
         !paletteSpaceSwitchState.workbenchTab?.active &&
-        paletteSpaceSwitchState.sourceTabClosed &&
+        paletteSpaceSwitchState.sourceTabReused &&
         paletteSwitchAssessment.ok,
       JSON.stringify({ paletteSpaceSwitchState, paletteSwitchAssessment }),
     );
@@ -5630,15 +5647,14 @@ async function main() {
         String(tab.url || '').startsWith('https://example.net/remote-saved'));
       const workbenchTab = (await chrome.tabs.query({ currentWindow: true })).find((tab) =>
         tab.id === ${JSON.stringify(openedWorkbench.id)}) || null;
-      const remoteRow = remoteTabs.length === 1
-        ? [...document.querySelectorAll('.tab-row')].find((row) =>
-          row.dataset.tabId === String(remoteTabs[0].id)) || null
-        : null;
+      const remoteRow = document.querySelector('.tab-row');
+      const activeBrowserTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
       if (stored.spaceTabsState?.activeSpaceId !== 'remote-current' ||
           document.querySelector('#activeSpaceName')?.textContent !== 'Remote Current' ||
-          !visibleText.includes('Remote Saved') || !remoteRow ||
-          remoteRow.classList.contains('dormant') || remoteTabs.length !== 1 ||
-          !remoteTabs[0].active || !workbenchTab || workbenchTab.active) return null;
+          !visibleText.includes('Remote Saved') || !remoteRow || remoteTabs.length !== 0 ||
+          !activeBrowserTab?.active || !isNewTabUrl(activeBrowserTab.url) ||
+          !(stored.spaceTabsState?.ephemeralTabIds || []).includes(activeBrowserTab.id) ||
+          !workbenchTab || workbenchTab.active) return null;
       return {
         activeSpaceId: stored.spaceTabsState?.activeSpaceId || '',
         activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
@@ -5657,7 +5673,7 @@ async function main() {
         })),
         newTabTabs: (listed.tabs || []).filter((tab) => isNewTabUrl(tab.url)),
         snapshotNewTabUrls: snapshotUrls.filter(isNewTabUrl),
-        activeBrowserTab: (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null,
+        activeBrowserTab,
         workbenchTab: {
           id: workbenchTab.id,
           active: workbenchTab.active,
@@ -5674,10 +5690,9 @@ async function main() {
     await evaluate(client, `[...document.querySelectorAll('.space')]
       .find((button) => button.title === 'Workbench E2E')?.click()`);
     const railSpaceSwitchState = await waitFor(client, `(async () => {
-      const [stored, browserTabs, browserGroups] = await Promise.all([
+      const [stored, browserTabs] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
         chrome.tabs.query({ currentWindow: true }),
-        chrome.tabGroups.query({ windowId: ${JSON.stringify(workbenchAddAtomicityBaseline.currentWindowId)} }),
       ]);
       const saved = stored.spaceTabsState || {};
       const isNewTabUrl = (value) => {
@@ -5696,14 +5711,12 @@ async function main() {
         String(tab.url || tab.pendingUrl || '').startsWith('https://example.net/remote-saved'));
       const workbenchTab = browserTabs.find((tab) =>
         tab.id === ${JSON.stringify(openedWorkbench.id)}) || null;
-      const targetTab = targetOwnedTabs[0] || null;
-      const sourceGroupStillPresent = browserGroups.some((group) =>
-        group.id === ${JSON.stringify(restoredRemoteState.remoteTabs[0].groupId)});
       if (saved.activeSpaceId !== 'workbench-e2e' ||
           document.querySelector('#activeSpaceName')?.textContent !== 'Workbench E2E' ||
-          targetOwnedTabs.length !== 1 || !targetTab?.active || targetTab.groupId !== -1 ||
-          !isNewTabUrl(targetTab.url || targetTab.pendingUrl) || activeTab?.id !== targetTab.id ||
-          remoteTabs.length !== 0 || sourceGroupStillPresent ||
+          targetOwnedTabs.length !== 0 || !activeTab?.active || activeTab.groupId !== -1 ||
+          !isNewTabUrl(activeTab.url || activeTab.pendingUrl) ||
+          !(saved.ephemeralTabIds || []).includes(activeTab.id) ||
+          remoteTabs.length !== 0 ||
           !workbenchTab || workbenchTab.active) return null;
       return {
         activeSpaceId: saved.activeSpaceId,
@@ -5723,8 +5736,6 @@ async function main() {
           windowId: tab.windowId,
         })),
         remoteTabs: remoteTabs.map((tab) => ({ id: tab.id, active: tab.active })),
-        sourceGroupId: ${JSON.stringify(restoredRemoteState.remoteTabs[0].groupId)},
-        sourceGroupStillPresent,
         remoteSnapshot: saved.spaceSnapshots?.['remote-current'] || null,
         workbenchTab: {
           id: workbenchTab.id,
@@ -5735,14 +5746,13 @@ async function main() {
     })()`, 20000);
     await waitFor(client, `(() => {
       const events = window.__workbenchSwitchTrace.snapshot('rail-to-workbench').events;
-      return events.some((entry) => entry.kind === 'after-durable-save' && entry.candidateWrite) &&
-        events.some((entry) => entry.kind === 'after-command' && entry.type === 'tabs:close');
+      return events.some((entry) => entry.kind === 'after-durable-save' && entry.candidateWrite);
     })()`, 12000);
     const railSwitchTrace = await evaluate(client,
       `window.__workbenchSwitchTrace.snapshot('rail-to-workbench')`);
     const railSwitchAssessment = assessWorkbenchSwitchTrace(
       railSwitchTrace,
-      [restoredRemoteState.remoteTabs[0].id],
+      [],
     );
     const workbenchSwitchTraceDisposed = await evaluate(client, `(() => {
       const result = window.__workbenchSwitchTrace.dispose();
@@ -5752,12 +5762,10 @@ async function main() {
     record(
       'Workbench rail activates and durably saves the target before guarded source cleanup',
       railSpaceSwitchState.activeSpaceId === 'workbench-e2e' &&
-        railSpaceSwitchState.targetOwnedTabs.length === 1 &&
-        railSpaceSwitchState.activeBrowserTab.id === railSpaceSwitchState.targetOwnedTabs[0].id &&
-        railSpaceSwitchState.targetOwnedTabs[0].active &&
-        railSpaceSwitchState.targetOwnedTabs[0].groupId === -1 &&
+        railSpaceSwitchState.targetOwnedTabs.length === 0 &&
+        railSpaceSwitchState.activeBrowserTab.active &&
+        railSpaceSwitchState.activeBrowserTab.groupId === -1 &&
         railSpaceSwitchState.remoteTabs.length === 0 &&
-        !railSpaceSwitchState.sourceGroupStillPresent &&
         railSpaceSwitchState.workbenchTab?.id === openedWorkbench.id &&
         !railSpaceSwitchState.workbenchTab?.active &&
         railSwitchAssessment.ok &&
@@ -5830,10 +5838,8 @@ async function main() {
     })()`, 20000);
     record(
       'Command Palette finds an inactive Space saved tab, switches there, and opens only that row',
-      restoredRemoteState.activeSpaceName === 'Remote Current' &&
-        restoredRemoteState.activeBrowserTab?.id === restoredRemoteState.remoteTabs[0].id &&
-        restoredRemoteState.dormantRows === 0 &&
-        !restoredRemoteState.remoteRowDormant &&
+        restoredRemoteState.activeSpaceName === 'Remote Current' &&
+        restoredRemoteState.remoteTabs.length === 0 &&
         !restoredRemoteState.workbenchTab?.active &&
         restoredRemoteState.visibleText.includes('Remote Saved') &&
         Boolean(restoredRemoteState.remoteRowTitle) &&
@@ -10381,7 +10387,7 @@ async function main() {
     );
     record(
       'Ask Page ignores selected rows and discloses only the previously active current page',
-      askPageDisclosure.hint === 'Click Ask Page to read this page locally. Nothing is sent to the provider until you confirm.' &&
+      askPageDisclosure.hint === 'Ask Page sends the current page and recent conversation context directly to your configured provider.' &&
         askPageDisclosure.chips.length === 1 &&
         askPageDisclosure.chips[0].includes('Ask Source Alpha') &&
         askSelectionFixtureIds.every((tabId) => askPageDisclosure.selectedIds.includes(tabId)),
@@ -10541,7 +10547,7 @@ async function main() {
       document.querySelector('#askPagePrompt').value = '';
     })()`);
     record(
-      'A simulated denied optional-host API response stops Ask before extraction, Review, persistence, or provider traffic',
+      'A simulated denied optional-host API response stops Ask before extraction, persistence, or provider traffic',
       deniedAskPermissionState.calls.permissionRequests ===
           deniedAskPermissionBefore.calls.permissionRequests + 1 &&
         deniedAskPermissionState.calls.pageExtractions ===
@@ -14124,260 +14130,7 @@ async function main() {
       aiChats: [],
     }`);
 
-    const askFreshnessInitialUrl = `${askFixtureServer.sourceAlphaUrl}#/customer/1`;
-    const askFreshnessChangedUrl = `${askFixtureServer.sourceAlphaUrl}#/customer/2`;
-    const askFreshnessPrompt = 'E2E review freshness must stop before sending';
-    await evaluate(client, `chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, {
-      url: ${JSON.stringify(askFreshnessInitialUrl)},
-    })`);
-    await waitFor(client, `(async () => {
-      const tab = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
-      return tab.status === 'complete' && tab.url === ${JSON.stringify(askFreshnessInitialUrl)};
-    })()`, 12000);
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const key = stored.spaceTabsState?.activeAskSessionKey || '';
-      const session = stored.spaceTabsState?.askSessions?.[key];
-      return !document.querySelector('#askPageView')?.hidden &&
-        !document.querySelector('#settingsDialog')?.open &&
-        document.querySelector('#askProvider')?.textContent ===
-          'Custom OpenAI-compatible · ask-e2e-model' &&
-        session?.tabId === ${JSON.stringify(askSourceTabs.alpha.id)} &&
-        session?.url === ${JSON.stringify(askFreshnessInitialUrl)};
-    })()`);
-
-    const askFreshnessBefore = await evaluate(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return {
-        activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-        domMessages: [...document.querySelectorAll('#askMessages .ask-message')]
-          .map((message) => ({ className: message.className, text: message.textContent || '' })),
-        prompt: document.querySelector('#askPagePrompt')?.value || '',
-        aiChatCount: window.__askE2ECalls.aiChats.length,
-      };
-    })()`);
-    const askProviderRequestsBeforeFreshness = askFixtureServer.requests.length;
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = ${JSON.stringify(askFreshnessPrompt)};
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const askFreshnessReview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
-      const source = document.querySelector('#actionDialogPreview .action-preview-item');
-      const url = source?.querySelector('.action-preview-meta')?.textContent || '';
-      return url === ${JSON.stringify(askFreshnessInitialUrl)}
-        ? {
-            url,
-            title: source.querySelector('.action-preview-title')?.textContent || '',
-            confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-          }
-        : null;
-    })()`, 12000);
-    await evaluate(client, `chrome.scripting.executeScript({
-      target: { tabId: ${JSON.stringify(askSourceTabs.alpha.id)} },
-      func: () => history.pushState({}, '', '#/customer/2'),
-    })`);
-    await waitFor(client, `(async () => {
-      const [tab, listed] = await Promise.all([
-        chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}),
-        chrome.runtime.sendMessage({ type: 'tabs:listAll' }),
-      ]);
-      const publicTab = (listed.tabs || []).find((item) =>
-        Number(item.id) === ${JSON.stringify(askSourceTabs.alpha.id)});
-      return tab.status === 'complete' && tab.url === ${JSON.stringify(askFreshnessChangedUrl)} &&
-        publicTab?.url === ${JSON.stringify(askFreshnessChangedUrl)} &&
-        document.querySelector('#actionDialog')?.open;
-    })()`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
-    let askFreshnessAfter;
-    try {
-      askFreshnessAfter = await waitFor(client, `(async () => {
-        const expected = 'The current page changed after review. Nothing was sent; review the new page and try again.';
-        const status = document.querySelector('#syncStatus')?.textContent || '';
-        const toast = document.querySelector('#workbenchToast')?.textContent || '';
-        if (document.querySelector('#actionDialog')?.open || status !== expected ||
-            toast !== expected ||
-            document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
-        const [stored, currentTab] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}),
-        ]);
-        const sourceChip = document.querySelector('#askSourceList .ask-source-chip');
-        return {
-          status,
-          toast,
-          activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-          askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-          domMessages: [...document.querySelectorAll('#askMessages .ask-message')]
-            .map((message) => ({ className: message.className, text: message.textContent || '' })),
-          prompt: document.querySelector('#askPagePrompt')?.value || '',
-          sourceUrl: sourceChip?.title || '',
-          sourceTitle: sourceChip?.querySelector('b')?.textContent || '',
-          chromeTitle: currentTab.title || '',
-          scope: document.querySelector('#askScope')?.textContent || '',
-          sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-          aiChatCount: window.__askE2ECalls.aiChats.length,
-        };
-      })()`, 20000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const [tab, listed] = await Promise.all([
-          chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}).catch(() => null),
-          chrome.runtime.sendMessage({ type: 'tabs:listAll' }).catch(() => ({})),
-        ]);
-        return {
-          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
-          dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
-          status: document.querySelector('#syncStatus')?.textContent || '',
-          toast: document.querySelector('#workbenchToast')?.textContent || '',
-          toastHidden: Boolean(document.querySelector('#workbenchToast')?.hidden),
-          toastClassName: document.querySelector('#workbenchToast')?.className || '',
-          button: document.querySelector('#askAIButton')?.textContent || '',
-          chromeTab: tab,
-          publicTab: (listed.tabs || []).find((item) =>
-            Number(item.id) === ${JSON.stringify(askSourceTabs.alpha.id)}) || null,
-          calls: structuredClone(window.__askE2ECalls || {}),
-        };
-      })()`);
-      throw new Error(`Ask review freshness did not settle: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-    // Cross a complete passive shared-state refresh before checking storage
-    // again. This is the path that used to persist an empty session for the
-    // newly navigated hash route after the stale Review dialog was rejected.
-    await new Promise((resolve) => setTimeout(resolve, sharedStateRefreshWaitMs));
-    const askFreshnessAfterRefresh = await evaluate(client, `(async () => {
-      const [stored, currentTab] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}),
-      ]);
-      const changedSessionKey =
-        'tab:${askSourceTabs.alpha.id}:${askFreshnessChangedUrl}';
-      const sourceChip = document.querySelector('#askSourceList .ask-source-chip');
-      return {
-        activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-        changedSessionKey,
-        hasChangedSession: Object.hasOwn(
-          stored.spaceTabsState?.askSessions || {},
-          changedSessionKey,
-        ),
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-        domMessages: [...document.querySelectorAll('#askMessages .ask-message')]
-          .map((message) => ({ className: message.className, text: message.textContent || '' })),
-        prompt: document.querySelector('#askPagePrompt')?.value || '',
-        sourceUrl: sourceChip?.title || '',
-        sourceTitle: sourceChip?.querySelector('b')?.textContent || '',
-        chromeTitle: currentTab.title || '',
-        scope: document.querySelector('#askScope')?.textContent || '',
-        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        aiChatCount: window.__askE2ECalls.aiChats.length,
-      };
-    })()`);
-    record(
-      'Ask Page rechecks a same-tab hash route before Confirm and stores nothing through passive refresh',
-      askFreshnessReview.confirmText === 'Send to provider' &&
-        askFreshnessAfter.activeSessionKey === askFreshnessBefore.activeSessionKey &&
-        JSON.stringify(askFreshnessAfter.askSessions) === JSON.stringify(askFreshnessBefore.askSessions) &&
-        JSON.stringify(askFreshnessAfter.domMessages) === JSON.stringify(askFreshnessBefore.domMessages) &&
-        askFreshnessAfter.prompt === askFreshnessPrompt &&
-        askFreshnessAfter.sourceUrl === askFreshnessChangedUrl &&
-        Boolean(askFreshnessAfter.sourceTitle) &&
-        askFreshnessAfter.sourceTitle === askFreshnessAfter.chromeTitle &&
-        askFreshnessAfter.sourceSummary === 'Current page' &&
-        !askFreshnessAfter.scope.includes('#/customer/1') &&
-        askFreshnessAfter.aiChatCount === askFreshnessBefore.aiChatCount &&
-        !askFreshnessAfterRefresh.hasChangedSession &&
-        askFreshnessAfterRefresh.activeSessionKey === askFreshnessBefore.activeSessionKey &&
-        JSON.stringify(askFreshnessAfterRefresh.askSessions) === JSON.stringify(askFreshnessBefore.askSessions) &&
-        JSON.stringify(askFreshnessAfterRefresh.domMessages) === JSON.stringify(askFreshnessBefore.domMessages) &&
-        askFreshnessAfterRefresh.prompt === askFreshnessPrompt &&
-        askFreshnessAfterRefresh.sourceUrl === askFreshnessChangedUrl &&
-        askFreshnessAfterRefresh.sourceTitle === askFreshnessAfterRefresh.chromeTitle &&
-        askFreshnessAfterRefresh.sourceTitle === askFreshnessAfter.sourceTitle &&
-        askFreshnessAfterRefresh.sourceSummary === 'Current page' &&
-        !askFreshnessAfterRefresh.scope.includes('#/customer/1') &&
-        askFreshnessAfterRefresh.aiChatCount === askFreshnessBefore.aiChatCount &&
-        askFixtureServer.requests.length === askProviderRequestsBeforeFreshness,
-      JSON.stringify({
-        askFreshnessReview,
-        askFreshnessBefore,
-        askFreshnessAfter,
-        askFreshnessAfterRefresh,
-        providerRequestsBefore: askProviderRequestsBeforeFreshness,
-        providerRequestsAfter: askFixtureServer.requests.length,
-      }),
-    );
-    await clickElementWithCDP(client, '#askAIButton');
-    const askFreshnessRetryReview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
-      const source = document.querySelector('#actionDialogPreview .action-preview-item');
-      const url = source?.querySelector('.action-preview-meta')?.textContent || '';
-      return url === ${JSON.stringify(askFreshnessChangedUrl)}
-        ? {
-            url,
-            title: source.querySelector('.action-preview-title')?.textContent || '',
-            confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-            prompt: document.querySelector('#askPagePrompt')?.value || '',
-          }
-        : null;
-    })()`, 12000);
-    await clickElementWithCDP(client, '#actionDialogCancel');
-    await new Promise((resolve) => setTimeout(resolve, sharedStateRefreshWaitMs));
-    const askFreshnessRetryCancelled = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const changedSessionKey =
-        'tab:${askSourceTabs.alpha.id}:${askFreshnessChangedUrl}';
-      return {
-        activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-        changedSessionKey,
-        hasChangedSession: Object.hasOwn(
-          stored.spaceTabsState?.askSessions || {},
-          changedSessionKey,
-        ),
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-        domMessages: [...document.querySelectorAll('#askMessages .ask-message')]
-          .map((message) => ({ className: message.className, text: message.textContent || '' })),
-        prompt: document.querySelector('#askPagePrompt')?.value || '',
-        aiChatCount: window.__askE2ECalls.aiChats.length,
-      };
-    })()`);
-    record(
-      'Ask Page can immediately retry the preserved question against the newly reviewed route',
-      askFreshnessRetryReview.confirmText === 'Send to provider' &&
-        askFreshnessRetryReview.prompt === askFreshnessPrompt &&
-        askFreshnessRetryCancelled.prompt === askFreshnessPrompt &&
-        !askFreshnessRetryCancelled.hasChangedSession &&
-        askFreshnessRetryCancelled.activeSessionKey === askFreshnessBefore.activeSessionKey &&
-        JSON.stringify(askFreshnessRetryCancelled.askSessions) ===
-          JSON.stringify(askFreshnessBefore.askSessions) &&
-        JSON.stringify(askFreshnessRetryCancelled.domMessages) ===
-          JSON.stringify(askFreshnessBefore.domMessages) &&
-        askFreshnessRetryCancelled.aiChatCount === askFreshnessBefore.aiChatCount &&
-        askFixtureServer.requests.length === askProviderRequestsBeforeFreshness,
-      JSON.stringify({
-        askFreshnessRetryReview,
-        askFreshnessRetryCancelled,
-        providerRequestsBefore: askProviderRequestsBeforeFreshness,
-        providerRequestsAfter: askFixtureServer.requests.length,
-      }),
-    );
-    await evaluate(client, `chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, {
-      url: ${JSON.stringify(askFixtureServer.sourceAlphaUrl)},
-    })`);
-    await waitFor(client, `(async () => {
-      const tab = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
-      return tab.status === 'complete' && tab.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)};
-    })()`, 12000);
-    const askReviewCallsBefore = await evaluate(client, `({
+    const askDirectCallsBefore = await evaluate(client, `({
       permissionRequests: window.__askE2ECalls.permissionRequests,
       pageExtractions: window.__askE2ECalls.pageExtractions,
       aiChatCount: window.__askE2ECalls.aiChats.length,
@@ -14422,16 +14175,15 @@ async function main() {
       });
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
-    let askReviewState;
+    let askDirectSendState;
     try {
-      askReviewState = await waitFor(client, `(async () => {
-        if (!document.querySelector('#actionDialog')?.open ||
-            document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
+      askDirectSendState = await waitFor(client, `(async () => {
+        if (document.querySelector('#actionDialog')?.open ||
+            document.querySelector('#askAIButton')?.textContent !== 'Stop') return null;
         const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
         const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
         const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)});
         const stored = await chrome.storage.local.get('spaceTabsState');
-        const firstSection = document.querySelector('#actionDialogPreview .action-preview-section');
         return {
           activeTabId: active?.id,
           sourceTabsActive: [Boolean(alpha.active), Boolean(beta.active)],
@@ -14441,14 +14193,7 @@ async function main() {
           sessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
           storedSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
           calls: { ...window.__askE2ECalls },
-          message: document.querySelector('#actionDialogMessage')?.textContent || '',
-          sectionTitle: firstSection?.querySelector('h3 span')?.textContent || '',
-          sourceItems: [...(firstSection?.querySelectorAll('.action-preview-item') || [])].map((item) => ({
-            title: item.querySelector('.action-preview-title')?.textContent || '',
-            chars: item.querySelector('.action-preview-result')?.textContent || '',
-            url: item.querySelector('.action-preview-meta')?.textContent || '',
-          })),
-          confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
         };
       })()`, 12000);
     } catch (error) {
@@ -14471,34 +14216,27 @@ async function main() {
           calls: { ...window.__askE2ECalls },
         };
       })()`);
-      throw new Error(`Ask Page review did not open: ${JSON.stringify(diagnostic)}`, { cause: error });
+      throw new Error(`Ask Page did not send directly: ${JSON.stringify(diagnostic)}`, { cause: error });
     }
     record(
-      'Ask Page reads only the previously active page while Workbench stays active and shows a complete Review',
-      askReviewState.activeTabId === openedWorkbench.id &&
-        askReviewState.sourceTabsActive.every((active) => !active) &&
-        askReviewState.permission &&
-        askReviewState.calls.permissionRequests === askReviewCallsBefore.permissionRequests + 1 &&
-        askReviewState.calls.pageExtractions === askReviewCallsBefore.pageExtractions + 1 &&
-        askReviewState.calls.aiChats.length === askReviewCallsBefore.aiChatCount &&
-        askReviewState.provider === 'Custom OpenAI-compatible · ask-e2e-model' &&
-        askReviewState.sourceSummary === 'Current page' &&
-        askReviewState.message.includes('Custom OpenAI-compatible · ask-e2e-model') &&
-        /\d+ chars from the current page/.test(askReviewState.message) &&
-        askReviewState.sectionTitle === 'Current page' &&
-        askReviewState.sourceItems.length === 1 &&
-        askReviewState.sourceItems.every((item) => /\d+ chars/.test(item.chars)) &&
-        askReviewState.sourceItems[0]?.url === askFixtureServer.sourceAlphaUrl &&
-        askReviewState.confirmText === 'Send to provider',
+      'Ask Page reads only the previously active page and sends directly without a confirmation dialog',
+      askDirectSendState.activeTabId === openedWorkbench.id &&
+        askDirectSendState.sourceTabsActive.every((active) => !active) &&
+        askDirectSendState.permission &&
+        askDirectSendState.calls.permissionRequests === askDirectCallsBefore.permissionRequests + 1 &&
+        askDirectSendState.calls.pageExtractions === askDirectCallsBefore.pageExtractions + 1 &&
+        askDirectSendState.calls.aiChats.length === askDirectCallsBefore.aiChatCount + 1 &&
+        askDirectSendState.provider === 'Custom OpenAI-compatible · ask-e2e-model' &&
+        askDirectSendState.sourceSummary === 'Current page' &&
+        !askDirectSendState.dialogOpen,
       JSON.stringify({
         askPageDisclosure,
-        askReviewCallsBefore,
-        askReviewState,
+        askDirectCallsBefore,
+        askDirectSendState,
         permissionFlow: 'trusted CDP pointer click with temporary unpacked-fixture host preauthorization',
       }),
     );
 
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     await waitFor(client, `document.querySelector('#askAIButton')?.textContent === 'Stop'`);
     const expectedCompletedAskSessionKey =
       `tab:${askSourceTabs.alpha.id}:${askFixtureServer.sourceAlphaUrl}`;
@@ -14806,12 +14544,6 @@ async function main() {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
-    const stopAskReview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
-      return { message: document.querySelector('#actionDialogMessage')?.textContent || '' };
-    })()`, 12000);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const streamingPartialState = await waitFor(client, `(() => {
       const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
       const answer = answers.at(-1)?.textContent || '';
@@ -14842,8 +14574,6 @@ async function main() {
         stoppedAskState.sourceLinks.includes(askFixtureServer.sourceAlphaUrl) &&
         !stoppedAskState.sourceLinks.includes(askFixtureServer.sourceBetaUrl) &&
         stoppedMockRequest?.sourceCount === 1 &&
-        stopAskReview.message.includes('stored text from 2 recent conversation messages') &&
-        stopAskReview.message.includes('generated citation URLs and Sources appendix excluded') &&
         stoppedMockRequest.historyIncludesCompletedAnswer &&
         stoppedMockRequest.historyIncludesPlainCitation &&
         !stoppedMockRequest.historyIncludesGeneratedInlineCitationLink &&
@@ -14854,7 +14584,6 @@ async function main() {
         stoppedMockRequest.doneSentAt === 0,
       JSON.stringify({ streamingPartialState, stoppedAskState, stoppedMockRequest: {
         sourceCount: stoppedMockRequest?.sourceCount,
-        stopAskReview,
         historyIncludesCompletedAnswer: stoppedMockRequest?.historyIncludesCompletedAnswer,
         historyIncludesPlainCitation: stoppedMockRequest?.historyIncludesPlainCitation,
         historyIncludesGeneratedInlineCitationLink:
@@ -14897,30 +14626,19 @@ async function main() {
       (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
         ${JSON.stringify(openedWorkbench.id)})()`);
     const selectionProviderRequestsBefore = askFixtureServer.requests.length;
-    const askSelectionQuestion = 'E2E selection privacy: summarize exactly the reviewed selection';
+    const askSelectionQuestion = 'E2E selection privacy: summarize exactly the selected text';
     await evaluate(client, `(() => {
       const input = document.querySelector('#askPagePrompt');
-      input.value = ${JSON.stringify('E2E selection privacy: summarize exactly the reviewed selection')};
+      input.value = ${JSON.stringify('E2E selection privacy: summarize exactly the selected text')};
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
-    const askSelectionReview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
-      const source = document.querySelector('#actionDialogPreview .action-preview-item');
-      const message = document.querySelector('#actionDialogMessage')?.textContent || '';
-      const result = source?.querySelector('.action-preview-result')?.textContent || '';
-      return message.includes('selected text only') && result.includes('selected text only')
-        ? { message, result, confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '' }
-        : null;
-    })()`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     const askSelectionCompleted = await waitFor(client, `(() => {
       if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
       const messages = [...document.querySelectorAll('#askMessages .ask-message')];
       const user = messages.findLast((message) => message.classList.contains('user'));
       const assistant = messages.findLast((message) => message.classList.contains('assistant'));
-      return user?.textContent?.includes(${JSON.stringify('E2E selection privacy: summarize exactly the reviewed selection')}) &&
+      return user?.textContent?.includes(${JSON.stringify('E2E selection privacy: summarize exactly the selected text')}) &&
         assistant?.textContent?.includes('Alpha sets the Tuesday checkpoint')
         ? { user: user.textContent || '', assistant: assistant.textContent || '' }
         : null;
@@ -14934,9 +14652,6 @@ async function main() {
     const askSelectionPrivacyOk =
       askSelectionFixture?.selectedText === askSelectionMarker &&
       askSelectionFixture?.bodyText.includes(askPrivateBodyMarker) &&
-      askSelectionReview.confirmText === 'Send to provider' &&
-      askSelectionReview.message.includes('selected text only') &&
-      askSelectionReview.result.includes('selected text only') &&
       askSelectionMockRequest?.sourceCount === 1 &&
       askSelectionProviderPrompt.includes(`Selected text:\n${askSelectionMarker}`) &&
       !askSelectionProviderPrompt.includes('Page text:') &&
@@ -14948,7 +14663,6 @@ async function main() {
       askSelectionPrivacyOk,
       JSON.stringify({
         askSelectionFixture,
-        askSelectionReview,
         askSelectionCompleted,
         sourceCount: askSelectionMockRequest?.sourceCount,
         providerPrompt: askSelectionProviderPrompt,
@@ -14958,7 +14672,6 @@ async function main() {
     if (!askSelectionPrivacyOk) {
       throw new Error(`Ask selection privacy regression: ${JSON.stringify({
         askSelectionFixture,
-        askSelectionReview,
         sourceCount: askSelectionMockRequest?.sourceCount,
         providerPrompt: askSelectionProviderPrompt,
       })}`);
@@ -15878,41 +15591,6 @@ async function main() {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await clickElementWithCDP(client, '#askAIButton');
-    let restoredContinuationReview;
-    try {
-      restoredContinuationReview = await waitFor(client, `(() => {
-        if (!document.querySelector('#actionDialog')?.open ||
-            document.querySelector('#actionDialogTitle')?.textContent !== 'Review Ask Page') return null;
-        const message = document.querySelector('#actionDialogMessage')?.textContent || '';
-        return message.includes('stored text from')
-          ? { message, confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '' }
-          : null;
-      })()`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const [stored, secret] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
-        ]);
-        return {
-          status: document.querySelector('#syncStatus')?.textContent || '',
-          toast: document.querySelector('#workbenchToast')?.textContent || '',
-          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
-          dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
-          dialogMessage: document.querySelector('#actionDialogMessage')?.textContent || '',
-          prompt: document.querySelector('#askPagePrompt')?.value || '',
-          button: document.querySelector('#askAIButton')?.textContent || '',
-          provider: document.querySelector('#askProvider')?.textContent || '',
-          localAI: stored.spaceTabsState?.ai || null,
-          secretKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
-          sourceChip: document.querySelector('#askSourceList .ask-source-chip')?.title || '',
-        };
-      })()`);
-      throw new Error(`Restored Ask review did not open with history: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     const restoredContinuationState = await waitFor(client, `(async () => {
       if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
@@ -15992,16 +15670,7 @@ async function main() {
       sessionsWithoutKey(restoredContinuationState.askSessions, restoredContinuationState.liveKey),
       sessionsWithoutKey(restoredAskSessionsBeforePortableRender, restoredPortableKey),
     );
-    const restoredReviewHistoryText =
-      `${restoredExpectedProviderHistory.length} recent conversation ${
-        restoredExpectedProviderHistory.length === 1 ? 'message' : 'messages'
-      }`;
     const restoredContinuationOk =
-      restoredContinuationReview.confirmText === 'Send to provider' &&
-      restoredContinuationReview.message.includes(`stored text from ${restoredReviewHistoryText}`) &&
-      restoredContinuationReview.message.includes(
-        'generated citation URLs and Sources appendix excluded',
-      ) &&
       restoredContinuationState.activeKey === restoredContinuationState.liveKey &&
       restoredContinuationState.liveSession?.key === restoredContinuationState.liveKey &&
       restoredContinuationState.liveSession?.tabId === restoredContinuationTab.id &&
@@ -16021,10 +15690,9 @@ async function main() {
       !restoredContinuationDomDifference &&
       !restoredUnrelatedSessionsDifference;
     record(
-      'Sending after Restore adopts the reviewed history and appends one complete turn without splitting it',
+      'Sending after Restore adopts the restored history and appends one complete turn without splitting it',
       restoredContinuationOk,
       JSON.stringify({
-        restoredContinuationReview,
         restoredContinuationState,
         restoredExpectedProviderHistory,
         restoredActualProviderHistory,
@@ -17147,133 +16815,83 @@ async function main() {
       throw new Error(`Explicit saved-target update regression: ${JSON.stringify(savedTargetAfterExplicitUpdate)}`);
     }
 
-    progress('checking transactional Space activation order and stable round-trip identity');
-    const spaceSwitchActivationFixture = {
+    progress('checking Space switches keep every saved Tag dormant behind one New Tab keepalive');
+    const dormantSwitchFixture = {
       source: {
-        id: 'space-switch-source-e2e',
-        name: 'Space Switch Source E2E',
+        id: 'space-switch-dormant-source-e2e',
+        name: 'Dormant Switch Source E2E',
         group: {
-          snapshotGroupId: 'space-switch-source-group-e2e',
-          title: 'Space Switch Source TagGroup E2E',
-          color: 'green',
+          snapshotGroupId: 'space-switch-dormant-source-group-e2e',
+          title: 'Dormant Source TagGroup E2E',
+          color: 'orange',
           collapsed: false,
-          customMetadata: { fixture: 'source-group', revision: 7 },
-          tabs: [
-            {
-              snapshotTabId: 'space-switch-source-group-tab-1-e2e',
-              title: askFixtureServer.tidyPrimaryTitle,
-              panelTitle: 'Source grouped alias one',
-              url: `${askFixtureServer.tidyPrimaryUrl}?space-switch=source-group-1`,
-              customMetadata: { row: 'source-group-1' },
-            },
-            {
-              snapshotTabId: 'space-switch-source-group-tab-2-e2e',
-              title: askFixtureServer.tidySecondaryTitle,
-              panelTitle: 'Source grouped alias two',
-              url: `${askFixtureServer.tidySecondaryUrl}?space-switch=source-group-2`,
-              customMetadata: { row: 'source-group-2' },
-            },
-          ],
-        },
-        ungrouped: {
-          snapshotGroupId: 'space-switch-source-ungrouped-e2e',
-          title: 'Ungrouped',
-          color: 'grey',
-          collapsed: false,
-          restorable: true,
-          customMetadata: { fixture: 'source-ungrouped', revision: 3 },
           tabs: [{
-            snapshotTabId: 'space-switch-source-ungrouped-tab-e2e',
-            title: 'Ask Source Alpha',
-            panelTitle: 'Source ungrouped alias',
-            url: `${askFixtureServer.sourceAlphaUrl}?space-switch=source-ungrouped`,
-            customMetadata: { row: 'source-ungrouped' },
+            snapshotTabId: 'space-switch-dormant-source-tab-e2e',
+            title: askFixtureServer.tidyPrimaryTitle,
+            panelTitle: 'Dormant source',
+            url: `${askFixtureServer.tidyPrimaryUrl}?space-switch=dormant-source`,
           }],
         },
       },
       target: {
-        id: 'space-switch-target-e2e',
-        name: 'Space Switch Target E2E',
+        id: 'space-switch-dormant-target-e2e',
+        name: 'Dormant Switch Target E2E',
         group: {
-          snapshotGroupId: 'space-switch-target-group-e2e',
-          title: 'Space Switch Target TagGroup E2E',
-          color: 'blue',
+          snapshotGroupId: 'space-switch-dormant-target-group-e2e',
+          title: 'Dormant Target TagGroup E2E',
+          color: 'cyan',
           collapsed: false,
-          customMetadata: { fixture: 'target-group', revision: 11 },
           tabs: [
             {
-              snapshotTabId: 'space-switch-target-group-tab-1-e2e',
-              title: 'Lifecycle Navigation Before',
-              panelTitle: 'Target grouped alias one',
-              url: `${askFixtureServer.lifecycleNavigationBeforeUrl}?space-switch=target-group-1`,
-              customMetadata: { row: 'target-group-1' },
+              snapshotTabId: 'space-switch-dormant-target-tab-1-e2e',
+              title: 'Ask Source Alpha',
+              panelTitle: 'Dormant target one',
+              url: `${askFixtureServer.sourceAlphaUrl}?space-switch=dormant-target-1`,
             },
             {
-              snapshotTabId: 'space-switch-target-group-tab-2-e2e',
-              title: 'Lifecycle Navigation After',
-              panelTitle: 'Target grouped alias two',
-              url: `${askFixtureServer.lifecycleNavigationAfterUrl}?space-switch=target-group-2`,
-              customMetadata: { row: 'target-group-2' },
+              snapshotTabId: 'space-switch-dormant-target-tab-2-e2e',
+              title: 'Ask Source Beta',
+              panelTitle: 'Dormant target two',
+              url: `${askFixtureServer.sourceBetaUrl}?space-switch=dormant-target-2`,
             },
           ],
         },
       },
     };
-    const fixtureRowsForSpace = (space) => [
-      ...(space.group?.tabs || []),
-      ...(space.ungrouped?.tabs || []),
+    const dormantSwitchUrls = [
+      dormantSwitchFixture.source.group.tabs[0].url,
+      ...dormantSwitchFixture.target.group.tabs.map((row) => row.url),
     ];
-    const allSpaceSwitchRows = [
-      ...fixtureRowsForSpace(spaceSwitchActivationFixture.source),
-      ...fixtureRowsForSpace(spaceSwitchActivationFixture.target),
-    ];
-    const allSpaceSwitchUrls = allSpaceSwitchRows.map((row) => row.url);
-    const originalDurableSpaceId = await evaluate(client, `(async () =>
-      (await chrome.storage.local.get('spaceTabsState')).spaceTabsState?.activeSpaceId || '')()`);
-    const spaceSwitchPanel = await createAuxiliaryPanelWindow();
-    const sourceChromeFixture = await evaluate(client, `(async () => {
-      const fixture = ${JSON.stringify(spaceSwitchActivationFixture.source)};
-      const definitions = [
-        ...fixture.group.tabs.map((row) => ({ ...row, grouped: true })),
-        ...fixture.ungrouped.tabs.map((row) => ({ ...row, grouped: false })),
-      ];
-      const created = [];
-      for (const definition of definitions) {
-        const tab = await chrome.tabs.create({
-          windowId: ${JSON.stringify(spaceSwitchPanel.windowId)},
-          url: definition.url,
-          active: false,
-        });
-        created.push({ ...definition, id: tab.id });
-      }
+    const dormantSwitchPanel = await createAuxiliaryPanelWindow();
+    const dormantSourceChrome = await evaluate(client, `(async () => {
+      const fixture = ${JSON.stringify(dormantSwitchFixture.source)};
+      const tab = await chrome.tabs.create({
+        windowId: ${JSON.stringify(dormantSwitchPanel.windowId)},
+        url: fixture.group.tabs[0].url,
+        active: false,
+      });
       const startedAt = Date.now();
+      let current = null;
       while (Date.now() - startedAt < 15000) {
-        const current = await Promise.all(created.map((item) =>
-          chrome.tabs.get(item.id).catch(() => null)));
-        if (current.every((tab, index) => tab?.status === 'complete' &&
-            tab.url === created[index].url && tab.title === created[index].title)) break;
+        current = await chrome.tabs.get(tab.id).catch(() => null);
+        if (current?.status === 'complete' &&
+            (current.url || current.pendingUrl || '') === fixture.group.tabs[0].url) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      const current = await Promise.all(created.map((item) => chrome.tabs.get(item.id)));
-      if (!current.every((tab, index) => tab.status === 'complete' &&
-          tab.url === created[index].url && tab.title === created[index].title)) {
-        throw new Error('Source Space HTTP tabs did not finish loading with deterministic titles.');
+      if (!current || current.status !== 'complete') {
+        throw new Error('Dormant-switch source tab did not finish loading.');
       }
-      const groupedIds = created.filter((item) => item.grouped).map((item) => item.id);
       const groupId = await chrome.tabs.group({
-        tabIds: groupedIds,
-        createProperties: { windowId: ${JSON.stringify(spaceSwitchPanel.windowId)} },
+        tabIds: [current.id],
+        createProperties: { windowId: ${JSON.stringify(dormantSwitchPanel.windowId)} },
       });
       await chrome.tabGroups.update(groupId, {
         title: fixture.group.title,
         color: fixture.group.color,
         collapsed: fixture.group.collapsed,
       });
-      await chrome.tabs.update(groupedIds[0], { active: true });
-      return {
-        groupId,
-        tabs: await Promise.all(created.map((item) => chrome.tabs.get(item.id))),
-      };
+      await chrome.tabs.update(current.id, { active: true });
+      return { groupId, tab: await chrome.tabs.get(current.id) };
     })()`);
     await waitForLifecycleJournalToSettle(client);
 
@@ -17281,946 +16899,26 @@ async function main() {
       'space-tabs-shared-state',
       { mode: 'exclusive' },
       async () => {
-        const fixture = ${JSON.stringify(spaceSwitchActivationFixture)};
-        const sourceChrome = ${JSON.stringify(sourceChromeFixture)};
-        const fixtureSpaceIds = new Set([fixture.source.id, fixture.target.id]);
-        const fixtureUrls = new Set(${JSON.stringify(allSpaceSwitchUrls)});
-        const fixtureSnapshotGroupIds = new Set([
-          fixture.source.group.snapshotGroupId,
-          fixture.source.ungrouped.snapshotGroupId,
-          fixture.target.group.snapshotGroupId,
-        ]);
-        const fixtureGroupTitles = new Set([
-          fixture.source.group.title,
-          fixture.target.group.title,
-        ]);
-        const sourceTabIds = new Set(sourceChrome.tabs.map((tab) => Number(tab.id)));
-        const sourceGroupKey = 'group:' + sourceChrome.groupId;
-        const [stored, storedWindow] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-        ]);
-        const saved = structuredClone(stored.spaceTabsState || {});
-        saved.spaces = (saved.spaces || []).filter((space) => !fixtureSpaceIds.has(space.id));
-        saved.spaces.push(
-          { id: fixture.source.id, name: fixture.source.name, icon: 'A', color: 'green' },
-          { id: fixture.target.id, name: fixture.target.name, icon: 'B', color: 'blue' },
-        );
-        saved.spaceSnapshots = saved.spaceSnapshots || {};
-        for (const snapshot of Object.values(saved.spaceSnapshots)) {
-          snapshot.groups = (snapshot.groups || [])
-            .filter((group) => !fixtureSnapshotGroupIds.has(group.snapshotGroupId) &&
-              !fixtureGroupTitles.has(group.title))
-            .map((group) => ({
-              ...group,
-              tabs: (group.tabs || []).filter((row) => !fixtureUrls.has(row.url)),
-            }));
-        }
-        saved.spaceSnapshots[fixture.source.id] = {
-          version: 1,
-          identityVersion: 1,
-          preserveGroups: true,
-          updatedAt: Date.now(),
-          customMetadata: { fixture: 'source-snapshot', revision: 5 },
-          groups: [structuredClone(fixture.source.group), structuredClone(fixture.source.ungrouped)],
-        };
-        saved.spaceSnapshots[fixture.target.id] = {
-          version: 1,
-          identityVersion: 1,
-          preserveGroups: true,
-          updatedAt: Date.now(),
-          customMetadata: { fixture: 'target-snapshot', revision: 9 },
-          groups: [structuredClone(fixture.target.group)],
-        };
-        saved.groupSpaces = saved.groupSpaces || {};
-        for (const [groupId, spaceId] of Object.entries(saved.groupSpaces)) {
-          if (fixtureSpaceIds.has(spaceId)) delete saved.groupSpaces[groupId];
-        }
-        saved.groupSpaces[String(sourceChrome.groupId)] = fixture.source.id;
-        saved.tabSpaces = saved.tabSpaces || {};
-        saved.tabLifecycle = saved.tabLifecycle || {};
-        saved.renamedTabs = saved.renamedTabs || {};
-        saved.tabGroups = saved.tabGroups || {};
-        const sourceRows = [...fixture.source.group.tabs, ...fixture.source.ungrouped.tabs];
-        for (const [index, row] of sourceRows.entries()) {
-          const liveTab = sourceChrome.tabs.find((tab) => tab.url === row.url);
-          if (!liveTab) throw new Error('Missing live source fixture tab: ' + row.url);
-          const grouped = index < fixture.source.group.tabs.length;
-          if (grouped) delete saved.tabSpaces[String(liveTab.id)];
-          else saved.tabSpaces[String(liveTab.id)] = fixture.source.id;
-          delete saved.tabGroups[String(liveTab.id)];
-          saved.renamedTabs[String(liveTab.id)] = row.panelTitle;
-          saved.tabLifecycle[String(liveTab.id)] = {
-            tabId: liveTab.id,
-            snapshotTabId: row.snapshotTabId,
-            snapshotGroupId: grouped
-              ? fixture.source.group.snapshotGroupId
-              : fixture.source.ungrouped.snapshotGroupId,
-            spaceId: fixture.source.id,
-            url: liveTab.url,
-            title: liveTab.title,
-            panelTitle: row.panelTitle,
-            windowId: liveTab.windowId,
-            groupId: grouped ? sourceChrome.groupId : -1,
-            trackingMode: 'live',
-            sessionId: saved.browserSessionId,
-          };
-        }
-        saved.groupOrder = saved.groupOrder || {};
-        for (const [spaceId, order] of Object.entries(saved.groupOrder)) {
-          if (!fixtureSpaceIds.has(spaceId)) {
-            saved.groupOrder[spaceId] = (order || []).filter((key) => key !== sourceGroupKey);
-          }
-        }
-        saved.groupOrder[fixture.source.id] = ['group:' + sourceChrome.groupId, 'ungrouped'];
-        saved.groupOrder[fixture.target.id] = [
-          'snapshot:0:' + encodeURIComponent(fixture.target.id) + ':' +
-            fixture.target.group.snapshotGroupId,
-        ];
-        saved.tabOrder = saved.tabOrder || {};
-        for (const [spaceId, order] of Object.entries(saved.tabOrder)) {
-          if (fixtureSpaceIds.has(spaceId)) continue;
-          delete order[sourceGroupKey];
-          for (const [key, tabIds] of Object.entries(order)) {
-            order[key] = (tabIds || []).filter((tabId) => !sourceTabIds.has(Number(tabId)));
-            if (order[key].length === 0) delete order[key];
-          }
-        }
-        saved.tabOrder[fixture.source.id] = {
-          ['group:' + sourceChrome.groupId]: fixture.source.group.tabs.map((row) =>
-            sourceChrome.tabs.find((tab) => tab.url === row.url).id),
-          ungrouped: fixture.source.ungrouped.tabs.map((row) =>
-            sourceChrome.tabs.find((tab) => tab.url === row.url).id),
-        };
-        saved.tabOrder[fixture.target.id] = {};
-        saved.collapsedGroups = saved.collapsedGroups || {};
-        delete saved.collapsedGroups[sourceGroupKey];
-        saved.collapsedGroups['group:' + sourceChrome.groupId] = false;
-        const windowState = structuredClone(storedWindow.spaceTabsWindowState || { activeSpaceIds: {} });
-        windowState.activeSpaceIds = windowState.activeSpaceIds || {};
-        windowState.activeSpaceIds[${JSON.stringify(String(spaceSwitchPanel.windowId))}] = fixture.source.id;
-        await chrome.storage.local.set({ spaceTabsState: saved });
-        await chrome.storage.session.set({ spaceTabsWindowState: windowState });
-      },
-    ))()`);
-    await client.send('Page.reload', {}, spaceSwitchPanel.sessionId);
-    await waitForInSession(client, spaceSwitchPanel.sessionId, `(async () => {
-      const fixture = ${JSON.stringify(spaceSwitchActivationFixture.source)};
-      const [storedWindow, tabs] = await Promise.all([
-        chrome.storage.session.get('spaceTabsWindowState'),
-        chrome.tabs.query({ windowId: ${JSON.stringify(spaceSwitchPanel.windowId)} }),
-      ]);
-      const expectedRows = [...fixture.group.tabs, ...fixture.ungrouped.tabs];
-      const renderedRows = [...document.querySelectorAll('.tab-row')]
-        .filter((row) => expectedRows.some((expected) =>
-          expected.snapshotTabId === row.dataset.snapshotTabId));
-      return document.querySelector('#activeSpaceName')?.textContent === fixture.name &&
-        storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-          ${JSON.stringify(String(spaceSwitchPanel.windowId))}
-        ] === fixture.id &&
-        expectedRows.every((expected) =>
-          tabs.filter((tab) => tab.url === expected.url).length === 1) &&
-        renderedRows.length === expectedRows.length &&
-        renderedRows.every((row) => !row.classList.contains('dormant')) &&
-        !Object.keys(await chrome.storage.session.get(null)).some((key) =>
-          key.startsWith('spaceTabsLifecycleEvent:') ||
-          key.startsWith('spaceTabsLifecycleSuppression:'));
-    })()`, 20000);
-
-    const traceInstalled = await evaluateInSession(client, spaceSwitchPanel.sessionId, `(async () => {
-      const fixture = ${JSON.stringify(spaceSwitchActivationFixture)};
-      const windowId = ${JSON.stringify(spaceSwitchPanel.windowId)};
-      const extensionOrigin = chrome.runtime.getURL('');
-      const originalSendMessage = chrome.runtime.sendMessage;
-      const trackedTypes = new Set([
-        'tabs:create',
-        'tabs:focus',
-        'tabs:group',
-        'tabs:groupExisting',
-        'groups:update',
-        'tabs:close',
-      ]);
-      const destinations = {
-        'A-to-B': {
-          all: fixture.target.group.tabs.map((row) => row.url),
-          grouped: fixture.target.group.tabs.map((row) => row.url),
-        },
-        'B-to-A': {
-          all: [...fixture.source.group.tabs, ...fixture.source.ungrouped.tabs]
-            .map((row) => row.url),
-          grouped: fixture.source.group.tabs.map((row) => row.url),
-        },
-      };
-      const state = {
-        phase: '',
-        sequence: 0,
-        trace: [],
-        pending: new Set(),
-        minContentTabCount: Number.POSITIVE_INFINITY,
-        minTotalTabCount: Number.POSITIVE_INFINITY,
-        zeroContentObserved: false,
-        zeroTotalObserved: false,
-        unsafeCloseObserved: false,
-        captureErrors: [],
-      };
-      const capture = async (kind, message = null, response = null, event = null) => {
-        try {
-          const [allTabs, groups] = await Promise.all([
-            chrome.tabs.query({ windowId }),
-            chrome.tabGroups.query({ windowId }),
-          ]);
-          const contentTabs = allTabs
-            .filter((tab) => !String(tab.url || tab.pendingUrl || '').startsWith(extensionOrigin))
-            .sort((left, right) => left.index - right.index)
-            .map((tab) => ({
-              id: tab.id,
-              url: tab.url || tab.pendingUrl || '',
-              index: tab.index,
-              active: tab.active,
-              groupId: tab.groupId,
-              status: tab.status,
-            }));
-          const destination = destinations[state.phase] || { all: [], grouped: [] };
-          const destinationTabs = destination.all.map((url) =>
-            contentTabs.find((tab) => tab.url === url)).filter(Boolean);
-          const groupedDestinationTabs = destination.grouped.map((url) =>
-            contentTabs.find((tab) => tab.url === url)).filter(Boolean);
-          const destinationGroupIds = new Set(groupedDestinationTabs.map((tab) => tab.groupId));
-          const destinationGrouped = groupedDestinationTabs.length === destination.grouped.length &&
-            destinationGroupIds.size === 1 && !destinationGroupIds.has(-1);
-          const destinationActiveInGroup = groupedDestinationTabs.some((tab) =>
-            tab.active && tab.groupId !== -1);
-          const targetReady = destinationTabs.length === destination.all.length &&
-            destinationGrouped && destinationActiveInGroup;
-          state.minContentTabCount = Math.min(state.minContentTabCount, contentTabs.length);
-          state.minTotalTabCount = Math.min(state.minTotalTabCount, allTabs.length);
-          if (contentTabs.length === 0) state.zeroContentObserved = true;
-          if (allTabs.length === 0) state.zeroTotalObserved = true;
-          if (kind === 'before-command' && message?.type === 'tabs:close' && !targetReady) {
-            state.unsafeCloseObserved = true;
-          }
-          const closingTab = message?.type === 'tabs:close'
-            ? contentTabs.find((tab) => tab.id === Number(message.tabId)) || null
-            : null;
-          state.trace.push({
-            sequence: ++state.sequence,
-            at: Date.now(),
-            phase: state.phase,
-            kind,
-            type: message?.type || '',
-            payload: message ? {
-              tabId: message.tabId,
-              tabIds: message.tabIds,
-              groupId: message.groupId,
-              url: message.url,
-              active: message.active,
-            } : null,
-            response: response ? {
-              tabId: response.tab?.id,
-              tabUrl: response.tab?.url,
-              groupId: response.groupId,
-            } : null,
-            event,
-            closingTab,
-            targetReady,
-            destinationActiveInGroup,
-            destinationGrouped,
-            contentTabCount: contentTabs.length,
-            totalTabCount: allTabs.length,
-            contentTabs,
-            groups: groups.map((group) => ({
-              id: group.id,
-              title: group.title,
-              color: group.color,
-              collapsed: group.collapsed,
-            })),
-          });
-        } catch (error) {
-          state.captureErrors.push(error?.message || String(error));
-        }
-      };
-      const observe = (kind, event) => {
-        const pending = capture(kind, null, null, event);
-        state.pending.add(pending);
-        void pending.finally(() => state.pending.delete(pending));
-      };
-      const wrappedSendMessage = async function(message, ...rest) {
-        if (!trackedTypes.has(message?.type)) {
-          return originalSendMessage.call(chrome.runtime, message, ...rest);
-        }
-        await capture('before-command', message);
-        const response = await originalSendMessage.call(chrome.runtime, message, ...rest);
-        await capture('after-command', message, response);
-        return response;
-      };
-      const onCreated = (tab) => {
-        if (tab.windowId === windowId) observe('tab-created', { tabId: tab.id });
-      };
-      const onRemoved = (tabId, removeInfo) => {
-        if (removeInfo.windowId === windowId) observe('tab-removed', { tabId });
-      };
-      const onActivated = (activeInfo) => {
-        if (activeInfo.windowId === windowId) observe('tab-activated', { tabId: activeInfo.tabId });
-      };
-      const onGroupCreated = (group) => {
-        if (group.windowId === windowId) observe('group-created', { groupId: group.id });
-      };
-      const onGroupUpdated = (group) => {
-        if (group.windowId === windowId) observe('group-updated', { groupId: group.id });
-      };
-      const onGroupRemoved = (group) => {
-        if (group.windowId === windowId) observe('group-removed', { groupId: group.id });
-      };
-      chrome.runtime.sendMessage = wrappedSendMessage;
-      chrome.tabs.onCreated.addListener(onCreated);
-      chrome.tabs.onRemoved.addListener(onRemoved);
-      chrome.tabs.onActivated.addListener(onActivated);
-      chrome.tabGroups.onCreated.addListener(onGroupCreated);
-      chrome.tabGroups.onUpdated.addListener(onGroupUpdated);
-      chrome.tabGroups.onRemoved.addListener(onGroupRemoved);
-      await capture('trace-installed');
-      window.__spaceSwitchActivationTrace = {
-        state,
-        async setPhase(phase) {
-          state.phase = phase;
-          await capture('phase-start');
-        },
-        async dispose() {
-          chrome.runtime.sendMessage = originalSendMessage;
-          chrome.tabs.onCreated.removeListener(onCreated);
-          chrome.tabs.onRemoved.removeListener(onRemoved);
-          chrome.tabs.onActivated.removeListener(onActivated);
-          chrome.tabGroups.onCreated.removeListener(onGroupCreated);
-          chrome.tabGroups.onUpdated.removeListener(onGroupUpdated);
-          chrome.tabGroups.onRemoved.removeListener(onGroupRemoved);
-          await Promise.allSettled([...state.pending]);
-          await capture('trace-disposed');
-          return {
-            phase: state.phase,
-            trace: state.trace,
-            minContentTabCount: Number.isFinite(state.minContentTabCount)
-              ? state.minContentTabCount
-              : null,
-            minTotalTabCount: Number.isFinite(state.minTotalTabCount)
-              ? state.minTotalTabCount
-              : null,
-            zeroContentObserved: state.zeroContentObserved,
-            zeroTotalObserved: state.zeroTotalObserved,
-            unsafeCloseObserved: state.unsafeCloseObserved,
-            captureErrors: state.captureErrors,
-          };
-        },
-      };
-      return chrome.runtime.sendMessage === wrappedSendMessage;
-    })()`);
-    if (!traceInstalled) throw new Error('Could not install Space-switch command trace.');
-
-    const clickSpaceInActivationPanel = async (phase, space) => {
-      await evaluate(client, `chrome.tabs.update(${JSON.stringify(spaceSwitchPanel.tabId)}, { active: true })`);
-      await waitForInSession(client, spaceSwitchPanel.sessionId,
-        `document.visibilityState === 'visible'`, 8000);
-      await evaluateInSession(client, spaceSwitchPanel.sessionId,
-        `window.__spaceSwitchActivationTrace.setPhase(${JSON.stringify(phase)})`);
-      const clicked = await evaluateInSession(client, spaceSwitchPanel.sessionId, `(() => {
-        const button = [...document.querySelectorAll('.space')]
-          .find((candidate) => candidate.title === ${JSON.stringify(space.name)});
-        if (!button) return false;
-        button.click();
-        return true;
-      })()`);
-      if (!clicked) throw new Error(`Space activation fixture could not find ${space.name}.`);
-      await waitForInSession(client, spaceSwitchPanel.sessionId, `(async () => {
-        const stored = await chrome.storage.session.get('spaceTabsWindowState');
-        return document.querySelector('#activeSpaceName')?.textContent === ${JSON.stringify(space.name)} &&
-          stored.spaceTabsWindowState?.activeSpaceIds?.[
-            ${JSON.stringify(String(spaceSwitchPanel.windowId))}
-          ] === ${JSON.stringify(space.id)};
-      })()`, 30000);
-    };
-
-    const waitForStableInActivationPanel = async (
-      expression,
-      stableMs = 750,
-      timeoutMs = 30000,
-    ) => {
-      const startedAt = Date.now();
-      let stableSince = 0;
-      let lastValue = null;
-      while (Date.now() - startedAt < timeoutMs) {
-        const value = await evaluateInSession(client, spaceSwitchPanel.sessionId, expression);
-        if (value) {
-          if (!stableSince) stableSince = Date.now();
-          lastValue = value;
-          if (Date.now() - stableSince >= stableMs) return lastValue;
-        } else {
-          stableSince = 0;
-          lastValue = null;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      throw new Error(`Timed out waiting for a stable activation-panel result: ${expression}`);
-    };
-    const captureActivatedSpaceState = (destination, previous) =>
-      waitForStableInActivationPanel(`(async () => {
-        const fixture = ${JSON.stringify(spaceSwitchActivationFixture)};
-        const destination = ${JSON.stringify(destination)};
-        const previous = ${JSON.stringify(previous)};
-        const fixtureUrls = new Set(${JSON.stringify(allSpaceSwitchUrls)});
-        const allFixtureRows = [
-          ...fixture.source.group.tabs,
-          ...fixture.source.ungrouped.tabs,
-          ...fixture.target.group.tabs,
-        ];
-        const expectedRows = [
-          ...(destination.group?.tabs || []),
-          ...(destination.ungrouped?.tabs || []),
-        ];
-        const [stored, storedWindow, storedSession, browserTabs, browserGroups] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-          chrome.storage.session.get(null),
-          chrome.tabs.query({ windowId: ${JSON.stringify(spaceSwitchPanel.windowId)} }),
-          chrome.tabGroups.query({ windowId: ${JSON.stringify(spaceSwitchPanel.windowId)} }),
-        ]);
-        const saved = stored.spaceTabsState || {};
-        const contentTabs = browserTabs
-          .filter((tab) => fixtureUrls.has(tab.url || tab.pendingUrl || ''))
-          .sort((left, right) => left.index - right.index)
-          .map((tab) => ({
-            id: tab.id,
-            url: tab.url || tab.pendingUrl || '',
-            title: tab.title || '',
-            index: tab.index,
-            active: tab.active,
-            groupId: tab.groupId,
-            status: tab.status,
-          }));
-        const destinationTabs = expectedRows.map((row) =>
-          contentTabs.find((tab) => tab.url === row.url)).filter(Boolean);
-        if (document.querySelector('#activeSpaceName')?.textContent !== destination.name ||
-            storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-              ${JSON.stringify(String(spaceSwitchPanel.windowId))}
-            ] !== destination.id ||
-            destinationTabs.length !== expectedRows.length ||
-            destinationTabs.some((tab) => tab.status !== 'complete')) return null;
-        const pendingLifecycleKeys = Object.keys(storedSession).filter((key) =>
-          key.startsWith('spaceTabsLifecycleEvent:') ||
-          key.startsWith('spaceTabsLifecycleSuppression:'));
-        if (pendingLifecycleKeys.length) return null;
-        const uiRows = [...document.querySelectorAll('.tab-row')]
-          .filter((row) => allFixtureRows.some((expected) =>
-            expected.snapshotTabId === row.dataset.snapshotTabId))
-          .map((row) => ({
-            snapshotTabId: row.dataset.snapshotTabId || '',
-            snapshotGroupId: row.dataset.snapshotGroupId || '',
-            title: row.querySelector('.tab-title')?.textContent || '',
-            dormant: row.classList.contains('dormant'),
-            groupTitle: row.closest('.group-card')
-              ?.querySelector('.group-header h2')?.textContent || '',
-            ungrouped: Boolean(row.closest('.ungrouped-section')),
-            tabId: Number(row.dataset.tabId),
-          }));
-        const lifecycle = Object.fromEntries(destinationTabs.map((tab) => [
-          tab.url,
-          saved.tabLifecycle?.[String(tab.id)] || null,
-        ]));
-        const snapshotOccurrences = Object.fromEntries(allFixtureRows.map((expected) => [
-          expected.snapshotTabId,
-          Object.entries(saved.spaceSnapshots || {}).flatMap(([spaceId, snapshot]) =>
-            (snapshot?.groups || []).flatMap((group) =>
-              (group.tabs || [])
-                .filter((row) => row.snapshotTabId === expected.snapshotTabId)
-                .map((row) => ({
-                  spaceId,
-                  snapshotGroupId: group.snapshotGroupId || '',
-                  row,
-                })))),
-        ]));
-        return {
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          windowSpaceId: storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-            ${JSON.stringify(String(spaceSwitchPanel.windowId))}
-          ] || '',
-          contentTabs,
-          destinationTabs,
-          previousTabs: contentTabs.filter((tab) => [
-            ...(previous.group?.tabs || []),
-            ...(previous.ungrouped?.tabs || []),
-          ].some((row) => row.url === tab.url)),
-          browserGroups: browserGroups.map((group) => ({
-            id: group.id,
-            title: group.title,
-            color: group.color,
-            collapsed: group.collapsed,
-          })),
-          uiRows,
-          lifecycle,
-          snapshots: {
-            [fixture.source.id]: saved.spaceSnapshots?.[fixture.source.id] || null,
-            [fixture.target.id]: saved.spaceSnapshots?.[fixture.target.id] || null,
-          },
-          snapshotOccurrences,
-          groupSpaces: { ...(saved.groupSpaces || {}) },
-          groupOrder: [...(saved.groupOrder?.[destination.id] || [])],
-          tabOrder: structuredClone(saved.tabOrder?.[destination.id] || {}),
-          pendingLifecycleKeys,
-        };
-      })()`);
-
-    const snapshotFixtureIsStable = (captured, space) => {
-      const snapshot = captured.snapshots?.[space.id];
-      const expectedGroups = [space.group, space.ungrouped].filter(Boolean);
-      if (!snapshot || snapshot.identityVersion !== 1 || snapshot.preserveGroups !== true) return false;
-      if (snapshot.customMetadata?.fixture !==
-          (space.id === spaceSwitchActivationFixture.source.id
-            ? 'source-snapshot'
-            : 'target-snapshot')) return false;
-      return expectedGroups.every((expectedGroup) => {
-        const storedGroup = (snapshot.groups || []).find((group) =>
-          group.snapshotGroupId === expectedGroup.snapshotGroupId);
-        if (!storedGroup || storedGroup.title !== expectedGroup.title ||
-            storedGroup.color !== expectedGroup.color ||
-            Boolean(storedGroup.collapsed) !== Boolean(expectedGroup.collapsed) ||
-            JSON.stringify(storedGroup.customMetadata) !==
-              JSON.stringify(expectedGroup.customMetadata)) return false;
-        return expectedGroup.tabs.every((expectedRow, index) => {
-          const occurrences = captured.snapshotOccurrences?.[expectedRow.snapshotTabId] || [];
-          const storedRow = (storedGroup.tabs || [])[index];
-          return occurrences.length === 1 &&
-            occurrences[0]?.spaceId === space.id &&
-            occurrences[0]?.snapshotGroupId === expectedGroup.snapshotGroupId &&
-            storedRow?.snapshotTabId === expectedRow.snapshotTabId &&
-            storedRow?.url === expectedRow.url &&
-            storedRow?.title === expectedRow.title &&
-            storedRow?.panelTitle === expectedRow.panelTitle &&
-            JSON.stringify(storedRow?.customMetadata) ===
-              JSON.stringify(expectedRow.customMetadata);
-        });
-      });
-    };
-    const activatedSpaceStateIsCorrect = (captured, destination, previous) => {
-      const groupedRows = destination.group.tabs;
-      const ungroupedRows = destination.ungrouped?.tabs || [];
-      const expectedRows = [...groupedRows, ...ungroupedRows];
-      const groupedTabs = groupedRows.map((row) =>
-        captured.destinationTabs.find((tab) => tab.url === row.url));
-      const ungroupedTabs = ungroupedRows.map((row) =>
-        captured.destinationTabs.find((tab) => tab.url === row.url));
-      const groupIds = new Set(groupedTabs.map((tab) => tab?.groupId));
-      const physicalGroupId = groupedTabs[0]?.groupId;
-      const physicalGroup = captured.browserGroups.find((group) => group.id === physicalGroupId);
-      const destinationOrder = captured.contentTabs
-        .filter((tab) => expectedRows.some((row) => row.url === tab.url))
-        .map((tab) => tab.url);
-      const groupKey = `group:${physicalGroupId}`;
-      const expectedGroupedIds = groupedTabs.map((tab) => tab?.id);
-      const expectedUngroupedIds = ungroupedTabs.map((tab) => tab?.id);
-      const rowsCorrect = expectedRows.every((row) => {
-        const matchingRows = captured.uiRows.filter((candidate) =>
-          candidate.snapshotTabId === row.snapshotTabId);
-        const expectedGroupId = groupedRows.includes(row)
-          ? destination.group.snapshotGroupId
-          : destination.ungrouped.snapshotGroupId;
-        return matchingRows.length === 1 && !matchingRows[0].dormant &&
-          matchingRows[0].snapshotGroupId === expectedGroupId &&
-          matchingRows[0].title === row.panelTitle &&
-          (groupedRows.includes(row)
-            ? matchingRows[0].groupTitle === destination.group.title && !matchingRows[0].ungrouped
-            : matchingRows[0].ungrouped);
-      });
-      const lifecycleCorrect = expectedRows.every((row) => {
-        const tab = captured.destinationTabs.find((candidate) => candidate.url === row.url);
-        const binding = captured.lifecycle[row.url];
-        const grouped = groupedRows.includes(row);
-        return binding?.tabId === tab?.id &&
-          binding?.snapshotTabId === row.snapshotTabId &&
-          binding?.snapshotGroupId === (grouped
-            ? destination.group.snapshotGroupId
-            : destination.ungrouped.snapshotGroupId) &&
-          binding?.spaceId === destination.id &&
-          binding?.url === row.url &&
-          binding?.panelTitle === row.panelTitle &&
-          binding?.windowId === spaceSwitchPanel.windowId &&
-          binding?.groupId === (grouped ? physicalGroupId : -1) &&
-          binding?.trackingMode === 'saved-target';
-      });
-      const previousUrls = fixtureRowsForSpace(previous).map((row) => row.url);
-      const expectedSnapshotIds = new Set(expectedRows.map((row) => row.snapshotTabId));
-      return captured.activeSpaceName === destination.name &&
-        captured.windowSpaceId === destination.id &&
-        captured.previousTabs.length === 0 &&
-        previousUrls.every((url) => !captured.contentTabs.some((tab) => tab.url === url)) &&
-        captured.destinationTabs.length === expectedRows.length &&
-        new Set(captured.destinationTabs.map((tab) => tab.url)).size === expectedRows.length &&
-        groupIds.size === 1 && Number.isSafeInteger(physicalGroupId) && physicalGroupId >= 0 &&
-        groupedTabs.some((tab) => tab.active) &&
-        ungroupedTabs.every((tab) => tab?.groupId === -1 && !tab.active) &&
-        physicalGroup?.title === destination.group.title &&
-        physicalGroup?.color === destination.group.color &&
-        physicalGroup?.collapsed === destination.group.collapsed &&
-        destinationOrder.join('\n') === expectedRows.map((row) => row.url).join('\n') &&
-        rowsCorrect && captured.uiRows.length === expectedRows.length &&
-        captured.uiRows.every((row) => expectedSnapshotIds.has(row.snapshotTabId) && !row.dormant) &&
-        !captured.browserGroups.some((group) => group.title === previous.group.title) &&
-        lifecycleCorrect &&
-        captured.groupSpaces[String(physicalGroupId)] === destination.id &&
-        captured.groupOrder.includes(groupKey) &&
-        (!ungroupedRows.length || (
-          captured.groupOrder.includes('ungrouped') &&
-          captured.groupOrder.indexOf(groupKey) < captured.groupOrder.indexOf('ungrouped')
-        )) &&
-        JSON.stringify(captured.tabOrder[groupKey] || []) === JSON.stringify(expectedGroupedIds) &&
-        JSON.stringify(captured.tabOrder.ungrouped || []) === JSON.stringify(expectedUngroupedIds) &&
-        captured.pendingLifecycleKeys.length === 0 &&
-        snapshotFixtureIsStable(captured, spaceSwitchActivationFixture.source) &&
-        snapshotFixtureIsStable(captured, spaceSwitchActivationFixture.target);
-    };
-
-    await clickSpaceInActivationPanel('A-to-B', spaceSwitchActivationFixture.target);
-    const activationAfterB = await captureActivatedSpaceState(
-      spaceSwitchActivationFixture.target,
-      spaceSwitchActivationFixture.source,
-    );
-    await clickSpaceInActivationPanel('B-to-A', spaceSwitchActivationFixture.source);
-    const activationAfterA = await captureActivatedSpaceState(
-      spaceSwitchActivationFixture.source,
-      spaceSwitchActivationFixture.target,
-    );
-    const spaceSwitchTrace = await evaluateInSession(
-      client,
-      spaceSwitchPanel.sessionId,
-      `window.__spaceSwitchActivationTrace.dispose()`,
-    );
-    const closeRecords = spaceSwitchTrace.trace.filter((entry) =>
-      entry.kind === 'before-command' && entry.type === 'tabs:close');
-    const closeRecordsByPhase = (phase) => closeRecords.filter((entry) => entry.phase === phase);
-    const aToBCloseRecords = closeRecordsByPhase('A-to-B');
-    const bToACloseRecords = closeRecordsByPhase('B-to-A');
-    const closedUrlsMatch = (records, rows) => {
-      const expected = rows.map((row) => row.url).sort();
-      const actual = records.map((entry) => entry.closingTab?.url || '').sort();
-      return JSON.stringify(actual) === JSON.stringify(expected);
-    };
-    const activationPrecedesEveryClose = closeRecords.length === 5 &&
-      closeRecords.every((entry) => entry.targetReady &&
-        entry.destinationGrouped && entry.destinationActiveInGroup &&
-        entry.contentTabCount >= 2 && entry.totalTabCount >= 3) &&
-      closedUrlsMatch(aToBCloseRecords, fixtureRowsForSpace(spaceSwitchActivationFixture.source)) &&
-      closedUrlsMatch(bToACloseRecords, fixtureRowsForSpace(spaceSwitchActivationFixture.target));
-    const roundTripActivationOk =
-      activatedSpaceStateIsCorrect(
-        activationAfterB,
-        spaceSwitchActivationFixture.target,
-        spaceSwitchActivationFixture.source,
-      ) &&
-      activatedSpaceStateIsCorrect(
-        activationAfterA,
-        spaceSwitchActivationFixture.source,
-        spaceSwitchActivationFixture.target,
-      ) &&
-      activationPrecedesEveryClose &&
-      spaceSwitchTrace.minContentTabCount >= 2 &&
-      spaceSwitchTrace.minTotalTabCount >= 3 &&
-      !spaceSwitchTrace.zeroContentObserved &&
-      !spaceSwitchTrace.zeroTotalObserved &&
-      !spaceSwitchTrace.unsafeCloseObserved &&
-      spaceSwitchTrace.captureErrors.length === 0;
-    const roundTripActivationDetail = JSON.stringify({
-      fixture: spaceSwitchActivationFixture,
-      sourceChromeFixture,
-      activationAfterB,
-      activationAfterA,
-      traceSummary: {
-        closeRecords,
-        minContentTabCount: spaceSwitchTrace.minContentTabCount,
-        minTotalTabCount: spaceSwitchTrace.minTotalTabCount,
-        zeroContentObserved: spaceSwitchTrace.zeroContentObserved,
-        zeroTotalObserved: spaceSwitchTrace.zeroTotalObserved,
-        unsafeCloseObserved: spaceSwitchTrace.unsafeCloseObserved,
-        captureErrors: spaceSwitchTrace.captureErrors,
-      },
-      assertions: { activationPrecedesEveryClose },
-    });
-    record(
-      'Space switch activates the complete target TagGroup before closing the source, then round-trips stable rows',
-      roundTripActivationOk,
-      roundTripActivationDetail,
-    );
-    if (!roundTripActivationOk) {
-      throw new Error(`Transactional Space-switch regression: ${roundTripActivationDetail}`);
-    }
-
-    await evaluate(client, `chrome.windows.remove(${JSON.stringify(spaceSwitchPanel.windowId)})`);
-    await waitForStable(client, `(async () => {
-      const [closedWindow, sessionEntries] = await Promise.all([
-        chrome.windows.get(${JSON.stringify(spaceSwitchPanel.windowId)}).catch(() => null),
-        chrome.storage.session.get(null),
-      ]);
-      const pending = Object.keys(sessionEntries).filter((key) =>
-        key.startsWith('spaceTabsLifecycleEvent:') ||
-        key.startsWith('spaceTabsLifecycleSuppression:'));
-      return !closedWindow && pending.length === 0 ? true : null;
-    })()`, 750, 20000);
-    await evaluate(client, `(async () => navigator.locks.request(
-      'space-tabs-shared-state',
-      { mode: 'exclusive' },
-      async () => {
-        const fixture = ${JSON.stringify(spaceSwitchActivationFixture)};
+        const fixture = ${JSON.stringify(dormantSwitchFixture)};
+        const live = ${JSON.stringify(dormantSourceChrome)};
         const fixtureIds = new Set([fixture.source.id, fixture.target.id]);
-        const fixtureUrls = new Set(${JSON.stringify(allSpaceSwitchUrls)});
+        const fixtureUrls = new Set(${JSON.stringify(dormantSwitchUrls)});
         const [stored, storedWindow] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
           chrome.storage.session.get('spaceTabsWindowState'),
         ]);
         const saved = structuredClone(stored.spaceTabsState || {});
         saved.spaces = (saved.spaces || []).filter((space) => !fixtureIds.has(space.id));
-        for (const spaceId of fixtureIds) {
-          delete saved.spaceSnapshots?.[spaceId];
-          delete saved.groupOrder?.[spaceId];
-          delete saved.tabOrder?.[spaceId];
-          delete saved.collapsedSpaceGroups?.[spaceId];
-        }
-        for (const [tabId, binding] of Object.entries(saved.tabLifecycle || {})) {
-          if (fixtureIds.has(binding?.spaceId) || fixtureUrls.has(binding?.url)) {
-            delete saved.tabLifecycle[tabId];
-            delete saved.tabSpaces?.[tabId];
-            delete saved.tabGroups?.[tabId];
-            delete saved.renamedTabs?.[tabId];
-          }
-        }
-        for (const [tabId, spaceId] of Object.entries(saved.tabSpaces || {})) {
-          if (fixtureIds.has(spaceId)) delete saved.tabSpaces[tabId];
-        }
-        for (const [groupId, spaceId] of Object.entries(saved.groupSpaces || {})) {
-          if (fixtureIds.has(spaceId)) {
-            delete saved.groupSpaces[groupId];
-            delete saved.collapsedGroups?.['group:' + groupId];
-          }
-        }
-        for (const [key, group] of Object.entries(saved.virtualGroups || {})) {
-          if (fixtureIds.has(group?.spaceId)) delete saved.virtualGroups[key];
-        }
-        saved.activeSpaceId = ${JSON.stringify(originalDurableSpaceId)};
-        const windowState = structuredClone(storedWindow.spaceTabsWindowState || { activeSpaceIds: {} });
-        delete windowState.activeSpaceIds?.[${JSON.stringify(String(spaceSwitchPanel.windowId))}];
-        await chrome.storage.local.set({ spaceTabsState: saved });
-        await chrome.storage.session.set({ spaceTabsWindowState: windowState });
-      },
-    ))()`);
-    await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      return !(saved.spaces || []).some((space) => [
-        ${JSON.stringify(spaceSwitchActivationFixture.source.id)},
-        ${JSON.stringify(spaceSwitchActivationFixture.target.id)},
-      ].includes(space.id)) &&
-        !saved.spaceSnapshots?.[${JSON.stringify(spaceSwitchActivationFixture.source.id)}] &&
-        !saved.spaceSnapshots?.[${JSON.stringify(spaceSwitchActivationFixture.target.id)}];
-    })()`, 15000);
-
-    progress('checking partial-live Space activation keeps Chrome alive and restores the missing TagGroup');
-    const partialLiveSpaceSwitchFixture = {
-      source: {
-        id: 'space-switch-partial-source-e2e',
-        name: 'Partial Switch Source E2E',
-        group: {
-          snapshotGroupId: 'space-switch-partial-source-group-e2e',
-          title: 'Partial Switch Source TagGroup E2E',
-          color: 'orange',
-          collapsed: false,
-          customMetadata: { fixture: 'partial-source-group', revision: 13 },
-          tabs: [
-            {
-              snapshotTabId: 'space-switch-partial-source-tab-1-e2e',
-              title: 'Lifecycle Navigation Before',
-              panelTitle: 'Partial source alias one',
-              url: `${askFixtureServer.lifecycleNavigationBeforeUrl}?space-switch=partial-source-1`,
-              customMetadata: { row: 'partial-source-1' },
-            },
-            {
-              snapshotTabId: 'space-switch-partial-source-tab-2-e2e',
-              title: 'Lifecycle Navigation After',
-              panelTitle: 'Partial source alias two',
-              url: `${askFixtureServer.lifecycleNavigationAfterUrl}?space-switch=partial-source-2`,
-              customMetadata: { row: 'partial-source-2' },
-            },
-          ],
-        },
-      },
-      target: {
-        id: 'space-switch-partial-target-e2e',
-        name: 'Partial Switch Target E2E',
-        pinned: {
-          title: 'Ask Source Alpha',
-          url: `${askFixtureServer.sourceAlphaUrl}?space-switch=partial-target-pinned`,
-        },
-        wrongGroup: {
-          snapshotGroupId: 'space-switch-partial-stale-group-e2e',
-          title: 'Wrong Target Tag E2E',
-          color: 'purple',
-          collapsed: true,
-        },
-        group: {
-          snapshotGroupId: 'space-switch-partial-target-group-e2e',
-          title: 'Partial Switch Target TagGroup E2E',
-          color: 'cyan',
-          collapsed: false,
-          customMetadata: { fixture: 'partial-target-group', revision: 17 },
-          tabs: [
-            {
-              snapshotTabId: 'space-switch-partial-target-tab-1-e2e',
-              title: askFixtureServer.tidyPrimaryTitle,
-              panelTitle: 'Partial target alias one',
-              url: `${askFixtureServer.tidyPrimaryUrl}?space-switch=partial-target-1`,
-              customMetadata: { row: 'partial-target-1' },
-            },
-            {
-              snapshotTabId: 'space-switch-partial-target-tab-2-e2e',
-              title: askFixtureServer.tidySecondaryTitle,
-              panelTitle: 'Partial target alias two',
-              url: `${askFixtureServer.tidySecondaryUrl}?space-switch=partial-target-2`,
-              customMetadata: { row: 'partial-target-2' },
-            },
-          ],
-        },
-      },
-    };
-    const partialLiveFixtureUrls = [
-      ...partialLiveSpaceSwitchFixture.source.group.tabs.map((row) => row.url),
-      partialLiveSpaceSwitchFixture.target.pinned.url,
-      ...partialLiveSpaceSwitchFixture.target.group.tabs.map((row) => row.url),
-    ];
-    const partialLiveSpaceSwitchPanel = await createAuxiliaryPanelWindow();
-    const partialLiveChromeFixture = await evaluate(client, `(async () => {
-      const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-      const sourceTabs = [];
-      for (const row of fixture.source.group.tabs) {
-        sourceTabs.push(await chrome.tabs.create({
-          windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)},
-          url: row.url,
-          active: false,
-        }));
-      }
-      const existingTarget = await chrome.tabs.create({
-        windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)},
-        url: fixture.target.group.tabs[0].url,
-        active: false,
-      });
-      const pinned = await chrome.tabs.create({
-        windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)},
-        url: fixture.target.pinned.url,
-        active: false,
-      });
-      await chrome.tabs.update(pinned.id, { pinned: true });
-      const startedAt = Date.now();
-      const expected = [...sourceTabs, existingTarget, pinned];
-      while (Date.now() - startedAt < 15000) {
-        const current = await Promise.all(expected.map((tab) =>
-          chrome.tabs.get(tab.id).catch(() => null)));
-        if (current.every((tab, index) => tab?.status === 'complete' &&
-            (tab.url || tab.pendingUrl || '') === [
-              ...fixture.source.group.tabs.map((row) => row.url),
-              fixture.target.group.tabs[0].url,
-              fixture.target.pinned.url,
-            ][index])) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      const loadedSourceTabs = await Promise.all(sourceTabs.map((tab) => chrome.tabs.get(tab.id)));
-      const loadedExistingTarget = await chrome.tabs.get(existingTarget.id);
-      const loadedPinned = await chrome.tabs.get(pinned.id);
-      if (loadedSourceTabs.some((tab, index) => tab.status !== 'complete' ||
-          (tab.url || tab.pendingUrl || '') !== fixture.source.group.tabs[index].url) ||
-          loadedExistingTarget.status !== 'complete' || loadedExistingTarget.pinned ||
-          loadedExistingTarget.groupId !== -1 ||
-          (loadedExistingTarget.url || loadedExistingTarget.pendingUrl || '') !==
-            fixture.target.group.tabs[0].url ||
-          loadedPinned.status !== 'complete' || !loadedPinned.pinned ||
-          (loadedPinned.url || loadedPinned.pendingUrl || '') !== fixture.target.pinned.url) {
-        throw new Error('Partial-live Space-switch fixture tabs did not finish loading.');
-      }
-      const wrongTargetGroupId = await chrome.tabs.group({
-        tabIds: [loadedExistingTarget.id],
-        createProperties: { windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} },
-      });
-      await chrome.tabGroups.update(wrongTargetGroupId, {
-        title: fixture.target.wrongGroup.title,
-        color: fixture.target.wrongGroup.color,
-        collapsed: fixture.target.wrongGroup.collapsed,
-      });
-      const sourceGroupId = await chrome.tabs.group({
-        tabIds: loadedSourceTabs.map((tab) => tab.id),
-        createProperties: { windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} },
-      });
-      await chrome.tabGroups.update(sourceGroupId, {
-        title: fixture.source.group.title,
-        color: fixture.source.group.color,
-        collapsed: fixture.source.group.collapsed,
-      });
-      await chrome.tabs.update(loadedSourceTabs[0].id, { active: true });
-      return {
-        sourceGroupId,
-        wrongTargetGroupId,
-        sourceTabs: await Promise.all(loadedSourceTabs.map((tab) => chrome.tabs.get(tab.id))),
-        existingTarget: await chrome.tabs.get(existingTarget.id),
-        pinned: await chrome.tabs.get(pinned.id),
-      };
-    })()`);
-    await waitForLifecycleJournalToSettle(client);
-
-    await evaluate(client, `(async () => navigator.locks.request(
-      'space-tabs-shared-state',
-      { mode: 'exclusive' },
-      async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-        const chromeFixture = ${JSON.stringify(partialLiveChromeFixture)};
-        const fixtureSpaceIds = new Set([fixture.source.id, fixture.target.id]);
-        const fixtureUrls = new Set(${JSON.stringify(partialLiveFixtureUrls)});
-        const fixtureSnapshotGroupIds = new Set([
-          fixture.source.group.snapshotGroupId,
-          fixture.target.wrongGroup.snapshotGroupId,
-          fixture.target.group.snapshotGroupId,
-        ]);
-        const fixtureGroupTitles = new Set([
-          fixture.source.group.title,
-          fixture.target.wrongGroup.title,
-          fixture.target.group.title,
-        ]);
-        const fixtureTabIds = new Set([
-          ...chromeFixture.sourceTabs.map((tab) => Number(tab.id)),
-          Number(chromeFixture.existingTarget.id),
-          Number(chromeFixture.pinned.id),
-        ]);
-        const sourceGroupKey = 'group:' + chromeFixture.sourceGroupId;
-        const wrongTargetGroupKey = 'group:' + chromeFixture.wrongTargetGroupId;
-        const targetSnapshotKey = 'snapshot:0:' + encodeURIComponent(fixture.target.id) + ':' +
-          fixture.target.group.snapshotGroupId;
-        const [stored, storedWindow] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-        ]);
-        const saved = structuredClone(stored.spaceTabsState || {});
-        saved.spaces = (saved.spaces || []).filter((space) => !fixtureSpaceIds.has(space.id));
         saved.spaces.push(
-          { id: fixture.source.id, name: fixture.source.name, icon: 'P', color: 'orange' },
-          { id: fixture.target.id, name: fixture.target.name, icon: 'L', color: 'cyan' },
+          { id: fixture.source.id, name: fixture.source.name, icon: 'S', color: 'orange' },
+          { id: fixture.target.id, name: fixture.target.name, icon: 'T', color: 'cyan' },
         );
         saved.spaceSnapshots = saved.spaceSnapshots || {};
-        for (const [spaceId, snapshot] of Object.entries(saved.spaceSnapshots)) {
-          if (fixtureSpaceIds.has(spaceId)) continue;
-          snapshot.groups = (snapshot.groups || [])
-            .filter((group) => !fixtureSnapshotGroupIds.has(group.snapshotGroupId) &&
-              !fixtureGroupTitles.has(group.title))
-            .map((group) => ({
-              ...group,
-              tabs: (group.tabs || []).filter((row) => !fixtureUrls.has(row.url)),
-            }));
-        }
         saved.spaceSnapshots[fixture.source.id] = {
           version: 1,
           identityVersion: 1,
           preserveGroups: true,
           updatedAt: Date.now(),
-          customMetadata: { fixture: 'partial-source-snapshot', revision: 19 },
           groups: [structuredClone(fixture.source.group)],
         };
         saved.spaceSnapshots[fixture.target.id] = {
@@ -18228,1129 +16926,159 @@ async function main() {
           identityVersion: 1,
           preserveGroups: true,
           updatedAt: Date.now(),
-          customMetadata: { fixture: 'partial-target-snapshot', revision: 23 },
           groups: [structuredClone(fixture.target.group)],
         };
         saved.groupSpaces = saved.groupSpaces || {};
         for (const [groupId, spaceId] of Object.entries(saved.groupSpaces)) {
-          if (fixtureSpaceIds.has(spaceId)) delete saved.groupSpaces[groupId];
+          if (fixtureIds.has(spaceId)) delete saved.groupSpaces[groupId];
         }
-        saved.groupSpaces[String(chromeFixture.sourceGroupId)] = fixture.source.id;
-        saved.groupSpaces[String(chromeFixture.wrongTargetGroupId)] = fixture.target.id;
-        saved.tabSpaces = saved.tabSpaces || {};
+        saved.groupSpaces[String(live.groupId)] = fixture.source.id;
         saved.tabLifecycle = saved.tabLifecycle || {};
-        saved.renamedTabs = saved.renamedTabs || {};
+        saved.tabSpaces = saved.tabSpaces || {};
         saved.tabGroups = saved.tabGroups || {};
-        for (const tabId of fixtureTabIds) {
-          delete saved.tabSpaces[String(tabId)];
-          delete saved.tabLifecycle[String(tabId)];
-          delete saved.renamedTabs[String(tabId)];
-          delete saved.tabGroups[String(tabId)];
+        saved.renamedTabs = saved.renamedTabs || {};
+        for (const [tabId, binding] of Object.entries(saved.tabLifecycle)) {
+          if (fixtureIds.has(binding?.spaceId) || fixtureUrls.has(binding?.url)) {
+            delete saved.tabLifecycle[tabId];
+            delete saved.tabSpaces[tabId];
+            delete saved.tabGroups[tabId];
+            delete saved.renamedTabs[tabId];
+          }
         }
-        for (const row of fixture.source.group.tabs) {
-          const liveTab = chromeFixture.sourceTabs.find((tab) =>
-            (tab.url || tab.pendingUrl || '') === row.url);
-          if (!liveTab) throw new Error('Missing partial-live source fixture row: ' + row.url);
-          saved.renamedTabs[String(liveTab.id)] = row.panelTitle;
-          saved.tabLifecycle[String(liveTab.id)] = {
-            tabId: liveTab.id,
-            snapshotTabId: row.snapshotTabId,
-            snapshotGroupId: fixture.source.group.snapshotGroupId,
-            spaceId: fixture.source.id,
-            url: row.url,
-            title: liveTab.title || row.title,
-            panelTitle: row.panelTitle,
-            windowId: liveTab.windowId,
-            groupId: chromeFixture.sourceGroupId,
-            pinned: false,
-            trackingMode: 'live',
-            sessionId: saved.browserSessionId,
-          };
-        }
-        saved.tabSpaces[String(chromeFixture.pinned.id)] = fixture.target.id;
-        saved.tabLifecycle[String(chromeFixture.pinned.id)] = {
-          tabId: chromeFixture.pinned.id,
-          spaceId: fixture.target.id,
-          url: fixture.target.pinned.url,
-          title: chromeFixture.pinned.title || fixture.target.pinned.title,
-          windowId: chromeFixture.pinned.windowId,
-          groupId: -1,
-          pinned: true,
+        const row = fixture.source.group.tabs[0];
+        delete saved.tabSpaces[String(live.tab.id)];
+        saved.renamedTabs[String(live.tab.id)] = row.panelTitle;
+        saved.tabLifecycle[String(live.tab.id)] = {
+          tabId: live.tab.id,
+          snapshotTabId: row.snapshotTabId,
+          snapshotGroupId: fixture.source.group.snapshotGroupId,
+          spaceId: fixture.source.id,
+          url: live.tab.url,
+          title: live.tab.title,
+          panelTitle: row.panelTitle,
+          windowId: live.tab.windowId,
+          groupId: live.groupId,
           trackingMode: 'live',
           sessionId: saved.browserSessionId,
         };
-        const existingTargetRow = fixture.target.group.tabs[0];
-        saved.renamedTabs[String(chromeFixture.existingTarget.id)] = existingTargetRow.panelTitle;
-        saved.tabLifecycle[String(chromeFixture.existingTarget.id)] = {
-          tabId: chromeFixture.existingTarget.id,
-          snapshotTabId: existingTargetRow.snapshotTabId,
-          snapshotGroupId: fixture.target.wrongGroup.snapshotGroupId,
-          spaceId: fixture.target.id,
-          url: existingTargetRow.url,
-          title: chromeFixture.existingTarget.title || existingTargetRow.title,
-          panelTitle: existingTargetRow.panelTitle,
-          windowId: chromeFixture.existingTarget.windowId,
-          groupId: chromeFixture.wrongTargetGroupId,
-          pinned: false,
-          trackingMode: 'saved-target',
-          sessionId: saved.browserSessionId,
-        };
         saved.groupOrder = saved.groupOrder || {};
-        for (const [spaceId, order] of Object.entries(saved.groupOrder)) {
-          if (fixtureSpaceIds.has(spaceId)) continue;
-          saved.groupOrder[spaceId] = (order || [])
-            .filter((key) => key !== sourceGroupKey && key !== wrongTargetGroupKey &&
-              key !== targetSnapshotKey);
-        }
-        saved.groupOrder[fixture.source.id] = [sourceGroupKey];
+        saved.groupOrder[fixture.source.id] = ['group:' + live.groupId];
         saved.groupOrder[fixture.target.id] = [
-          targetSnapshotKey,
-          wrongTargetGroupKey,
-          'ungrouped',
+          'snapshot:0:' + encodeURIComponent(fixture.target.id) + ':' +
+            fixture.target.group.snapshotGroupId,
         ];
         saved.tabOrder = saved.tabOrder || {};
-        for (const [spaceId, order] of Object.entries(saved.tabOrder)) {
-          if (fixtureSpaceIds.has(spaceId)) continue;
-          delete order[sourceGroupKey];
-          delete order[wrongTargetGroupKey];
-          delete order[targetSnapshotKey];
-          for (const [key, tabIds] of Object.entries(order)) {
-            order[key] = (tabIds || []).filter((tabId) => !fixtureTabIds.has(Number(tabId)));
-            if (order[key].length === 0) delete order[key];
-          }
-        }
-        saved.tabOrder[fixture.source.id] = {
-          [sourceGroupKey]: fixture.source.group.tabs.map((row) =>
-            chromeFixture.sourceTabs.find((tab) =>
-              (tab.url || tab.pendingUrl || '') === row.url).id),
-        };
-        saved.tabOrder[fixture.target.id] = {
-          [wrongTargetGroupKey]: [chromeFixture.existingTarget.id],
-          ungrouped: [chromeFixture.pinned.id],
-        };
-        saved.collapsedGroups = saved.collapsedGroups || {};
-        saved.collapsedGroups[sourceGroupKey] = false;
-        saved.collapsedGroups[wrongTargetGroupKey] = true;
-        delete saved.collapsedGroups[targetSnapshotKey];
+        saved.tabOrder[fixture.source.id] = { ['group:' + live.groupId]: [live.tab.id] };
+        saved.tabOrder[fixture.target.id] = {};
+        saved.activeSpaceId = fixture.source.id;
         const windowState = structuredClone(
           storedWindow.spaceTabsWindowState || { activeSpaceIds: {} },
         );
         windowState.activeSpaceIds = windowState.activeSpaceIds || {};
-        windowState.activeSpaceIds[
-          ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-        ] = fixture.source.id;
+        windowState.activeSpaceIds[${JSON.stringify(String(dormantSwitchPanel.windowId))}] =
+          fixture.source.id;
         await chrome.storage.local.set({ spaceTabsState: saved });
         await chrome.storage.session.set({ spaceTabsWindowState: windowState });
       },
     ))()`);
-    await client.send('Page.reload', {}, partialLiveSpaceSwitchPanel.sessionId);
-    await waitForInSession(client, partialLiveSpaceSwitchPanel.sessionId, `(async () => {
-      const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-      const [stored, storedWindow, browserTabs, browserGroups, sourceTabs, existingTarget, pinned,
-        sessionEntries] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsWindowState'),
-        chrome.tabs.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-        chrome.tabGroups.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-        Promise.all(${JSON.stringify(partialLiveChromeFixture.sourceTabs.map((tab) => tab.id))}
-          .map((tabId) => chrome.tabs.get(tabId).catch(() => null))),
-        chrome.tabs.get(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)}).catch(() => null),
-        chrome.tabs.get(${JSON.stringify(partialLiveChromeFixture.pinned.id)}).catch(() => null),
-        chrome.storage.session.get(null),
-      ]);
-      const saved = stored.spaceTabsState || {};
-      const existingBinding = saved.tabLifecycle?.[
-        String(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)})
-      ];
-      const firstTargetUrlCount = browserTabs.filter((tab) =>
-        (tab.url || tab.pendingUrl || '') === fixture.target.group.tabs[0].url).length;
-      const missingTargetUrlCount = browserTabs.filter((tab) =>
-        (tab.url || tab.pendingUrl || '') === fixture.target.group.tabs[1].url).length;
-      const wrongGroup = browserGroups.find((group) =>
-        group.id === ${JSON.stringify(partialLiveChromeFixture.wrongTargetGroupId)});
-      const pending = Object.keys(sessionEntries).filter((key) =>
-        key.startsWith('spaceTabsLifecycleEvent:') ||
-        key.startsWith('spaceTabsLifecycleSuppression:'));
-      return document.documentElement.dataset.initialized === 'true' &&
-        document.querySelector('#activeSpaceName')?.textContent === fixture.source.name &&
-        storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-          ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-        ] === fixture.source.id &&
-        sourceTabs.every(Boolean) && pinned?.pinned === true &&
-        existingTarget?.pinned === false &&
-        existingTarget?.groupId === ${JSON.stringify(partialLiveChromeFixture.wrongTargetGroupId)} &&
-        wrongGroup?.title === fixture.target.wrongGroup.title &&
-        wrongGroup?.color === fixture.target.wrongGroup.color &&
-        wrongGroup?.collapsed === fixture.target.wrongGroup.collapsed &&
-        existingBinding?.snapshotTabId === fixture.target.group.tabs[0].snapshotTabId &&
-        existingBinding?.snapshotGroupId === fixture.target.wrongGroup.snapshotGroupId &&
-        existingBinding?.spaceId === fixture.target.id &&
-        existingBinding?.groupId === wrongGroup.id &&
-        existingBinding?.trackingMode === 'saved-target' &&
-        saved.groupSpaces?.[String(wrongGroup.id)] === fixture.target.id &&
-        !Object.hasOwn(saved.tabSpaces || {}, String(existingTarget.id)) &&
-        firstTargetUrlCount === 1 && missingTargetUrlCount === 0 && pending.length === 0;
+
+    await client.send('Page.reload', {}, dormantSwitchPanel.sessionId);
+    await waitForInSession(client, dormantSwitchPanel.sessionId, `(async () => {
+      const fixture = ${JSON.stringify(dormantSwitchFixture.source)};
+      const row = [...document.querySelectorAll('.tab-row')]
+        .find((candidate) =>
+          candidate.dataset.snapshotTabId === fixture.group.tabs[0].snapshotTabId);
+      return document.querySelector('#activeSpaceName')?.textContent === fixture.name &&
+        row && !row.classList.contains('dormant') ? true : null;
     })()`, 20000);
 
-    const partialLiveTraceInstalled = await evaluateInSession(
+    const clickedDormantTarget = await evaluateInSession(
       client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-        const windowId = ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)};
-        const extensionOrigin = chrome.runtime.getURL('');
-        const originalSendMessage = chrome.runtime.sendMessage;
-        const trackedTypes = new Set([
-          'tabs:create',
-          'tabs:focus',
-          'tabs:group',
-          'tabs:groupExisting',
-          'tabs:ungroup',
-          'groups:update',
-          'tabs:close',
-        ]);
-        const targetUrls = fixture.target.group.tabs.map((row) => row.url);
-        const rollbackProtectedTabIds = new Set([
-          ...${JSON.stringify(partialLiveChromeFixture.sourceTabs.map((tab) => tab.id))},
-          ${JSON.stringify(partialLiveChromeFixture.existingTarget.id)},
-          ${JSON.stringify(partialLiveChromeFixture.pinned.id)},
-        ].map(Number));
-        const state = {
-          phase: '',
-          sequence: 0,
-          trace: [],
-          pending: new Set(),
-          minContentTabCount: Number.POSITIVE_INFINITY,
-          minTotalTabCount: Number.POSITIVE_INFINITY,
-          zeroContentObserved: false,
-          zeroTotalObserved: false,
-          unsafeCloseObserved: false,
-          captureErrors: [],
-        };
-        const capture = async (kind, message = null, response = null, event = null) => {
-          try {
-            const [allTabs, groups] = await Promise.all([
-              chrome.tabs.query({ windowId }),
-              chrome.tabGroups.query({ windowId }),
-            ]);
-            const contentTabs = allTabs
-              .filter((tab) => !String(tab.url || tab.pendingUrl || '').startsWith(extensionOrigin))
-              .sort((left, right) => left.index - right.index)
-              .map((tab) => ({
-                id: tab.id,
-                url: tab.url || tab.pendingUrl || '',
-                active: tab.active,
-                pinned: tab.pinned,
-                groupId: tab.groupId,
-                index: tab.index,
-                status: tab.status,
-              }));
-            const pinned = contentTabs.find((tab) =>
-              tab.id === ${JSON.stringify(partialLiveChromeFixture.pinned.id)}) || null;
-            const targetTabs = targetUrls.map((url) =>
-              contentTabs.find((tab) => tab.url === url)).filter(Boolean);
-            const targetGroupIds = new Set(targetTabs.map((tab) => tab.groupId));
-            const activeGroupedTarget = targetTabs.find((tab) => tab.active && tab.groupId !== -1) || null;
-            const targetReady = pinned?.pinned === true && targetTabs.length === targetUrls.length &&
-              targetGroupIds.size === 1 && !targetGroupIds.has(-1) && Boolean(activeGroupedTarget);
-            const closingTab = message?.type === 'tabs:close'
-              ? contentTabs.find((tab) => tab.id === Number(message.tabId)) || null
-              : null;
-            const requiredActiveSurvivor = message?.type === 'tabs:close'
-              ? contentTabs.find((tab) =>
-                tab.id === Number(message.requiredActiveSurvivorTabId)) || null
-              : null;
-            const survivorMatches = message?.type !== 'tabs:close' || (
-              Number(message.requiredActiveSurvivorTabId) === Number(activeGroupedTarget?.id)
-            );
-            const requiredSurvivorSafe = message?.type !== 'tabs:close' || Boolean(
-              requiredActiveSurvivor?.active &&
-              requiredActiveSurvivor.id !== closingTab?.id
-            );
-            const closeSafe = message?.type !== 'tabs:close' || (
-              state.phase === 'rollback-attempt'
-                ? Boolean(closingTab && !rollbackProtectedTabIds.has(closingTab.id) &&
-                  requiredSurvivorSafe)
-                : targetReady && survivorMatches && requiredSurvivorSafe
-            );
-            state.minContentTabCount = Math.min(state.minContentTabCount, contentTabs.length);
-            state.minTotalTabCount = Math.min(state.minTotalTabCount, allTabs.length);
-            if (contentTabs.length === 0) state.zeroContentObserved = true;
-            if (allTabs.length === 0) state.zeroTotalObserved = true;
-            if (kind === 'before-command' && message?.type === 'tabs:close' && !closeSafe) {
-              state.unsafeCloseObserved = true;
-            }
-            state.trace.push({
-              sequence: ++state.sequence,
-              phase: state.phase,
-              kind,
-              type: message?.type || '',
-              payload: message ? {
-                tabId: message.tabId,
-                tabIds: message.tabIds,
-                groupId: message.groupId,
-                url: message.url,
-                active: message.active,
-                requiredActiveSurvivorTabId: message.requiredActiveSurvivorTabId,
-                requiredTargetTabGuards: Array.isArray(message.requiredTargetTabGuards)
-                  ? message.requiredTargetTabGuards.map((guard) => ({ ...guard }))
-                  : message.requiredTargetTabGuards,
-              } : null,
-              response: response ? {
-                tabId: response.tab?.id,
-                tabUrl: response.tab?.url,
-                groupId: response.groupId,
-              } : null,
-              event,
-              closingTab,
-              pinned,
-              targetTabs,
-              activeGroupedTarget,
-              requiredActiveSurvivor,
-              targetReady,
-              survivorMatches,
-              requiredSurvivorSafe,
-              closeSafe,
-              contentTabCount: contentTabs.length,
-              totalTabCount: allTabs.length,
-              groups: groups.map((group) => ({
-                id: group.id,
-                title: group.title,
-                color: group.color,
-                collapsed: group.collapsed,
-              })),
-            });
-          } catch (error) {
-            state.captureErrors.push(error?.message || String(error));
-          }
-        };
-        const observe = (kind, event) => {
-          const pending = capture(kind, null, null, event);
-          state.pending.add(pending);
-          void pending.finally(() => state.pending.delete(pending));
-        };
-        const wrappedSendMessage = async function(message, ...rest) {
-          if (!trackedTypes.has(message?.type)) {
-            return originalSendMessage.call(chrome.runtime, message, ...rest);
-          }
-          await capture('before-command', message);
-          const response = await originalSendMessage.call(chrome.runtime, message, ...rest);
-          await capture('after-command', message, response);
-          return response;
-        };
-        const onCreated = (tab) => {
-          if (tab.windowId === windowId) observe('tab-created', { tabId: tab.id });
-        };
-        const onRemoved = (tabId, removeInfo) => {
-          if (removeInfo.windowId === windowId) observe('tab-removed', { tabId });
-        };
-        const onActivated = (activeInfo) => {
-          if (activeInfo.windowId === windowId) observe('tab-activated', { tabId: activeInfo.tabId });
-        };
-        const onGroupCreated = (group) => {
-          if (group.windowId === windowId) observe('group-created', { groupId: group.id });
-        };
-        const onGroupUpdated = (group) => {
-          if (group.windowId === windowId) observe('group-updated', { groupId: group.id });
-        };
-        const onGroupRemoved = (group) => {
-          if (group.windowId === windowId) observe('group-removed', { groupId: group.id });
-        };
-        chrome.runtime.sendMessage = wrappedSendMessage;
-        chrome.tabs.onCreated.addListener(onCreated);
-        chrome.tabs.onRemoved.addListener(onRemoved);
-        chrome.tabs.onActivated.addListener(onActivated);
-        chrome.tabGroups.onCreated.addListener(onGroupCreated);
-        chrome.tabGroups.onUpdated.addListener(onGroupUpdated);
-        chrome.tabGroups.onRemoved.addListener(onGroupRemoved);
-        await capture('trace-installed');
-        window.__partialLiveSpaceSwitchTrace = {
-          async setPhase(phase) {
-            state.phase = phase;
-            await capture('phase-start');
-          },
-          async snapshot() {
-            await Promise.allSettled([...state.pending]);
-            return [...state.trace];
-          },
-          async dispose() {
-            chrome.runtime.sendMessage = originalSendMessage;
-            chrome.tabs.onCreated.removeListener(onCreated);
-            chrome.tabs.onRemoved.removeListener(onRemoved);
-            chrome.tabs.onActivated.removeListener(onActivated);
-            chrome.tabGroups.onCreated.removeListener(onGroupCreated);
-            chrome.tabGroups.onUpdated.removeListener(onGroupUpdated);
-            chrome.tabGroups.onRemoved.removeListener(onGroupRemoved);
-            await Promise.allSettled([...state.pending]);
-            await capture('trace-disposed');
-            return {
-              trace: state.trace,
-              minContentTabCount: Number.isFinite(state.minContentTabCount)
-                ? state.minContentTabCount
-                : null,
-              minTotalTabCount: Number.isFinite(state.minTotalTabCount)
-                ? state.minTotalTabCount
-                : null,
-              zeroContentObserved: state.zeroContentObserved,
-              zeroTotalObserved: state.zeroTotalObserved,
-              unsafeCloseObserved: state.unsafeCloseObserved,
-              captureErrors: state.captureErrors,
-            };
-          },
-        };
-        return chrome.runtime.sendMessage === wrappedSendMessage;
-      })()`,
-    );
-    if (!partialLiveTraceInstalled) {
-      throw new Error('Could not install partial-live Space-switch command trace.');
-    }
-
-    await evaluate(client, `chrome.tabs.update(
-      ${JSON.stringify(partialLiveSpaceSwitchPanel.tabId)},
-      { active: true },
-    )`);
-    await waitForInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `document.visibilityState === 'visible'`,
-      8000,
-    );
-    const clickPartialLiveTarget = async () => {
-      const clicked = await evaluateInSession(
-        client,
-        partialLiveSpaceSwitchPanel.sessionId,
-        `(() => {
+      dormantSwitchPanel.sessionId,
+      `(() => {
         const button = [...document.querySelectorAll('.space')]
-          .find((candidate) => candidate.title ===
-            ${JSON.stringify(partialLiveSpaceSwitchFixture.target.name)});
+          .find((candidate) =>
+            candidate.title === ${JSON.stringify(dormantSwitchFixture.target.name)});
         if (!button) return false;
         button.click();
         return true;
       })()`,
-      );
-      if (!clicked) throw new Error('Could not click the partial-live target Space.');
-    };
+    );
+    if (!clickedDormantTarget) throw new Error('Could not click the dormant target Space.');
 
-    const partialLiveRollbackBefore = await evaluateInSession(
+    const dormantSwitchState = await waitForInSession(
       client,
-      partialLiveSpaceSwitchPanel.sessionId,
+      dormantSwitchPanel.sessionId,
       `(async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-        const [stored, storedWindow, browserTabs, browserGroups] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-          chrome.tabs.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-          chrome.tabGroups.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-        ]);
+        const fixture = ${JSON.stringify(dormantSwitchFixture)};
+        const [stored, storedWindow, sessionEntries, browserTabs, browserGroups] =
+          await Promise.all([
+            chrome.storage.local.get('spaceTabsState'),
+            chrome.storage.session.get('spaceTabsWindowState'),
+            chrome.storage.session.get(null),
+            chrome.tabs.query({ windowId: ${JSON.stringify(dormantSwitchPanel.windowId)} }),
+            chrome.tabGroups.query({ windowId: ${JSON.stringify(dormantSwitchPanel.windowId)} }),
+          ]);
         const saved = stored.spaceTabsState || {};
-        const existingTargetId = ${JSON.stringify(partialLiveChromeFixture.existingTarget.id)};
-        const existingTarget = browserTabs.find((tab) => tab.id === existingTargetId);
-        const semanticTabs = browserTabs.sort((left, right) => left.index - right.index).map((tab) => ({
-          id: tab.id,
-          url: tab.url || tab.pendingUrl || '',
-          index: tab.index,
-          active: tab.active,
-          pinned: tab.pinned,
-          groupRole: tab.id === existingTargetId
-            ? 'wrong-target'
-            : tab.groupId === ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)}
-              ? 'source'
-              : String(tab.groupId),
-        }));
-        const semanticGroups = browserGroups.map((group) => ({
-          role: group.id === existingTarget?.groupId
-            ? 'wrong-target'
-            : group.id === ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)}
-              ? 'source'
-              : String(group.id),
-          title: group.title,
-          color: group.color,
-          collapsed: group.collapsed,
-        })).sort((left, right) => left.role.localeCompare(right.role));
-        return {
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          durableActiveSpaceId: saved.activeSpaceId || '',
-          windowSpaceId: storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-            ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-          ] || '',
-          tabs: browserTabs.sort((left, right) => left.index - right.index).map((tab) => ({
-            id: tab.id,
-            url: tab.url || tab.pendingUrl || '',
-            index: tab.index,
-            active: tab.active,
-            pinned: tab.pinned,
-            groupId: tab.groupId,
-          })),
-          groups: browserGroups.map((group) => ({
-            id: group.id,
-            title: group.title,
-            color: group.color,
-            collapsed: group.collapsed,
-          })).sort((left, right) => left.id - right.id),
-          semanticTabs,
-          semanticGroups,
-          targetGroupOrder: [...(saved.groupOrder?.[fixture.target.id] || [])],
-          targetTabOrder: structuredClone(saved.tabOrder?.[fixture.target.id] || {}),
-          existingTargetBinding: structuredClone(saved.tabLifecycle?.[
-            String(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)})
-          ] || null),
-          existingTargetSpaceId: saved.tabSpaces?.[
-            String(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)})
-          ] || '',
-          existingTargetGroupSpaceId: saved.groupSpaces?.[String(existingTarget?.groupId)] || '',
-          existingTargetGroupKey: 'group:' + existingTarget?.groupId,
-          existingTargetGroupCollapsed:
-            saved.collapsedGroups?.['group:' + existingTarget?.groupId],
-        };
-      })()`,
-    );
-    await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `window.__partialLiveSpaceSwitchTrace.setPhase('rollback-attempt')`,
-    );
-    const partialLiveStorageFailureInstalled = await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(() => {
-        const targetSpaceId = ${JSON.stringify(partialLiveSpaceSwitchFixture.target.id)};
-        window.__partialLiveRollbackOriginalStorageSet = chrome.storage.local.set;
-        window.__partialLiveRollbackFailureCount = 0;
-        const original = window.__partialLiveRollbackOriginalStorageSet;
-        const replacement = function(value, ...rest) {
-          if (value?.spaceTabsState?.activeSpaceId === targetSpaceId &&
-              window.__partialLiveRollbackFailureCount === 0) {
-            window.__partialLiveRollbackFailureCount += 1;
-            return Promise.reject(new Error('Injected partial-live switch checkpoint failure E2E'));
-          }
-          return original.call(chrome.storage.local, value, ...rest);
-        };
-        chrome.storage.local.set = replacement;
-        return chrome.storage.local.set === replacement;
-      })()`,
-    );
-    if (!partialLiveStorageFailureInstalled) {
-      throw new Error('Could not install partial-live storage failure injection.');
-    }
-    await clickPartialLiveTarget();
-    const partialLiveRollbackAfter = await waitForInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-        const [stored, storedWindow, sessionEntries, browserTabs, browserGroups] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-          chrome.storage.session.get(null),
-          chrome.tabs.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-          chrome.tabGroups.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-        ]);
-        const saved = stored.spaceTabsState || {};
-        const tabs = browserTabs.sort((left, right) => left.index - right.index).map((tab) => ({
-          id: tab.id,
-          url: tab.url || tab.pendingUrl || '',
-          index: tab.index,
-          active: tab.active,
-          pinned: tab.pinned,
-          groupId: tab.groupId,
-        }));
-        const groups = browserGroups.map((group) => ({
-          id: group.id,
-          title: group.title,
-          color: group.color,
-          collapsed: group.collapsed,
-        })).sort((left, right) => left.id - right.id);
-        const existingTargetId = ${JSON.stringify(partialLiveChromeFixture.existingTarget.id)};
-        const existingTarget = browserTabs.find((tab) => tab.id === existingTargetId);
-        const wrongGroup = browserGroups.find((group) => group.id === existingTarget?.groupId);
-        const semanticTabs = browserTabs.sort((left, right) => left.index - right.index).map((tab) => ({
-          id: tab.id,
-          url: tab.url || tab.pendingUrl || '',
-          index: tab.index,
-          active: tab.active,
-          pinned: tab.pinned,
-          groupRole: tab.id === existingTargetId
-            ? 'wrong-target'
-            : tab.groupId === ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)}
-              ? 'source'
-              : String(tab.groupId),
-        }));
-        const semanticGroups = browserGroups.map((group) => ({
-          role: group.id === existingTarget?.groupId
-            ? 'wrong-target'
-            : group.id === ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)}
-              ? 'source'
-              : String(group.id),
-          title: group.title,
-          color: group.color,
-          collapsed: group.collapsed,
-        })).sort((left, right) => left.role.localeCompare(right.role));
+        const fixtureUrls = new Set(${JSON.stringify(dormantSwitchUrls)});
+        const openedFixtureTabs = browserTabs.filter((tab) =>
+          fixtureUrls.has(tab.url || tab.pendingUrl || ''));
+        const newTabs = browserTabs.filter((tab) =>
+          ['chrome://newtab', 'chrome://newtab/'].includes(tab.url || tab.pendingUrl || ''));
+        const activeNewTab = newTabs.find((tab) => tab.active) || null;
+        const targetRows = [...document.querySelectorAll('.tab-row')]
+          .filter((row) => fixture.target.group.tabs.some((savedRow) =>
+            savedRow.snapshotTabId === row.dataset.snapshotTabId));
+        const sourceSnapshotUrls = (saved.spaceSnapshots?.[fixture.source.id]?.groups || [])
+          .flatMap((group) => (group.tabs || []).map((row) => row.url));
+        const targetSnapshotUrls = (saved.spaceSnapshots?.[fixture.target.id]?.groups || [])
+          .flatMap((group) => (group.tabs || []).map((row) => row.url));
         const pendingLifecycleKeys = Object.keys(sessionEntries).filter((key) =>
           key.startsWith('spaceTabsLifecycleEvent:') ||
           key.startsWith('spaceTabsLifecycleSuppression:'));
-        const status = document.querySelector('#syncStatus')?.textContent || '';
-        const toast = document.querySelector('#workbenchToast')?.textContent || '';
-        if (window.__partialLiveRollbackFailureCount !== 1 ||
-            !(status + ' ' + toast).includes('Injected partial-live switch checkpoint failure E2E') ||
-            document.querySelector('#activeSpaceName')?.textContent !== fixture.source.name ||
-            storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-              ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-            ] !== fixture.source.id ||
-            JSON.stringify(semanticTabs) !==
-              ${JSON.stringify(JSON.stringify(partialLiveRollbackBefore.semanticTabs))} ||
-            JSON.stringify(semanticGroups) !==
-              ${JSON.stringify(JSON.stringify(partialLiveRollbackBefore.semanticGroups))} ||
-            wrongGroup?.title !== fixture.target.wrongGroup.title ||
-            wrongGroup?.color !== fixture.target.wrongGroup.color ||
-            wrongGroup?.collapsed !== fixture.target.wrongGroup.collapsed ||
-            browserTabs.some((tab) =>
-              (tab.url || tab.pendingUrl || '') === fixture.target.group.tabs[1].url) ||
-            pendingLifecycleKeys.length > 0) return null;
-        return {
-          status,
-          toast,
-          failureCount: window.__partialLiveRollbackFailureCount,
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          durableActiveSpaceId: saved.activeSpaceId || '',
-          windowSpaceId: storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-            ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-          ] || '',
-          tabs,
-          groups,
-          semanticTabs,
-          semanticGroups,
-          targetGroupOrder: [...(saved.groupOrder?.[fixture.target.id] || [])],
-          targetTabOrder: structuredClone(saved.tabOrder?.[fixture.target.id] || {}),
-          existingTargetBinding: structuredClone(saved.tabLifecycle?.[
-            String(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)})
-          ] || null),
-          existingTargetSpaceId: saved.tabSpaces?.[
-            String(${JSON.stringify(partialLiveChromeFixture.existingTarget.id)})
-          ] || '',
-          existingTargetGroupSpaceId: saved.groupSpaces?.[String(existingTarget?.groupId)] || '',
-          existingTargetGroupKey: 'group:' + existingTarget?.groupId,
-          existingTargetGroupCollapsed:
-            saved.collapsedGroups?.['group:' + existingTarget?.groupId],
-          pendingLifecycleKeys,
-          contentTabCount: browserTabs.filter((tab) =>
-            !String(tab.url || tab.pendingUrl || '').startsWith(chrome.runtime.getURL(''))).length,
-          totalTabCount: browserTabs.length,
-        };
+        const ready =
+          document.querySelector('#activeSpaceName')?.textContent === fixture.target.name &&
+          storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
+            ${JSON.stringify(String(dormantSwitchPanel.windowId))}
+          ] === fixture.target.id &&
+          openedFixtureTabs.length === 0 &&
+          newTabs.length === 1 &&
+          Boolean(activeNewTab) &&
+          targetRows.length === fixture.target.group.tabs.length &&
+          targetRows.every((row) => row.classList.contains('dormant')) &&
+          (saved.ephemeralTabIds || []).includes(activeNewTab.id) &&
+          !Object.hasOwn(saved.tabSpaces || {}, String(activeNewTab.id)) &&
+          !browserGroups.some((group) => group.title === fixture.target.group.title) &&
+          sourceSnapshotUrls.join('\\n') ===
+            fixture.source.group.tabs.map((row) => row.url).join('\\n') &&
+          targetSnapshotUrls.join('\\n') ===
+            fixture.target.group.tabs.map((row) => row.url).join('\\n') &&
+          pendingLifecycleKeys.length === 0;
+        return ready ? {
+          activeNewTabId: activeNewTab.id,
+          dormantRows: targetRows.length,
+          openedFixtureTabCount: openedFixtureTabs.length,
+        } : null;
       })()`,
       20000,
     );
-    const partialLiveRollbackTrace = await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `window.__partialLiveSpaceSwitchTrace.snapshot()`,
-    );
-    await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(() => {
-        chrome.storage.local.set = window.__partialLiveRollbackOriginalStorageSet;
-        delete window.__partialLiveRollbackOriginalStorageSet;
-      })()`,
-    );
-    const partialRollbackCreateRecords = partialLiveRollbackTrace.filter((entry) =>
-      entry.phase === 'rollback-attempt' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:create');
-    const partialRollbackCreatedRecords = partialLiveRollbackTrace.filter((entry) =>
-      entry.phase === 'rollback-attempt' && entry.kind === 'after-command' &&
-      entry.type === 'tabs:create');
-    const partialRollbackCreatedTabId = partialRollbackCreatedRecords[0]?.response?.tabId;
-    const partialRollbackCloseRecords = partialLiveRollbackTrace.filter((entry) =>
-      entry.phase === 'rollback-attempt' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:close');
-    const partialRollbackGroupRecords = partialLiveRollbackTrace.filter((entry) =>
-      entry.phase === 'rollback-attempt' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:group');
-    const partialRollbackUngroupRecords = partialLiveRollbackTrace.filter((entry) =>
-      entry.phase === 'rollback-attempt' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:ungroup');
-    const partialLiveRollbackCreatedCleanup = await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(async () => {
-        const tabId = ${JSON.stringify(partialRollbackCreatedTabId)};
-        const [stored, tab] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.tabs.get(tabId).catch(() => null),
-        ]);
-        const saved = stored.spaceTabsState || {};
-        return {
-          tabPresent: Boolean(tab),
-          lifecyclePresent: Boolean(saved.tabLifecycle?.[String(tabId)]),
-          tabSpacePresent: Object.hasOwn(saved.tabSpaces || {}, String(tabId)),
-          tabGroupPresent: Object.hasOwn(saved.tabGroups || {}, String(tabId)),
-          renamedTitlePresent: Object.hasOwn(saved.renamedTabs || {}, String(tabId)),
-        };
-      })()`,
-    );
-    const partialRollbackGroupedIds = new Set(
-      partialRollbackGroupRecords.flatMap((entry) => entry.payload?.tabIds || []).map(Number),
-    );
-    const partialRollbackUngroupedIds = new Set(
-      partialRollbackUngroupRecords.flatMap((entry) => entry.payload?.tabIds || []).map(Number),
-    );
-    const partialRollbackTargetSnapshotKey = `snapshot:0:${encodeURIComponent(
-      partialLiveSpaceSwitchFixture.target.id,
-    )}:${partialLiveSpaceSwitchFixture.target.group.snapshotGroupId}`;
-    const partialRollbackMaterializationGroup = partialRollbackGroupRecords.find((entry) => {
-      const tabIds = new Set((entry.payload?.tabIds || []).map(Number));
-      return tabIds.has(partialLiveChromeFixture.existingTarget.id) &&
-        tabIds.has(partialRollbackCreatedTabId);
-    });
-    const partialRollbackRestoredWrongGroup = partialRollbackGroupRecords.find((entry) => {
-      const tabIds = new Set((entry.payload?.tabIds || []).map(Number));
-      return tabIds.size === 1 && tabIds.has(partialLiveChromeFixture.existingTarget.id);
-    });
-    const partialLiveRollbackOk =
-      partialLiveRollbackAfter.failureCount === 1 &&
-      partialLiveRollbackAfter.activeSpaceName === partialLiveRollbackBefore.activeSpaceName &&
-      partialLiveRollbackAfter.durableActiveSpaceId ===
-        partialLiveRollbackBefore.durableActiveSpaceId &&
-      partialLiveRollbackAfter.windowSpaceId === partialLiveRollbackBefore.windowSpaceId &&
-      JSON.stringify(partialLiveRollbackAfter.semanticTabs) ===
-        JSON.stringify(partialLiveRollbackBefore.semanticTabs) &&
-      JSON.stringify(partialLiveRollbackAfter.semanticGroups) ===
-        JSON.stringify(partialLiveRollbackBefore.semanticGroups) &&
-      JSON.stringify(partialLiveRollbackAfter.targetGroupOrder) === JSON.stringify([
-        partialRollbackTargetSnapshotKey,
-        partialLiveRollbackAfter.existingTargetGroupKey,
-        'ungrouped',
-      ]) &&
-      Object.keys(partialLiveRollbackAfter.targetTabOrder).length === 2 &&
-      JSON.stringify(
-        partialLiveRollbackAfter.targetTabOrder[
-          partialLiveRollbackAfter.existingTargetGroupKey
-        ] || [],
-      ) === JSON.stringify([partialLiveChromeFixture.existingTarget.id]) &&
-      JSON.stringify(partialLiveRollbackAfter.targetTabOrder.ungrouped || []) ===
-        JSON.stringify([partialLiveChromeFixture.pinned.id]) &&
-      partialLiveRollbackAfter.existingTargetSpaceId ===
-        partialLiveRollbackBefore.existingTargetSpaceId &&
-      partialLiveRollbackAfter.existingTargetSpaceId === '' &&
-      partialLiveRollbackAfter.existingTargetGroupSpaceId ===
-        partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveRollbackAfter.existingTargetGroupKey ===
-        `group:${partialLiveRollbackAfter.existingTargetBinding?.groupId}` &&
-      partialLiveRollbackAfter.existingTargetGroupCollapsed === true &&
-      JSON.stringify({
-        ...partialLiveRollbackAfter.existingTargetBinding,
-        groupId: 'wrong-target',
-      }) === JSON.stringify({
-        ...partialLiveRollbackBefore.existingTargetBinding,
-        groupId: 'wrong-target',
-      }) &&
-      partialLiveRollbackAfter.existingTargetBinding?.snapshotTabId ===
-        partialLiveSpaceSwitchFixture.target.group.tabs[0].snapshotTabId &&
-      partialLiveRollbackAfter.existingTargetBinding?.snapshotGroupId ===
-        partialLiveSpaceSwitchFixture.target.wrongGroup.snapshotGroupId &&
-      partialLiveRollbackAfter.existingTargetBinding?.spaceId ===
-        partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveRollbackAfter.existingTargetBinding?.trackingMode === 'saved-target' &&
-      partialLiveRollbackAfter.pendingLifecycleKeys.length === 0 &&
-      partialLiveRollbackAfter.contentTabCount >= 4 &&
-      partialLiveRollbackAfter.totalTabCount >= 5 &&
-      partialRollbackCreateRecords.length === 1 &&
-      partialRollbackCreateRecords[0]?.payload?.url ===
-        partialLiveSpaceSwitchFixture.target.group.tabs[1].url &&
-      partialRollbackCreateRecords[0]?.payload?.active === false &&
-      partialRollbackCreatedRecords.length === 1 &&
-      Number.isSafeInteger(partialRollbackCreatedTabId) &&
-      partialRollbackCloseRecords.length === 1 &&
-      partialRollbackCloseRecords[0]?.closingTab?.id === partialRollbackCreatedTabId &&
-      partialRollbackCloseRecords[0]?.closeSafe === true &&
-      partialRollbackCloseRecords[0]?.requiredSurvivorSafe === true &&
-      partialRollbackCloseRecords[0]?.contentTabCount >= 5 &&
-      partialRollbackCloseRecords[0]?.totalTabCount >= 6 &&
-      !partialLiveChromeFixture.sourceTabs.some((tab) =>
-        partialRollbackCloseRecords.some((entry) => entry.closingTab?.id === tab.id)) &&
-      partialRollbackGroupRecords.length >= 2 &&
-      partialRollbackGroupedIds.has(partialLiveChromeFixture.existingTarget.id) &&
-      partialRollbackGroupedIds.has(partialRollbackCreatedTabId) &&
-      Boolean(partialRollbackMaterializationGroup) &&
-      Boolean(partialRollbackRestoredWrongGroup) &&
-      partialRollbackUngroupRecords.length >= 1 &&
-      partialRollbackUngroupedIds.has(partialLiveChromeFixture.existingTarget.id) &&
-      !partialLiveRollbackCreatedCleanup.tabPresent &&
-      !partialLiveRollbackCreatedCleanup.lifecyclePresent &&
-      !partialLiveRollbackCreatedCleanup.tabSpacePresent &&
-      !partialLiveRollbackCreatedCleanup.tabGroupPresent &&
-      !partialLiveRollbackCreatedCleanup.renamedTitlePresent;
-    const partialLiveRollbackDetail = JSON.stringify({
-      before: partialLiveRollbackBefore,
-      after: partialLiveRollbackAfter,
-      createdCleanup: partialLiveRollbackCreatedCleanup,
-      trace: {
-        creates: partialRollbackCreateRecords,
-        created: partialRollbackCreatedRecords,
-        closes: partialRollbackCloseRecords,
-        groups: partialRollbackGroupRecords,
-        ungroups: partialRollbackUngroupRecords,
-      },
-    });
+
+    const dormantSwitchOk =
+      dormantSwitchState.dormantRows === dormantSwitchFixture.target.group.tabs.length &&
+      dormantSwitchState.openedFixtureTabCount === 0;
     record(
-      'A failed partial-live switch restores the stale physical Tag and safely closes only the new row',
-      partialLiveRollbackOk,
-      partialLiveRollbackDetail,
+      'Space switch keeps all target Tags dormant behind one temporary New Tab',
+      dormantSwitchOk,
+      JSON.stringify(dormantSwitchState),
     );
-    if (!partialLiveRollbackOk) {
-      throw new Error(`Partial-live Space-switch rollback regression: ${partialLiveRollbackDetail}`);
+    if (!dormantSwitchOk) {
+      throw new Error(`Dormant Space-switch regression: ${JSON.stringify(dormantSwitchState)}`);
     }
 
-    await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `window.__partialLiveSpaceSwitchTrace.setPhase('successful-switch')`,
-    );
-    await clickPartialLiveTarget();
-
-    const partialLiveActivationState = await waitForInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `(async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
-        const sourceTabIds = ${JSON.stringify(partialLiveChromeFixture.sourceTabs.map((tab) => tab.id))};
-        const pinnedTabId = ${JSON.stringify(partialLiveChromeFixture.pinned.id)};
-        const [stored, storedWindow, sessionEntries, browserTabs, browserGroups] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsWindowState'),
-          chrome.storage.session.get(null),
-          chrome.tabs.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-          chrome.tabGroups.query({ windowId: ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)} }),
-        ]);
-        const saved = stored.spaceTabsState || {};
-        const sourceUrls = new Set(fixture.source.group.tabs.map((row) => row.url));
-        const targetUrls = new Set(fixture.target.group.tabs.map((row) => row.url));
-        const sourceTabs = browserTabs.filter((tab) =>
-          sourceUrls.has(tab.url || tab.pendingUrl || ''));
-        const targetTabs = browserTabs
-          .filter((tab) => targetUrls.has(tab.url || tab.pendingUrl || ''))
-          .sort((left, right) => left.index - right.index);
-        const pinned = browserTabs.find((tab) => tab.id === pinnedTabId) || null;
-        const targetGroupIds = new Set(targetTabs.map((tab) => tab.groupId));
-        const physicalGroupId = targetTabs[0]?.groupId;
-        const physicalGroup = browserGroups.find((group) => group.id === physicalGroupId) || null;
-        const pendingLifecycleKeys = Object.keys(sessionEntries).filter((key) =>
-          key.startsWith('spaceTabsLifecycleEvent:') ||
-          key.startsWith('spaceTabsLifecycleSuppression:'));
-        if (document.querySelector('#activeSpaceName')?.textContent !== fixture.target.name ||
-            storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-              ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-            ] !== fixture.target.id ||
-            sourceTabs.length !== 0 || targetTabs.length !== fixture.target.group.tabs.length ||
-            targetTabs.some((tab) => tab.status !== 'complete') ||
-            targetGroupIds.size !== 1 || targetGroupIds.has(-1) ||
-            !targetTabs.some((tab) => tab.active) || !pinned?.pinned || pinned.active ||
-            pendingLifecycleKeys.length > 0) return null;
-        const targetUiRows = fixture.target.group.tabs.map((row) => {
-          const matches = [...document.querySelectorAll('.tab-row')]
-            .filter((candidate) => candidate.dataset.snapshotTabId === row.snapshotTabId);
-          return matches.map((candidate) => ({
-            tabId: Number(candidate.dataset.tabId),
-            snapshotTabId: candidate.dataset.snapshotTabId || '',
-            snapshotGroupId: candidate.dataset.snapshotGroupId || '',
-            title: candidate.querySelector('.tab-title')?.textContent || '',
-            groupTitle: candidate.closest('.group-card')
-              ?.querySelector('.group-header h2')?.textContent || '',
-            dormant: candidate.classList.contains('dormant'),
-            ungrouped: Boolean(candidate.closest('.ungrouped-section')),
-          }));
-        });
-        const pinnedRows = [...document.querySelectorAll(
-          '.tab-row[data-tab-id="' + pinnedTabId + '"]',
-        )].map((row) => ({
-          dormant: row.classList.contains('dormant'),
-          ungrouped: Boolean(row.closest('.ungrouped-section')),
-        }));
-        const lifecycle = Object.fromEntries(targetTabs.map((tab) => [
-          tab.url || tab.pendingUrl || '',
-          saved.tabLifecycle?.[String(tab.id)] || null,
-        ]));
-        const targetSnapshotOccurrences = Object.fromEntries(
-          fixture.target.group.tabs.map((expected) => [
-            expected.snapshotTabId,
-            Object.entries(saved.spaceSnapshots || {}).flatMap(([spaceId, snapshot]) =>
-              (snapshot?.groups || []).flatMap((group) =>
-                (group.tabs || [])
-                  .filter((row) => row.snapshotTabId === expected.snapshotTabId)
-                  .map((row) => ({ spaceId, snapshotGroupId: group.snapshotGroupId, row })))),
-          ]),
-        );
-        return {
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          durableActiveSpaceId: saved.activeSpaceId || '',
-          windowSpaceId: storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
-            ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-          ] || '',
-          sourceTabs,
-          sourceTabIdsStillBound: sourceTabIds.filter((tabId) =>
-            saved.tabLifecycle?.[String(tabId)] || saved.tabSpaces?.[String(tabId)] ||
-            saved.tabGroups?.[String(tabId)]),
-          targetTabs: targetTabs.map((tab) => ({
-            id: tab.id,
-            url: tab.url || tab.pendingUrl || '',
-            active: tab.active,
-            groupId: tab.groupId,
-            index: tab.index,
-            status: tab.status,
-          })),
-          pinned: {
-            id: pinned.id,
-            url: pinned.url || pinned.pendingUrl || '',
-            active: pinned.active,
-            pinned: pinned.pinned,
-            groupId: pinned.groupId,
-            windowId: pinned.windowId,
-          },
-          pinnedBinding: saved.tabLifecycle?.[String(pinnedTabId)] || null,
-          pinnedSpaceId: saved.tabSpaces?.[String(pinnedTabId)] || '',
-          physicalGroup: physicalGroup ? {
-            id: physicalGroup.id,
-            title: physicalGroup.title,
-            color: physicalGroup.color,
-            collapsed: physicalGroup.collapsed,
-          } : null,
-          sourceGroupPresent: browserGroups.some((group) =>
-            group.id === ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)} ||
-            group.title === fixture.source.group.title),
-          wrongTargetGroupPresent: browserGroups.some((group) =>
-            group.title === fixture.target.wrongGroup.title),
-          targetUiRows,
-          pinnedRows,
-          lifecycle,
-          groupSpaceId: saved.groupSpaces?.[String(physicalGroupId)] || '',
-          groupOrder: [...(saved.groupOrder?.[fixture.target.id] || [])],
-          tabOrder: structuredClone(saved.tabOrder?.[fixture.target.id] || {}),
-          targetSnapshot: structuredClone(saved.spaceSnapshots?.[fixture.target.id] || null),
-          sourceSnapshot: structuredClone(saved.spaceSnapshots?.[fixture.source.id] || null),
-          targetSnapshotOccurrences,
-          pendingLifecycleKeys,
-          browserTabCount: browserTabs.length,
-        };
-      })()`,
-      30000,
-    );
-    const partialLiveSpaceSwitchTrace = await evaluateInSession(
-      client,
-      partialLiveSpaceSwitchPanel.sessionId,
-      `window.__partialLiveSpaceSwitchTrace.dispose()`,
-    );
-    const partialLiveCloseRecords = partialLiveSpaceSwitchTrace.trace.filter((entry) =>
-      entry.phase === 'successful-switch' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:close');
-    const partialLiveCreateRecords = partialLiveSpaceSwitchTrace.trace.filter((entry) =>
-      entry.phase === 'successful-switch' && entry.kind === 'before-command' &&
-      entry.type === 'tabs:create');
-    const partialLiveCreatedRecords = partialLiveSpaceSwitchTrace.trace.filter((entry) =>
-      entry.phase === 'successful-switch' && entry.kind === 'after-command' &&
-      entry.type === 'tabs:create');
-    const expectedPartialSourceUrls = partialLiveSpaceSwitchFixture.source.group.tabs
-      .map((row) => row.url)
-      .sort();
-    const actualPartialClosedUrls = partialLiveCloseRecords
-      .map((entry) => entry.closingTab?.url || '')
-      .sort();
-    const partialTargetRows = partialLiveSpaceSwitchFixture.target.group.tabs;
-    const partialTargetTabsByUrl = new Map(
-      partialLiveActivationState.targetTabs.map((tab) => [tab.url, tab]),
-    );
-    const partialPhysicalGroupId = partialLiveActivationState.physicalGroup?.id;
-    const partialPhysicalGroupKey = `group:${partialPhysicalGroupId}`;
-    const partialExpectedTargetTabIds = partialTargetRows.map((row) =>
-      partialTargetTabsByUrl.get(row.url)?.id);
-    const partialSuccessfulCreatedTabId = partialLiveCreatedRecords[0]?.response?.tabId;
-    const partialCreatedOnlyMissingRow =
-      partialLiveCreateRecords.length === 1 && partialLiveCreatedRecords.length === 1 &&
-      partialLiveCreateRecords[0]?.payload?.url === partialTargetRows[1].url &&
-      partialLiveCreateRecords[0]?.payload?.active === false &&
-      partialSuccessfulCreatedTabId === partialExpectedTargetTabIds[1] &&
-      partialExpectedTargetTabIds[0] === partialLiveChromeFixture.existingTarget.id &&
-      partialExpectedTargetTabIds[1] !== partialLiveChromeFixture.existingTarget.id &&
-      partialLiveActivationState.targetTabs.filter((tab) =>
-        tab.url === partialTargetRows[0].url).length === 1 &&
-      partialLiveActivationState.targetTabs.filter((tab) =>
-        tab.url === partialTargetRows[1].url).length === 1;
-    const partialTargetSnapshotStable =
-      partialLiveActivationState.targetSnapshot?.identityVersion === 1 &&
-      partialLiveActivationState.targetSnapshot?.preserveGroups === true &&
-      partialLiveActivationState.targetSnapshot?.customMetadata?.fixture ===
-        'partial-target-snapshot' &&
-      partialLiveActivationState.targetSnapshot?.groups?.length === 1 &&
-      partialLiveActivationState.targetSnapshot.groups[0]?.snapshotGroupId ===
-        partialLiveSpaceSwitchFixture.target.group.snapshotGroupId &&
-      partialLiveActivationState.targetSnapshot.groups[0]?.title ===
-        partialLiveSpaceSwitchFixture.target.group.title &&
-      partialLiveActivationState.targetSnapshot.groups[0]?.color ===
-        partialLiveSpaceSwitchFixture.target.group.color &&
-      partialLiveActivationState.targetSnapshot.groups[0]?.collapsed === false &&
-      JSON.stringify(partialLiveActivationState.targetSnapshot.groups[0]?.customMetadata) ===
-        JSON.stringify(partialLiveSpaceSwitchFixture.target.group.customMetadata) &&
-      partialTargetRows.every((row, index) => {
-        const storedRow = partialLiveActivationState.targetSnapshot.groups[0]?.tabs?.[index];
-        const occurrences = partialLiveActivationState.targetSnapshotOccurrences[row.snapshotTabId] || [];
-        return occurrences.length === 1 &&
-          occurrences[0]?.spaceId === partialLiveSpaceSwitchFixture.target.id &&
-          occurrences[0]?.snapshotGroupId ===
-            partialLiveSpaceSwitchFixture.target.group.snapshotGroupId &&
-          storedRow?.snapshotTabId === row.snapshotTabId &&
-          storedRow?.url === row.url &&
-          storedRow?.title === row.title &&
-          storedRow?.panelTitle === row.panelTitle &&
-          JSON.stringify(storedRow?.customMetadata) === JSON.stringify(row.customMetadata);
-      });
-    const partialSourceSnapshotStable =
-      partialLiveActivationState.sourceSnapshot?.identityVersion === 1 &&
-      partialLiveActivationState.sourceSnapshot?.preserveGroups === true &&
-      partialLiveActivationState.sourceSnapshot?.customMetadata?.fixture ===
-        'partial-source-snapshot' &&
-      partialLiveActivationState.sourceSnapshot?.groups?.[0]?.snapshotGroupId ===
-        partialLiveSpaceSwitchFixture.source.group.snapshotGroupId &&
-      partialLiveSpaceSwitchFixture.source.group.tabs.every((row, index) =>
-        partialLiveActivationState.sourceSnapshot.groups[0]?.tabs?.[index]?.snapshotTabId ===
-          row.snapshotTabId &&
-        partialLiveActivationState.sourceSnapshot.groups[0]?.tabs?.[index]?.url === row.url);
-    const partialLifecycleCorrect = partialTargetRows.every((row) => {
-      const tab = partialTargetTabsByUrl.get(row.url);
-      const binding = partialLiveActivationState.lifecycle[row.url];
-      return binding?.tabId === tab?.id &&
-        binding?.snapshotTabId === row.snapshotTabId &&
-        binding?.snapshotGroupId === partialLiveSpaceSwitchFixture.target.group.snapshotGroupId &&
-        binding?.spaceId === partialLiveSpaceSwitchFixture.target.id &&
-        binding?.url === row.url &&
-        binding?.panelTitle === row.panelTitle &&
-        binding?.windowId === partialLiveSpaceSwitchPanel.windowId &&
-        binding?.groupId === partialPhysicalGroupId &&
-        binding?.trackingMode === 'saved-target';
-    });
-    const partialUiCorrect = partialTargetRows.every((row, index) => {
-      const matches = partialLiveActivationState.targetUiRows[index] || [];
-      return matches.length === 1 &&
-        matches[0]?.tabId === partialTargetTabsByUrl.get(row.url)?.id &&
-        matches[0]?.snapshotTabId === row.snapshotTabId &&
-        matches[0]?.snapshotGroupId === partialLiveSpaceSwitchFixture.target.group.snapshotGroupId &&
-        matches[0]?.title === row.panelTitle &&
-        matches[0]?.groupTitle === partialLiveSpaceSwitchFixture.target.group.title &&
-        matches[0]?.dormant === false && matches[0]?.ungrouped === false;
-    });
-    const partialTargetCloseGuardsCorrect = partialLiveCloseRecords.every((entry) => {
-      const guards = entry.payload?.requiredTargetTabGuards;
-      if (!Array.isArray(guards) || guards.length !== 3) return false;
-      const guardsByTabId = new Map(guards.map((guard) => [Number(guard.tabId), guard]));
-      if (guardsByTabId.size !== 3) return false;
-      const groupedGuardsCorrect = partialExpectedTargetTabIds.every((tabId) => {
-        const guard = guardsByTabId.get(Number(tabId));
-        return guard?.windowId === partialLiveSpaceSwitchPanel.windowId &&
-          guard?.groupId === partialPhysicalGroupId;
-      });
-      const pinnedGuard = guardsByTabId.get(Number(partialLiveChromeFixture.pinned.id));
-      return groupedGuardsCorrect &&
-        pinnedGuard?.windowId === partialLiveSpaceSwitchPanel.windowId &&
-        pinnedGuard?.groupId === -1;
-    });
-    const partialCloseSafetyCorrect = partialLiveCloseRecords.length ===
-        partialLiveSpaceSwitchFixture.source.group.tabs.length &&
-      JSON.stringify(actualPartialClosedUrls) === JSON.stringify(expectedPartialSourceUrls) &&
-      partialTargetCloseGuardsCorrect &&
-      partialLiveCloseRecords.every((entry) => entry.targetReady && entry.survivorMatches &&
-        entry.activeGroupedTarget?.groupId === partialPhysicalGroupId &&
-        entry.payload?.requiredActiveSurvivorTabId === entry.activeGroupedTarget?.id &&
-        entry.closingTab?.id !== partialLiveChromeFixture.pinned.id &&
-        entry.contentTabCount >= 4 && entry.totalTabCount >= 5);
-    const partialPhysicalTitleCorrect = partialLiveActivationState.physicalGroup?.title ===
-      chromeGroupTitle(partialLiveSpaceSwitchFixture.target.group.title);
-    const partialLiveSwitchOk =
-      partialLiveActivationState.activeSpaceName === partialLiveSpaceSwitchFixture.target.name &&
-      partialLiveActivationState.durableActiveSpaceId === partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveActivationState.windowSpaceId === partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveActivationState.sourceTabs.length === 0 &&
-      partialLiveActivationState.sourceTabIdsStillBound.length === 0 &&
-      partialLiveActivationState.targetTabs.length === partialTargetRows.length &&
-      partialLiveActivationState.targetTabs.every((tab) =>
-        tab.status === 'complete' && tab.groupId === partialPhysicalGroupId) &&
-      partialLiveActivationState.targetTabs.some((tab) => tab.active) &&
-      partialLiveActivationState.targetTabs.map((tab) => tab.url).join('\n') ===
-        partialTargetRows.map((row) => row.url).join('\n') &&
-      partialLiveActivationState.pinned?.id === partialLiveChromeFixture.pinned.id &&
-      partialLiveActivationState.pinned?.url === partialLiveSpaceSwitchFixture.target.pinned.url &&
-      partialLiveActivationState.pinned?.pinned === true &&
-      partialLiveActivationState.pinned?.active === false &&
-      partialLiveActivationState.pinned?.groupId === -1 &&
-      partialLiveActivationState.pinned?.windowId === partialLiveSpaceSwitchPanel.windowId &&
-      partialLiveActivationState.pinnedBinding?.spaceId === partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveActivationState.pinnedBinding?.trackingMode === 'live' &&
-      partialLiveActivationState.pinnedBinding?.pinned === true &&
-      partialLiveActivationState.pinnedSpaceId === partialLiveSpaceSwitchFixture.target.id &&
-      partialLiveActivationState.pinnedRows.length === 1 &&
-      partialLiveActivationState.pinnedRows[0]?.dormant === false &&
-      partialLiveActivationState.pinnedRows[0]?.ungrouped === true &&
-      partialPhysicalTitleCorrect &&
-      partialLiveActivationState.physicalGroup?.color ===
-        partialLiveSpaceSwitchFixture.target.group.color &&
-      partialLiveActivationState.physicalGroup?.collapsed === false &&
-      partialLiveActivationState.sourceGroupPresent === false &&
-      partialLiveActivationState.wrongTargetGroupPresent === false &&
-      partialLiveActivationState.groupSpaceId === partialLiveSpaceSwitchFixture.target.id &&
-      JSON.stringify(partialLiveActivationState.groupOrder) ===
-        JSON.stringify([partialPhysicalGroupKey, 'ungrouped']) &&
-      Object.keys(partialLiveActivationState.tabOrder).length === 2 &&
-      JSON.stringify(partialLiveActivationState.tabOrder[partialPhysicalGroupKey] || []) ===
-        JSON.stringify(partialExpectedTargetTabIds) &&
-      JSON.stringify(partialLiveActivationState.tabOrder.ungrouped || []) ===
-        JSON.stringify([partialLiveChromeFixture.pinned.id]) &&
-      partialCreatedOnlyMissingRow && partialTargetSnapshotStable && partialSourceSnapshotStable &&
-      partialLifecycleCorrect && partialUiCorrect && partialCloseSafetyCorrect &&
-      partialLiveActivationState.pendingLifecycleKeys.length === 0 &&
-      partialLiveActivationState.browserTabCount >= 4 &&
-      partialLiveSpaceSwitchTrace.minContentTabCount >= 3 &&
-      partialLiveSpaceSwitchTrace.minTotalTabCount >= 4 &&
-      !partialLiveSpaceSwitchTrace.zeroContentObserved &&
-      !partialLiveSpaceSwitchTrace.zeroTotalObserved &&
-      !partialLiveSpaceSwitchTrace.unsafeCloseObserved &&
-      partialLiveSpaceSwitchTrace.captureErrors.length === 0;
-    const partialLiveSwitchDetail = JSON.stringify({
-      fixture: partialLiveSpaceSwitchFixture,
-      chromeFixture: partialLiveChromeFixture,
-      activationState: partialLiveActivationState,
-      traceSummary: {
-        createRecords: partialLiveCreateRecords,
-        createdRecords: partialLiveCreatedRecords,
-        closeRecords: partialLiveCloseRecords,
-        minContentTabCount: partialLiveSpaceSwitchTrace.minContentTabCount,
-        minTotalTabCount: partialLiveSpaceSwitchTrace.minTotalTabCount,
-        zeroContentObserved: partialLiveSpaceSwitchTrace.zeroContentObserved,
-        zeroTotalObserved: partialLiveSpaceSwitchTrace.zeroTotalObserved,
-        unsafeCloseObserved: partialLiveSpaceSwitchTrace.unsafeCloseObserved,
-        captureErrors: partialLiveSpaceSwitchTrace.captureErrors,
-      },
-      assertions: {
-        partialTargetSnapshotStable,
-        partialSourceSnapshotStable,
-        partialCreatedOnlyMissingRow,
-        partialLifecycleCorrect,
-        partialUiCorrect,
-        partialPhysicalTitleCorrect,
-        partialTargetCloseGuardsCorrect,
-        partialCloseSafetyCorrect,
-      },
-    });
-    record(
-      'A pinned partial-live target reuses its stable row and creates only the missing row before source close',
-      partialLiveSwitchOk,
-      partialLiveSwitchDetail,
-    );
-    if (!partialLiveSwitchOk) {
-      throw new Error(`Partial-live Space-switch regression: ${partialLiveSwitchDetail}`);
-    }
-
-    await evaluate(client, `chrome.windows.remove(
-      ${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)},
-    )`);
+    await evaluate(client, `chrome.windows.remove(${JSON.stringify(dormantSwitchPanel.windowId)})`);
     await waitForStable(client, `(async () => {
       const [closedWindow, sessionEntries] = await Promise.all([
-        chrome.windows.get(${JSON.stringify(partialLiveSpaceSwitchPanel.windowId)}).catch(() => null),
+        chrome.windows.get(${JSON.stringify(dormantSwitchPanel.windowId)}).catch(() => null),
         chrome.storage.session.get(null),
       ]);
       const pending = Object.keys(sessionEntries).filter((key) =>
@@ -19358,19 +17086,17 @@ async function main() {
         key.startsWith('spaceTabsLifecycleSuppression:'));
       return !closedWindow && pending.length === 0 ? true : null;
     })()`, 750, 20000);
+
     await evaluate(client, `(async () => navigator.locks.request(
       'space-tabs-shared-state',
       { mode: 'exclusive' },
       async () => {
-        const fixture = ${JSON.stringify(partialLiveSpaceSwitchFixture)};
+        const fixture = ${JSON.stringify(dormantSwitchFixture)};
         const fixtureIds = new Set([fixture.source.id, fixture.target.id]);
-        const fixtureUrls = new Set(${JSON.stringify(partialLiveFixtureUrls)});
+        const fixtureUrls = new Set(${JSON.stringify(dormantSwitchUrls)});
         const fixtureTabIds = new Set([
-          ...${JSON.stringify(partialLiveChromeFixture.sourceTabs.map((tab) => tab.id))},
-          ${JSON.stringify(partialLiveChromeFixture.existingTarget.id)},
-          ${JSON.stringify(partialLiveChromeFixture.pinned.id)},
-          ${JSON.stringify(partialRollbackCreatedTabId)},
-          ...${JSON.stringify(partialExpectedTargetTabIds)},
+          ${JSON.stringify(dormantSourceChrome.tab.id)},
+          ${JSON.stringify(dormantSwitchState.activeNewTabId)},
         ].map(Number));
         const [stored, storedWindow] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
@@ -19383,12 +17109,6 @@ async function main() {
           delete saved.groupOrder?.[spaceId];
           delete saved.tabOrder?.[spaceId];
           delete saved.collapsedSpaceGroups?.[spaceId];
-        }
-        for (const snapshot of Object.values(saved.spaceSnapshots || {})) {
-          snapshot.groups = (snapshot.groups || []).map((group) => ({
-            ...group,
-            tabs: (group.tabs || []).filter((row) => !fixtureUrls.has(row.url)),
-          }));
         }
         for (const [tabId, binding] of Object.entries(saved.tabLifecycle || {})) {
           if (fixtureIds.has(binding?.spaceId) || fixtureUrls.has(binding?.url) ||
@@ -19399,55 +17119,23 @@ async function main() {
             delete saved.renamedTabs?.[tabId];
           }
         }
-        for (const [tabId, spaceId] of Object.entries(saved.tabSpaces || {})) {
-          if (fixtureIds.has(spaceId) || fixtureTabIds.has(Number(tabId))) delete saved.tabSpaces[tabId];
-        }
         for (const [groupId, spaceId] of Object.entries(saved.groupSpaces || {})) {
           if (fixtureIds.has(spaceId)) {
             delete saved.groupSpaces[groupId];
             delete saved.collapsedGroups?.['group:' + groupId];
           }
         }
-        for (const groupId of [
-          ${JSON.stringify(partialLiveChromeFixture.sourceGroupId)},
-          ${JSON.stringify(partialLiveChromeFixture.wrongTargetGroupId)},
-          ${JSON.stringify(partialLiveRollbackAfter.existingTargetBinding?.groupId)},
-          ${JSON.stringify(partialPhysicalGroupId)},
-        ]) {
-          delete saved.groupSpaces?.[String(groupId)];
-          delete saved.collapsedGroups?.['group:' + groupId];
-        }
-        for (const [spaceId, order] of Object.entries(saved.tabOrder || {})) {
-          if (fixtureIds.has(spaceId)) continue;
-          for (const [key, tabIds] of Object.entries(order)) {
-            order[key] = (tabIds || []).filter((tabId) => !fixtureTabIds.has(Number(tabId)));
-            if (order[key].length === 0) delete order[key];
-          }
-        }
-        for (const [key, group] of Object.entries(saved.virtualGroups || {})) {
-          if (fixtureIds.has(group?.spaceId)) delete saved.virtualGroups[key];
-        }
+        saved.ephemeralTabIds = (saved.ephemeralTabIds || [])
+          .filter((tabId) => !fixtureTabIds.has(Number(tabId)));
         saved.activeSpaceId = ${JSON.stringify(originalDurableSpaceId)};
         const windowState = structuredClone(
           storedWindow.spaceTabsWindowState || { activeSpaceIds: {} },
         );
-        delete windowState.activeSpaceIds?.[
-          ${JSON.stringify(String(partialLiveSpaceSwitchPanel.windowId))}
-        ];
+        delete windowState.activeSpaceIds?.[${JSON.stringify(String(dormantSwitchPanel.windowId))}];
         await chrome.storage.local.set({ spaceTabsState: saved });
         await chrome.storage.session.set({ spaceTabsWindowState: windowState });
       },
     ))()`);
-    await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      return !(saved.spaces || []).some((space) => [
-        ${JSON.stringify(partialLiveSpaceSwitchFixture.source.id)},
-        ${JSON.stringify(partialLiveSpaceSwitchFixture.target.id)},
-      ].includes(space.id)) &&
-        !saved.spaceSnapshots?.[${JSON.stringify(partialLiveSpaceSwitchFixture.source.id)}] &&
-        !saved.spaceSnapshots?.[${JSON.stringify(partialLiveSpaceSwitchFixture.target.id)}];
-    })()`, 15000);
 
     const lifecycleWindowPanel = await createAuxiliaryPanelWindow();
     await selectSpaceInAuxiliaryPanel(

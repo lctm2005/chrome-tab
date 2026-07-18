@@ -697,7 +697,7 @@ function askTurnStorage({ apiKey = 'secret-must-not-leak' } = {}) {
     state,
     sourceTab,
     projectedSession,
-    reviewedSessionRevision: askSessionRevision(projectedSession),
+    preparedSessionRevision: askSessionRevision(projectedSession),
     storage: { local: { [STORAGE_KEY]: state }, session: {} },
   };
 }
@@ -2697,7 +2697,7 @@ test('Ask begin durably arms pending recovery before provider dispatch and survi
       prompt: 'What matters?',
       sourceTab: fixture.sourceTab,
       projectedSession: fixture.projectedSession,
-      reviewedSessionRevision: fixture.reviewedSessionRevision,
+      preparedSessionRevision: fixture.preparedSessionRevision,
       requestId: 'begin-before-provider',
       pruneOptions: {
         openTabIds: [fixture.sourceTab.id],
@@ -2750,7 +2750,7 @@ test('Ask begin durably arms pending recovery before provider dispatch and survi
   assert.equal(fetchCount, 0, 'a panel disappearing before ai:chat never contacts the provider');
 });
 
-test('Ask begin rejects invalid or stale reviews and compensates an alarm creation failure', async () => {
+test('Ask begin rejects invalid or stale prepared turns and compensates an alarm creation failure', async () => {
   const fixture = askTurnStorage();
   let fetchCount = 0;
   const background = await loadBackground({
@@ -2771,7 +2771,7 @@ test('Ask begin rejects invalid or stale reviews and compensates an alarm creati
       sessionKey: 'tab:99:https://wrong.example/',
       sourceTab: fixture.sourceTab,
       projectedSession: fixture.projectedSession,
-      reviewedSessionRevision: fixture.reviewedSessionRevision,
+      preparedSessionRevision: fixture.preparedSessionRevision,
       requestId: 'wrong-session',
     },
   })).error, /no longer matches the current page/);
@@ -2781,9 +2781,9 @@ test('Ask begin rejects invalid or stale reviews and compensates an alarm creati
       sessionKey: fixture.projectedSession.key,
       sourceTab: fixture.sourceTab,
       projectedSession: fixture.projectedSession,
-      requestId: 'stale-review',
+      requestId: 'stale-preparation',
     },
-  })).error, /conversation changed after Review opened/);
+  })).error, /conversation changed before it could be sent/);
   assert.equal(fetchCount, 0);
 
   const writeFixture = askTurnStorage({ apiKey: '' });
@@ -2804,7 +2804,7 @@ test('Ask begin rejects invalid or stale reviews and compensates an alarm creati
       prompt: 'Never send this',
       sourceTab: writeFixture.sourceTab,
       projectedSession: writeFixture.projectedSession,
-      reviewedSessionRevision: writeFixture.reviewedSessionRevision,
+      preparedSessionRevision: writeFixture.preparedSessionRevision,
       requestId: 'begin-write-failure',
     },
   })).error, /begin write failed/);
@@ -2834,7 +2834,7 @@ test('Ask begin rejects invalid or stale reviews and compensates an alarm creati
       prompt: '',
       sourceTab: alarmFixture.sourceTab,
       projectedSession: alarmFixture.projectedSession,
-      reviewedSessionRevision: alarmFixture.reviewedSessionRevision,
+      preparedSessionRevision: alarmFixture.preparedSessionRevision,
       requestId: 'alarm-failure',
     },
   })).error, /alarm storage unavailable/);

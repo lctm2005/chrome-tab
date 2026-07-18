@@ -216,10 +216,7 @@ import {
   uniqueSnapshotGroupForTabId,
   updateSnapshotTab,
 } from './src/shared/space-snapshot.js';
-import {
-  orderSpaceSwitchPhysicalIds,
-  planSpaceSwitch,
-} from './src/shared/space-switch.js';
+import { planSpaceSwitch } from './src/shared/space-switch.js';
 import {
   collectSpaceDeletionRollbackFailures,
   createCommittedSpaceDeletionError,
@@ -2458,8 +2455,8 @@ function refreshAskPageTargetUI() {
   if (activeView !== 'ask') return;
   const sourceTab = currentAskPageTab();
   els.askScope.textContent = sourceTab
-    ? `${sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page'} · stays local until you confirm`
-    : 'Current page · stays local until you confirm';
+    ? `${sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page'} · sent when you ask`
+    : 'Current page · sent when you ask';
   renderAskDisclosure();
   renderAskMessages();
 }
@@ -2480,7 +2477,7 @@ function renderAskDisclosure() {
   els.askProvider.textContent = [provider.label, state.ai.model].filter(Boolean).join(' · ');
   els.askSourceSummary.textContent = readableTab ? 'Current page' : 'No readable page';
   els.askSourceHint.textContent = readableTab
-    ? 'Click Ask Page to read this page locally. Nothing is sent to the provider until you confirm.'
+    ? 'Ask Page sends the current page and recent conversation context directly to your configured provider.'
     : 'Switch to an http or https page before using Ask Page.';
   const chips = tab ? [tab].map((sourceTab) => {
     const chip = document.createElement('span');
@@ -6188,8 +6185,6 @@ async function switchSpace(spaceId, options = {}) {
   // taking a new checkpoint here would preserve an uncommitted ghost Space.
   const checkpoint = options.rollbackCheckpoint || captureWorkspaceMemoryCheckpoint();
   const createdTabIds = [];
-  const openedDormantTabIds = [];
-  const movedTargetGroupIds = [];
   let storageMayBeDirty = false;
   let switchPlan = null;
   let materializedTarget = null;
@@ -6198,7 +6193,6 @@ async function switchSpace(spaceId, options = {}) {
   let activeSurvivorGuard = null;
   let originalFocusTabId = null;
   let reviewedCloseTargets = new Map();
-  let targetMembershipRollback = null;
   try {
     await withCreatedTabCheckpointRollback(createdTabIds, async () => {
       const loaded = await loadTabs({ adopt: false, windowBinding });
@@ -6240,21 +6234,13 @@ async function switchSpace(spaceId, options = {}) {
         sourceCleanupTabs,
         previousSpaceId,
       );
-      targetMembershipRollback = captureTabGroupMembership(
-        tabs,
-        groups,
-        spaceSwitchMembershipRollbackTabIds(switchPlan.targetLiveTabs, tabs),
-      );
-
-      // Hard safety boundary: the target is completely materialized and then
-      // made active before the durable active-Space pair is written. Source
-      // tabs are not even eligible for closing until all three steps succeed.
+      // Hard safety boundary: one temporary destination New Tab is prepared
+      // and made active before the durable active-Space pair is written.
+      // Saved target Tags remain dormant and source tabs are not eligible for
+      // closing until the keepalive is active.
       materializedTarget = await materializeSpaceSwitchTarget(switchPlan, {
         createdTabIds,
-        openedDormantTabIds,
-        movedTargetGroupIds,
         sourceSpaceId: previousSpaceId,
-        targetSnapshot,
         windowBinding,
       });
       activatedTarget = await activateSpaceSwitchTarget(materializedTarget.tabs, {
@@ -6280,23 +6266,9 @@ async function switchSpace(spaceId, options = {}) {
       }
     }, { windowBinding });
   } catch (error) {
-    for (const tabId of openedDormantTabIds) forgetRecentlyOpenedDormantTab(tabId);
     const rollbackFailures = [];
-    let rollbackCheckpoint = checkpoint;
-    if (targetMembershipRollback?.tabs?.length > 0) {
-      try {
-        const replacements = await restoreSpaceSwitchTargetMembership(targetMembershipRollback, {
-          restoreGroupPositions: movedTargetGroupIds.length > 0,
-          spaceId,
-          windowBinding,
-        });
-        rollbackCheckpoint = remapWorkspaceCheckpointGroups(checkpoint, replacements);
-      } catch (membershipError) {
-        rollbackFailures.push({ stage: 'restoring target Tag membership', error: membershipError });
-      }
-    }
     try {
-      await rollbackWindowBoundCreatedTabMutation(rollbackCheckpoint, {
+      await rollbackWindowBoundCreatedTabMutation(checkpoint, {
         error,
         stateMayHaveBeenPersisted: storageMayBeDirty,
         windowBinding,
@@ -6408,365 +6380,48 @@ function captureSpaceSwitchCloseTargets(sourceTabs, sourceCleanupTabs, sourceSpa
   return targets;
 }
 
-function spaceSwitchMembershipRollbackTabIds(targetTabs, allTabs) {
-  const targetIds = new Set((targetTabs || []).map((tab) => Number(tab.id)));
-  const targetGroupIds = new Set((targetTabs || [])
-    .filter(isGroupedTab)
-    .map((tab) => Number(tab.groupId)));
-  return uniqueNumberIds((allTabs || [])
-    .filter((tab) => (
-      targetIds.has(Number(tab.id)) || targetGroupIds.has(Number(tab.groupId))
-    ))
-    .map((tab) => Number(tab.id)));
-}
-
 async function materializeSpaceSwitchTarget(plan, options = {}) {
-  const targetSpaceId = plan.targetSpaceId;
-  const targetTabs = (plan.targetLiveTabs || []).map((tab) => ({ ...tab }));
+  const targetTabs = [];
   const requiredGroupAssignments = [];
-  const snapshotPhysicalGroupIds = [];
   let retainedFallbackTabId = null;
-  prepareSpaceSwitchTargetOrder(targetSpaceId, options.targetSnapshot, targetTabs);
-  const snapshotGroups = Array.isArray(options.targetSnapshot?.groups)
-    ? options.targetSnapshot.groups
-    : [];
-  for (let snapshotGroupIndex = 0; snapshotGroupIndex < snapshotGroups.length; snapshotGroupIndex += 1) {
-    const sourceGroup = { group: snapshotGroups[snapshotGroupIndex], index: snapshotGroupIndex };
-    const snapshotGroup = spaceSwitchPlannedRestoreGroup(plan, sourceGroup);
-    const localSnapshotTabs = spaceSwitchLocalTabsForSnapshotGroup(sourceGroup.group, targetTabs);
-    if (!snapshotGroup && localSnapshotTabs.length === 0) continue;
-    const groupKey = snapshotGroupKey(sourceGroup.index, sourceGroup.group, targetSpaceId);
-    const createdForGroup = [];
-    for (const snapshotTab of snapshotGroup?.tabs || []) {
-      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
-        throw new Error('This panel moved before the target Space could finish opening.');
-      }
-      const created = await send('tabs:create', {
-        url: snapshotTab.url,
-        active: false,
-      }, { windowBinding: options.windowBinding });
-      const tabId = Number(created.tab?.id);
-      if (Number.isSafeInteger(tabId)) options.createdTabIds.push(tabId);
-      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
-        throw new Error('This panel moved before the target Space could finish opening.');
-      }
-      if (!Number.isSafeInteger(tabId)) {
-        throw new Error('Chrome did not return a target tab it opened.');
-      }
-      const createdTab = {
-        ...created.tab,
-        id: tabId,
-        groupId: -1,
-        windowId: Number.isSafeInteger(Number(created.tab?.windowId))
-          ? Number(created.tab.windowId)
-          : options.windowBinding.windowId,
-      };
-      options.openedDormantTabIds.push(tabId);
-      createdForGroup.push({ tab: createdTab, snapshotTab });
-      targetTabs.push(createdTab);
-      state.tabSpaces[tabId] = targetSpaceId;
-      preserveDormantPanelName(snapshotTab, tabId);
-      if (!state.tabLifecycle || typeof state.tabLifecycle !== 'object') state.tabLifecycle = {};
-      state.tabLifecycle[tabId] = {
-        tabId,
-        snapshotTabId: snapshotTab.snapshotTabId,
-        snapshotGroupId: snapshotTab.snapshotGroupId || sourceGroup.group.snapshotGroupId,
-        spaceId: targetSpaceId,
-        url: String(createdTab.url || snapshotTab.url),
-        title: String(createdTab.title || snapshotTab.title || snapshotTab.url),
-        panelTitle: cleanPanelName(snapshotTab.panelTitle),
-        windowId: createdTab.windowId,
-        groupId: -1,
-        trackingMode: 'saved-target',
-        sessionId: state.browserSessionId,
-      };
-      rememberOpenedDormantTab(snapshotTab, {
-        ...sourceGroup.group,
-        key: groupKey,
-        spaceId: targetSpaceId,
-      }, tabId);
-    }
-
-    const tabIds = createdForGroup.map((entry) => Number(entry.tab.id));
-    const snapshotTabs = uniqueSpaceSwitchTabs([...localSnapshotTabs, ...createdForGroup.map((entry) => entry.tab)]);
-    if (snapshotTabs.length === 0) continue;
-    if (isUngroupedSnapshotGroup(sourceGroup.group)) {
-      const groupedTabIds = snapshotTabs
-        .filter(isGroupedTab)
-        .map((tab) => Number(tab.id));
-      if (groupedTabIds.length > 0) {
-        const ungrouped = await send('tabs:ungroup', { tabIds: groupedTabIds }, {
-          windowBinding: options.windowBinding,
-        });
-        if (ungrouped.missing) {
-          throw new Error('A target Space tab changed before its saved Ungrouped position could be restored.');
-        }
-      }
-      for (const tab of snapshotTabs) {
-        tab.groupId = -1;
-        state.tabSpaces[tab.id] = targetSpaceId;
-        delete state.tabGroups?.[tab.id];
-        ensureSpaceSwitchTargetLifecycle(tab, sourceGroup.group, -1, targetSpaceId);
-      }
-      transferGroupLocalState(groupKey, 'ungrouped', targetSpaceId);
-      for (const tabId of tabIds) removeTabFromSavedOrder(tabId, targetSpaceId);
-      const targetOrder = ensureTabOrderForSpace(targetSpaceId);
-      const ungroupedIds = targetTabs
-        .filter((tab) => !isGroupedTab(tab))
-        .map((tab) => Number(tab.id));
-      targetOrder.ungrouped = uniqueKeys([
-        ...spaceSwitchSnapshotTabOrder(sourceGroup.group, targetTabs, (tab) => !isGroupedTab(tab)),
-        ...(targetOrder.ungrouped || []).filter((tabId) => ungroupedIds.includes(Number(tabId))),
-        ...ungroupedIds,
-      ]);
-      continue;
-    }
-
-    const groupableTabs = snapshotTabs.filter((tab) => !tab.pinned);
-    const groupableTabIds = groupableTabs.map((tab) => Number(tab.id));
-    if (groupableTabIds.length === 0) continue;
-    const existingGroup = chromeGroupForSnapshotIdentity(
-      sourceGroup.group,
-      targetSpaceId,
-      targetTabs,
-    );
-    const idsToAdd = existingGroup
-      ? groupableTabs
-        .filter((tab) => Number(tab.groupId) !== Number(existingGroup.id))
-        .map((tab) => Number(tab.id))
-      : groupableTabIds;
-    const groupId = existingGroup
-      ? idsToAdd.length > 0
-        ? await addTabsToChromeGroup(existingGroup.id, idsToAdd, targetSpaceId, {
-          windowBinding: options.windowBinding,
-        })
-        : Number(existingGroup.id)
-      : await createChromeGroup(idsToAdd, {
-        title: sourceGroup.group.title,
-        color: sourceGroup.group.color,
-        collapsed: Boolean(state.collapsedGroups[groupKey] ?? sourceGroup.group.collapsed ?? true),
-        spaceId: targetSpaceId,
-        sourceKey: groupKey,
-        windowBinding: options.windowBinding,
-      });
+  const reusable = tabs.find((tab) => (
+    !tab.pinned &&
+    !isGroupedTab(tab) &&
+    isChromeNewTabUrl(tab.url) &&
+    (isEphemeralTab(tab) || tabBelongsToSpace(tab, options.sourceSpaceId))
+  ));
+  let fallback = reusable ? { ...reusable } : null;
+  if (!fallback) {
+    const created = await send('tabs:create', {
+      url: 'chrome://newtab',
+      active: false,
+    }, { windowBinding: options.windowBinding });
+    const tabId = Number(created.tab?.id);
+    if (Number.isSafeInteger(tabId)) options.createdTabIds.push(tabId);
     if (!isCurrentPanelWindowBinding(options.windowBinding)) {
-      throw new Error('This panel moved before the target Space could finish grouping.');
+      throw new Error('This panel moved before the target Space fallback could open.');
     }
-    if (!Number.isSafeInteger(Number(groupId)) || Number(groupId) < 0) {
-      throw new Error(`Chrome could not restore the target Tag "${sourceGroup.group.title || 'Tabs'}".`);
+    if (!Number.isSafeInteger(tabId)) {
+      throw new Error('Chrome did not return the target Space fallback tab.');
     }
-    if (existingGroup) {
-      await normalizeSpaceSwitchChromeGroup(groupId, sourceGroup.group, {
-        groupKey,
-        windowBinding: options.windowBinding,
-      });
-    }
-    for (const tab of groupableTabs) {
-      tab.groupId = Number(groupId);
-      ensureSpaceSwitchTargetLifecycle(
-        tab,
-        sourceGroup.group,
-        Number(groupId),
-        targetSpaceId,
-      );
-    }
-    if (existingGroup) {
-      transferGroupLocalState(groupKey, `group:${Number(groupId)}`, targetSpaceId);
-    }
-    const physicalGroupTabs = targetTabs.filter((tab) => Number(tab.groupId) === Number(groupId));
-    const orderedPhysicalGroupTabIds = uniqueKeys([
-      ...spaceSwitchSnapshotTabOrder(sourceGroup.group, physicalGroupTabs),
-      ...physicalGroupTabs.map((tab) => Number(tab.id)),
-    ]);
-    await reorderSpaceSwitchChromeGroup(groupId, orderedPhysicalGroupTabIds, {
-      windowBinding: options.windowBinding,
-    });
-    rememberRestoredGroupTabOrder(groupId, orderedPhysicalGroupTabIds, targetSpaceId);
-    requiredGroupAssignments.push({
-      groupId: Number(groupId),
-      tabIds: physicalGroupTabs.map((tab) => Number(tab.id)),
-    });
-    snapshotPhysicalGroupIds.push(Number(groupId));
+    fallback = {
+      ...created.tab,
+      id: tabId,
+      groupId: -1,
+      windowId: Number.isSafeInteger(Number(created.tab?.windowId))
+        ? Number(created.tab.windowId)
+        : options.windowBinding.windowId,
+    };
   }
-
-  const movableUngroupedTabIds = targetTabs
-    .filter((tab) => !tab.pinned && !isGroupedTab(tab))
-    .map((tab) => Number(tab.id));
-  const orderedUngroupedTabIds = orderSpaceSwitchPhysicalIds(
-    movableUngroupedTabIds,
-    state.tabOrder?.[targetSpaceId]?.ungrouped || [],
-  );
-  await reorderSpaceSwitchUngroupedTabs(orderedUngroupedTabIds, {
-    windowBinding: options.windowBinding,
-  });
-  await reorderSpaceSwitchChromeGroups(snapshotPhysicalGroupIds, {
-    movedGroupIds: options.movedTargetGroupIds,
-    windowBinding: options.windowBinding,
-  });
-
-  if (targetTabs.length === 0 && plan.needsFallback) {
-    const reusable = tabs.find((tab) => (
-      !tab.pinned &&
-      !isGroupedTab(tab) &&
-      isChromeNewTabUrl(tab.url) &&
-      (isEphemeralTab(tab) || tabBelongsToSpace(tab, options.sourceSpaceId))
-    ));
-    let fallback = reusable ? { ...reusable } : null;
-    if (!fallback) {
-      const created = await send('tabs:create', {
-        url: 'chrome://newtab',
-        active: false,
-      }, { windowBinding: options.windowBinding });
-      const tabId = Number(created.tab?.id);
-      if (Number.isSafeInteger(tabId)) options.createdTabIds.push(tabId);
-      if (!isCurrentPanelWindowBinding(options.windowBinding)) {
-        throw new Error('This panel moved before the target Space fallback could open.');
-      }
-      if (!Number.isSafeInteger(tabId)) {
-        throw new Error('Chrome did not return the target Space fallback tab.');
-      }
-      fallback = {
-        ...created.tab,
-        id: tabId,
-        groupId: -1,
-        windowId: Number.isSafeInteger(Number(created.tab?.windowId))
-          ? Number(created.tab.windowId)
-          : options.windowBinding.windowId,
-      };
-    }
-    retainedFallbackTabId = Number(fallback.id);
-    delete state.tabGroups?.[retainedFallbackTabId];
-    delete state.tabLifecycle?.[retainedFallbackTabId];
-    delete state.renamedTabs?.[retainedFallbackTabId];
-    removeTabFromSavedOrder(retainedFallbackTabId, options.sourceSpaceId);
-    if (snapshotHasPersistentContent(options.targetSnapshot)) {
-      delete state.tabSpaces[retainedFallbackTabId];
-      rememberEphemeralTab(retainedFallbackTabId);
-    } else {
-      forgetEphemeralTab(retainedFallbackTabId);
-      state.tabSpaces[retainedFallbackTabId] = targetSpaceId;
-      const targetOrder = ensureTabOrderForSpace(targetSpaceId);
-      targetOrder.ungrouped = uniqueKeys([...(targetOrder.ungrouped || []), retainedFallbackTabId]);
-    }
-    targetTabs.push(fallback);
-  }
-
-  if (targetTabs.length === 0) {
-    throw new Error('The target Space has no local tab that Chrome can activate safely.');
-  }
+  retainedFallbackTabId = Number(fallback.id);
+  delete state.tabGroups?.[retainedFallbackTabId];
+  delete state.tabLifecycle?.[retainedFallbackTabId];
+  delete state.renamedTabs?.[retainedFallbackTabId];
+  delete state.tabSpaces[retainedFallbackTabId];
+  removeTabFromSavedOrder(retainedFallbackTabId, options.sourceSpaceId);
+  rememberEphemeralTab(retainedFallbackTabId);
+  targetTabs.push(fallback);
   return { requiredGroupAssignments, retainedFallbackTabId, tabs: targetTabs };
-}
-
-function prepareSpaceSwitchTargetOrder(spaceId, snapshot, targetTabs) {
-  if (!state.groupOrder || typeof state.groupOrder !== 'object') state.groupOrder = {};
-  if (!state.tabOrder || typeof state.tabOrder !== 'object') state.tabOrder = {};
-  const snapshotGroups = Array.isArray(snapshot?.groups) ? snapshot.groups : [];
-  const snapshotKeys = snapshotGroups.map((group, index) => snapshotGroupKey(index, group, spaceId));
-  const snapshotTabIds = new Set(snapshotGroups.flatMap((group) => (
-    (group?.tabs || []).map((row) => validSnapshotLifecycleId(row?.snapshotTabId))
-  )).filter(Boolean));
-  const liveGroupKeys = uniqueKeys((targetTabs || [])
-    .filter(isGroupedTab)
-    .map((tab) => `group:${Number(tab.groupId)}`));
-  const snapshotOwnedLiveKeys = new Set((targetTabs || [])
-    .filter((tab) => (
-      isGroupedTab(tab) && snapshotTabIds.has(spaceSwitchSnapshotTabId(tab))
-    ))
-    .map((tab) => `group:${Number(tab.groupId)}`));
-  const liveOnlyKeys = liveGroupKeys.filter((key) => !snapshotOwnedLiveKeys.has(key));
-  const previousGroupOrder = state.groupOrder[spaceId] || [];
-  const orderedLiveOnlyKeys = uniqueKeys([
-    ...previousGroupOrder.filter((key) => liveOnlyKeys.includes(key)),
-    ...liveOnlyKeys,
-  ]);
-  const hasLiveUngrouped = (targetTabs || []).some((tab) => !isGroupedTab(tab));
-  state.groupOrder[spaceId] = uniqueKeys([
-    ...snapshotKeys,
-    ...orderedLiveOnlyKeys,
-    ...(hasLiveUngrouped ? ['ungrouped'] : []),
-  ]);
-
-  const previousTabOrder = state.tabOrder[spaceId] || {};
-  const targetTabIds = new Set((targetTabs || []).map((tab) => Number(tab.id)));
-  const nextTabOrder = {};
-  for (const key of orderedLiveOnlyKeys) {
-    const ids = (previousTabOrder[key] || [])
-      .map(Number)
-      .filter((tabId) => targetTabIds.has(tabId));
-    if (ids.length > 0) nextTabOrder[key] = uniqueKeys(ids);
-  }
-  const ungroupedIds = (targetTabs || [])
-    .filter((tab) => !isGroupedTab(tab))
-    .map((tab) => Number(tab.id));
-  if (ungroupedIds.length > 0) {
-    nextTabOrder.ungrouped = uniqueKeys([
-      ...(previousTabOrder.ungrouped || []).filter((tabId) => ungroupedIds.includes(Number(tabId))),
-      ...ungroupedIds,
-    ]);
-  }
-  state.tabOrder[spaceId] = nextTabOrder;
-}
-
-function spaceSwitchPlannedRestoreGroup(plan, sourceGroup) {
-  const plannedIndex = (plan.restoreGroupIndexes || []).findIndex((index) => (
-    Number(index) === Number(sourceGroup.index)
-  ));
-  if (plannedIndex >= 0) return plan.restoreGroups?.[plannedIndex] || null;
-  const stableId = validSnapshotLifecycleId(sourceGroup.group?.snapshotGroupId);
-  return stableId
-    ? (plan.restoreGroups || []).find((group) => (
-      validSnapshotLifecycleId(group?.snapshotGroupId) === stableId
-    )) || null
-    : null;
-}
-
-function spaceSwitchLocalTabsForSnapshotGroup(snapshotGroup, candidateTabs) {
-  const result = [];
-  for (const row of snapshotGroup?.tabs || []) {
-    const snapshotTabId = validSnapshotLifecycleId(row?.snapshotTabId);
-    if (!snapshotTabId) continue;
-    const matches = (candidateTabs || []).filter((tab) => (
-      spaceSwitchSnapshotTabId(tab) === snapshotTabId
-    ));
-    if (matches.length > 1) {
-      throw new Error('The target Space has duplicate live copies of one saved tab identity.');
-    }
-    if (matches.length === 1) result.push(matches[0]);
-  }
-  return uniqueSpaceSwitchTabs(result);
-}
-
-function spaceSwitchSnapshotTabId(tab) {
-  return validSnapshotLifecycleId(
-    state.tabLifecycle?.[tab?.id]?.snapshotTabId || tab?.snapshotTabId,
-  );
-}
-
-function ensureSpaceSwitchTargetLifecycle(tab, snapshotGroup, groupId, spaceId) {
-  if (!state.tabLifecycle || typeof state.tabLifecycle !== 'object') state.tabLifecycle = {};
-  const existing = state.tabLifecycle[tab.id];
-  const snapshotTabId = spaceSwitchSnapshotTabId(tab);
-  const snapshotRow = (snapshotGroup?.tabs || []).find((row) => (
-    validSnapshotLifecycleId(row?.snapshotTabId) === snapshotTabId
-  ));
-  if (!existing && !snapshotRow) return;
-  state.tabLifecycle[tab.id] = {
-    ...(existing || {}),
-    tabId: Number(tab.id),
-    snapshotTabId: snapshotTabId || existing?.snapshotTabId,
-    snapshotGroupId: validSnapshotLifecycleId(
-      snapshotRow?.snapshotGroupId || snapshotGroup?.snapshotGroupId ||
-        existing?.snapshotGroupId || tab.snapshotGroupId,
-    ),
-    spaceId,
-    url: String(tab.url || existing?.url || snapshotRow?.url || ''),
-    title: String(tab.title || existing?.title || snapshotRow?.title || tab.url || ''),
-    panelTitle: cleanPanelName(existing?.panelTitle || snapshotRow?.panelTitle),
-    windowId: Number(tab.windowId),
-    groupId,
-    trackingMode: existing?.trackingMode || 'live',
-    sessionId: state.browserSessionId,
-  };
 }
 
 function uniqueSpaceSwitchTabs(candidateTabs) {
@@ -6789,326 +6444,23 @@ async function verifyMaterializedSpaceSwitchTarget(materializedTarget, options =
   for (const target of materializedTarget?.tabs || []) {
     const current = currentById.get(Number(target.id));
     if (!current || Number(current.windowId) !== Number(options.windowBinding?.windowId)) {
-      throw new Error('A target Space tab closed or moved before the source Space could be cleaned up.');
+      throw new Error('The target Space keepalive closed or moved before source cleanup.');
     }
   }
   for (const assignment of materializedTarget?.requiredGroupAssignments || []) {
     for (const tabId of assignment.tabIds || []) {
-      const current = currentById.get(Number(tabId));
-      if (!current || Number(current.groupId) !== Number(assignment.groupId)) {
-        throw new Error('A target Space Tag changed before the source Space could be cleaned up.');
+      if (Number(currentById.get(Number(tabId))?.groupId) !== Number(assignment.groupId)) {
+        throw new Error('The target Space keepalive changed before source cleanup.');
       }
     }
   }
   if (Number.isSafeInteger(Number(options.activeTabId))) {
     const active = currentById.get(Number(options.activeTabId));
     if (!active?.active) {
-      throw new Error('The target Space was not active before the source Space cleanup checkpoint.');
+      throw new Error('The target Space keepalive was not active before source cleanup.');
     }
   }
-  return true;
-}
-
-async function restoreSpaceSwitchTargetMembership(membership, options = {}) {
-  const messageOptions = {
-    windowBinding: options.windowBinding,
-    allowStaleWindowBinding: true,
-  };
-  const replacements = new Map();
-  await restoreTabGroupMembership(membership, {
-    listTabs: async () => (await send('tabs:listAll', {}, messageOptions)).tabs || [],
-    ungroupTabs: (tabIds) => send('tabs:ungroup', { tabIds }, messageOptions),
-    moveTab: (tabId, position) => send('tabs:move', { tabId, ...position }, messageOptions),
-    addTabsToGroup: (groupId, tabIds) => addTabsToChromeGroup(
-      groupId,
-      tabIds,
-      options.spaceId,
-      messageOptions,
-    ),
-    createGroup: (tabIds, group) => createChromeGroup(tabIds, {
-      ...group,
-      spaceId: options.spaceId,
-      ...messageOptions,
-    }),
-  }, replacements);
-  for (const group of membership.groups || []) {
-    const restoredGroupId = resolveChromeGroupIdReplacement(group.groupId, replacements);
-    if (restoredGroupId === null) {
-      throw new Error('The saved target Tag identity is invalid during rollback.');
-    }
-    const logicalTitle = group.title === '' ? '' : normalizeGroupTitle(group.title, 'Group');
-    const restored = await send('groups:update', {
-      groupId: restoredGroupId,
-      update: {
-        title: logicalTitle === '' ? '' : chromeGroupTitle(logicalTitle, 'Group'),
-        color: group.color || 'blue',
-        collapsed: Boolean(group.collapsed),
-      },
-    }, messageOptions);
-    if (!restored.group) {
-      throw new Error(`Chrome group ${restoredGroupId} no longer exists during rollback.`);
-    }
-  }
-  if (options.restoreGroupPositions === true) {
-    await restoreSpaceSwitchChromeGroupPositions(membership, replacements, {
-      windowBinding: options.windowBinding,
-    });
-  }
-  return replacements;
-}
-
-async function restoreSpaceSwitchChromeGroupPositions(membership, replacements, options = {}) {
-  const capturedTabs = Array.isArray(membership?.tabs) ? membership.tabs : [];
-  const positions = (membership?.groups || [])
-    .map((group) => {
-      const originalGroupId = Number(group?.groupId);
-      const groupId = resolveChromeGroupIdReplacement(originalGroupId, replacements);
-      const indexes = capturedTabs
-        .filter((tab) => Number(tab?.groupId) === originalGroupId)
-        .map((tab) => Number(tab?.index))
-        .filter((index) => Number.isSafeInteger(index) && index >= 0);
-      const windowIds = uniqueKeys(capturedTabs
-        .filter((tab) => Number(tab?.groupId) === originalGroupId)
-        .map((tab) => Number(tab?.windowId))
-        .filter((windowId) => Number.isSafeInteger(windowId) && windowId >= 0));
-      if (groupId === null || indexes.length === 0 || windowIds.length !== 1) return null;
-      return { groupId, index: Math.min(...indexes), windowId: windowIds[0] };
-    })
-    .filter(Boolean)
-    .sort((left, right) => left.index - right.index || left.groupId - right.groupId);
-  if (positions.length === 0) return;
-
-  const messageOptions = {
-    windowBinding: options.windowBinding,
-    allowStaleWindowBinding: true,
-  };
-  for (const position of positions) {
-    const listed = await send('tabs:listAll', {}, messageOptions);
-    const groupTabs = (listed.tabs || [])
-      .filter((tab) => Number(tab.groupId) === Number(position.groupId));
-    if (
-      groupTabs.length === 0 ||
-      groupTabs.some((tab) => Number(tab.windowId) !== Number(position.windowId))
-    ) {
-      throw new Error('A saved target Tag changed while its original position was restored.');
-    }
-    const currentIndex = Math.min(...groupTabs.map((tab) => Number(tab.index)));
-    if (currentIndex === position.index) continue;
-    const moved = await send('groups:move', {
-      groupId: position.groupId,
-      index: position.index,
-    }, messageOptions);
-    if (moved.missing) {
-      throw new Error('A saved target Tag disappeared while its original position was restored.');
-    }
-  }
-
-  const verified = await send('tabs:listAll', {}, messageOptions);
-  for (const position of positions) {
-    const groupTabs = (verified.tabs || [])
-      .filter((tab) => Number(tab.groupId) === Number(position.groupId));
-    const actualIndex = groupTabs.length > 0
-      ? Math.min(...groupTabs.map((tab) => Number(tab.index)))
-      : -1;
-    if (
-      actualIndex !== position.index ||
-      groupTabs.some((tab) => Number(tab.windowId) !== Number(position.windowId))
-    ) {
-      throw new Error('Chrome did not restore the original target TagGroup position.');
-    }
-  }
-}
-
-function remapWorkspaceCheckpointGroups(checkpoint, replacements) {
-  if (!(replacements instanceof Map) || replacements.size === 0) return checkpoint;
-  const remapped = structuredClone(checkpoint);
-  remapChromeGroupBindings(remapped.state, replacements);
-  remapped.logicalChromeGroupTitles = [...remapLogicalChromeGroupTitles(
-    new Map(remapped.logicalChromeGroupTitles),
-    replacements,
-  )];
-  return remapped;
-}
-
-async function normalizeSpaceSwitchChromeGroup(groupId, snapshotGroup, options = {}) {
-  const logicalTitle = Object.hasOwn(snapshotGroup || {}, 'title')
-    ? String(snapshotGroup.title ?? '').trim()
-    : 'Tabs';
-  const physicalTitle = logicalTitle === '' ? '' : chromeGroupTitle(logicalTitle, 'Tabs');
-  const collapsed = Boolean(
-    state.collapsedGroups?.[options.groupKey] ?? snapshotGroup?.collapsed ?? true,
-  );
-  const result = await send('groups:update', {
-    groupId: Number(groupId),
-    update: {
-      title: physicalTitle,
-      color: snapshotGroup?.color || 'blue',
-      collapsed,
-    },
-  }, { windowBinding: options.windowBinding });
-  if (!result.group) {
-    throw new Error(`Chrome could not restore the target Tag "${logicalTitle || 'Tabs'}" metadata.`);
-  }
-  const current = groups.find((group) => Number(group.id) === Number(groupId));
-  if (current) Object.assign(current, result.group);
-  logicalChromeGroupTitles.set(Number(groupId), logicalTitle);
-  state.collapsedGroups[`group:${Number(groupId)}`] = collapsed;
-}
-
-async function reorderSpaceSwitchChromeGroup(groupId, orderedTabIds, options = {}) {
-  const numericGroupId = Number(groupId);
-  const messageOptions = { windowBinding: options.windowBinding };
-  const listed = await send('tabs:listAll', {}, messageOptions);
-  const currentGroupTabs = (listed.tabs || [])
-    .filter((tab) => Number(tab.groupId) === numericGroupId)
-    .sort((left, right) => Number(left.index) - Number(right.index));
-  const currentIds = currentGroupTabs.map((tab) => Number(tab.id));
-  const desiredIds = uniqueKeys([
-    ...(orderedTabIds || []).map(Number).filter((tabId) => currentIds.includes(tabId)),
-    ...currentIds,
-  ]);
-  if (
-    desiredIds.length < 2 ||
-    desiredIds.every((tabId, index) => tabId === currentIds[index])
-  ) return;
-  const firstIndex = Math.min(...currentGroupTabs.map((tab) => Number(tab.index)));
-  const windowId = Number(currentGroupTabs[0]?.windowId);
-  for (let index = 0; index < desiredIds.length; index += 1) {
-    const moved = await send('tabs:move', {
-      tabId: desiredIds[index],
-      index: firstIndex + index,
-      windowId,
-    }, messageOptions);
-    if (moved.missing) {
-      throw new Error('A target Space tab changed while its saved Tag order was restored.');
-    }
-  }
-  const verified = await send('tabs:listAll', {}, messageOptions);
-  const verifiedIds = (verified.tabs || [])
-    .filter((tab) => Number(tab.groupId) === numericGroupId)
-    .sort((left, right) => Number(left.index) - Number(right.index))
-    .map((tab) => Number(tab.id));
-  if (JSON.stringify(verifiedIds) !== JSON.stringify(desiredIds)) {
-    throw new Error('Chrome did not preserve the saved target Tag order.');
-  }
-}
-
-async function reorderSpaceSwitchUngroupedTabs(orderedTabIds, options = {}) {
-  const requestedIds = uniqueNumberIds(orderedTabIds);
-  if (requestedIds.length < 2) return;
-  const requestedSet = new Set(requestedIds);
-  const expectedWindowId = Number(options.windowBinding?.windowId);
-  const messageOptions = { windowBinding: options.windowBinding };
-  const readCurrent = async () => {
-    const listed = await send('tabs:listAll', {}, messageOptions);
-    const current = (listed.tabs || [])
-      .filter((tab) => requestedSet.has(Number(tab.id)))
-      .sort((left, right) => Number(left.index) - Number(right.index));
-    if (
-      current.length !== requestedIds.length ||
-      current.some((tab) => (
-        Number(tab.windowId) !== expectedWindowId ||
-        Number(tab.groupId) !== -1 ||
-        tab.pinned === true
-      ))
-    ) {
-      throw new Error('A target Space Ungrouped tab changed before its saved order could be restored.');
-    }
-    return current;
-  };
-
-  const current = await readCurrent();
-  const currentIds = current.map((tab) => Number(tab.id));
-  const desiredIds = orderSpaceSwitchPhysicalIds(currentIds, requestedIds);
-  if (desiredIds.every((tabId, index) => tabId === currentIds[index])) return;
-  const firstIndex = Math.min(...current.map((tab) => Number(tab.index)));
-  for (let index = 0; index < desiredIds.length; index += 1) {
-    const moved = await send('tabs:move', {
-      tabId: desiredIds[index],
-      index: firstIndex + index,
-      windowId: expectedWindowId,
-    }, messageOptions);
-    if (moved.missing) {
-      throw new Error('A target Space Ungrouped tab changed while its saved order was restored.');
-    }
-  }
-  const verified = await readCurrent();
-  const verifiedIds = verified.map((tab) => Number(tab.id));
-  if (JSON.stringify(verifiedIds) !== JSON.stringify(desiredIds)) {
-    throw new Error('Chrome did not preserve the saved target Ungrouped tab order.');
-  }
-}
-
-async function reorderSpaceSwitchChromeGroups(orderedGroupIds, options = {}) {
-  const normalizedGroupIds = (orderedGroupIds || [])
-    .map(Number)
-    .filter((groupId) => Number.isSafeInteger(groupId) && groupId >= 0);
-  const desiredGroupIds = uniqueKeys(normalizedGroupIds);
-  if (desiredGroupIds.length !== normalizedGroupIds.length) {
-    throw new Error('Two saved target Tags resolved to the same Chrome group.');
-  }
-  if (desiredGroupIds.length < 2) return;
-  const desiredSet = new Set(desiredGroupIds);
-  const expectedWindowId = Number(options.windowBinding?.windowId);
-  const messageOptions = { windowBinding: options.windowBinding };
-  const readCurrent = async () => {
-    const listed = await send('tabs:listAll', {}, messageOptions);
-    const relevantTabs = (listed.tabs || [])
-      .filter((tab) => desiredSet.has(Number(tab.groupId)))
-      .sort((left, right) => Number(left.index) - Number(right.index));
-    if (
-      relevantTabs.some((tab) => Number(tab.windowId) !== expectedWindowId) ||
-      new Set(relevantTabs.map((tab) => Number(tab.groupId))).size !== desiredGroupIds.length
-    ) {
-      throw new Error('A target Space Tag changed before its saved group order could be restored.');
-    }
-    return {
-      tabs: relevantTabs,
-      groupIds: uniqueKeys(relevantTabs.map((tab) => Number(tab.groupId))),
-    };
-  };
-
-  let current = await readCurrent();
-  if (desiredGroupIds.every((groupId, index) => groupId === current.groupIds[index])) return;
-  let nextIndex = Math.min(...current.tabs.map((tab) => Number(tab.index)));
-  for (const groupId of desiredGroupIds) {
-    current = await readCurrent();
-    const groupTabs = current.tabs.filter((tab) => Number(tab.groupId) === groupId);
-    const currentIndex = Math.min(...groupTabs.map((tab) => Number(tab.index)));
-    if (currentIndex !== nextIndex) {
-      if (
-        Array.isArray(options.movedGroupIds) &&
-        !options.movedGroupIds.includes(groupId)
-      ) options.movedGroupIds.push(groupId);
-      const moved = await send('groups:move', { groupId, index: nextIndex }, messageOptions);
-      if (moved.missing) {
-        throw new Error('A target Space Tag changed while its saved group order was restored.');
-      }
-    }
-    current = await readCurrent();
-    const movedGroupTabs = current.tabs.filter((tab) => Number(tab.groupId) === groupId);
-    nextIndex = Math.max(...movedGroupTabs.map((tab) => Number(tab.index))) + 1;
-  }
-  const verified = await readCurrent();
-  if (JSON.stringify(verified.groupIds) !== JSON.stringify(desiredGroupIds)) {
-    throw new Error('Chrome did not preserve the saved target TagGroup order.');
-  }
-}
-
-function spaceSwitchSnapshotTabOrder(snapshotGroup, candidateTabs, predicate = () => true) {
-  const candidatesBySnapshotId = new Map();
-  for (const tab of candidateTabs || []) {
-    if (!predicate(tab)) continue;
-    const snapshotTabId = validSnapshotLifecycleId(
-      state.tabLifecycle?.[tab.id]?.snapshotTabId || tab.snapshotTabId,
-    );
-    if (snapshotTabId && !candidatesBySnapshotId.has(snapshotTabId)) {
-      candidatesBySnapshotId.set(snapshotTabId, Number(tab.id));
-    }
-  }
-  return (snapshotGroup?.tabs || [])
-    .map((row) => candidatesBySnapshotId.get(validSnapshotLifecycleId(row?.snapshotTabId)))
-    .filter(Number.isSafeInteger);
+  return allTabs;
 }
 
 async function activateSpaceSwitchTarget(targetTabs, options = {}) {
@@ -10617,7 +9969,7 @@ async function askCustomPrompt({
   render();
   const sessionKey = sessionKeyForTab(sourceTab);
   const session = projectAskSessionForTab(state.askSessions, sourceTab);
-  const reviewedSessionRevision = askSessionRevision(session);
+  const preparedSessionRevision = askSessionRevision(session);
   const history = recentAskHistory(session.messages);
   const requestId = beginAIRequest();
   let statusMessage = null;
@@ -10643,52 +9995,19 @@ async function askCustomPrompt({
       Number(page.tabId) !== Number(sourceTab.id) ||
       normalizeSessionUrl(page.url) !== normalizeSessionUrl(sourceTab.url)
     ) {
-      throw new Error('The current page changed while Ask Page was preparing it. Review the new page and try again.');
+      throw new Error('The current page changed while Ask Page was preparing it. Nothing was sent; try again.');
     }
-    const selectionOnly = page.contentMode === 'selection' ||
-      Boolean(String(page.selectedText || page.selection || '').trim());
-    const reviewedCharacterCount = Number.isFinite(Number(page.charCount))
-      ? Number(page.charCount)
-      : String(selectionOnly ? page.selectedText || page.selection || '' : page.text || '').length;
-    const provider = providerById(aiSettings.provider);
-    // Permission and extraction are asynchronous. Keep Review attached to the
-    // frozen source without inserting an empty conversation. A confirmed turn
-    // creates and activates the durable session in beginAskTurn().
-    const confirmed = await showPlanPreview({
-      title: 'Review Ask Page',
-      message: `${provider.label} · ${aiSettings.model || 'configured model'} · ${formatCharacterCount(extraction.totalChars)} from the current page${selectionOnly ? ' · selected text only' : ''}${page.truncated ? ' · source text truncated' : ''}${history.length ? ` · stored text from ${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'} (generated citation URLs and Sources appendix excluded)` : ''}. Nothing is sent until you confirm.`,
-      confirmText: 'Send to provider',
-      sections: [
-        {
-          title: 'Current page',
-          items: [{
-            title: `[1] ${page.title || page.url || 'Untitled'}`,
-            result: `${formatCharacterCount(reviewedCharacterCount)}${selectionOnly ? ' · selected text only' : ''}${page.truncated ? ' · truncated' : ''}`,
-            meta: page.url,
-          }],
-        },
-        {
-          title: 'Question and conversation context',
-          items: [
-            { title: 'Your current question', result: 'Sent as written' },
-            ...(history.length ? [{
-              title: `${history.length} recent conversation ${history.length === 1 ? 'message' : 'messages'}`,
-              result: 'Stored message text sent; generated citation URLs and Sources appendices excluded',
-            }] : []),
-          ],
-        },
-      ],
-    });
-    if (!confirmed) return;
+    // Permission and extraction are asynchronous. Revalidate the frozen source
+    // before creating the durable turn and dispatching it to the provider.
     assertAIRequestActive(requestId);
-    await assertReviewedAskPageStillCurrent(page, sourceTab);
+    await assertPreparedAskPageStillCurrent(page, sourceTab);
     assertAIRequestActive(requestId);
     statusMessage = await beginAskTurn(
       sessionKey,
       prompt,
       sourceTab,
       session,
-      reviewedSessionRevision,
+      preparedSessionRevision,
       requestId,
     );
     activeAskStreams.set(requestId, { messageRef: statusMessage, page, text: '', finished: false });
@@ -10742,14 +10061,14 @@ async function askCustomPrompt({
   }
 }
 
-async function assertReviewedAskPageStillCurrent(page, sourceTab) {
+async function assertPreparedAskPageStillCurrent(page, sourceTab) {
   const response = await send('tabs:listAll');
   const current = (response.tabs || []).find((tab) => Number(tab.id) === Number(sourceTab.id));
   if (
     !current ||
     normalizeSessionUrl(current.pendingUrl || current.url) !== normalizeSessionUrl(page.url)
   ) {
-    throw new Error('The current page changed after review. Nothing was sent; review the new page and try again.');
+    throw new Error('The current page changed before Ask Page could send it. Nothing was sent; try again.');
   }
 }
 
@@ -10765,7 +10084,7 @@ async function beginAskTurn(
   prompt,
   sourceTab,
   projectedSession,
-  reviewedSessionRevision,
+  preparedSessionRevision,
   requestId,
 ) {
   if (extensionRuntime) {
@@ -10775,7 +10094,7 @@ async function beginAskTurn(
         prompt,
         sourceTab,
         projectedSession,
-        reviewedSessionRevision,
+        preparedSessionRevision,
         requestId,
         pruneOptions: currentAskSessionPruneOptions(sessionKey),
       },
@@ -10802,10 +10121,10 @@ async function beginAskTurn(
       projectedSession,
     );
     if (latestSession.key !== sessionKey) {
-      throw new Error('The reviewed Ask conversation no longer matches the current page. Review it again.');
+      throw new Error('The prepared Ask conversation no longer matches the current page. Nothing was sent; try again.');
     }
-    if (askSessionRevision(latestSession) !== reviewedSessionRevision) {
-      throw new Error('The Ask conversation changed after Review opened. Nothing was sent; review the updated conversation and try again.');
+    if (askSessionRevision(latestSession) !== preparedSessionRevision) {
+      throw new Error('The Ask conversation changed before it could be sent. Nothing was sent; try again.');
     }
     setActiveAskSessionKey(latestSession.key);
     appendAskSessionMessage(latestSession, 'user', prompt);
@@ -10868,11 +10187,6 @@ function replayAskMessageTabReplacements(ref) {
 
 function assertAIRequestActive(requestId) {
   if (activeAIRequestId !== requestId) throw new Error('AI request was stopped.');
-}
-
-function formatCharacterCount(value) {
-  const count = Math.max(0, Number(value) || 0);
-  return count >= 1000 ? `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}K chars` : `${count} chars`;
 }
 
 function startTestAIFromUserGesture(controls = settingsAIControls()) {

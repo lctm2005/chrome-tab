@@ -24,7 +24,7 @@ function fixture() {
   return { session, sessions: { [session.key]: session } };
 }
 
-test('Ask review revisions compare the exact semantic transcript and normalize malformed messages', () => {
+test('Ask prepared-turn revisions compare the exact semantic transcript and normalize malformed messages', () => {
   const session = {
     messages: [
       { id: 'u1', role: 'user', text: 'Question' },

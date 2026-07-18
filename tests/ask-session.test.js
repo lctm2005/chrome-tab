@@ -968,7 +968,7 @@ test('Ask projection clones only the matching newest conversation and tolerates 
   assert.deepEqual(malformedLiveProjection.messages, []);
 });
 
-test('two Ask actors keep the reviewed portable history when the first actor adopts it', () => {
+test('two Ask actors keep the prepared portable history when the first actor adopts it', () => {
   const url = 'https://example.com/shared-review';
   const firstTab = { id: 51, title: 'First window', url };
   const secondTab = { id: 52, title: 'Second window', url };
