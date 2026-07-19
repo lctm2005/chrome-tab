@@ -122,13 +122,13 @@ Core features do not require an account or AI API key.
 
 Suggested review flow:
 
-1. Install Space Tabs and choose Start fresh or Move from Arc in the visible three-stage setup: Choose, Space, then AI & ready.
+1. Install Space Tabs and choose Create new space or Move from Arc in setup step one: Space.
 2. For Arc, manually select a StorableSidebar.json fixture, review conflicts and counts, select Spaces, import, and use Undo. Start another import and verify that the file must be selected again.
 3. Create or switch a Space, open several pages, and use the command palette, folders, tab groups, and dormant tabs.
    Optionally import a `file://` saved row: before enabling Chrome's file-access
    toggle it remains saved and shows an actionable explanation; after enabling
    the toggle it opens normally and remains recoverable across Space switches.
-4. In setup step three, leave the provider unselected and choose Save to finish without AI. Repeat with complete provider settings and verify that Save stores them. The setup footer has no Not now, export, or import-Undo actions. Then open Workbench Settings to review backup, restore, BYOK settings, and shortcuts.
+4. In setup step two, AI, leave the provider unselected and choose Save to finish without AI. Repeat with complete provider settings and verify that Save stores them. The setup footer has no Not now, export, or import-Undo actions. Then open Workbench Settings to review backup, restore, BYOK settings, and shortcuts.
 5. With a test AI provider configured, make an HTTP(S) page active and ask about it. Review the provider, exact current page, extracted character count, and conversation context; confirm, observe streaming and the clickable single-source link, and Stop if desired. Verify that selected or background tabs are not sent.
 6. Run Tidy Names and verify one click generates its single final preview without an intermediate confirmation; cancel it and verify nothing changes. Do the same for Auto Group, then run it again, apply, and use the 10-second Undo prompt.
 7. In AI Settings, verify Thinking is available for DeepSeek V4 and GLM-5.2,

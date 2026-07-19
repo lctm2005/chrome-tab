@@ -80,7 +80,7 @@ test("renders a privacy page that matches the extension data path", async () => 
 test("renders support for Arc setup, Ask Page, and historical Tags", async () => {
   const html = await htmlFor("/support");
   assert.match(html, /<title>Support · Space Tabs<\/title>/i);
-  assert.match(html, /Why are there three setup steps/);
+  assert.match(html, /Why are there two setup steps/);
   assert.match(html, /StorableSidebar\.json/);
   assert.match(html, /review optional BYOK AI settings and choose Save/i);
   assert.match(html, /leave the provider unselected to finish without AI/i);

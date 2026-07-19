@@ -2151,7 +2151,7 @@ menu {
 
 .onboarding-progress {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -2185,14 +2185,6 @@ menu {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.onboarding-rail p {
-  margin-top: auto;
-  color: rgba(247, 247, 249, 0.68);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.65;
 }
 
 .onboarding-stage {
@@ -2895,10 +2887,6 @@ html[data-layout="workbench"] #settingsDialog menu {
   }
 
   .onboarding-progress {
-    display: none;
-  }
-
-  .onboarding-rail p {
     display: none;
   }
 

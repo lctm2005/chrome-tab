@@ -6,7 +6,7 @@ import SupportPage, { metadata } from "../app/support/page";
 import { expectNoAccessibilityViolations, expectWorkingSkipLink } from "./accessibility";
 
 describe("support page", () => {
-  it("presents a three-step setup and seven independently expandable answers", async () => {
+  it("presents a two-step setup and seven independently expandable answers", async () => {
     const user = userEvent.setup();
     const view = render(<SupportPage />);
 
@@ -15,7 +15,7 @@ describe("support page", () => {
       description: expect.stringContaining("troubleshooting"),
     });
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Get your Arc workflow settled in Chrome.");
-    expect(view.container.querySelectorAll(".quick-grid article")).toHaveLength(3);
+    expect(view.container.querySelectorAll(".quick-grid article")).toHaveLength(2);
 
     const details = [...view.container.querySelectorAll("details")];
     expect(details).toHaveLength(7);
@@ -24,7 +24,7 @@ describe("support page", () => {
     expect(disclosureIcons).toHaveLength(7);
     for (const icon of disclosureIcons) expect(icon).toHaveAttribute("aria-hidden", "true");
 
-    const firstSummary = screen.getByText("Why are there three setup steps?").closest("summary");
+    const firstSummary = screen.getByText("Why are there two setup steps?").closest("summary");
     const secondSummary = screen.getByText("What Arc file do I select?").closest("summary");
     expect(firstSummary).not.toBeNull();
     expect(secondSummary).not.toBeNull();

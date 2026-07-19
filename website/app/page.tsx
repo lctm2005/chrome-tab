@@ -81,13 +81,13 @@ export default function Home() {
           <div className="section-heading">
             <p className="eyebrow"><span /> Migration without the leap of faith</p>
             <h2>Your Arc workspace,<br />now in Chrome.</h2>
-            <p>Import is a visible three-step setup: choose a path, create or import a workspace, then review optional AI settings. The final step has one Save action: leave the provider unselected to continue without AI, or complete the provider settings to save them. You choose what crosses over and see conflicts before committing.</p>
+            <p>Import is part of a visible two-step setup: choose a path and create or import the workspace in Space, then review optional AI settings. The final step has one Save action: leave the provider unselected to continue without AI, or complete the provider settings to save them. You choose what crosses over and see conflicts before committing.</p>
           </div>
           <div className="feature-stack">
             <ProductScreenshot
               src="/screenshots/02-nested-folders-dormant-tabs.png"
-              alt="Current Space Tabs three-step Arc import preview with selectable Spaces and conflict details"
-              caption="Real setup flow · Choose, Space, AI & ready"
+              alt="Current Space Tabs two-step Arc import preview with selectable Spaces and conflict details"
+              caption="Real setup flow · Space, AI"
             />
             <div className="promise-list">
               {promises.map((item) => (

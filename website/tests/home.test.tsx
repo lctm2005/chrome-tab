@@ -31,7 +31,7 @@ describe("home page", () => {
     expect(screenshots).toHaveLength(5);
     expect(view.container.querySelectorAll("figure.product-screenshot figcaption")).toHaveLength(5);
     expect(screen.getByAltText(/Launch Space, nested groups/)).toHaveAttribute("data-priority", "true");
-    expect(screen.getByAltText(/three-step Arc import preview/)).toHaveAttribute("data-priority", "false");
+    expect(screen.getByAltText(/two-step Arc import preview/)).toHaveAttribute("data-priority", "false");
 
     expectWorkingSkipLink(view);
   });

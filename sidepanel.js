@@ -867,11 +867,7 @@ function bindEvents() {
   });
   els.onboardingSpaceNameInput.addEventListener('input', renderOnboarding);
   for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
-    button.addEventListener('click', () => {
-      const path = button.dataset.onboardingPath;
-      chooseOnboardingPath(path);
-      if (path === 'arc') startArcFileSelectionFromUserGesture('onboarding');
-    });
+    button.addEventListener('click', () => chooseOnboardingPath(button.dataset.onboardingPath));
   }
   els.onboardingArcInput.addEventListener('change', () => runTask((windowBinding) => (
     previewOnboardingArcFile(null, { windowBinding })
@@ -3647,12 +3643,7 @@ function chooseOnboardingPath(path) {
   if (path !== 'fresh' && path !== 'arc') return;
   if (path === 'fresh') clearOnboardingArcSelection();
   onboardingPath = path;
-  onboardingStep = 1;
   renderOnboarding();
-  requestAnimationFrame(() => {
-    if (path === 'fresh') els.onboardingSpaceNameInput.focus();
-    else els.onboardingArcInput.focus();
-  });
 }
 
 function goBackOnboarding() {
@@ -3675,13 +3666,14 @@ function renderOnboarding() {
   els.onboardingFooter.classList.toggle('no-back', isChoose);
   els.onboardingBackButton.hidden = isChoose;
   els.skipOnboardingButton.hidden = isFinish;
-  els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
+  const visibleStep = isFinish ? 1 : 0;
+  els.onboardingStepLabel.textContent = `Step ${visibleStep + 1} of 2`;
   els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
 
   const progress = [...els.onboardingProgress.querySelectorAll('span')];
   progress.forEach((item, index) => {
-    item.classList.toggle('active', index === onboardingStep);
-    item.classList.toggle('complete', index < onboardingStep);
+    item.classList.toggle('active', index === visibleStep);
+    item.classList.toggle('complete', index < visibleStep);
   });
   for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
     button.classList.toggle('selected', button.dataset.onboardingPath === onboardingPath);
@@ -3705,6 +3697,10 @@ async function continueOnboarding(options = {}) {
     if (!onboardingPath) return;
     onboardingStep = 1;
     renderOnboarding();
+    requestAnimationFrame(() => {
+      if (onboardingPath === 'fresh') els.onboardingSpaceNameInput.focus();
+      else els.onboardingArcChooseButton.focus();
+    });
     return;
   }
   if (onboardingStep !== 1) return;

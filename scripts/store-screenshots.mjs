@@ -487,6 +487,7 @@ function storeShotHtml(shot) {
         const input = doc.querySelector('#onboardingArcInput');
         if (input) input.click = () => {};
         doc.querySelector('[data-onboarding-path="arc"]')?.click();
+        doc.querySelector('#onboardingNextButton')?.click();
         const status = doc.querySelector('#onboardingArcStatus');
         const list = doc.querySelector('#onboardingArcSpaces');
         const choose = doc.querySelector('#onboardingArcChooseButton');

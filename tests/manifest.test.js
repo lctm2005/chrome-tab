@@ -272,6 +272,7 @@ test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', as
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+  const choosePathSource = functionSource(source, 'chooseOnboardingPath');
 
   assert.match(
     html,
@@ -287,6 +288,16 @@ test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', as
   );
   assert.match(source, /onboardingFooter\.classList\.toggle\('no-back', isChoose\)/);
   assert.match(styles, /\.onboarding-footer\.no-back\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+  assert.match(
+    html,
+    /id="onboardingProgress"[\s\S]*?<small>Space<\/small>[\s\S]*?<small>AI<\/small>[\s\S]*?<\/div>/,
+  );
+  assert.doesNotMatch(html, /<small>Choose<\/small>|AI &amp; ready|Keep Chrome\.<br>Bring your Arc workflow/);
+  assert.match(html, /id="onboardingStepLabel">Step 1 of 2<\/span>/);
+  assert.match(styles, /\.onboarding-progress\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+  assert.match(choosePathSource, /onboardingPath = path;[\s\S]*renderOnboarding\(\)/);
+  assert.doesNotMatch(choosePathSource, /onboardingStep\s*=|startArcFileSelectionFromUserGesture|\.focus\(/);
+  assert.match(source, /const visibleStep = isFinish \? 1 : 0;[\s\S]*`Step \$\{visibleStep \+ 1\} of 2`/);
 
   assert.doesNotMatch(html, /Panel Shortcuts|Toggle panel is a Chrome global shortcut/);
   assert.match(html, /<section class="shortcut-settings">\s*<div id="shortcutsList" class="shortcuts-list"><\/div>/);

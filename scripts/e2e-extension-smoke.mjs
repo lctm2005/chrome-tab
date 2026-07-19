@@ -1636,9 +1636,28 @@ async function main() {
     record('unfinished setup remains available after dismissal', true);
     await evaluate(client, `document.querySelector('.setup-space').click()`);
     await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
-    await evaluate(client, `document.querySelector('[data-onboarding-path="arc"]').click()`);
+    const arcPathSelectionState = await evaluate(client, `(() => {
+      document.querySelector('[data-onboarding-path="arc"]').click();
+      return {
+        chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
+        arcHidden: Boolean(document.querySelector('#onboardingArcStep')?.hidden),
+        selected: document.querySelector('[data-onboarding-path="arc"]')?.classList.contains('selected'),
+        step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+      };
+    })()`);
+    record(
+      'selecting Move from Arc stays on the first Space screen until Continue',
+      arcPathSelectionState.chooseVisible &&
+        arcPathSelectionState.arcHidden &&
+        arcPathSelectionState.selected &&
+        arcPathSelectionState.step === 'Step 1 of 2' &&
+        !arcPathSelectionState.nextDisabled,
+      JSON.stringify(arcPathSelectionState),
+    );
+    await evaluate(client, `document.querySelector('#onboardingNextButton').click()`);
     await waitFor(client, `!document.querySelector('#onboardingArcStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
     const arcPickerCancelState = await evaluate(client, `(async () => {
       const input = document.querySelector('#onboardingArcInput');
       let nativeInputClicks = 0;
@@ -1667,7 +1686,7 @@ async function main() {
         arcPickerCancelState.acceptsJson &&
         arcPickerCancelState.dialogOpen &&
         arcPickerCancelState.arcStepVisible &&
-        arcPickerCancelState.stepLabel === 'Step 2 of 3' &&
+        arcPickerCancelState.stepLabel === 'Step 1 of 2' &&
         !arcPickerCancelState.completed &&
         arcPickerCancelState.nextDisabled,
       JSON.stringify(arcPickerCancelState),
@@ -1706,12 +1725,15 @@ async function main() {
 
     await evaluate(client, `document.querySelector('#onboardingBackButton').click()`);
     await waitFor(client, `!document.querySelector('#onboardingChooseStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 3'`);
-    await evaluate(client, `document.querySelector('[data-onboarding-path="arc"]').click()`);
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
+    await evaluate(client, `(() => {
+      document.querySelector('[data-onboarding-path="arc"]').click();
+      document.querySelector('#onboardingNextButton').click();
+    })()`);
     const clearedArcPreviewState = await waitFor(client, `(() => {
       const input = document.querySelector('#onboardingArcInput');
       if (document.querySelector('#onboardingArcStep')?.hidden ||
-          document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 2 of 3') return null;
+          document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 1 of 2') return null;
       return {
         status: document.querySelector('#onboardingArcStatus')?.textContent || '',
         rows: document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option').length,
@@ -1786,7 +1808,7 @@ async function main() {
         !pendingArcAISetup.unselectedImported &&
         !pendingArcAISetup.completed &&
         pendingArcAISetup.onboardingStage === 'ai' &&
-        pendingArcAISetup.stepLabel === 'Step 3 of 3' &&
+        pendingArcAISetup.stepLabel === 'Step 2 of 2' &&
         pendingArcAISetup.aiStepVisible &&
         pendingArcAISetup.providerOptions > 1 &&
         pendingArcAISetup.removedControlsAbsent &&
@@ -14867,12 +14889,15 @@ async function main() {
     })()`);
     record(
       'Workbench Settings can reopen setup after onboarding is complete',
-      setupReentryState.chooseVisible && setupReentryState.step === 'Step 1 of 3' && !setupReentryState.settingsOpen,
+      setupReentryState.chooseVisible && setupReentryState.step === 'Step 1 of 2' && !setupReentryState.settingsOpen,
       JSON.stringify(setupReentryState),
     );
-    await evaluate(client, `document.querySelector('[data-onboarding-path="fresh"]').click()`);
+    await evaluate(client, `(() => {
+      document.querySelector('[data-onboarding-path="fresh"]').click();
+      document.querySelector('#onboardingNextButton').click();
+    })()`);
     await waitFor(client, `!document.querySelector('#onboardingFreshStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 2 of 3'`);
+      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
     await evaluate(client, `(() => {
       const input = document.querySelector('#onboardingSpaceNameInput');
       input.value = 'Setup E2E';
@@ -14916,7 +14941,7 @@ async function main() {
       pendingFreshAISetup.activeSpaceId === pendingFreshAISetup.setupSpace.id &&
         !pendingFreshAISetup.completed &&
         pendingFreshAISetup.onboardingStage === 'ai' &&
-        pendingFreshAISetup.stepLabel === 'Step 3 of 3' &&
+        pendingFreshAISetup.stepLabel === 'Step 2 of 2' &&
         pendingFreshAISetup.finishMessage === 'Setup E2E is ready.' &&
         pendingFreshAISetup.provider === 'openai' &&
         pendingFreshAISetup.model.length > 0 &&

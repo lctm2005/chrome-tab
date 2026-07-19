@@ -403,7 +403,28 @@ async function main() {
       onboardingUrl.searchParams.set('onboarding', '1');
       await checkpointPreviewCoverage(client, coverageSnapshots);
       await client.send('Page.navigate', { url: onboardingUrl.toString() });
-      await waitFor(client, `document.querySelector('#onboardingDialog')?.open && document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 3'`);
+      await waitFor(client, `document.querySelector('#onboardingDialog')?.open && document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
+      const freshPathSelectionState = await evaluate(client, `(() => {
+        document.querySelector('[data-onboarding-path="fresh"]').click();
+        return {
+          chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
+          freshHidden: Boolean(document.querySelector('#onboardingFreshStep')?.hidden),
+          selected: document.querySelector('[data-onboarding-path="fresh"]')?.classList.contains('selected'),
+          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
+          nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
+          nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
+        };
+      })()`);
+      record(
+        'selecting Create new space stays on the first Space screen until Continue',
+        freshPathSelectionState.chooseVisible &&
+          freshPathSelectionState.freshHidden &&
+          freshPathSelectionState.selected &&
+          freshPathSelectionState.step === 'Step 1 of 2' &&
+          freshPathSelectionState.nextText === 'Continue' &&
+          !freshPathSelectionState.nextDisabled,
+        JSON.stringify(freshPathSelectionState),
+      );
       await evaluate(client, `(() => {
         const originalSetItem = Storage.prototype.setItem;
         window.__ONBOARDING_STORAGE_FAULT__ = {
@@ -429,7 +450,7 @@ async function main() {
             throw new Error(fault.message || 'Simulated onboarding storage failure.');
           }
         };
-        document.querySelector('[data-onboarding-path="fresh"]').click();
+        document.querySelector('#onboardingNextButton').click();
         const input = document.querySelector('#onboardingSpaceNameInput');
         input.value = 'Atomic Space';
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -454,7 +475,7 @@ async function main() {
       record(
         'skipping onboarding rolls an apply-then-reject write back without a ghost completion',
         failedSkip.dialogOpen &&
-          failedSkip.step === 'Step 2 of 3' &&
+          failedSkip.step === 'Step 1 of 2' &&
           failedSkip.input === 'Atomic Space' &&
           failedSkip.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
           failedSkip.onboarding?.completed === false &&
@@ -492,7 +513,7 @@ async function main() {
       record(
         'onboarding Space creation storage failure stays on the naming step without a ghost or false success',
         failedCreate.dialogOpen &&
-          failedCreate.step === 'Step 2 of 3' &&
+          failedCreate.step === 'Step 1 of 2' &&
           failedCreate.nextAction === 'Create Space' &&
           failedCreate.activeSpaceName === 'Default' &&
           failedCreate.railNames.filter((name) => name === 'Atomic Space').length === 0 &&
@@ -515,7 +536,7 @@ async function main() {
         return true;
       })()`);
       const retriedCreate = await waitFor(client, `(() => {
-        if (document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 3 of 3') return null;
+        if (document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 2 of 2') return null;
         const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
         const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
         return {
@@ -532,7 +553,7 @@ async function main() {
       record(
         'retrying onboarding Space creation commits one visible and durable Space',
         retriedCreate.dialogOpen &&
-          retriedCreate.step === 'Step 3 of 3' &&
+          retriedCreate.step === 'Step 2 of 2' &&
           retriedCreate.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
           retriedCreate.activeSpaceName === 'Atomic Space' &&
           retriedCreate.railMatches === 1 &&
@@ -567,7 +588,7 @@ async function main() {
       record(
         'onboarding completion storage failure keeps the final step open and rolls back the completion marker',
         failedCompletion.dialogOpen &&
-          failedCompletion.step === 'Step 3 of 3' &&
+          failedCompletion.step === 'Step 2 of 2' &&
           failedCompletion.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
           failedCompletion.storedMatches === 1 &&
           failedCompletion.onboarding?.completed === false &&
