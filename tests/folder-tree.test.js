@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   createFolderTree,
+  folderTitleParts,
   movedGroupTitleForFolderDrop,
   renamedFolderGroupTitle,
 } from '../src/shared/folder-tree.js';
@@ -65,6 +66,16 @@ test('folds direct tabs into nested folders too', () => {
   assert.deepEqual(tree[0].children[0].children.map((node) => node.type), ['folder-tabs', 'group']);
 });
 
+test('renders deeply nested slash paths without an undocumented depth cutoff', () => {
+  const deep = group('Company / Product / Research / Drafts', ['https://example.com/deep']);
+  const tree = createFolderTree([deep], { activeSpaceId: 'space-a' });
+
+  assert.equal(tree[0].title, 'Company');
+  assert.equal(tree[0].children[0].title, 'Product');
+  assert.equal(tree[0].children[0].children[0].title, 'Research');
+  assert.equal(tree[0].children[0].children[0].children[0].group.displayTitle, 'Drafts');
+});
+
 test('retitles folder descendants when dragging a subfolder out to root', () => {
   assert.equal(
     movedGroupTitleForFolderDrop(
@@ -114,6 +125,44 @@ test('retitles groups when renaming a folder without duplicate adjacent path par
     ),
     'Work / Archive / Spec'
   );
+});
+
+test('folder parsing removes empty path segments and handles empty inputs as root groups', () => {
+  assert.deepEqual(folderTitleParts(' / Research // Drafts / '), ['Research', 'Drafts']);
+  assert.deepEqual(folderTitleParts(), []);
+
+  const emptyTitle = group('', ['https://example.com/empty']);
+  assert.deepEqual(createFolderTree([emptyTitle]), [{ type: 'group', group: emptyTitle }]);
+  assert.deepEqual(createFolderTree(), []);
+});
+
+test('folder moves provide stable fallback names and remove adjacent duplicate path parts', () => {
+  assert.equal(
+    movedGroupTitleForFolderDrop('', { type: 'folder', path: [] }, ['Archive', 'Archive']),
+    'Archive / Group',
+  );
+  assert.equal(
+    movedGroupTitleForFolderDrop('Parent / Leaf', { type: 'group', path: null }, ['Target']),
+    'Target / Leaf',
+  );
+  assert.equal(movedGroupTitleForFolderDrop(), 'Group');
+});
+
+test('folder rename falls back safely when paths no longer match or names are missing', () => {
+  assert.equal(
+    renamedFolderGroupTitle(
+      { displayTitle: 'Visible Leaf' },
+      ['Missing', 'Folder'],
+      'Archive',
+    ),
+    'Missing / Archive / Visible Leaf',
+  );
+  assert.equal(
+    renamedFolderGroupTitle({ title: 'Only' }, ['Longer', 'Source'], 'Next'),
+    'Longer / Next / Only',
+  );
+  assert.equal(renamedFolderGroupTitle(), 'Group');
+  assert.equal(renamedFolderGroupTitle({ title: 'A / B' }, null, ''), 'B');
 });
 
 function group(title, urls) {

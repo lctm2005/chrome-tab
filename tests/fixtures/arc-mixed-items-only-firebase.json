@@ -1,0 +1,76 @@
+{
+  "firebaseSyncState": {
+    "syncData": {
+      "orderedSpaceIDs": {
+        "value": [
+          "missing-firebase-space"
+        ]
+      },
+      "items": [
+        {
+          "value": {
+            "id": "orphan-firebase-tab",
+            "title": "Orphaned firebase tab",
+            "data": {
+              "tab": {
+                "savedURL": "https://example.com/orphaned"
+              }
+            },
+            "childrenIds": []
+          }
+        }
+      ]
+    }
+  },
+  "sidebarSyncState": {
+    "container": {
+      "value": {
+        "orderedSpaceIDs": [
+          "sidebar-sync-space"
+        ]
+      }
+    },
+    "spaceModels": [
+      {
+        "value": {
+          "id": "sidebar-sync-space",
+          "title": "Recovered Work",
+          "newContainerIDs": [
+            "sidebar-sync-container"
+          ]
+        }
+      }
+    ],
+    "items": [
+      {
+        "value": {
+          "id": "sidebar-sync-container",
+          "data": {
+            "itemContainer": {
+              "containerType": {
+                "spaceItems": {
+                  "_0": "sidebar-sync-space"
+                }
+              }
+            }
+          },
+          "childrenIds": [
+            "sidebar-sync-tab"
+          ]
+        }
+      },
+      {
+        "value": {
+          "id": "sidebar-sync-tab",
+          "title": "Recovered tab",
+          "data": {
+            "tab": {
+              "savedURL": "https://example.com/recovered"
+            }
+          },
+          "childrenIds": []
+        }
+      }
+    ]
+  }
+}

@@ -25,47 +25,47 @@ const shots = [
   {
     id: 'overview',
     file: '01-spaces-overview.png',
-    title: 'Spaces Overview',
-    kicker: 'Focused browser workspaces',
-    description: 'Project Spaces, live Chrome tab groups, saved tab names, and quick actions in one side panel.',
+    title: 'Your Arc workspace, now in Chrome.',
+    kicker: 'One thing. One Space.',
+    description: 'Keep projects, folders, tab groups, and saved tabs together without switching browsers.',
     activeSpaceId: 'launch',
-    notes: ['Live groups', 'Panel names', 'Space dock'],
+    notes: ['Spaces', 'Folders + saved tabs', 'Chrome-native groups'],
   },
   {
-    id: 'nested-dormant',
+    id: 'arc-import',
     file: '02-nested-folders-dormant-tabs.png',
-    title: 'Nested Folders',
-    kicker: 'Dormant tabs stay unloaded',
-    description: 'Keep deep project folders and saved tabs available without keeping every page open.',
-    activeSpaceId: 'research',
-    notes: ['3-level folders', 'Saved tabs', 'Open on demand'],
-  },
-  {
-    id: 'context-menu',
-    file: '03-tab-context-menu.png',
-    title: 'Tab Actions',
-    kicker: 'Right-click control',
-    description: 'Rename, duplicate, update saved URLs, and move tabs across Spaces from the panel.',
+    title: 'Import Arc Spaces in minutes.',
+    kicker: 'Move from Arc',
+    description: 'Preview Spaces, folders, saved tabs, and conflicts before anything changes.',
     activeSpaceId: 'launch',
-    notes: ['Move to Space', 'Duplicate', 'Rename'],
-  },
-  {
-    id: 'settings',
-    file: '04-settings-arc-import-shortcuts.png',
-    title: 'Settings',
-    kicker: 'Import and shortcuts',
-    description: 'Bring in Arc StorableSidebar.json, edit shortcuts, and configure optional AI providers.',
-    activeSpaceId: 'launch',
-    notes: ['Arc import', 'Shortcuts', 'BYOK settings'],
+    notes: ['3-step setup with AI', 'Choose Spaces', 'Undo import'],
   },
   {
     id: 'ask',
     file: '05-ask-page-byok-ai.png',
-    title: 'Ask Page',
-    kicker: 'Optional BYOK AI',
-    description: 'Ask questions or summarize the active page using the provider and API key you choose.',
+    title: 'Ask the current page with your own AI key.',
+    kicker: 'Ask Page',
+    description: 'Review the provider, exact page, and content size before anything is sent.',
     activeSpaceId: 'launch',
-    notes: ['Page context', 'API key', 'No account required'],
+    notes: ['Current page only', 'Clickable citation', 'Stream + Stop'],
+  },
+  {
+    id: 'auto-group',
+    file: '03-tab-context-menu.png',
+    title: 'AI organizes tabs. You approve every change.',
+    kicker: 'Auto Group',
+    description: 'Live and saved tabs enter one proposal. Cancel, apply, or Undo with a visible record.',
+    activeSpaceId: 'launch',
+    notes: ['Live + saved tabs', 'Preview first', 'Undo'],
+  },
+  {
+    id: 'settings',
+    file: '04-settings-arc-import-shortcuts.png',
+    title: 'Local by default. Export anytime.',
+    kicker: 'Your workspace, your data',
+    description: 'No Space Tabs account or server. Export a portable backup whenever you want.',
+    activeSpaceId: 'launch',
+    notes: ['Local workspace data', 'Portable backup', 'BYOK'],
   },
 ];
 
@@ -172,7 +172,7 @@ function storeShotHtml(shot) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(shot.title)} - Space Tabs Store Screenshot</title>
+    <title>${escapeHtml(shot.title)} - Space Store Screenshot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -187,8 +187,8 @@ function storeShotHtml(shot) {
         margin: 0;
         overflow: hidden;
         background:
-          linear-gradient(90deg, rgba(35, 139, 119, 0.16), transparent 42%),
-          linear-gradient(180deg, #191a22 0%, #0f1015 100%);
+          radial-gradient(circle at 18% 20%, rgba(118, 82, 255, 0.24), transparent 34%),
+          linear-gradient(180deg, #191724 0%, #0c0b12 100%);
       }
       .canvas {
         position: relative;
@@ -221,7 +221,7 @@ function storeShotHtml(shot) {
       }
       .kicker {
         margin: 70px 0 12px;
-        color: #77e0c6;
+        color: #b7a5ff;
         font-size: 18px;
         font-weight: 760;
       }
@@ -306,11 +306,11 @@ function storeShotHtml(shot) {
         margin-top: 28px;
       }
       .notes span {
-        border: 1px solid rgba(119, 224, 198, 0.28);
+        border: 1px solid rgba(183, 165, 255, 0.3);
         border-radius: 999px;
         padding: 8px 12px;
         color: rgba(247, 248, 251, 0.82);
-        background: rgba(119, 224, 198, 0.08);
+        background: rgba(118, 82, 255, 0.1);
         font-size: 13px;
         font-weight: 720;
       }
@@ -325,6 +325,61 @@ function storeShotHtml(shot) {
         border-radius: 8px;
         background: #090812;
         box-shadow: 0 34px 90px rgba(0, 0, 0, 0.44);
+      }
+      .workbench-shot .canvas {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: 82px minmax(0, 1fr);
+        gap: 18px;
+        padding: 28px 34px 32px;
+      }
+      .workbench-shot .story {
+        display: grid;
+        grid-template-columns: 190px minmax(0, 1fr) auto;
+        grid-template-rows: minmax(0, 1fr);
+        align-items: center;
+        gap: 24px;
+        padding: 0;
+      }
+      .workbench-shot .kicker,
+      .workbench-shot .description,
+      .workbench-shot .browser {
+        display: none;
+      }
+      .workbench-shot h1 {
+        position: relative;
+        margin: 0;
+        font-size: 38px;
+        line-height: 1;
+      }
+      .auto-group-shot .brand {
+        visibility: hidden;
+      }
+      .auto-group-shot::before {
+        position: fixed;
+        z-index: 10;
+        top: 52px;
+        left: 38px;
+        min-height: 38px;
+        padding-left: 50px;
+        background: url('/icons/icon128.png') left center / 38px 38px no-repeat;
+        color: rgba(247, 248, 251, 0.86);
+        content: 'Space Tabs';
+        font-size: 15px;
+        font-weight: 750;
+        line-height: 38px;
+      }
+      .workbench-shot .story > div:last-child {
+        min-width: 0;
+      }
+      .workbench-shot .notes {
+        max-width: 480px;
+        justify-content: flex-end;
+        margin: 0;
+      }
+      .workbench-shot .panel-wrap {
+        align-self: stretch;
+        width: 100%;
+        height: 100%;
       }
       .panel-titlebar {
         display: flex;
@@ -345,12 +400,12 @@ function storeShotHtml(shot) {
       }
     </style>
   </head>
-  <body>
+  <body class="${shot.id === 'overview' ? '' : 'workbench-shot'} ${shot.id}-shot">
     <main class="canvas">
       <section class="story">
         <div class="brand">
           <img src="/icons/icon128.png" alt="">
-          <span>Space Tabs for Chrome</span>
+          <span>Space Tabs</span>
         </div>
         <div class="kicker">${escapeHtml(shot.kicker)}</div>
         <h1>${escapeHtml(shot.title)}</h1>
@@ -374,22 +429,28 @@ function storeShotHtml(shot) {
           <div class="notes">${shot.notes.map((note) => `<span>${escapeHtml(note)}</span>`).join('')}</div>
         </div>
       </section>
-      <section class="panel-wrap" aria-label="Space Tabs side panel preview">
+      <section class="panel-wrap" aria-label="Space side panel preview">
         <div class="panel-titlebar">
           <span>Side panel</span>
           <span>Chrome</span>
         </div>
-        <iframe id="panel" title="Space Tabs"></iframe>
+        <iframe id="panel" title="Space"></iframe>
       </section>
     </main>
     <script>
       const scenario = ${JSON.stringify(scenario)};
       const STORAGE_KEY = 'spaceTabsState';
       const RUNTIME_KEY = 'spaceTabsPreviewRuntime';
+      const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
       localStorage.clear();
       sessionStorage.clear();
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: scenario.state }));
       sessionStorage.setItem(RUNTIME_KEY, JSON.stringify(scenario.runtime));
+      if (scenario.secrets) {
+        sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify({
+          [SECRET_STORAGE_KEY]: { ai: scenario.secrets },
+        }));
+      }
 
       const panel = document.querySelector('#panel');
       panel.addEventListener('load', async () => {
@@ -401,85 +462,126 @@ function storeShotHtml(shot) {
           document.body.dataset.error = error?.stack || error?.message || String(error);
         }
       }, { once: true });
-      panel.src = '/sidepanel.html';
+      panel.src = scenario.action === 'settings'
+        ? '/sidepanel.html?layout=workbench&view=settings'
+        : scenario.action === 'arc-import'
+        ? '/sidepanel.html?layout=workbench&onboarding=1'
+        : scenario.action === 'auto-group' || scenario.action === 'ask'
+        ? '/sidepanel.html?layout=workbench'
+        : '/sidepanel.html';
 
       async function afterPanelLoad(frame, scenario) {
         const win = frame.contentWindow;
         const doc = frame.contentDocument;
         await waitFor(() => doc.querySelector('#activeSpaceName')?.textContent?.trim().length);
         await waitFor(() => doc.querySelector('#spacesList button'));
-        if (scenario.action === 'context-menu') openContextMenu(doc);
+        if (scenario.action === 'arc-import') openArcImport(doc);
+        if (scenario.action === 'auto-group') await openAutoGroup(doc);
         if (scenario.action === 'settings') openSettings(doc);
         if (scenario.action === 'ask') await openAskPage(doc);
         await wait(240);
         win.dispatchEvent(new Event('resize'));
       }
 
-      function openContextMenu(doc) {
-        const row = [...doc.querySelectorAll('.tab-row')]
-          .find((item) => /Launch brief/i.test(item.textContent)) || doc.querySelector('.tab-row');
-        const rect = row.getBoundingClientRect();
-        row.dispatchEvent(new MouseEvent('contextmenu', {
-          bubbles: true,
-          cancelable: true,
-          view: panel.contentWindow,
-          clientX: rect.left + 26,
-          clientY: rect.top + 18,
-          button: 2,
-        }));
-        const submenu = doc.querySelector('.context-submenu');
-        if (submenu) submenu.classList.add('open');
+      function openArcImport(doc) {
+        const input = doc.querySelector('#onboardingArcInput');
+        if (input) input.click = () => {};
+        doc.querySelector('[data-onboarding-path="arc"]')?.click();
+        doc.querySelector('#onboardingNextButton')?.click();
+        const status = doc.querySelector('#onboardingArcStatus');
+        const list = doc.querySelector('#onboardingArcSpaces');
+        const choose = doc.querySelector('#onboardingArcChooseButton');
+        if (choose) choose.textContent = 'Choose another Arc file';
+        if (status) {
+          status.textContent = 'Preview: 3 Spaces, 6 folders, 18 saved tabs. 1 name conflict will import as Research (2).';
+        }
+        if (list) {
+          list.innerHTML = [
+            ['Launch', '3 folders · 8 tabs', 'Ready'],
+            ['Research', '2 folders · 6 tabs', 'Will import as Research (2)'],
+            ['Personal', '1 folder · 4 tabs', 'Ready'],
+          ].map(([name, counts, detail], index) => \`
+            <label class="onboarding-space-option">
+              <input type="checkbox" data-arc-space-id="arc-\${index}" checked>
+              <span class="onboarding-space-icon">\${name.slice(0, 1)}</span>
+              <strong>\${name}</strong>
+              <small class="\${index === 1 ? 'conflict' : ''}">\${counts} · \${detail}</small>
+            </label>
+          \`).join('');
+        }
+        const next = doc.querySelector('#onboardingNextButton');
+        if (next) next.disabled = false;
+      }
+
+      async function openAutoGroup(doc) {
+        doc.querySelector('#autoGroupButton')?.click();
+        await waitFor(() => doc.querySelector('#actionDialog')?.open &&
+          /Auto Group Preview/i.test(doc.querySelector('#actionDialogTitle')?.textContent), 5000);
+        const dialog = doc.querySelector('#actionDialog');
+        const preview = doc.querySelector('#actionDialogPreview');
+        const form = dialog?.querySelector('.action-form');
+        if (!dialog || !preview || !form || dialog.scrollHeight > dialog.clientHeight + 1 ||
+            doc.defaultView.getComputedStyle(preview).overflowY !== 'auto' ||
+            doc.defaultView.getComputedStyle(form).overflow !== 'hidden') {
+          throw new Error('Auto Group preview must use one internal scroll region.');
+        }
       }
 
       function openSettings(doc) {
-        doc.querySelector('#settingsButton')?.click();
         const dialog = doc.querySelector('#settingsDialog');
         const form = doc.querySelector('.settings');
-        const arcStatus = doc.querySelector('#arcImportStatus');
         const settingsStatus = doc.querySelector('#settingsStatus');
-        const filePicker = doc.querySelector('.file-picker');
+        const backupStatus = doc.querySelector('#spaceBackupStatus');
+        const backupInput = doc.querySelector('#spaceBackupInput');
+        const backupPicker = backupInput?.closest('.file-picker');
         const arcInput = doc.querySelector('#arcImportInput');
+        const restoreBackup = doc.querySelector('#restoreSpaceDataButton');
         const style = doc.createElement('style');
         style.textContent = '.store-file-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; min-height: 36px; border: 1px solid var(--glass-border); border-radius: var(--radius-sm); background: var(--surface-strong); padding: 0 10px; color: var(--text-soft); font-size: 12px; font-weight: 650; } .store-file-button { border-radius: 6px; padding: 5px 8px; background: var(--surface-hover); color: var(--text); }';
         doc.head.append(style);
-        if (filePicker && arcInput && !doc.querySelector('.store-file-row')) {
-          arcInput.hidden = true;
-          const fakePicker = doc.createElement('div');
-          fakePicker.className = 'store-file-row';
-          fakePicker.innerHTML = '<span class="store-file-button">Choose File</span><span>StorableSidebar.json</span>';
-          filePicker.append(fakePicker);
+        if (backupPicker && backupInput && !backupPicker.querySelector('.store-file-row')) {
+          backupInput.hidden = true;
+          const fakeBackupPicker = doc.createElement('div');
+          fakeBackupPicker.className = 'store-file-row';
+          fakeBackupPicker.innerHTML = '<span class="store-file-button">Choose File</span><span>space-backup-2026-07-12.json</span>';
+          backupPicker.append(fakeBackupPicker);
         }
-        if (arcStatus) arcStatus.textContent = 'Ready to append: 3 Spaces, 9 folders, 42 tabs from Arc.';
-        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Add your own provider key only when you use Ask Page.';
+        if (arcInput) arcInput.hidden = true;
+        if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
+        if (restoreBackup) restoreBackup.disabled = false;
+        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
         if (dialog?.open && form) {
-          const arc = doc.querySelector('.arc-import-settings');
-          form.scrollTop = Math.max(0, (arc?.offsetTop || 0) - 64);
+          const spaceData = doc.querySelector('.space-data-settings');
+          form.scrollTop = Math.max(0, (spaceData?.offsetTop || 0) - 92);
         }
       }
 
       async function openAskPage(doc) {
-        doc.querySelector('.ask-space')?.click();
-        await waitFor(() => !doc.querySelector('#askPageView')?.hidden);
+        doc.querySelector('.ask-page')?.click();
+        await waitFor(() => !doc.querySelector('#askPageView')?.hidden, 8000, 'Ask Page view');
         const input = doc.querySelector('#askPagePrompt');
-        input.value = 'Summarize the active page and list the next actions.';
+        input.value = 'What launch work is still missing from this brief?';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         doc.querySelector('#askAIButton')?.click();
         await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
-          .some((node) => /Preview AI response/i.test(node.textContent)), 5000);
+          .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Page preview response');
         const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
         if (assistant) {
-          assistant.innerHTML = '<p><strong>Summary</strong></p><p>The launch brief is ready for review. Next actions: finalize store copy, check reviewer notes, and ship the packaged build.</p>';
+          assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review, package verification, and the final store checklist <a href="https://docs.example.com/launch-brief">[1]</a>.</p><p><strong>Source</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a></p>';
+          const messages = doc.querySelector('#askMessages');
+          messages?.replaceChildren(assistant);
+          if (messages) messages.scrollTop = 0;
         }
       }
 
-      async function waitFor(check, timeoutMs = 8000) {
+      async function waitFor(check, timeoutMs = 8000, label = 'screenshot state') {
         const started = Date.now();
         while (Date.now() - started < timeoutMs) {
           const value = check();
           if (value) return value;
           await wait(50);
         }
-        throw new Error('Timed out while preparing screenshot.');
+        throw new Error(\`Timed out while preparing screenshot: \${label}.\`);
       }
 
       function wait(ms) {
@@ -493,15 +595,37 @@ function storeShotHtml(shot) {
 function scenarioFor(shot) {
   const state = baseState(shot.activeSpaceId);
   const runtime = baseRuntime();
-  if (shot.id === 'nested-dormant') {
-    runtime.tabs = [];
-    runtime.groups = [];
-    runtime.nextId = 1;
-    runtime.nextGroupId = 1;
+  let secrets = null;
+  if (shot.id === 'arc-import') state.onboarding = { version: 2, completed: false, stage: 'choose' };
+  if (shot.id === 'ask' || shot.id === 'auto-group') {
+    secrets = {
+      provider: state.ai.provider,
+      baseUrl: state.ai.baseUrl,
+      apiKey: 'store-preview-fixture-key',
+    };
+  }
+  if (shot.id === 'auto-group') {
+    state.spaceSnapshots.launch = {
+      version: 1,
+      updatedAt: 1770000000000,
+      preserveGroups: true,
+      groups: [{
+        id: 'arc-history',
+        title: 'Arc History',
+        color: 'orange',
+        collapsed: false,
+        tabs: [
+          { title: 'Arc launch plan', url: 'https://example.com/arc/launch-plan' },
+          { title: 'Historical store copy', url: 'https://example.com/arc/store-copy' },
+        ],
+      }],
+    };
+    state.groupOrder.launch.push('snapshot:0:Arc History');
   }
   return {
     state,
     runtime,
+    secrets,
     action: shot.id,
   };
 }
@@ -515,7 +639,7 @@ function baseState(activeSpaceId) {
   ];
 
   return {
-    version: 4,
+    version: 12,
     theme: 'ocean',
     activeSpaceId,
     spaces,
@@ -553,6 +677,7 @@ function baseState(activeSpaceId) {
     collapsedSpaceGroups: {},
     askSessions: {},
     activeAskSessionKey: '',
+    spaceContexts: {},
     spaceSnapshots: {
       research: {
         version: 1,
@@ -597,10 +722,11 @@ function baseState(activeSpaceId) {
         ],
       },
     },
+    onboarding: { version: 2, completed: true, stage: 'done' },
     shortcuts: {
       togglePanel: 'Alt+S',
-      askSubmit: 'Meta+Enter',
-      askAbort: 'Control+C',
+      askSubmit: 'Primary+Enter',
+      askAbort: 'Escape',
       openAsk: 'Alt+A',
       tidyNames: 'Control+Alt+T',
       autoGroup: 'Control+Alt+G',
@@ -612,11 +738,10 @@ function baseState(activeSpaceId) {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-5.4-mini',
-      apiKey: 'sk-store-demo',
+      apiKey: '',
       thinking: 'disabled',
       language: 'en',
       temperature: 0.6,
-      maxTokens: 2048,
     },
   };
 }

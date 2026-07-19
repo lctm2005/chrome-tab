@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=18">
+    <link rel="stylesheet" href="sidepanel.css?v=25">
   </head>
   <body>
     <div class="shell">
@@ -16,7 +16,7 @@
         </div>
         <div class="top-actions" aria-label="Actions">
           <button class="icon-button compact" id="tidyNamesButton" title="Tidy names" aria-label="Tidy Names">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+            <span class="tidy-icon" aria-hidden="true">🧹</span>
           </button>
           <button class="icon-button compact" id="autoGroupButton" title="Auto group" aria-label="Auto Group">
             <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -28,28 +28,46 @@
           <button class="icon-button compact" id="collapseGroupsButton" title="Collapse groups" aria-label="Collapse groups">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
           </button>
+          <button class="icon-button compact" id="commandPaletteButton" title="Command palette" aria-label="Open command palette">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+          </button>
+          <button class="icon-button compact" id="openWorkbenchButton" title="Open Workbench" aria-label="Open Workbench">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path><path d="M9 10h12"></path></svg>
+          </button>
           <button class="icon-button compact" id="settingsButton" title="Settings" aria-label="Settings">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
           </button>
         </div>
       </header>
 
+      <div class="operation-record" id="operationRecord" role="status" hidden>
+        <span id="operationRecordText"></span>
+        <button type="button" class="link-button" id="undoOrganizationButton">Undo</button>
+      </div>
+
       <main class="space-view" id="groupsList"></main>
 
       <main class="ask-view" id="askPageView" hidden>
+        <div class="ask-scope" id="askScope" hidden></div>
+        <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Page data disclosure" hidden>
+          <div><span>Provider</span><strong id="askProvider"></strong></div>
+          <div><span>Page</span><strong id="askSourceSummary"></strong></div>
+          <p id="askSourceHint">Ask Page sends the current page and recent conversation context directly to your configured provider.</p>
+          <div class="ask-source-list" id="askSourceList"></div>
+        </section>
         <div class="ask-messages" id="askMessages"></div>
         <textarea id="askPagePrompt" rows="4" placeholder="Ask about the current page"></textarea>
         <div class="ai-actions">
-          <button id="askAIButton">Ask</button>
-          <button id="summarizePageButton">Summary</button>
+          <button id="askAIButton">Ask Page</button>
         </div>
       </main>
 
       <nav class="space-dock" id="spacesList" aria-label="Spaces"></nav>
-      <div class="context-menu" id="contextMenu" hidden></div>
+      <div class="context-menu" id="contextMenu" role="menu" aria-label="Context actions" tabindex="-1" hidden></div>
+      <div class="workbench-toast" id="workbenchToast" role="status" aria-live="polite" hidden></div>
     </div>
 
-    <dialog id="actionDialog">
+    <dialog id="actionDialog" aria-labelledby="actionDialogTitle">
       <form class="action-form">
         <div class="dialog-title">
           <h2 id="actionDialogTitle">Action</h2>
@@ -58,6 +76,7 @@
           </button>
         </div>
         <p id="actionDialogMessage" class="action-message"></p>
+        <div id="actionDialogPreview" class="action-preview" hidden></div>
         <label id="actionDialogLabel" class="action-label">
           Name
           <input id="actionDialogInput" type="text" autocomplete="off" spellcheck="false">
@@ -69,10 +88,132 @@
       </form>
     </dialog>
 
-    <dialog id="settingsDialog">
+    <dialog id="onboardingDialog" class="onboarding-dialog" aria-label="Set up Space Tabs">
+      <div class="onboarding-shell">
+        <aside class="onboarding-rail">
+          <div class="onboarding-brand">
+            <span class="onboarding-mark">S</span>
+            <strong>Space</strong>
+          </div>
+          <div class="onboarding-progress" id="onboardingProgress" aria-label="Setup progress">
+            <span class="active"><small>Space</small></span>
+            <span><small>AI</small></span>
+          </div>
+        </aside>
+        <section class="onboarding-stage">
+          <header class="onboarding-header">
+            <span id="onboardingStepLabel">Step 1 of 2</span>
+          </header>
+
+          <section class="onboarding-step" id="onboardingChooseStep">
+            <div class="onboarding-copy">
+              <h2>How do you want to start?</h2>
+              <p>Create a clean Space or bring selected Arc Spaces into Chrome.</p>
+            </div>
+            <div class="onboarding-choices">
+              <button type="button" class="onboarding-choice" data-onboarding-path="fresh">
+                <span class="onboarding-choice-icon">+</span>
+                <span><strong>Create new space</strong></span>
+              </button>
+              <button type="button" class="onboarding-choice" data-onboarding-path="arc">
+                <span class="onboarding-choice-icon">A</span>
+                <span><strong>Move from Arc</strong></span>
+              </button>
+            </div>
+          </section>
+
+          <section class="onboarding-step" id="onboardingFreshStep" hidden>
+            <div class="onboarding-copy">
+              <h2>Name the thing.</h2>
+              <p>Use one Space for one project, decision, or research thread.</p>
+            </div>
+            <label class="onboarding-field">
+              Space name
+              <input id="onboardingSpaceNameInput" type="text" maxlength="64" autocomplete="off" placeholder="Research launch">
+            </label>
+          </section>
+
+          <section class="onboarding-step" id="onboardingArcStep" hidden>
+            <div class="onboarding-copy">
+              <h2>Choose what comes over from Arc.</h2>
+              <p>Choose Arc's <code>StorableSidebar.json</code>, then review the Spaces before importing.</p>
+            </div>
+            <input id="onboardingArcInput" type="file" accept=".json,application/json" hidden>
+            <button type="button" class="secondary-button arc-file-button" id="onboardingArcChooseButton">Choose Arc file</button>
+            <p class="arc-file-help">Cancel keeps you here. Nothing is imported until you review and confirm.</p>
+            <div class="onboarding-import-status" id="onboardingArcStatus">No Arc file selected.</div>
+            <div class="onboarding-space-list" id="onboardingArcSpaces"></div>
+          </section>
+
+          <section class="onboarding-step onboarding-finish" id="onboardingFinishStep" hidden>
+            <div class="onboarding-copy">
+              <h2>Connect your AI.</h2>
+              <p id="onboardingFinishMessage">Your first Space is ready.</p>
+              <p>Optional. Bring your own provider; the API key stays in this Chrome session.</p>
+            </div>
+            <div class="onboarding-ai-grid">
+              <label class="onboarding-field">
+                Provider
+                <select id="onboardingProviderInput">
+                  <option value="" selected>No provider</option>
+                </select>
+              </label>
+              <label class="onboarding-field">
+                Base URL
+                <input id="onboardingBaseUrlInput" type="url" spellcheck="false" disabled>
+              </label>
+              <label class="onboarding-field">
+                Model
+                <select id="onboardingModelInput" disabled></select>
+              </label>
+              <label class="onboarding-field" id="onboardingCustomModelLabel" hidden>
+                Custom Model
+                <input id="onboardingCustomModelInput" type="text" spellcheck="false">
+              </label>
+              <label class="onboarding-field">
+                Language
+                <select id="onboardingLanguageInput">
+                  <option value="zh-CN">Chinese (Simplified)</option>
+                  <option value="en">English</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </label>
+              <label class="onboarding-field">
+                API Key
+                <input id="onboardingApiKeyInput" type="password" autocomplete="off" spellcheck="false" disabled>
+              </label>
+              <label class="onboarding-field" id="onboardingThinkingLabel">
+                Thinking
+                <select id="onboardingThinkingInput" disabled>
+                  <option value="disabled">Disabled</option>
+                  <option value="enabled">Enabled</option>
+                </select>
+                <span class="ai-field-hint" id="onboardingThinkingHint">Choose a provider to see whether Thinking is supported.</span>
+              </label>
+            </div>
+            <div class="onboarding-ai-actions">
+              <button type="button" class="secondary-button" id="onboardingTestAIButton" disabled>Test AI</button>
+              <div id="onboardingAIStatus" class="settings-status">Choose a provider, or Save without AI.</div>
+            </div>
+            <div class="onboarding-finish-actions">
+              <button type="button" id="onboardingOpenWorkbenchButton">Save</button>
+            </div>
+            <p class="onboarding-privacy">No account, telemetry, or Space Tabs server. Workspace data stays in Chrome. BYOK content goes only to the provider you choose.</p>
+          </section>
+
+          <footer class="onboarding-footer" id="onboardingFooter">
+            <button type="button" class="secondary-button" id="onboardingBackButton">Back</button>
+            <button type="button" class="secondary-button" id="skipOnboardingButton">Skip</button>
+            <button type="button" id="onboardingNextButton">Continue</button>
+          </footer>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">
       <form method="dialog" class="settings">
         <div class="dialog-title">
-          <h2>Settings</h2>
+          <h2 id="settingsDialogTitle">Settings</h2>
           <button class="icon-button" value="cancel" aria-label="Close settings">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
@@ -120,32 +261,42 @@
           <span id="apiKeyStatus">No API key configured.</span>
           <button type="button" id="clearApiKeyButton" class="link-button">Clear API key</button>
         </div>
-        <div class="form-grid">
-          <label>
-            Thinking
-            <select id="thinkingInput">
-              <option value="disabled">Disabled</option>
-              <option value="enabled">Enabled</option>
-            </select>
-          </label>
-          <label>
-            Max tokens
-            <input id="maxTokensInput" type="number" min="256" max="32768" step="256">
-          </label>
-        </div>
+        <label id="thinkingLabel">
+          Thinking
+          <select id="thinkingInput">
+            <option value="disabled">Disabled</option>
+            <option value="enabled">Enabled</option>
+          </select>
+          <span class="ai-field-hint" id="thinkingHint" hidden></span>
+        </label>
         <button type="button" id="testAIButton" class="secondary-button">Test AI</button>
         <div id="settingsStatus" class="settings-status">AI status appears here.</div>
-        <section class="arc-import-settings">
-          <h3>Arc Import</h3>
-          <p>Select Arc's <code>StorableSidebar.json</code>.</p>
+        <section class="workspace-settings">
+          <h3>Workspace</h3>
+          <div class="settings-action-row">
+            <button type="button" id="runOnboardingButton" class="secondary-button">Run Setup</button>
+            <button type="button" id="settingsOpenWorkbenchButton" class="secondary-button">Open Workbench</button>
+          </div>
+        </section>
+        <section class="space-data-settings">
+          <h3>Space Data</h3>
+          <button type="button" id="exportSpaceDataButton" class="secondary-button">Export Backup</button>
           <label class="file-picker">
-            <input id="arcImportInput" type="file" accept=".json,application/json">
+            <input id="spaceBackupInput" type="file" accept=".json,application/json">
           </label>
+          <button type="button" id="restoreSpaceDataButton" class="secondary-button" disabled>Restore Backup</button>
+          <div id="spaceBackupStatus" class="settings-status">No backup selected.</div>
+        </section>
+        <section class="arc-import-settings">
+          <h3>Import from Arc</h3>
+          <p>Choose Arc's <code>StorableSidebar.json</code>. Space Tabs reads the selected copy locally and never modifies it.</p>
+          <input id="arcImportInput" type="file" accept=".json,application/json" hidden>
+          <button type="button" id="arcImportChooseButton" class="secondary-button">Choose Arc file</button>
           <button type="button" id="importArcButton" class="secondary-button" disabled>Append Import</button>
+          <button type="button" id="undoArcImportButton" class="secondary-button" disabled>Undo Last Import</button>
           <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
         </section>
         <section class="shortcut-settings">
-          <h3>Shortcuts</h3>
           <div id="shortcutsList" class="shortcuts-list"></div>
         </section>
         <menu>
@@ -155,7 +306,16 @@
       </form>
     </dialog>
 
+    <dialog id="commandPaletteDialog" class="command-palette-dialog" aria-labelledby="commandPaletteTitle">
+      <form method="dialog" class="command-palette-shell">
+        <label id="commandPaletteTitle" for="commandPaletteInput">Switch Spaces, find tabs, or ask</label>
+        <input id="commandPaletteInput" type="search" autocomplete="off" spellcheck="false" placeholder="Type a Space, tab, or command…">
+        <div id="commandPaletteResults" class="command-palette-results" role="listbox"></div>
+        <p class="command-palette-help">↑↓ navigate · Enter open · Esc close</p>
+      </form>
+    </dialog>
+
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=18"></script>
+    <script type="module" src="sidepanel.js?v=25"></script>
   </body>
 </html>

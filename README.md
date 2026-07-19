@@ -1,22 +1,30 @@
 # Space Tabs
 
-Space Tabs is a Chrome side panel extension for managing browser workspaces with a Space -> Folder -> Tab Group -> Tab model.
+Keep Chrome. Bring your Arc workflow. Add private BYOK AI.
 
-It is built for an Arc-like workflow in Chrome: each Space keeps its own working context, saved tabs are stored locally by the extension, and dormant tabs stay unloaded until you explicitly open them.
+Space Tabs is an Arc-like workspace for Chrome. Its first-run migration wizard
+previews selected Arc Spaces before import, while controlled AI workflows show
+what data is involved and what will change before anything is applied.
 
 ## Features
 
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
-- Folders: show locally stored nested folders, up to three levels deep.
+- Arc migration: choose `StorableSidebar.json` for each import, preview selected Spaces, review conflicts and counts, and undo the latest import. Space Tabs reads the chosen file locally and never modifies it.
+- Ask Page: ask about the current HTTP(S) page when you send a question. Selected text is prioritized when present. Before anything goes to the provider, Space Tabs shows the provider, page, total extracted character count (including selected text), and stored text from recent conversation messages. Responses stream, can be stopped, and include a clickable link to the single source page.
+- Workbench: use a full-page view for the current Space's tabs, Ask, and Settings.
+- Folders: show locally stored nested folders derived from slash-separated Tag names.
 - Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
+- Pinned tabs: stay open across Space switches and are never silently renamed, grouped, dragged, cleared, or closed by Space actions. Deleting their Space moves their ownership to the fallback Space.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Auto Group: group ungrouped tabs locally, with optional BYOK AI support.
+- Tidy Names and Auto Group: Tidy uses the configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and open one final, reviewable preview. Nothing is applied until you choose Apply. Tidy handles live tab names; Auto Group includes eligible live and dormant saved tabs and lists untouched historical Tags.
+- Recovery: use the 10-second Undo prompt after Tidy, Auto Group, or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
+- Command palette: switch Spaces, find tabs, and open Ask with `Cmd/Ctrl+K`.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
-- Ask Page: optional page summary and Q&A with a user-provided OpenAI-compatible API key.
-- Arc import: append Arc `StorableSidebar.json` Spaces and folders as saved Space content.
-- Shortcuts: built-in keyboard actions with user-editable bindings in Settings.
+- Portable backup: export and restore Spaces, saved tabs, and Ask history without API keys. Restore checks an 8 MB Chrome-storage safety budget before writing and rolls back on failure.
+- Local-first privacy: no account, hosted sync service, or persistent script running on every website.
+- Panel shortcuts: built-in keyboard actions with user-editable bindings in Settings.
 
 ## Package for Chrome Web Store
 
@@ -48,6 +56,11 @@ Store preparation docs:
 6. Select the unzipped extension folder.
 7. Pin `Space Tabs` to the toolbar and click the extension icon to open the side panel.
 
+If a backup or Arc import contains local `file://` pages, also enable **Allow
+access to file URLs** on Space Tabs' Chrome extension details page. Until that
+manual Chrome permission is enabled, saved local-file rows remain stored but
+cannot be opened or cleared by the extension.
+
 ## Install From Source
 
 1. Clone or download this repository.
@@ -61,28 +74,47 @@ After updating the source files, reload the unpacked extension from `chrome://ex
 
 ## AI Setup
 
-AI features are optional and use your own API key.
+AI features are optional and use your own API key. The third step of first-run
+setup always ends with one `Save` action. Leave the provider unselected to
+finish without configuring AI, or complete the provider settings to save them.
+You can configure or change AI later in Settings.
 
-Open `Settings` in the side panel and configure:
+The setup step and full-page Workbench Settings use the same provider options:
 
-- `Provider`: choose `Z.ai / GLM`, `OpenAI`, or `Custom OpenAI-compatible`.
+- `Provider`: choose `Z.ai / GLM`, `OpenAI`, `Google Gemini`, `DeepSeek`,
+  `Ollama (Local)`, or `Custom OpenAI-compatible`.
 - `Base URL`: built-in providers fill this automatically; custom providers can
   edit it.
 - `Model`: choose a provider model, or pick `Custom model...` for compatible
-  endpoints.
-- `API Key`: stored locally by Chrome for the current extension session.
-- `Language`: controls Ask and Summary output language.
+  endpoints and local Ollama models.
+- `Thinking`: available only for DeepSeek V4 and compatible GLM models. Space
+  Tabs sends Enabled or Disabled explicitly; unsupported providers show the
+  control as unavailable instead of ignoring it.
+- `API Key`: stored locally by Chrome for the current extension session; Ollama
+  runs locally and does not require one.
+- `Language`: controls Ask Page output language.
+
+The built-in `Z.ai / GLM` option uses Z.ai's general API endpoint. A GLM Coding
+Plan endpoint can still be entered deliberately through `Custom
+OpenAI-compatible`; Space Tabs never switches products or billing pools after
+an account error.
 
 If no API key is configured, normal Space, folder, and tab management features continue to work.
 
-## Arc Import
+## Space Backup
 
-1. Open `Settings`.
-2. Choose Arc's `StorableSidebar.json`.
-3. Review the import summary.
-4. Click `Append Import`.
+Open `Settings` and use `Export Backup` to write a portable JSON file. Restore
+shows a preview, replaces the current Spaces while keeping local AI settings,
+shortcuts, and API keys unchanged, keeps current browser tabs open in the
+restored active Space, and creates an Undo record. The exported
+file can contain saved page URLs and Ask history, so treat it as personal data.
 
-The importer appends Spaces and keeps the current Space active. Arc folders become nested folder paths, leaf folders become Chrome tab groups when opened, and saved tabs remain dormant until selected.
+## Product, Privacy, and Support Site
+
+The source for the aligned product, privacy, and support pages lives in
+`website/`. A private validation deployment is available at
+`https://space-tabs-chrome.james-lctm.chatgpt.site`; make the site public before
+using its URLs in the Chrome Web Store listing.
 
 ## Shortcuts
 
@@ -91,8 +123,8 @@ Default bindings:
 | Action | Shortcut |
 | --- | --- |
 | Toggle panel | `Alt+S` |
-| Ask submit | `Cmd+Enter` |
-| Abort Ask | `Ctrl+C` |
+| Ask submit | `Ctrl/Cmd+Enter` |
+| Stop Ask | `Escape` |
 | Open Ask Page | `Alt+A` |
 | Tidy names | `Ctrl+Alt+T` |
 | Auto group | `Ctrl+Alt+G` |
@@ -100,4 +132,9 @@ Default bindings:
 | Previous Space | `Ctrl+Alt+Left` |
 | Next Space | `Ctrl+Alt+Right` |
 
-You can edit common shortcuts in `Settings`.
+`Alt+S` is the global Chrome action shortcut. The other bindings apply while
+the side panel is focused and can be edited in `Settings`.
+
+Multi-page Ask Space is intentionally deferred until its product scope and
+source-selection model are defined. Selecting tab rows does not broaden Ask
+Page beyond the current page.

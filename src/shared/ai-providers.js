@@ -3,11 +3,27 @@ export const CUSTOM_AI_PROVIDER_ID = 'openai-compatible';
 export const AI_PROVIDER_CATALOG = [
   {
     id: 'z-ai',
-    label: 'Z.ai / GLM',
-    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    label: 'Z.ai',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
     editableBaseUrl: false,
     models: [
-      { id: 'glm-5.2', label: 'GLM-5.2' },
+      {
+        id: 'glm-5.2',
+        label: 'GLM-5.2',
+        documentationUrl: 'https://docs.z.ai/guides/llm/glm-5.2',
+      },
+    ],
+  },
+  {
+    id: 'glm',
+    label: 'GLM（国内）',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    editableBaseUrl: false,
+    models: [
+      {
+        id: 'glm-5.2',
+        label: 'GLM-5.2',
+      },
     ],
   },
   {
@@ -20,6 +36,35 @@ export const AI_PROVIDER_CATALOG = [
       { id: 'gpt-5.4', label: 'GPT-5.4' },
       { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
     ],
+  },
+  {
+    id: 'gemini',
+    label: 'Google Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    editableBaseUrl: false,
+    models: [
+      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
+    ],
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    editableBaseUrl: false,
+    models: [
+      { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+    ],
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama (Local)',
+    baseUrl: 'http://localhost:11434/v1',
+    editableBaseUrl: false,
+    requiresApiKey: false,
+    models: [],
   },
   {
     id: CUSTOM_AI_PROVIDER_ID,
@@ -42,24 +87,44 @@ export function providerForBaseUrl(baseUrl) {
     .find((provider) => normalizeProviderUrl(provider.baseUrl) === normalized) || null;
 }
 
+export function providerRequiresApiKey(settings = {}) {
+  const value = settings && typeof settings === 'object' ? settings : {};
+  const provider = value.provider
+    ? providerById(value.provider)
+    : providerForBaseUrl(value.baseUrl) || customProvider();
+  return provider.requiresApiKey !== false;
+}
+
+export function providerSupportsThinking(settings = {}) {
+  const value = settings && typeof settings === 'object' ? settings : {};
+  const provider = value.provider
+    ? providerById(value.provider)
+    : providerForBaseUrl(value.baseUrl) || customProvider();
+  const model = String(value.model || '').trim().toLowerCase();
+  if (provider.id === 'deepseek') return /^deepseek-v4(?:-|$)/.test(model);
+  if (provider.id === 'z-ai' || provider.id === 'glm') return supportsGlmThinking(model);
+  if (provider.id !== CUSTOM_AI_PROVIDER_ID) return false;
+  return /^deepseek-v4(?:-|$)/.test(model) || supportsGlmThinking(model);
+}
+
 export function normalizeAIProviderSettings(settings = {}) {
-  const detectedProvider = settings.provider
-    ? providerById(settings.provider)
-    : providerForBaseUrl(settings.baseUrl) || customProvider();
-  const provider = detectedProvider || customProvider();
-  const model = normalizedProviderModel(provider, settings.model);
+  const value = settings && typeof settings === 'object' ? settings : {};
+  const provider = value.provider
+    ? providerById(value.provider)
+    : providerForBaseUrl(value.baseUrl) || customProvider();
+  const model = normalizedProviderModel(provider, value.model);
 
   if (provider.id === CUSTOM_AI_PROVIDER_ID) {
     return {
-      ...settings,
+      ...value,
       provider: CUSTOM_AI_PROVIDER_ID,
-      baseUrl: normalizeProviderUrl(settings.baseUrl),
+      baseUrl: normalizeProviderUrl(value.baseUrl),
       model,
     };
   }
 
   return {
-    ...settings,
+    ...value,
     provider: provider.id,
     baseUrl: provider.baseUrl,
     model,
@@ -68,9 +133,18 @@ export function normalizeAIProviderSettings(settings = {}) {
 
 function normalizedProviderModel(provider, model) {
   const value = String(model || '').trim();
-  if (!provider.models.length) return value;
-  if (provider.models.some((item) => item.id === value)) return value;
-  return provider.models[0].id;
+  // Keep built-in Z.ai users on the current flagship when the catalog advances.
+  if ((provider.id === 'z-ai' || provider.id === 'glm') && value.toLowerCase() === 'glm-5.1') {
+    return provider.models[0]?.id || '';
+  }
+  if (value) return value;
+  return provider.models[0]?.id || '';
+}
+
+function supportsGlmThinking(model) {
+  if (/^glm-5(?:[.\-]|$)/.test(model)) return true;
+  const match = model.match(/^glm-4\.(\d+)(?:[.\-]|$)/);
+  return Boolean(match && Number(match[1]) >= 5);
 }
 
 function customProvider() {
@@ -78,5 +152,14 @@ function customProvider() {
 }
 
 function normalizeProviderUrl(value) {
-  return String(value || '').trim().replace(/\/+$/, '');
+  const normalized = String(value || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/, '');
+  if (!normalized) return '';
+  try {
+    return new URL(normalized).toString().replace(/\/+$/, '');
+  } catch {
+    return normalized;
+  }
 }

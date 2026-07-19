@@ -1,13 +1,29 @@
 {
   "name": "space-tabs",
-  "version": "0.4.2",
+  "version": "0.5.8",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "e2e:smoke": "node scripts/e2e-smoke.mjs",
+    "test:coverage:shared": "node scripts/node-coverage-gate.mjs shared",
+    "test:coverage:background": "node scripts/node-coverage-gate.mjs background",
+    "test:coverage:node": "npm run test:coverage:shared && npm run test:coverage:background",
+    "test:coverage:e2e-union": "node --experimental-test-coverage --test-coverage-include='scripts/e2e-coverage-union.mjs' --test-coverage-lines=100 --test-coverage-branches=100 --test-coverage-functions=100 --test tests/e2e-coverage-union.test.js",
+    "e2e:smoke": "node scripts/e2e-extension-smoke.mjs",
+    "e2e:restart": "node scripts/e2e-extension-restart.mjs",
+    "e2e:coverage": "E2E_COVERAGE=1 E2E_COVERAGE_OUTPUT=coverage/e2e-extension-coverage.json node scripts/e2e-extension-smoke.mjs",
+    "e2e:preview": "node --experimental-websocket scripts/e2e-smoke.mjs",
+    "e2e:coverage:preview": "E2E_COVERAGE=1 E2E_COVERAGE_OUTPUT=coverage/e2e-preview-coverage.json node --experimental-websocket scripts/e2e-smoke.mjs",
     "screenshots:store": "node scripts/store-screenshots.mjs",
-    "check": "node --check background.js && node --check content-script.js && node --check sidepanel.js && node --check scripts/e2e-smoke.mjs && node --check scripts/package-release.mjs && node --check scripts/store-screenshots.mjs && node --check src/shared/ai.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/folder-tree.js && node --check src/shared/markdown.js && node --check src/shared/shortcuts.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/state.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
-    "package": "node scripts/package-release.mjs"
+    "verify:coverage:e2e": "node scripts/coverage-gate.mjs coverage/e2e-extension-coverage.json",
+    "verify:coverage:e2e:union": "node scripts/e2e-coverage-union.mjs --min-statements 84.65 --min-branches 62.18 --min-functions 82.66 --min-lines 86.55",
+    "check": "node --check background.js && node --check sidepanel.js && node --check scripts/cdp-coverage.mjs && node --check scripts/coverage-gate.mjs && node --check scripts/e2e-coverage-union.mjs && node --check scripts/node-coverage-gate.mjs && node --check scripts/e2e-smoke.mjs && node --check scripts/e2e-extension-smoke.mjs && node --check scripts/e2e-extension-restart.mjs && node --check scripts/package-release.mjs && node --check scripts/release-files.mjs && node --check scripts/store-screenshots.mjs && node --check scripts/verify-package.mjs && node --check src/shared/action-safety.js && node --check src/shared/ai.js && node --check src/shared/ai-auth.js && node --check src/shared/ai-providers.js && node --check src/shared/arc-import.js && node --check src/shared/ask-session.js && node --check src/shared/ask-sources.js && node --check src/shared/ask-stream.js && node --check src/shared/chrome-group-transaction.js && node --check src/shared/command-palette-controller.js && node --check src/shared/command-palette-selection.js && node --check src/shared/command-palette.js && node --check src/shared/dormant-snapshot.js && node --check src/shared/folder-tree.js && node --check src/shared/group-title.js && node --check src/shared/markdown.js && node --check src/shared/operation-safety.js && node --check src/shared/organization-plan.js && node --check src/shared/panel-focus.js && node --check src/shared/panel-render-signatures.js && node --check src/shared/page-extraction.js && node --check src/shared/panel-keyboard.js && node --check src/shared/panel-port.js && node --check src/shared/panel-routing.js && node --check src/shared/shortcuts.js && node --check src/shared/space-deletion.js && node --check src/shared/space-membership.js && node --check src/shared/space-snapshot.js && node --check src/shared/space-switch.js && node --check src/shared/space-transfer.js && node --check src/shared/space-view-merge.js && node --check src/shared/state.js && node --check src/shared/storage-transaction.js && node --check src/shared/tab-close-transaction.js && node --check src/shared/tab-lifecycle.js && node --check src/shared/tab-move.js && node --check src/shared/tab-replacement.js && node --check src/shared/tab-selection.js && node --check src/shared/tab-utils.js && node --check src/shared/preview-runtime.js",
+    "package": "node scripts/package-release.mjs",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "devDependencies": {
+    "acorn": "^8.17.0",
+    "ast-v8-to-istanbul": "^1.0.5",
+    "istanbul-lib-coverage": "^3.2.2"
   }
 }

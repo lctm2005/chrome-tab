@@ -7,45 +7,66 @@ export function createArcImportPlan(input, options = {}) {
   const source = pickArcSource(data);
   const existingSpaces = Array.isArray(options.existingSpaces) ? options.existingSpaces : [];
   const now = Number(options.now ?? Date.now());
-  const usedIds = new Set(existingSpaces.map((space) => String(space.id || '')));
-  const usedNames = new Set(existingSpaces.map((space) => String(space.name || space.title || '')));
+  const existingIds = new Set(existingSpaces.map((space) => String(space?.id || '')).filter(Boolean));
+  const existingNames = new Set(existingSpaces
+    .map((space) => String(space?.name || space?.title || ''))
+    .filter(Boolean));
+  const importedIds = new Set();
+  const importedNames = new Set();
   const itemsById = new Map(source.items.map((item) => [item.id, item]).filter(([id]) => id));
 
-  const summary = {
-    source: source.name,
-    spaces: 0,
-    folders: 0,
-    tabs: 0,
-    skipped: {
-      emptyFolders: 0,
-      invalidTabs: 0,
-      unsupportedItems: 0,
-      easel: 0,
-      splitView: 0,
-    },
-  };
+  const summary = emptyImportSummary(source.name);
   const spaces = [];
   const spaceSnapshots = {};
+  const spacePreviews = [];
+  const conflicts = [];
 
   for (const [index, arcSpace] of orderedSpaces(source)) {
+    const sourceSpaceId = cleanText(arcSpace.id);
     const originalName = cleanText(arcSpace.title) || 'Arc Space';
+    const idResolution = resolveUniqueId(
+      `arc-${sourceSpaceId || originalName}`,
+      existingIds,
+      importedIds,
+    );
+    const nameResolution = resolveUniqueImportedName(originalName, existingNames, importedNames);
     const importedSpace = {
-      id: uniqueId(`arc-${arcSpace.id || originalName}`, usedIds),
-      name: uniqueImportedName(originalName, usedNames),
+      id: idResolution.resolved,
+      name: nameResolution.resolved,
       icon: iconForSpace(arcSpace, originalName),
       color: SPACE_COLORS[index % SPACE_COLORS.length],
     };
-    const snapshotGroups = buildSnapshotGroupsForSpace(arcSpace, itemsById, summary);
+    const counts = emptyImportCounts();
+    const snapshotGroups = buildSnapshotGroupsForSpace(arcSpace, itemsById, counts);
+    const spaceConflicts = [
+      conflictForResolution('id', idResolution, importedSpace.id, sourceSpaceId),
+      conflictForResolution('name', nameResolution, importedSpace.id, sourceSpaceId),
+    ].filter(Boolean);
+
     spaces.push(importedSpace);
     spaceSnapshots[importedSpace.id] = {
       version: 1,
       updatedAt: now,
       groups: snapshotGroups,
     };
+    spacePreviews.push({
+      spaceId: importedSpace.id,
+      sourceSpaceId,
+      originalId: idResolution.original,
+      resolvedId: idResolution.resolved,
+      originalName,
+      resolvedName: importedSpace.name,
+      folders: counts.folders,
+      tabs: counts.tabs,
+      skipped: { ...counts.skipped },
+      conflicts: spaceConflicts,
+    });
+    conflicts.push(...spaceConflicts);
     summary.spaces += 1;
+    addImportCounts(summary, counts);
   }
 
-  return { spaces, spaceSnapshots, summary };
+  return { spaces, spaceSnapshots, summary, spacePreviews, conflicts };
 }
 
 export function appendArcImportPlan(state, plan) {
@@ -53,17 +74,159 @@ export function appendArcImportPlan(state, plan) {
   const snapshots = plan?.spaceSnapshots && typeof plan.spaceSnapshots === 'object'
     ? plan.spaceSnapshots
     : {};
+  assertAppendIdsAvailable(state, spaces);
   if (!Array.isArray(state.spaces)) state.spaces = [];
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') state.spaceSnapshots = {};
 
+  const importedSnapshots = {};
+  for (const space of spaces) {
+    const id = cleanText(space.id);
+    if (Object.hasOwn(snapshots, id)) importedSnapshots[id] = snapshots[id];
+  }
   state.spaces.push(...spaces);
-  Object.assign(state.spaceSnapshots, snapshots);
+  Object.assign(state.spaceSnapshots, importedSnapshots);
 
   return {
     importedSpaces: spaces.length,
-    importedTabs: Object.values(snapshots).reduce((sum, snapshot) => (
+    importedSpaceIds: spaces.map((space) => space.id),
+    importedTabs: Object.values(importedSnapshots).reduce((sum, snapshot) => (
       sum + arrayValue(snapshot?.groups).reduce((groupSum, group) => groupSum + arrayValue(group?.tabs).length, 0)
     ), 0),
+  };
+}
+
+function assertAppendIdsAvailable(state, spaces) {
+  const occupiedIds = new Set(arrayValue(state?.spaces)
+    .map((space) => cleanText(space?.id))
+    .filter(Boolean));
+  for (const id of Object.keys(state?.spaceSnapshots || {})) occupiedIds.add(id);
+
+  const incomingIds = new Set();
+  for (const space of spaces) {
+    const id = cleanText(space?.id);
+    if (!id || ['__proto__', 'prototype', 'constructor'].includes(id)) {
+      throw new Error('Arc import contains a Space without a valid id. Preview the file again.');
+    }
+    if (occupiedIds.has(id) || incomingIds.has(id)) {
+      throw new Error(`Arc import Space id "${id}" is no longer available. Preview the file again.`);
+    }
+    incomingIds.add(id);
+  }
+}
+
+export function selectArcImportPlan(plan, selectedIds) {
+  const selected = selectedIdSet(selectedIds);
+  const spaces = arrayValue(plan?.spaces).filter((space) => selected.has(String(space?.id || '')));
+  const selectedSpaceIds = new Set(spaces.map((space) => String(space.id)));
+  const spaceSnapshots = Object.fromEntries(spaces
+    .filter((space) => plan?.spaceSnapshots?.[space.id])
+    .map((space) => [space.id, plan.spaceSnapshots[space.id]]));
+  const spacePreviews = selectedSpacePreviews(plan, spaces);
+  const conflicts = spacePreviews.length > 0
+    ? spacePreviews.flatMap((preview) => preview.conflicts.map((conflict) => ({ ...conflict })))
+    : arrayValue(plan?.conflicts)
+      .filter((conflict) => selectedSpaceIds.has(String(conflict?.spaceId || '')))
+      .map((conflict) => ({ ...conflict }));
+  const summary = selectedImportSummary(plan, spaces, spacePreviews);
+
+  return { spaces, spaceSnapshots, summary, spacePreviews, conflicts };
+}
+
+function emptyImportSummary(source = 'unknown') {
+  return {
+    source,
+    spaces: 0,
+    folders: 0,
+    tabs: 0,
+    skipped: emptySkippedCounts(),
+  };
+}
+
+function emptyImportCounts() {
+  return {
+    folders: 0,
+    tabs: 0,
+    skipped: emptySkippedCounts(),
+  };
+}
+
+function emptySkippedCounts() {
+  return {
+    emptyFolders: 0,
+    invalidTabs: 0,
+    unsupportedItems: 0,
+    easel: 0,
+    splitView: 0,
+  };
+}
+
+function addImportCounts(target, counts) {
+  target.folders += Number(counts?.folders) || 0;
+  target.tabs += Number(counts?.tabs) || 0;
+  for (const key of Object.keys(target.skipped)) {
+    target.skipped[key] += Number(counts?.skipped?.[key]) || 0;
+  }
+}
+
+function selectedImportSummary(plan, spaces, previews) {
+  const summary = emptyImportSummary(String(plan?.summary?.source || 'unknown'));
+  summary.spaces = spaces.length;
+
+  if (previews.length === spaces.length) {
+    for (const preview of previews) addImportCounts(summary, preview);
+    return summary;
+  }
+
+  summary.folders = Number(plan?.summary?.folders) || 0;
+  summary.tabs = Number(plan?.summary?.tabs) || 0;
+  summary.skipped = {
+    ...summary.skipped,
+    ...(plan?.summary?.skipped || {}),
+  };
+  return summary;
+}
+
+function selectedSpacePreviews(plan, spaces) {
+  if (spaces.length === 0) return [];
+  const previews = arrayValue(plan?.spacePreviews);
+  if (previews.length === 0) {
+    if (spaces.length === arrayValue(plan?.spaces).length) return [];
+    throw new Error('This Arc import plan cannot recalculate a partial selection. Preview the file again.');
+  }
+
+  const previewsBySpaceId = new Map();
+  for (const preview of previews) {
+    const spaceId = String(preview?.spaceId || '');
+    if (!spaceId) continue;
+    const records = previewsBySpaceId.get(spaceId) || [];
+    records.push(preview);
+    previewsBySpaceId.set(spaceId, records);
+  }
+
+  return spaces.map((space) => {
+    const records = previewsBySpaceId.get(String(space.id)) || [];
+    if (records.length !== 1) {
+      throw new Error(`Arc import preview metadata is incomplete for Space "${space.name || space.id}".`);
+    }
+    return cloneSpacePreview(records[0]);
+  });
+}
+
+function selectedIdSet(selectedIds) {
+  if (selectedIds instanceof Set || Array.isArray(selectedIds)) {
+    return new Set([...selectedIds].map(String).filter(Boolean));
+  }
+  return new Set();
+}
+
+function cloneSpacePreview(preview) {
+  return {
+    ...preview,
+    skipped: {
+      ...emptySkippedCounts(),
+      ...(preview?.skipped || {}),
+    },
+    conflicts: arrayValue(preview?.conflicts).map((conflict) => ({ ...conflict })),
   };
 }
 
@@ -80,12 +243,59 @@ function pickArcSource(data = {}) {
     sidebarSyncSource(data),
     sidebarSource(data),
   ];
-  return candidates.find((source) => source.spaces.length || source.items.length) || {
+
+  let selected = null;
+  let selectedCompleteness = [];
+  for (const source of candidates) {
+    const completeness = arcSourceCompleteness(source);
+    if (completeness[0] === 0) continue;
+    if (!selected || compareCompleteness(completeness, selectedCompleteness) > 0) {
+      selected = source;
+      selectedCompleteness = completeness;
+    }
+  }
+
+  return selected || {
     name: 'unknown',
     orderedSpaceIds: [],
     spaces: [],
     items: [],
   };
+}
+
+function arcSourceCompleteness(source) {
+  const spaces = orderedSpaces(source).map(([, space]) => space);
+  const itemsById = new Map(source.items.map((item) => [item.id, item]).filter(([id]) => id));
+  let linkedSpaces = 0;
+  let spacesWithTabs = 0;
+  let tabs = 0;
+  let folders = 0;
+  let titledSpaces = 0;
+
+  for (const space of spaces) {
+    if (cleanText(space.title)) titledSpaces += 1;
+    if (containerIdsForSpace(space, itemsById).some((id) => itemsById.has(id))) {
+      linkedSpaces += 1;
+    }
+
+    const counts = emptyImportCounts();
+    buildSnapshotGroupsForSpace(space, itemsById, counts);
+    if (counts.tabs > 0) spacesWithTabs += 1;
+    tabs += counts.tabs;
+    folders += counts.folders;
+  }
+
+  // Preserve the most Spaces first, then prefer the source whose Space records
+  // are backed by the most complete, actually importable item trees.
+  return [spaces.length, linkedSpaces, spacesWithTabs, tabs, folders, titledSpaces];
+}
+
+function compareCompleteness(left, right) {
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index] - right[index];
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 function firebaseSource(data) {
@@ -193,6 +403,7 @@ function buildSnapshotGroupsForSpace(space, itemsById, summary) {
       title: UNGROUPED_TITLE,
       color: 'grey',
       collapsed: false,
+      restorable: true,
       tabs: ungroupedTabs,
     });
   }
@@ -200,7 +411,7 @@ function buildSnapshotGroupsForSpace(space, itemsById, summary) {
 }
 
 function visitItem(item, context) {
-  if (!item?.id || context.visited.has(item.id)) return 0;
+  if (context.visited.has(item.id)) return 0;
   context.visited.add(item.id);
 
   const data = item.data || {};
@@ -262,7 +473,7 @@ function visitChildren(childIds, context) {
 }
 
 function tabFromArcItem(item) {
-  const tab = item.data?.tab || {};
+  const tab = item.data.tab;
   const url = cleanText(tab.savedURL);
   if (!isImportableUrl(url)) return null;
   return {
@@ -272,7 +483,7 @@ function tabFromArcItem(item) {
 }
 
 function isImportableUrl(url) {
-  return /^(https?:|file:)/.test(url) || url === 'chrome://newtab';
+  return /^(https?:|file:)/.test(url);
 }
 
 function containerIdsForSpace(space, itemsById) {
@@ -294,31 +505,58 @@ function containerIdsFromList(list) {
 
 function iconForSpace(space, fallbackName) {
   const iconType = space.customInfo?.iconType || {};
-  return cleanText(iconType.emoji_v2) || cleanText(fallbackName).slice(0, 1).toUpperCase() || 'S';
+  return cleanText(iconType.emoji_v2) || cleanText(fallbackName).slice(0, 1).toUpperCase();
 }
 
-function uniqueImportedName(name, usedNames) {
-  if (!usedNames.has(name)) {
-    usedNames.add(name);
-    return name;
-  }
+function resolveUniqueImportedName(name, existingNames, importedNames) {
   let candidate = `${name} (Arc)`;
   let index = 2;
-  while (usedNames.has(candidate)) candidate = `${name} (Arc ${index++})`;
-  usedNames.add(candidate);
-  return candidate;
+  const collisionReasons = new Set();
+  if (!recordCollisionReasons(name, existingNames, importedNames, collisionReasons)) {
+    importedNames.add(name);
+    return { original: name, resolved: name, collisionReasons: [] };
+  }
+  while (recordCollisionReasons(candidate, existingNames, importedNames, collisionReasons)) {
+    candidate = `${name} (Arc ${index++})`;
+  }
+  importedNames.add(candidate);
+  return { original: name, resolved: candidate, collisionReasons: [...collisionReasons] };
 }
 
-function uniqueId(raw, usedIds) {
+function resolveUniqueId(raw, existingIds, importedIds) {
   const base = cleanText(raw)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'arc-space';
+    .replace(/^-+|-+$/g, '');
   let candidate = base;
   let index = 2;
-  while (usedIds.has(candidate)) candidate = `${base}-${index++}`;
-  usedIds.add(candidate);
-  return candidate;
+  const collisionReasons = new Set();
+  while (recordCollisionReasons(candidate, existingIds, importedIds, collisionReasons)) {
+    candidate = `${base}-${index++}`;
+  }
+  importedIds.add(candidate);
+  return { original: base, resolved: candidate, collisionReasons: [...collisionReasons] };
+}
+
+function recordCollisionReasons(candidate, existingValues, importedValues, reasons) {
+  const existingCollision = existingValues.has(candidate);
+  const batchCollision = importedValues.has(candidate);
+  if (existingCollision) reasons.add('existing-space');
+  if (batchCollision) reasons.add('import-batch');
+  return existingCollision || batchCollision;
+}
+
+function conflictForResolution(field, resolution, spaceId, sourceSpaceId) {
+  if (resolution.original === resolution.resolved) return null;
+  const collisionReasons = arrayValue(resolution.collisionReasons);
+  return {
+    spaceId,
+    sourceSpaceId,
+    field,
+    original: resolution.original,
+    resolved: resolution.resolved,
+    reason: collisionReasons.length > 1 ? 'mixed' : collisionReasons[0],
+  };
 }
 
 function cleanText(value) {
