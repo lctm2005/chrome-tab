@@ -268,6 +268,40 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
+test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', async () => {
+  const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+
+  assert.match(
+    html,
+    /data-onboarding-path="fresh">[\s\S]*?<strong>Create new space<\/strong>[\s\S]*?data-onboarding-path="arc">[\s\S]*?<strong>Move from Arc<\/strong>/,
+  );
+  assert.doesNotMatch(
+    html,
+    /Skip setup|Start with one thing|Create a focused Space\.|Preview and choose the Spaces to import\./,
+  );
+  assert.match(
+    html,
+    /<footer class="onboarding-footer" id="onboardingFooter">[\s\S]*?id="onboardingBackButton"[\s\S]*?id="skipOnboardingButton">Skip<\/button>[\s\S]*?id="onboardingNextButton">Continue<\/button>[\s\S]*?<\/footer>/,
+  );
+  assert.match(source, /onboardingFooter\.classList\.toggle\('no-back', isChoose\)/);
+  assert.match(styles, /\.onboarding-footer\.no-back\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+
+  assert.doesNotMatch(html, /Panel Shortcuts|Toggle panel is a Chrome global shortcut/);
+  assert.match(html, /<section class="shortcut-settings">\s*<div id="shortcutsList" class="shortcuts-list"><\/div>/);
+  assert.doesNotMatch(source, /isSettingsView\s*\?\s*'Settings'/);
+
+  assert.match(
+    styles,
+    /\.group-card:has\(> \.group-header:hover\)[\s\S]*?\.folder-direct-group:has\(> \.group-header:focus-within\)\s*\{\s*background: var\(--surface-hover\);/,
+  );
+  assert.match(
+    styles,
+    /\.group-card:has\(> \.group-header:hover\) > \.group-header[\s\S]*?\.folder-direct-group:has\(> \.group-header:focus-within\) > \.group-header\s*\{\s*background: transparent;/,
+  );
+});
+
 test('Workbench setup preserves its surface while Space switching keeps target Tags dormant', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const switchSource = functionSource(source, 'switchSpace');
@@ -1304,7 +1338,7 @@ test('non-Ask task failures never become persisted Ask conversation messages', a
   assert.match(askSource, /else \{[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'error'\)/);
 });
 
-test('Settings does not pretend a panel-local binding can replace Chrome global shortcut', async () => {
+test('Settings keeps Chrome global shortcut handling out of the compact shortcut surface', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const keyboardSource = await readFile(
@@ -1316,8 +1350,8 @@ test('Settings does not pretend a panel-local binding can replace Chrome global 
     source.indexOf('async function saveSettings()'),
   );
 
-  assert.match(html, /Toggle panel is a Chrome global shortcut \(default Alt\+S\)/);
-  assert.match(html, /chrome:\/\/extensions\/shortcuts/);
+  assert.doesNotMatch(html, /Toggle panel is a Chrome global shortcut \(default Alt\+S\)/);
+  assert.doesNotMatch(html, /chrome:\/\/extensions\/shortcuts/);
   assert.match(renderShortcutSource, /filter\(\(action\) => action\.id !== 'togglePanel'\)/);
   assert.match(source, /function shortcutConflict\(shortcuts\)[\s\S]*delete panelShortcuts\.togglePanel/);
   assert.match(source, /findReservedShortcutConflict\(panelShortcuts\[action\.id\]\)/);

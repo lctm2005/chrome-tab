@@ -453,6 +453,21 @@ h1 {
   background: rgba(255, 255, 255, 0.045);
 }
 
+/* Let a group-header hover fill its parent card instead of creating an inset highlight. */
+.group-card:has(> .group-header:hover),
+.group-card:has(> .group-header:focus-within),
+.folder-direct-group:has(> .group-header:hover),
+.folder-direct-group:has(> .group-header:focus-within) {
+  background: var(--surface-hover);
+}
+
+.group-card:has(> .group-header:hover) > .group-header,
+.group-card:has(> .group-header:focus-within) > .group-header,
+.folder-direct-group:has(> .group-header:hover) > .group-header,
+.folder-direct-group:has(> .group-header:focus-within) > .group-header {
+  background: transparent;
+}
+
 @media (prefers-color-scheme: light) {
   .group-card:hover,
   .folder-direct-group:hover,
@@ -2423,7 +2438,7 @@ menu {
 .onboarding-footer,
 .onboarding-finish-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -2431,8 +2446,8 @@ menu {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.onboarding-footer.single-action {
-  grid-template-columns: minmax(0, 1fr);
+.onboarding-footer.no-back {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .onboarding-footer button,

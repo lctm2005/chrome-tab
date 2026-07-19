@@ -1499,8 +1499,6 @@ function render() {
     ? panelActionStatus(activePanelAction)
     : isAskView
     ? activeAskPageStatus()
-    : isSettingsView
-    ? 'Settings'
     : '';
   els.groupsList.hidden = !showSources;
   els.askPageView.hidden = !isAskView;
@@ -3674,7 +3672,7 @@ function renderOnboarding() {
   els.onboardingArcStep.hidden = !(isSetup && onboardingPath === 'arc');
   els.onboardingFinishStep.hidden = !isFinish;
   els.onboardingFooter.hidden = isFinish;
-  els.onboardingFooter.classList.toggle('single-action', isChoose);
+  els.onboardingFooter.classList.toggle('no-back', isChoose);
   els.onboardingBackButton.hidden = isChoose;
   els.skipOnboardingButton.hidden = isFinish;
   els.onboardingStepLabel.textContent = `Step ${onboardingStep + 1} of 3`;
