@@ -702,6 +702,9 @@ function liveGroupMatchByChromeTitle(
   ));
   if (matches.length !== 1) return null;
   const [key, group] = matches[0];
+  const storedGroupId = String(storedGroup.snapshotGroupId || '').trim();
+  const liveGroupId = String(group.snapshotGroupId || '').trim();
+  if (storedGroupId && liveGroupId && storedGroupId !== liveGroupId) return null;
   return { key, group };
 }
 

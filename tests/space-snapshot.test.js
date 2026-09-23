@@ -578,6 +578,38 @@ test('stable group identity keeps same-title same-color groups separate during r
   ]);
 });
 
+test('same-title saved and live Tags with different stable identities remain visible to Tidy', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'saved-tag', title: 'Docs', color: 'blue',
+      tabs: [{ snapshotTabId: 'saved-row', title: 'Saved', url: 'https://example.test/saved' }],
+    }],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-tag', title: 'Docs', color: 'blue',
+      tabs: [{ snapshotTabId: 'live-row', title: 'Live', url: 'https://example.test/live' }],
+    }],
+  };
+
+  const refreshed = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(refreshed.groups.map((group) => group.snapshotGroupId), [
+    'saved-tag', 'live-tag',
+  ]);
+  const tidyPlan = mergeDuplicateSnapshotTags(refreshed);
+  assert.equal(tidyPlan.mergedCount, 1);
+  assert.deepEqual(tidyPlan.snapshot.groups.map((group) => ({
+    id: group.snapshotGroupId,
+    rows: group.tabs.map((tab) => tab.snapshotTabId),
+  })), [{ id: 'saved-tag', rows: ['saved-row', 'live-row'] }]);
+});
+
 test('duplicate live claims for one stable group preserve every row instead of overwriting a group', () => {
   const live = {
     version: 1,

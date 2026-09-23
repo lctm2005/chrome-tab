@@ -652,6 +652,12 @@ async function assertRequiredTargetTabGuards(closingTabId, requiredTargetTabGuar
     if (Number(tab.groupId) !== groupId) {
       throw guardedTabCloseChangedError('target-wrong-group');
     }
+    if (
+      typeof guard.pageUrl === 'string' &&
+      String(tab.pendingUrl || tab.url || '').split('#')[0] !== guard.pageUrl
+    ) {
+      throw guardedTabCloseChangedError('target-navigated');
+    }
   }
 }
 

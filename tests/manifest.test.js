@@ -952,7 +952,7 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /existingNames:\s*state\.renamedTabs/);
   assert.match(source, /preserveExisting:\s*true/);
   assert.match(source, /hasCurrentTidyNamesAICandidates[\s\S]*!tab\.pinned/);
-  assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => !tab\.pinned\)/);
+  assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => \([\s\S]*!tab\.pinned && !duplicateCloseIds\.has\(Number\(tab\.id\)\)/);
   assert.match(source, /const aiCandidates = renameableTabs\.filter/);
   assert.match(source, /planTidyTabNames\(renameableTabs/);
   assert.match(source, /currentTargets\.some\(\(tab\) => tab\.pinned\)/);

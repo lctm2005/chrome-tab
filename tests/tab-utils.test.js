@@ -17,6 +17,7 @@ import {
   isPageShortcutCapableUrl,
   isPlaceholderTabTitle,
   planDuplicateUrlClosures,
+  planDuplicatePageClosures,
   planTidyGroups,
   planTidyTabNames,
   planGroupPreviewPlacement,
@@ -360,6 +361,28 @@ test('prefers pinned duplicate webpage tabs when no duplicate is active', () => 
   ]);
 
   assert.deepEqual(closeIds, [1, 3]);
+});
+
+test('Tidy plans duplicate pages across fragments, preserving query variants and pinned copies', () => {
+  const plans = planDuplicatePageClosures([
+    { id: 1, url: 'https://example.com/page#top', index: 0, active: true },
+    { id: 2, url: 'https://example.com/page#details', index: 1, groupId: 9 },
+    { id: 3, url: 'https://example.com/page#other', index: 2 },
+    { id: 4, url: 'https://example.com/page?view=2#top', index: 3 },
+    { id: 5, url: 'https://example.com/page?view=2#other', index: 4, pinned: true },
+    { id: 6, url: 'https://example.com/page?view=2#third', index: 5, pinned: true },
+    { id: 7, url: 'https://example.com/virtual#one', index: 6, active: true },
+    { id: 8, url: 'https://example.com/virtual#two', index: 7, tidyGroupKey: 'virtual:1' },
+  ]);
+  assert.deepEqual(plans.map(({ pageUrl, keep, close }) => ({
+    pageUrl,
+    keepId: keep.id,
+    closeIds: close.map((tab) => tab.id),
+  })), [
+    { pageUrl: 'https://example.com/page', keepId: 2, closeIds: [1, 3] },
+    { pageUrl: 'https://example.com/page?view=2', keepId: 5, closeIds: [4] },
+    { pageUrl: 'https://example.com/virtual', keepId: 8, closeIds: [7] },
+  ]);
 });
 
 test('plans a Chrome tab group for the active space', () => {
