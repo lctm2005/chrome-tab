@@ -34,7 +34,7 @@ Free release:
 - Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
-- Tidy Names and Auto Group actions that generate one final preview, require Apply before changing tabs or Tags, and support Undo.
+- Tidy Names applies names and duplicate Tag merges directly with Undo. Auto Group shows one final preview, requires Apply, and supports Undo.
 - BYOK Ask Page grounded in the current HTTP(S) page, with provider, page,
   character-count, and conversation-context disclosure, plus streaming, Stop,
   and a clickable single-source citation.

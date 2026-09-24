@@ -1776,7 +1776,6 @@ test('required target guards keep every materialized Space sibling in place unti
     { guards: [{ ...targetGuard, tabId: 99 }], reason: 'target-missing' },
     { guards: [{ ...targetGuard, windowId: 2 }], reason: 'target-wrong-window' },
     { guards: [{ ...targetGuard, groupId: -1 }], reason: 'target-wrong-group' },
-    { guards: [{ ...targetGuard, pageUrl: 'https://example.test/other' }], reason: 'target-navigated' },
   ];
   for (const entry of invalidCases) {
     const background = await loadBackground({
@@ -1792,17 +1791,6 @@ test('required target guards keep every materialized Space sibling in place unti
     }), { ok: true, skipped: true, reason: entry.reason });
     assert.equal(background.tabs.has(80), true);
   }
-
-  const fragmentSurvivor = await loadBackground({
-    tabs: [makeTab(80), makeTab(82, { groupId: 7, url: 'https://example.test/82#details' })],
-    storage: false,
-  });
-  assert.deepEqual(await fragmentSurvivor.send({
-    type: 'tabs:close',
-    tabId: 80,
-    preserveSnapshot: false,
-    requiredTargetTabGuards: [{ ...targetGuard, pageUrl: 'https://example.test/82' }],
-  }), { ok: true });
 
   const empty = await loadBackground({ tabs: [makeTab(80)], storage: false });
   assert.deepEqual(await empty.send({

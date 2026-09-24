@@ -3183,242 +3183,56 @@ async function main() {
       return { id: tab.id, status: tab.status, title: tab.title, url: tab.url };
     })()`, 12000);
     record(
-      'Tidy Names duplicate reaches a stable local title and URL before preview',
+      'Tidy Names duplicate reaches a stable local title and URL before direct apply',
       stableTidyDuplicate.status === 'complete' &&
         stableTidyDuplicate.url === askFixtureServer.tidyPrimaryUrl &&
         stableTidyDuplicate.title === askFixtureServer.tidyPrimaryTitle,
       JSON.stringify(stableTidyDuplicate),
     );
-    const tidyCancelProviderCallsBefore = askFixtureServer.requests.length;
-    const tidyCancelBefore = await evaluate(client, `(async () => {
-      const targetIds = [${JSON.stringify(realGroup.primaryTabId)}, ${JSON.stringify(tidyDuplicate.id)}];
+    const tidyDirectBefore = await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const bindings = Object.fromEntries(targetIds.map((tabId) => [
-        String(tabId),
-        structuredClone(saved.tabLifecycle?.[tabId] || null),
-      ]));
-      const snapshotTabIds = new Set(Object.values(bindings)
-        .map((binding) => binding?.snapshotTabId)
-        .filter(Boolean));
-      const snapshotRows = [];
-      for (const [spaceId, snapshot] of Object.entries(saved.spaceSnapshots || {})) {
-        for (const group of snapshot?.groups || []) {
-          for (const tab of group.tabs || []) {
-            if (!snapshotTabIds.has(tab.snapshotTabId)) continue;
-            snapshotRows.push({
-              spaceId,
-              snapshotGroupId: group.snapshotGroupId || '',
-              tab: structuredClone(tab),
-            });
-          }
-        }
-      }
       return {
-        renamedTabs: Object.fromEntries(targetIds.map((tabId) => [
-          String(tabId),
-          Object.hasOwn(saved.renamedTabs || {}, tabId) ? saved.renamedTabs[tabId] : null,
-        ])),
-        bindings,
-        snapshotRows,
-        tidyOperations: structuredClone((saved.operationHistory || [])
-          .filter((operation) => operation?.type === 'tidy-names')),
-        chromeTabs: Object.fromEntries((listed.tabs || [])
-          .filter((tab) => targetIds.includes(Number(tab.id)))
-          .map((tab) => [String(tab.id), {
-            title: tab.title || '',
-            url: tab.url || '',
-            groupId: Number(tab.groupId),
-            pinned: Boolean(tab.pinned),
-            windowId: Number(tab.windowId),
-            index: Number(tab.index),
-          }])),
-        panelNames: Object.fromEntries(targetIds.map((tabId) => [
-          String(tabId),
-          document.querySelector('.tab-row[data-tab-id="' + tabId + '"] .tab-title')?.textContent || '',
-        ])),
+        renamedTabs: structuredClone(saved.renamedTabs || {}),
+        operationCount: (saved.operationHistory || []).filter((item) => item?.type === 'tidy-names').length,
       };
     })()`);
+    const tidyProviderCallsBefore = askFixtureServer.requests.length;
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names'`, 12000);
-    const tidyPreviewState = await evaluate(client, `({
-      previewItems: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-      confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-      activeSpaceId: document.querySelector('.space.active')?.title || '',
-    })`);
-    record(
-      'Workbench Tidy Names shows a preview before changing tabs',
-      tidyPreviewState.previewItems > 0 && tidyPreviewState.confirmText === 'Apply tidy',
-      JSON.stringify(tidyPreviewState),
-    );
-    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
-    const tidyCancelState = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#tidyNamesButton')?.disabled) return null;
-      const expectedIds = [${JSON.stringify(realGroup.primaryTabId)}, ${JSON.stringify(tidyDuplicate.id)}];
+    const tidyDirectApplied = await waitFor(client, `(async () => {
+      if (document.querySelector('#tidyNamesButton')?.disabled) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const bindings = Object.fromEntries(expectedIds.map((tabId) => [
-        String(tabId),
-        structuredClone(saved.tabLifecycle?.[tabId] || null),
-      ]));
-      const snapshotTabIds = new Set(Object.values(bindings)
-        .map((binding) => binding?.snapshotTabId)
-        .filter(Boolean));
-      const snapshotRows = [];
-      for (const [spaceId, snapshot] of Object.entries(saved.spaceSnapshots || {})) {
-        for (const group of snapshot?.groups || []) {
-          for (const tab of group.tabs || []) {
-            if (!snapshotTabIds.has(tab.snapshotTabId)) continue;
-            snapshotRows.push({
-              spaceId,
-              snapshotGroupId: group.snapshotGroupId || '',
-              tab: structuredClone(tab),
-            });
-          }
-        }
-      }
-      const chromeTabs = Object.fromEntries((listed.tabs || [])
-        .filter((tab) => expectedIds.includes(Number(tab.id)))
-        .map((tab) => [String(tab.id), {
-          title: tab.title || '',
-          url: tab.url || '',
-          groupId: Number(tab.groupId),
-          pinned: Boolean(tab.pinned),
-          windowId: Number(tab.windowId),
-          index: Number(tab.index),
-        }]));
-      if (Object.keys(chromeTabs).length !== expectedIds.length) return null;
+      const operation = [...(saved.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'tidy-names' && item.status === 'applied');
+      if (!operation) return null;
       return {
-        renamedTabs: Object.fromEntries(expectedIds.map((tabId) => [
-          String(tabId),
-          Object.hasOwn(saved.renamedTabs || {}, tabId) ? saved.renamedTabs[tabId] : null,
-        ])),
-        bindings,
-        snapshotRows,
-        tidyOperations: structuredClone((saved.operationHistory || [])
-          .filter((operation) => operation?.type === 'tidy-names')),
-        chromeTabs,
-        panelNames: Object.fromEntries(expectedIds.map((tabId) => [
-          String(tabId),
-          document.querySelector('.tab-row[data-tab-id="' + tabId + '"] .tab-title')?.textContent || '',
-        ])),
+        operationId: operation.id,
+        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        undoVisible: !document.querySelector('#operationRecord')?.hidden,
+        renamedTabs: structuredClone(saved.renamedTabs || {}),
       };
-    })()`);
-    const tidyCancelProviderCallsAfter = askFixtureServer.requests.length;
-    record(
-      'Workbench Tidy Names Cancel leaves Chrome, panel names, snapshots, lifecycle, history, and provider traffic unchanged',
-      JSON.stringify(tidyCancelState) === JSON.stringify(tidyCancelBefore) &&
-        tidyCancelProviderCallsAfter === tidyCancelProviderCallsBefore,
-      JSON.stringify({
-        before: tidyCancelBefore,
-        after: tidyCancelState,
-        providerCallsBefore: tidyCancelProviderCallsBefore,
-        providerCallsAfter: tidyCancelProviderCallsAfter,
-      }),
-    );
-
-    const staleTidyTabId = Number(tidyDuplicate.id);
-    const staleTidyPanelName = 'Concurrent manual panel name E2E';
-    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
-    await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = structuredClone(stored.spaceTabsState || {});
-      const tabId = ${JSON.stringify(staleTidyTabId)};
-      const panelName = ${JSON.stringify(staleTidyPanelName)};
-      saved.renamedTabs = saved.renamedTabs || {};
-      saved.renamedTabs[tabId] = panelName;
-      const binding = saved.tabLifecycle?.[tabId];
-      if (binding) {
-        binding.panelTitle = panelName;
-        const snapshot = saved.spaceSnapshots?.[binding.spaceId];
-        for (const group of snapshot?.groups || []) {
-          if (group.snapshotGroupId !== binding.snapshotGroupId) continue;
-          for (const tab of group.tabs || []) {
-            if (tab.snapshotTabId === binding.snapshotTabId) tab.panelTitle = panelName;
-          }
-        }
-      }
-      await chrome.storage.local.set({ spaceTabsState: saved });
-    }))()`);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
-    const staleTidyRejected = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#tidyNamesButton')?.disabled) return null;
+    })()`, 12000);
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyDirectUndone = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const tabId = ${JSON.stringify(staleTidyTabId)};
-      const binding = saved.tabLifecycle?.[tabId] || null;
-      const snapshotRow = (saved.spaceSnapshots?.[binding?.spaceId]?.groups || [])
-        .find((group) => group.snapshotGroupId === binding?.snapshotGroupId)?.tabs
-        ?.find((tab) => tab.snapshotTabId === binding?.snapshotTabId) || null;
-      const chromeTab = (listed.tabs || []).find((tab) => Number(tab.id) === tabId) || null;
-      const status = document.querySelector('#syncStatus')?.textContent || '';
-      if (!/Tabs changed while Tidy Names was open|fresh preview/i.test(status) ||
-          saved.renamedTabs?.[tabId] !== ${JSON.stringify(staleTidyPanelName)} ||
-          binding?.panelTitle !== ${JSON.stringify(staleTidyPanelName)} ||
-          snapshotRow?.panelTitle !== ${JSON.stringify(staleTidyPanelName)}) return null;
-      return {
-        status,
-        bindingPanelName: binding.panelTitle,
-        snapshotPanelName: snapshotRow.panelTitle,
-        tidyOperations: structuredClone((saved.operationHistory || [])
-          .filter((operation) => operation?.type === 'tidy-names')),
-        chromeTab: chromeTab ? {
-          title: chromeTab.title || '',
-          url: chromeTab.url || '',
-          groupId: Number(chromeTab.groupId),
-          pinned: Boolean(chromeTab.pinned),
-          windowId: Number(chromeTab.windowId),
-          index: Number(chromeTab.index),
-        } : null,
-      };
-    })()`, 12000);
-    const staleTidyRenderedName = await waitFor(client, `(() => {
-      const panelName = document.querySelector(
-        '.tab-row[data-tab-id="${staleTidyTabId}"] .tab-title'
-      )?.textContent || '';
-      return panelName === ${JSON.stringify(staleTidyPanelName)} ? panelName : '';
+      const operation = (saved.operationHistory || [])
+        .find((item) => item.id === ${JSON.stringify(tidyDirectApplied.operationId)});
+      if (operation?.status !== 'undone') return null;
+      return { renamedTabs: structuredClone(saved.renamedTabs || {}) };
     })()`, 12000);
     record(
-      'Tidy Names rejects a stale preview without overwriting a newer manual name or recording Undo',
-      staleTidyRenderedName === staleTidyPanelName &&
-        staleTidyRejected.bindingPanelName === staleTidyPanelName &&
-        staleTidyRejected.snapshotPanelName === staleTidyPanelName &&
-        JSON.stringify(staleTidyRejected.tidyOperations) === JSON.stringify(tidyCancelBefore.tidyOperations) &&
-        JSON.stringify(staleTidyRejected.chromeTab) ===
-          JSON.stringify(tidyCancelBefore.chromeTabs[String(staleTidyTabId)]),
-      JSON.stringify({ ...staleTidyRejected, renderedName: staleTidyRenderedName }),
+      'Workbench Tidy Names applies directly and Undo restores panel names',
+      !tidyDirectApplied.previewOpen && tidyDirectApplied.undoVisible &&
+        JSON.stringify(tidyDirectApplied.renamedTabs) !== JSON.stringify(tidyDirectBefore.renamedTabs) &&
+        JSON.stringify(tidyDirectUndone.renamedTabs) === JSON.stringify(tidyDirectBefore.renamedTabs) &&
+        askFixtureServer.requests.length > tidyProviderCallsBefore,
+      JSON.stringify({ tidyDirectBefore, tidyDirectApplied, tidyDirectUndone }),
     );
-    await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = structuredClone(stored.spaceTabsState || {});
-      const tabId = ${JSON.stringify(staleTidyTabId)};
-      delete saved.renamedTabs?.[tabId];
-      const binding = saved.tabLifecycle?.[tabId];
-      if (binding) {
-        delete binding.panelTitle;
-        const snapshot = saved.spaceSnapshots?.[binding.spaceId];
-        for (const group of snapshot?.groups || []) {
-          if (group.snapshotGroupId !== binding.snapshotGroupId) continue;
-          for (const tab of group.tabs || []) {
-            if (tab.snapshotTabId === binding.snapshotTabId) delete tab.panelTitle;
-          }
-        }
-      }
-      await chrome.storage.local.set({ spaceTabsState: saved });
-    }))()`);
     await evaluate(client, `location.reload()`);
     await waitFor(client, `document.readyState === 'complete' &&
-      document.querySelector('.tab-row[data-tab-id="${staleTidyTabId}"] .tab-title')?.textContent ===
-        ${JSON.stringify(askFixtureServer.tidyPrimaryTitle)}`, 15000);
+      document.querySelector('#tidyNamesButton') && !document.querySelector('#tidyNamesButton').disabled`, 12000);
 
     const tidyLiveDuplicateFixture = await evaluate(client, `(async () => {
       const definitions = [
@@ -3625,18 +3439,6 @@ async function main() {
           .map((tabId) => [tabId, saved.tabLifecycle?.[tabId] || null])),
       };
     })()`);
-    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
-    const tidyMergePreview = await evaluate(client, `({
-      sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
-        .map((heading) => heading.textContent || ''),
-      mergeRows: [...document.querySelectorAll('#actionDialogPreview .action-preview-section')]
-        .find((section) => section.querySelector('h3 span')?.textContent === 'Merge duplicate Tags')
-        ?.querySelectorAll('.action-preview-item').length || 0,
-      message: document.querySelector('#actionDialogMessage')?.textContent || '',
-    })`);
     const tidyApplyFailureInstalled = await evaluate(client, `(() => {
       window.__tidyTagApplyFailureOriginalLocalSet = chrome.storage.local.set;
       window.__tidyTagApplyFailureCount = 0;
@@ -3665,7 +3467,7 @@ async function main() {
     if (!tidyApplyFailureInstalled) {
       throw new Error('Could not install Tidy duplicate-Tag checkpoint failure injection.');
     }
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
     await waitFor(client, `window.__tidyTagApplyFailureCount === 1 &&
       !document.querySelector('#actionDialog')?.open &&
       !document.querySelector('#tidyNamesButton')?.disabled &&
@@ -3807,160 +3609,12 @@ async function main() {
       delete window.__tidyTagApplyFailureOriginalLocalSet;
       delete window.__tidyTagApplyFailureCount;
     })()`);
-    await clickElementWithCDP(client, '#tidyNamesButton');
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
-    await evaluate(client, `navigator.locks.request(
-      'space-tabs-shared-state',
-      { mode: 'exclusive' },
-      async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = structuredClone(stored.spaceTabsState || {});
-        const canonical = (saved.spaceSnapshots?.default?.groups || []).find((group) =>
-          group?.snapshotGroupId === 'group:tidy-duplicate-first-e2e');
-        if (!canonical) throw new Error('Missing canonical Tidy Tag for stale-preview fixture.');
-        canonical.color = 'orange';
-        canonical.custom = 'changed-during-tidy-preview-e2e';
-        await chrome.storage.local.set({ spaceTabsState: saved });
-      },
-    )`);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
-    const tidyStaleTagState = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#tidyNamesButton')?.disabled ||
-          document.querySelector('#workbenchToast')?.dataset.tone !== 'error') return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
-      const canonical = (saved.spaceSnapshots?.default?.groups || []).find((group) =>
-        group?.snapshotGroupId === 'group:tidy-duplicate-first-e2e');
-      const liveGroups = (listed.groups || []).filter((group) =>
-        group.title === ${JSON.stringify(askFixtureServer.tidyDuplicateChromeTitle)});
-      if (!canonical || liveGroups.length !== 2) return null;
-      const duplicateTitles = new Set([
-        ${JSON.stringify(askFixtureServer.tidyDuplicateTagTitle)},
-        ${JSON.stringify(askFixtureServer.tidySavedOnlyDuplicateTagTitle)},
-      ]);
-      return {
-        canonicalColor: canonical.color || '',
-        canonicalCustom: canonical.custom || '',
-        renamedTabs: { ...(saved.renamedTabs || {}) },
-        duplicateTags: (saved.spaceSnapshots?.default?.groups || [])
-          .filter((group) => duplicateTitles.has(group.title))
-          .map((group) => ({
-            snapshotGroupId: group.snapshotGroupId || '',
-            title: group.title || '',
-            color: group.color || '',
-            collapsed: Boolean(group.collapsed),
-            custom: group.custom || '',
-            tabs: (group.tabs || []).map((tab) => ({
-              snapshotTabId: tab.snapshotTabId || '',
-              title: tab.title || '',
-              url: tab.url || '',
-              panelTitle: tab.panelTitle || '',
-              custom: tab.custom || '',
-            })),
-          })),
-        operationHistory: structuredClone(saved.operationHistory || []),
-        liveGroups: liveGroups.map((group) => ({
-          color: group.color || '',
-          collapsed: Boolean(group.collapsed),
-          tabUrls: (listed.tabs || [])
-            .filter((tab) => Number(tab.groupId) === Number(group.id))
-            .sort((left, right) => Number(left.index) - Number(right.index))
-            .map((tab) => tab.url || ''),
-        })).sort((left, right) =>
-          ${JSON.stringify(tidyLiveDuplicateFixture.map((item) => item.url))}.indexOf(left.tabUrls[0]) -
-          ${JSON.stringify(tidyLiveDuplicateFixture.map((item) => item.url))}.indexOf(right.tabUrls[0])),
-        status: document.querySelector('#syncStatus')?.textContent || '',
-        toast: document.querySelector('#workbenchToast')?.textContent || '',
-        tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
-        icon: document.querySelector('#tidyNamesButton')?.textContent?.trim() || '',
-      };
-    })()`, 15000);
-    const tidyExpectedStaleTags = structuredClone(tidyBeforeApply.duplicateTags);
-    const tidyExpectedChangedCanonical = tidyExpectedStaleTags.find((group) =>
-      group.snapshotGroupId === 'group:tidy-duplicate-first-e2e');
-    if (tidyExpectedChangedCanonical) {
-      tidyExpectedChangedCanonical.color = 'orange';
-      tidyExpectedChangedCanonical.custom = 'changed-during-tidy-preview-e2e';
-    }
-    record(
-      'Tidy rejects a preview after its canonical Tag metadata changes and leaves Chrome untouched',
-      tidyStaleTagState.canonicalColor === 'orange' &&
-        tidyStaleTagState.canonicalCustom === 'changed-during-tidy-preview-e2e' &&
-        JSON.stringify(tidyStaleTagState.renamedTabs) ===
-          JSON.stringify(tidyBeforeApply.renamedTabs) &&
-        JSON.stringify(tidyStaleTagState.duplicateTags) ===
-          JSON.stringify(tidyExpectedStaleTags) &&
-        JSON.stringify(tidyStaleTagState.operationHistory) ===
-          JSON.stringify(tidyBeforeApply.operationHistory) &&
-        JSON.stringify(tidyStaleTagState.liveGroups) === JSON.stringify(
-          tidyBeforeApply.liveDuplicateGroups.map((group) => ({
-            color: group.color,
-            collapsed: group.collapsed,
-            tabUrls: group.tabUrls,
-          })),
-        ) &&
-        tidyStaleTagState.status.includes('Duplicate Tags changed while Tidy Names was open') &&
-        tidyStaleTagState.toast.includes('Duplicate Tags changed while Tidy Names was open') &&
-        tidyStaleTagState.tone === 'error' &&
-        tidyStaleTagState.icon === '🧹',
-      JSON.stringify(tidyStaleTagState),
-    );
-    await evaluate(client, `navigator.locks.request(
-      'space-tabs-shared-state',
-      { mode: 'exclusive' },
-      async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = structuredClone(stored.spaceTabsState || {});
-        const canonical = (saved.spaceSnapshots?.default?.groups || []).find((group) =>
-          group?.snapshotGroupId === 'group:tidy-duplicate-first-e2e');
-        if (!canonical) throw new Error('Missing canonical Tidy Tag after stale-preview refusal.');
-        canonical.color = 'purple';
-        canonical.custom = 'canonical-tidy-tag-e2e';
-        await chrome.storage.local.set({ spaceTabsState: saved });
-      },
-    )`);
     const tidyFreshReloadStartedAt = await evaluate(client, `Date.now()`);
     await evaluate(client, `location.reload()`);
     await waitFor(client, `performance.timeOrigin >= ${JSON.stringify(tidyFreshReloadStartedAt)} &&
       document.readyState === 'complete' &&
       !document.querySelector('#tidyNamesButton')?.disabled`, 15000);
     await clickElementWithCDP(client, '#tidyNamesButton');
-    try {
-      await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-        document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-        document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = stored.spaceTabsState || {};
-        return {
-          readyState: document.readyState,
-          timeOrigin: performance.timeOrigin,
-          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
-          dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
-          status: document.querySelector('#syncStatus')?.textContent || '',
-          toast: document.querySelector('#workbenchToast')?.textContent || '',
-          duplicateTags: (saved.spaceSnapshots?.default?.groups || [])
-            .filter((group) => [
-              ${JSON.stringify(askFixtureServer.tidyDuplicateTagTitle)},
-              ${JSON.stringify(askFixtureServer.tidySavedOnlyDuplicateTagTitle)},
-            ].includes(group.title))
-            .map((group) => ({
-              snapshotGroupId: group.snapshotGroupId || '',
-              title: group.title || '',
-              color: group.color || '',
-              custom: group.custom || '',
-              tabCount: (group.tabs || []).length,
-            })),
-        };
-      })()`);
-      throw new Error(`${error.message}\nTidy fresh-preview debug: ${JSON.stringify(diagnostic)}`);
-    }
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
           document.querySelector('#tidyNamesButton')?.disabled) return false;
@@ -4090,9 +3744,6 @@ async function main() {
         JSON.stringify(tidyAppliedState.chromeTabs) === JSON.stringify(tidyChromeBefore) &&
         tidyBeforeApply.duplicateTags.length === 5 &&
         tidyBeforeApply.liveDuplicateGroups.length === 2 &&
-        tidyMergePreview.sectionTitles.includes('Merge duplicate Tags') &&
-        tidyMergePreview.mergeRows === 2 &&
-        tidyMergePreview.message.includes('3 duplicate Tags merged') &&
         tidyAppliedState.operation.before?.tagMerge === true &&
         tidyAppliedState.duplicateTags.length === 2 &&
         tidyAppliedLiveSnapshotTag?.snapshotGroupId ===
@@ -4131,7 +3782,6 @@ async function main() {
         duplicateTagsAfter: tidyAppliedState.duplicateTags,
         liveDuplicateGroupsBefore: tidyBeforeApply.liveDuplicateGroups,
         liveDuplicateGroupsAfter: tidyAppliedState.liveDuplicateGroups,
-        mergePreview: tidyMergePreview,
         chromeTabsUnchanged: JSON.stringify(tidyAppliedState.chromeTabs) === JSON.stringify(tidyChromeBefore),
         status: tidyAppliedState.status,
       }),
@@ -4722,51 +4372,6 @@ async function main() {
       .filter((title) => title.textContent?.trim() === ${JSON.stringify(tidyMergeOnlyTitle)})
       .length === 2`, 15000);
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    const tidyMergeOnlyCancelPreview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Tidy Names') return null;
-      const sectionTitles = [...document.querySelectorAll(
-        '#actionDialogPreview .action-preview-section',
-      )].map((section) => section.querySelector('h3 span')?.textContent || '');
-      return {
-        sectionTitles,
-        message: document.querySelector('#actionDialogMessage')?.textContent || '',
-        mergeRows: document.querySelectorAll(
-          '#actionDialogPreview .action-preview-section .action-preview-item',
-        ).length,
-      };
-    })()`, 12000);
-    await clickElementWithCDP(client, '#actionDialogCancel');
-    const tidyMergeOnlyCancelled = await waitFor(client, `(async () => {
-      if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#tidyNamesButton')?.disabled) return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      return {
-        duplicateCount: (saved.spaceSnapshots?.default?.groups || [])
-          .filter((group) => group.title === ${JSON.stringify(tidyMergeOnlyTitle)}).length,
-        operationCount: (saved.operationHistory || []).length,
-        icon: document.querySelector('#tidyNamesButton')?.textContent?.trim() || '',
-      };
-    })()`, 15000);
-    record(
-      'Merge-only Tidy preview omits rename/untouched rows and Cancel is a durable no-op',
-      JSON.stringify(tidyMergeOnlyCancelPreview.sectionTitles) ===
-        JSON.stringify(['Merge duplicate Tags']) &&
-        tidyMergeOnlyCancelPreview.mergeRows === 1 &&
-        tidyMergeOnlyCancelPreview.message.includes('1 duplicate Tag merged') &&
-        tidyMergeOnlyCancelled.duplicateCount === 2 &&
-        tidyMergeOnlyCancelled.operationCount === tidyMergeOnlyBaseline.operationCount &&
-        tidyMergeOnlyCancelled.icon === '🧹' &&
-        askFixtureServer.requests.length === tidyMergeOnlyProviderCallsBefore,
-      JSON.stringify({ tidyMergeOnlyCancelPreview, tidyMergeOnlyCancelled }),
-    );
-
-    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
-    await clickElementWithCDP(client, '#actionDialogConfirm');
     const tidyMergeOnlyApplied = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
           document.querySelector('#tidyNamesButton')?.disabled) return null;
@@ -13990,51 +13595,45 @@ async function main() {
 
     const tidyAIRequestsBefore = askFixtureServer.requests
       .filter((request) => request.mode === 'tidy-names').length;
-    await evaluate(client, `(() => {
-      window.__tidyPreviewTitles = [];
-      window.__tidyPreviewObserver?.disconnect();
-      const title = document.querySelector('#actionDialogTitle');
-      window.__tidyPreviewObserver = new MutationObserver(() => {
-        const value = title?.textContent || '';
-        if (value) window.__tidyPreviewTitles.push(value);
-      });
-      window.__tidyPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
-    })()`);
     await clickElementWithCDP(client, '#tidyNamesButton');
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    const tidyDirectState = await waitFor(client, `(async () => {
+      if (document.querySelector('#tidyNamesButton')?.disabled) return null;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const operation = [...(stored.spaceTabsState?.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'tidy-names' && item.status === 'applied');
+      if (!operation) return null;
+      return {
+        operationId: operation.id,
+        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        undoVisible: !document.querySelector('#operationRecord')?.hidden,
+      };
+    })()`, 12000);
     const tidyAIRequest = askFixtureServer.requests
       .filter((request) => request.mode === 'tidy-names')[tidyAIRequestsBefore];
     const tidyAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
       .filter((request) => request.purpose === 'tidy-names').at(-1)`);
-    const tidyDirectPreviewState = await evaluate(client, `({
-      titles: [...new Set(window.__tidyPreviewTitles || [])],
-      message: document.querySelector('#actionDialogMessage')?.textContent || '',
-      confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-    })`);
     record(
-      'Tidy Names directly opens one concise final preview with its fixed 8K budget',
+      'Tidy Names applies without Preview with its fixed 8K budget and Undo',
       tidyAIRequest?.body?.stream === false &&
         tidyAIRequest?.body?.max_tokens === 8_192 &&
         tidyAIChat?.purpose === 'tidy-names' &&
         tidyAIChat?.itemCount === tidyAIRequest?.candidates?.length &&
         tidyAIChat.itemCount > 0 &&
         tidyAIChat.itemCount <= 80 &&
-        tidyDirectPreviewState.confirmText === 'Apply tidy' &&
-        /^\d+ names? · AI: Custom OpenAI-compatible(?: · \d+ duplicate Tags? merged)? · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(
-          tidyDirectPreviewState.message,
-        ) &&
-        !tidyDirectPreviewState.titles.includes('Generate Tidy Names preview?'),
+        !tidyDirectState.previewOpen && tidyDirectState.undoVisible,
       JSON.stringify({ request: {
         stream: tidyAIRequest?.body?.stream,
         maxTokens: tidyAIRequest?.body?.max_tokens,
         candidateCount: tidyAIRequest?.candidates?.length,
-      }, chat: tidyAIChat, preview: tidyDirectPreviewState }),
+      }, chat: tidyAIChat, applied: tidyDirectState }),
     );
-    await clickElementWithCDP(client, '#actionDialogCancel');
-    await waitFor(client, `!document.querySelector('#actionDialog')?.open &&
-      !document.querySelector('#tidyNamesButton')?.disabled`);
+    await clickElementWithCDP(client, '#undoOrganizationButton');
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const operation = (stored.spaceTabsState?.operationHistory || [])
+        .find((item) => item.id === ${JSON.stringify(tidyDirectState.operationId)});
+      return operation?.status === 'undone';
+    })()`, 12000);
 
     await evaluate(client, `document.querySelector('.ask-page').click()`);
     await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);

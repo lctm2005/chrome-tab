@@ -270,7 +270,6 @@ import {
   isForeignWindowTab,
   isPageShortcutCapableUrl,
   planGroupPreviewPlacement,
-  planDuplicatePageClosures,
   planTidyTabNames,
   preferredFocusableTab,
   sanitizeTidyGroups,
@@ -1530,8 +1529,8 @@ function updateOrganizationActionDisclosures() {
   const provider = providerById(state.ai.provider);
   const hasAI = hasUsableAISettings(state.ai);
   const tidyDisclosure = hasAI
-    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. It also merges duplicate Tags and closes same-page duplicate tabs locally. If the provider is unavailable, it falls back to local naming. One preview opens before applying.`
-    : 'Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent. It also closes same-page duplicate tabs after preview. One preview opens before applying.';
+    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. It also merges duplicate Tags locally. If the provider is unavailable, it falls back to local naming. Changes apply directly and can be undone.`
+    : 'Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent. Changes apply directly and can be undone.';
   els.tidyNamesButton.title = tidyDisclosure;
   els.tidyNamesButton.setAttribute('aria-label', tidyDisclosure);
   const disclosure = hasAI
@@ -2827,15 +2826,15 @@ function createGroupCard(group) {
   const toggle = createGroupToggle(group, group.displayTitle || group.title);
   const actions = document.createElement('div');
   actions.className = 'group-actions';
-  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => (
-    deleteGroup(group, { windowBinding })
-  ));
+  const groupAction = group.dormant
+    ? actionButton('↗', 'Open group', (windowBinding) => openDormantGroup(group, { windowBinding }))
+    : actionButton('↓', 'Close group', (windowBinding) => closeGroupToSaved(group, { windowBinding }));
   if (hasForeignLiveTabs) {
-    deleteButton.disabled = true;
-    deleteButton.title = 'Open this Space in the other window to edit or delete this group.';
-    deleteButton.setAttribute('aria-label', deleteButton.title);
+    groupAction.disabled = true;
+    groupAction.title = 'Open this Space in the other window to change this group.';
+    groupAction.setAttribute('aria-label', groupAction.title);
   }
-  actions.append(deleteButton);
+  actions.append(groupAction);
   header.append(toggle, actions);
   bindGroupPreview(header, group);
 
@@ -2877,15 +2876,15 @@ function createFolderTabs(group) {
   const toggle = createGroupToggle(group, group.displayTitle || 'Tabs');
   const actions = document.createElement('div');
   actions.className = 'group-actions';
-  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => (
-    deleteGroup(group, { windowBinding })
-  ));
+  const groupAction = group.dormant
+    ? actionButton('↗', 'Open group', (windowBinding) => openDormantGroup(group, { windowBinding }))
+    : actionButton('↓', 'Close group', (windowBinding) => closeGroupToSaved(group, { windowBinding }));
   if (hasForeignLiveTabs) {
-    deleteButton.disabled = true;
-    deleteButton.title = 'Open this Space in the other window to edit or delete this group.';
-    deleteButton.setAttribute('aria-label', deleteButton.title);
+    groupAction.disabled = true;
+    groupAction.title = 'Open this Space in the other window to change this group.';
+    groupAction.setAttribute('aria-label', groupAction.title);
   }
-  actions.append(deleteButton);
+  actions.append(groupAction);
   header.append(toggle, actions);
   bindGroupPreview(header, group);
 
@@ -5592,6 +5591,142 @@ async function finishMoveToSpace(spaceId, options = {}) {
   if (activated !== true) {
     throw new Error('The destination Space was not opened after the saved move.');
   }
+}
+
+async function closeGroupToSaved(group, options = {}) {
+  const windowBinding = options.windowBinding;
+  if (!options.stateLocked) {
+    if (!group || group.id === 'ungrouped' || group.dormant) return;
+    assertGroupActionsAreLocal([group]);
+    return withFreshSpaceStateMutation(() => closeGroupToSaved(currentGroupForMutation(group), {
+      stateLocked: true,
+      windowBinding,
+    }), { windowBinding });
+  }
+  if (!group || group.id === 'ungrouped' || group.dormant) return;
+  assertGroupActionsAreLocal([group]);
+  const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
+  if (liveTabs.length === 0) return;
+  if (liveTabs.some((tab) => tab.pinned || !isRestorableSnapshotTab(tab))) {
+    throw new Error('This group contains a pinned or unsavable tab. Keep it open or remove that tab first.');
+  }
+
+  const targetSpaceId = state.activeSpaceId;
+  const checkpointCreatedTabIds = [];
+  const checkpointCreatedTabs = [];
+  const reviewedTargets = new Map();
+  let checkpointState = null;
+  const result = await runGuardedDestructiveTabClose({
+    tabIds: liveTabs.map((tab) => Number(tab.id)),
+    checkpoint: async () => {
+      const beforeCheckpointState = structuredClone(state);
+      let storageMayBeDirty = false;
+      try {
+        await withCreatedTabCheckpointRollback(checkpointCreatedTabIds, async () => {
+          if (!isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error('This panel moved before the group could be closed.');
+          }
+          await ensureActiveSpaceHasOpenTabAfterClosing(
+            liveTabs.map((tab) => Number(tab.id)),
+            checkpointCreatedTabIds,
+            checkpointCreatedTabs,
+            { windowBinding },
+          );
+          snapshotOpenSpace(targetSpaceId);
+          const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+          const savedGroups = liveTabs.map((tab) => {
+            const snapshotTabId = state.tabLifecycle?.[tab.id]?.snapshotTabId;
+            return uniqueSnapshotGroupForTabId(snapshotGroups, snapshotTabId);
+          });
+          if (
+            !savedGroups[0] || isUngroupedSnapshotGroup(savedGroups[0]) ||
+            savedGroups.some((savedGroup) => savedGroup !== savedGroups[0])
+          ) {
+            throw new Error('This group could not be saved as one Tag. No tabs were closed.');
+          }
+          for (const tab of liveTabs) {
+            reviewedTargets.set(Number(tab.id), captureReviewedTabCloseTarget(
+              tab, targetSpaceId, group.key,
+            ));
+          }
+          storageMayBeDirty = true;
+          const saved = await saveState({ persistWindowState: false, windowBinding });
+          if (saved !== true || !isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error('This panel moved before the saved group could be checkpointed.');
+          }
+          checkpointState = structuredClone(state);
+        }, { windowBinding });
+      } catch (error) {
+        state = beforeCheckpointState;
+        if (storageMayBeDirty) await saveState({ persistWindowState: false });
+        throw error;
+      }
+    },
+    inspectTab: (tabId, transaction) => {
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(transaction.closedTabIds.length === 0
+          ? 'This panel moved before the group could be closed.'
+          : 'This panel moved while the group was closing. Already closed pages remain saved.');
+      }
+      return liveReviewedTabCloseMismatch(reviewedTargets.get(Number(tabId)), { windowBinding });
+    },
+    closeTab: (tabId) => guardedReviewedTabClose(
+      reviewedTargets.get(Number(tabId)),
+      { windowBinding },
+    ),
+    commit: async ({ closedTabIds }) => {
+      const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
+      await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
+      await loadTabs({
+        adopt: false,
+        skipSnapshotCleanupForTabIds: closedTabIds,
+        windowBinding,
+        allowStaleWindowBinding,
+      });
+      await closeUnneededDestructiveKeepalives({
+        createdTabs: checkpointCreatedTabs,
+        targetSpaceId,
+        closedTabIds,
+        windowBinding,
+        allowStaleWindowBinding,
+      });
+      for (const tabId of closedTabIds) {
+        forgetClosedTabMetadata(reviewedTargets.get(Number(tabId))?.tab);
+      }
+      await saveState({ persistWindowState: false });
+    },
+    reconcile: async ({ closedTabIds }) => {
+      state = structuredClone(checkpointState);
+      for (const tabId of closedTabIds) {
+        forgetClosedTabMetadata(reviewedTargets.get(Number(tabId))?.tab);
+      }
+      await saveState({ persistWindowState: false });
+      if (isCurrentPanelWindowBinding(windowBinding)) {
+        await refreshTabs({
+          reloadDormant: true,
+          skipSnapshotCleanupForTabIds: closedTabIds,
+          windowBinding,
+        });
+      }
+    },
+  });
+  await refreshTabs({ reloadDormant: true, windowBinding });
+  const closed = result.closedTabIds.length;
+  const skipped = result.skippedTabs.length;
+  setStatus(`Closed ${formatCount(closed, 'tab')} in "${group.displayTitle || group.title}"; the Tag remains saved.` +
+    (skipped > 0 ? ` Skipped ${formatCount(skipped, 'changed tab')}.` : ''));
+}
+
+async function openDormantGroup(group, options = {}) {
+  if (!group?.dormant) return;
+  const windowBinding = options.windowBinding;
+  const savedTabs = (group.tabs || []).filter((tab) => tab.dormant);
+  let opened = 0;
+  for (const tab of savedTabs) {
+    await openDormantTab(tab, group.key, { windowBinding });
+    opened += 1;
+  }
+  setStatus(`Opened ${formatCount(opened, 'tab')} in "${group.displayTitle || group.title}".`);
 }
 
 async function deleteGroup(group, options = {}) {
@@ -8444,7 +8579,6 @@ function startTidyNamesFromUserGesture() {
 
 async function tidyTabNames(options = {}) {
   const windowBinding = options.windowBinding;
-  const startedAt = performance.now();
   const aiSettings = options.aiSettings || structuredClone(state.ai);
   const permissionRequest = options.permissionRequest || Promise.resolve(true);
   const permissionRequested = options.permissionRequested === true;
@@ -8462,9 +8596,9 @@ async function tidyTabNames(options = {}) {
       updatedAt: Date.now(),
       groups: [],
     });
-    let duplicateTagPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
+    const duplicateTagPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
     const duplicateLiveBuckets = duplicateActiveGroupBuckets();
-    let duplicateLiveGroupCount = duplicateLiveBuckets
+    const duplicateLiveGroupCount = duplicateLiveBuckets
       .reduce((sum, bucket) => sum + bucket.length - 1, 0);
     const duplicateTagSummary = combineDuplicateTagMergePlans(
       duplicateTagPlan.merges,
@@ -8473,29 +8607,20 @@ async function tidyTabNames(options = {}) {
         mergedCount: bucket.length - 1,
       })),
     );
-    let duplicateTagCount = duplicateTagSummary.mergedCount;
-    let duplicateTagFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
+    const duplicateTagCount = duplicateTagSummary.mergedCount;
+    const duplicateTagFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
     const visibleTabs = spaceView
-      .flatMap((group) => group.tabs.map((tab) => ({
-        ...tab,
-        tidyGroupKey: group.key,
-      })))
+      .flatMap((group) => group.tabs)
       .filter((tab) => (
         !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
       ));
-    const duplicatePagePlans = planDuplicatePageClosures(visibleTabs);
-    const duplicateCloseIds = new Set(duplicatePagePlans
-      .flatMap((plan) => plan.close.map((tab) => Number(tab.id))));
-    const duplicateTabCount = duplicateCloseIds.size;
-    if (visibleTabs.length === 0 && duplicateTagCount === 0 && duplicateTabCount === 0) {
+    if (visibleTabs.length === 0 && duplicateTagCount === 0) {
       setStatus('No tabs or duplicate Tags in this Space to tidy.');
       return;
     }
 
-    const renameableTabs = visibleTabs.filter((tab) => (
-      !tab.pinned && !duplicateCloseIds.has(Number(tab.id))
-    ));
-    if (renameableTabs.length === 0 && duplicateTagCount === 0 && duplicateTabCount === 0) {
+    const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
+    if (renameableTabs.length === 0 && duplicateTagCount === 0) {
       setStatus('No unpinned tabs in this Space to rename.');
       return;
     }
@@ -8504,7 +8629,7 @@ async function tidyTabNames(options = {}) {
     const useAI = aiCandidates.length > 0 && hasUsableAISettings(aiSettings);
     if (useAI) {
       const provider = providerById(aiSettings.provider);
-      setStatus(`Generating Tidy Names preview with ${provider.label} for ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'}...`);
+      setStatus(`Tidying ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'} with ${provider.label}...`);
     }
 
     const localNames = planTidyTabNames(renameableTabs, {
@@ -8520,7 +8645,7 @@ async function tidyTabNames(options = {}) {
       : { names: {}, sourceLabel: 'Local naming' };
     if (!isCurrentPanelWindowBinding(windowBinding)) {
       throw new Error(
-        'This panel moved to another Chrome window before Tidy Names could create a preview. ' +
+        'This panel moved to another Chrome window before Tidy Names could apply. ' +
         'Nothing was changed; run Tidy Names again in the current window.',
       );
     }
@@ -8533,139 +8658,15 @@ async function tidyTabNames(options = {}) {
         meta: tab.domain,
       }))
       .filter((item) => item.title !== item.result);
-    const untouchedItems = visibleTabs
-      .filter((tab) => (
-        !duplicateCloseIds.has(Number(tab.id)) &&
-        !renameItems.some((item) => item.id === Number(tab.id))
-      ))
-      .map((tab) => ({
-        title: tab.displayTitle || tab.title || 'Untitled',
-        result: 'Unchanged',
-        meta: tab.domain,
-      }));
-    if (renameItems.length === 0 && duplicateTagCount === 0 && duplicateTabCount === 0) {
+    if (renameItems.length === 0 && duplicateTagCount === 0) {
       setStatus('Tidy Names found no changes to apply.');
       return;
     }
-    const previewTargetIds = new Set(renameItems.map((item) => item.id));
-    const previewTargetFingerprint = fingerprintTidyNameTargets(
-      visibleTabs.filter((tab) => previewTargetIds.has(Number(tab.id))),
+    const renameTargetIds = new Set(renameItems.map((item) => item.id));
+    const renameTargetFingerprint = fingerprintTidyNameTargets(
+      visibleTabs.filter((tab) => renameTargetIds.has(Number(tab.id))),
       state.renamedTabs,
     );
-
-    const previewSections = [];
-    if (renameItems.length > 0) {
-      previewSections.push({ title: 'Rename in panel', items: renameItems });
-    }
-    if (duplicateTagCount > 0) {
-      const mergeItems = duplicateTagSummary.merges.map((merge) => ({
-        title: merge.title || 'Tag',
-        result: 'Merge into first Tag',
-        meta: merge.snapshotMergedCount > 0
-          ? `${merge.mergedCount + 1} Tags · ${merge.appendedRowCount} ${merge.appendedRowCount === 1 ? 'saved row' : 'saved rows'} appended`
-          : `${merge.liveMergedCount + 1} live Tags`,
-      }));
-      previewSections.push({ title: 'Merge duplicate Tags', items: mergeItems });
-    }
-    if (duplicateTabCount > 0) {
-      previewSections.push({
-        title: 'Close duplicate tabs',
-        items: duplicatePagePlans.map((plan) => ({
-          title: plan.keep.displayTitle || plan.keep.title || plan.pageUrl,
-          result: `Keep ${1 + plan.protectedPinnedCount} · close ${plan.close.length}`,
-          meta: 'Same page, including different # positions; query parameters stay distinct',
-        })),
-      });
-    }
-    if (renameItems.length > 0 && untouchedItems.length > 0) {
-      previewSections.push({ title: 'Remain untouched', items: untouchedItems });
-    }
-    const previewSummary = [];
-    if (renameItems.length > 0) {
-      previewSummary.push(`${renameItems.length} ${renameItems.length === 1 ? 'name' : 'names'}`);
-      previewSummary.push(namingResult.sourceLabel);
-    }
-    if (duplicateTagCount > 0) {
-      previewSummary.push(`${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'} merged`);
-    }
-    if (duplicateTabCount > 0) {
-      previewSummary.push(`${duplicateTabCount} duplicate ${duplicateTabCount === 1 ? 'tab' : 'tabs'} to close`);
-      previewSummary.push('Closed tabs can be reopened in Chrome; Tidy Undo covers names and Tags');
-    }
-    previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
-    const confirmed = await showPlanPreview({
-      title: 'Preview Tidy Names',
-      message: previewSummary.join(' · '),
-      confirmText: 'Apply tidy',
-      sections: previewSections,
-    });
-    if (!confirmed) return;
-
-    let duplicateCloseResult = { closedTabIds: [], skippedTabs: [] };
-    if (duplicateTabCount > 0) {
-      duplicateCloseResult = await withSharedStateLock(async () => {
-        const synchronized = await syncStateFromStorage({ windowBinding });
-        if (synchronized === false || state.activeSpaceId !== sourceSpaceId) {
-          throw new Error('The active Space changed while Tidy Names was open. Review a fresh preview.');
-        }
-        const loaded = await loadTabs({ adopt: false, windowBinding });
-        if (loaded === false) {
-          throw new Error('This panel moved before duplicate tabs could be checked.');
-        }
-        snapshotOpenSpace(sourceSpaceId);
-        const preCloseSnapshot = state.spaceSnapshots?.[sourceSpaceId] || {
-          version: 1, updatedAt: Date.now(), groups: [],
-        };
-        const targetIds = new Set(renameItems.map((item) => item.id));
-        const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-        if (
-          currentTargets.length !== renameItems.length ||
-          currentTargets.some((tab) => tab.pinned) ||
-          fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== previewTargetFingerprint ||
-          fingerprintTidyDuplicateTags(preCloseSnapshot) !== duplicateTagFingerprint ||
-          mergeDuplicateSnapshotTags(preCloseSnapshot).mergedCount !== duplicateTagPlan.mergedCount ||
-          countDuplicateActiveGroups() !== duplicateLiveGroupCount
-        ) {
-          throw new Error('Tabs or Tags changed while Tidy Names was open. Review a fresh preview.');
-        }
-        const currentPlans = planDuplicatePageClosures(
-          buildSpaceViewForSpace(sourceSpaceId)
-            .flatMap((group) => group.tabs.map((tab) => ({
-              ...tab,
-              tidyGroupKey: group.key,
-            })))
-            .filter((tab) => !tab.dormant && Number.isSafeInteger(Number(tab.id))),
-        );
-        if (tidyDuplicatePagePlanFingerprint(currentPlans) !==
-            tidyDuplicatePagePlanFingerprint(duplicatePagePlans)) {
-          throw new Error('Duplicate tabs changed while Tidy Names was open. Review a fresh preview.');
-        }
-        return closeReviewedTidyDuplicateTabs(currentPlans, sourceSpaceId, { windowBinding });
-      });
-      snapshotOpenSpace(sourceSpaceId);
-      const afterCloseSnapshot = state.spaceSnapshots?.[sourceSpaceId] || {
-        version: 1, updatedAt: Date.now(), groups: [],
-      };
-      duplicateTagPlan = mergeDuplicateSnapshotTags(afterCloseSnapshot, afterCloseSnapshot.updatedAt);
-      duplicateLiveGroupCount = countDuplicateActiveGroups();
-      duplicateTagCount = combineDuplicateTagMergePlans(
-        duplicateTagPlan.merges,
-        duplicateActiveGroupBuckets().map((bucket) => ({
-          title: bucket[0]?.title,
-          mergedCount: bucket.length - 1,
-        })),
-      ).mergedCount;
-      duplicateTagFingerprint = fingerprintTidyDuplicateTags(afterCloseSnapshot);
-    }
-    if (renameItems.length === 0 && duplicateTagCount === 0) {
-      if (isCurrentPanelWindowBinding(windowBinding)) render();
-      setStatus(tidyDuplicateTabCloseStatus(duplicateCloseResult));
-      return;
-    }
-
-    const priorCloseNote = duplicateCloseResult.closedTabIds.length > 0
-      ? 'Duplicate tabs already closed remain closed.'
-      : 'Nothing was changed.';
 
     let committed = false;
     let postCommitWarning = '';
@@ -8673,19 +8674,19 @@ async function tidyTabNames(options = {}) {
       const synchronized = await syncStateFromStorage({ windowBinding });
       if (synchronized === false) {
         throw new Error(
-          'This panel moved before Tidy Names could apply the reviewed changes. ' +
-          `${priorCloseNote} Review a fresh preview in the current window.`,
+          'This panel moved before Tidy Names could apply the planned changes. ' +
+          'Nothing was changed; run Tidy Names again in the current window.',
         );
       }
       if (state.activeSpaceId !== sourceSpaceId) {
-        throw new Error('The active Space changed while Tidy Names was open. Run it again in the current Space.');
+        throw new Error('The active Space changed while Tidy Names was running. Run it again in the current Space.');
       }
       const rollback = captureChromeGroupMutationRollback();
       const loaded = await loadTabs({ adopt: false, windowBinding });
       if (loaded === false) {
         throw new Error(
-          'This panel moved before Tidy Names could apply the reviewed changes. ' +
-          `${priorCloseNote} Review a fresh preview in the current window.`,
+          'This panel moved before Tidy Names could apply the planned changes. ' +
+          'Nothing was changed; run Tidy Names again in the current window.',
         );
       }
       snapshotOpenSpace(sourceSpaceId);
@@ -8699,19 +8700,19 @@ async function tidyTabNames(options = {}) {
       if (
         currentTargets.length !== renameItems.length ||
         currentTargets.some((tab) => tab.pinned) ||
-        fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== previewTargetFingerprint
+        fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== renameTargetFingerprint
       ) {
-        throw new Error('Tabs changed while Tidy Names was open. Review a fresh preview before applying names.');
+        throw new Error('Tabs changed while Tidy Names was running. Run it again before applying names.');
       }
       if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateTagFingerprint) {
-        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
+        throw new Error('Duplicate Tags changed while Tidy Names was running. Run it again.');
       }
       const currentDuplicateTagPlan = mergeDuplicateSnapshotTags(currentSnapshot);
       if (
         currentDuplicateTagPlan.mergedCount !== duplicateTagPlan.mergedCount ||
         countDuplicateActiveGroups() !== duplicateLiveGroupCount
       ) {
-        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
+        throw new Error('Duplicate Tags changed while Tidy Names was running. Run it again.');
       }
       const beforeNames = Object.fromEntries(renameItems.map((item) => [
         item.id,
@@ -8746,7 +8747,7 @@ async function tidyTabNames(options = {}) {
             currentDuplicateTagPlan.snapshotGroupIdReplacements,
           );
           // Merge the saved Tag records before writing names. Otherwise the
-          // pre-preview merged clone can overwrite a just-written panelTitle,
+          // pre-apply merged clone can overwrite a just-written panelTitle,
           // which is especially visible for opened saved-target rows that are
           // intentionally excluded from passive snapshot refreshes.
           for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
@@ -8760,13 +8761,13 @@ async function tidyTabNames(options = {}) {
           }
           const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
           if (refreshedTargets.length !== renameItems.length) {
-            throw new Error(`Tabs changed while Tidy Names was being applied. Names and Tags were rolled back. ${priorCloseNote}`);
+            throw new Error('Tabs changed while Tidy Names was being applied. The change was rolled back.');
           }
           if (
             mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
             countDuplicateActiveGroups() > 0
           ) {
-            throw new Error(`Tidy Names could not finish merging duplicate Tags. Names and Tags were rolled back. ${priorCloseNote}`);
+            throw new Error('Tidy Names could not finish merging duplicate Tags. The change was rolled back.');
           }
           const summaryParts = [];
           if (renameItems.length > 0) {
@@ -8832,7 +8833,7 @@ async function tidyTabNames(options = {}) {
       }
     });
     if (!committed) {
-      throw new Error('Tidy Names stopped before its reviewed names and Tags could be committed.');
+      throw new Error('Tidy Names stopped before its planned changes could be committed. Nothing was changed.');
     }
     if (postCommitWarning) {
       setStatus(postCommitWarning);
@@ -8846,139 +8847,10 @@ async function tidyTabNames(options = {}) {
     if (duplicateTagCount > 0) {
       statusParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
     }
-    if (duplicateCloseResult.closedTabIds.length > 0) {
-      statusParts.push(`closed ${formatCount(duplicateCloseResult.closedTabIds.length, 'duplicate tab')}`);
-    }
-    if (duplicateCloseResult.skippedTabs.length > 0) {
-      statusParts.push(`skipped ${formatCount(duplicateCloseResult.skippedTabs.length, 'changed tab')}`);
-    }
     setStatus(`Tidy ${statusParts.join(' and ')}${renameItems.length > 0 ? ` · ${namingResult.sourceLabel}` : ''}.`);
   } finally {
     endPanelAction();
   }
-}
-
-function tidyDuplicatePagePlanFingerprint(plans = []) {
-  return JSON.stringify(plans.map((plan) => ({
-    pageUrl: plan.pageUrl,
-    protectedPinnedCount: plan.protectedPinnedCount,
-    keep: [Number(plan.keep.id), String(plan.keep.url), Number(plan.keep.groupId), plan.keep.tidyGroupKey],
-    close: plan.close.map((tab) => [
-      Number(tab.id), String(tab.url), Number(tab.groupId), tab.tidyGroupKey,
-    ]),
-  })).sort((left, right) => left.pageUrl.localeCompare(right.pageUrl)));
-}
-
-function tidyDuplicateTabCloseStatus(result = {}) {
-  const closed = result.closedTabIds?.length || 0;
-  const skipped = result.skippedTabs?.length || 0;
-  const status = closed > 0
-    ? `Tidy closed ${formatCount(closed, 'duplicate tab')}.`
-    : 'Tidy did not close any duplicate tabs.';
-  return skipped > 0
-    ? `${status} Skipped ${formatCount(skipped, 'tab')} that changed after review.`
-    : status;
-}
-
-async function closeReviewedTidyDuplicateTabs(plans, sourceSpaceId, options = {}) {
-  const windowBinding = options.windowBinding;
-  const view = buildSpaceViewForSpace(sourceSpaceId);
-  const groupKeyByTabId = new Map(view.flatMap((group) => (
-    group.tabs.map((tab) => [Number(tab.id), group.key])
-  )));
-  const targets = new Map();
-  for (const plan of plans) {
-    for (const tab of plan.close) {
-      targets.set(Number(tab.id), {
-        reviewed: captureReviewedTabCloseTarget(
-          tab, sourceSpaceId, groupKeyByTabId.get(Number(tab.id)),
-        ),
-        survivor: plan.keep,
-        survivorGroupKey: groupKeyByTabId.get(Number(plan.keep.id)),
-        pageUrl: plan.pageUrl,
-      });
-    }
-  }
-  let checkpointState = null;
-  const result = await runGuardedDestructiveTabClose({
-    tabIds: [...targets.keys()],
-    checkpoint: async () => {
-      checkpointState = structuredClone(state);
-      const saved = await saveState({ persistWindowState: false, windowBinding });
-      if (saved !== true || !isCurrentPanelWindowBinding(windowBinding)) {
-        throw new Error('This panel moved before duplicate tabs could be saved for recovery.');
-      }
-    },
-    inspectTab: async (tabId) => {
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        throw new Error('This panel moved while duplicate tabs were being closed.');
-      }
-      const target = targets.get(Number(tabId));
-      const mismatch = await liveReviewedTabCloseMismatch(target.reviewed, { windowBinding });
-      if (mismatch) return mismatch;
-      const [inventory, stored] = await Promise.all([
-        send('tabs:listAll', {}, { windowBinding }),
-        storageGet(),
-      ]);
-      const survivor = (inventory.tabs || [])
-        .find((tab) => Number(tab.id) === Number(target.survivor.id));
-      const currentState = mergeStoredState(stored[STORAGE_KEY], createDefaultState(localConfig));
-      if (
-        !survivor ||
-        String(survivor.pendingUrl || survivor.url || '').split('#')[0] !== target.pageUrl ||
-        !tabMatchesDestructiveTarget(
-          survivor, currentState, sourceSpaceId, target.survivorGroupKey,
-        )
-      ) return 'survivor-changed';
-      return '';
-    },
-    closeTab: (tabId) => {
-      const target = targets.get(Number(tabId));
-      return guardedReviewedTabClose(target.reviewed, {
-        windowBinding,
-        requiredTargetTabGuards: [{
-          tabId: Number(target.survivor.id),
-          windowId: Number(target.survivor.windowId),
-          groupId: Number(target.survivor.groupId),
-          pageUrl: target.pageUrl,
-        }],
-      });
-    },
-    commit: async ({ closedTabIds }) => {
-      const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
-      await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
-      await loadTabs({
-        adopt: false,
-        skipSnapshotCleanupForTabIds: closedTabIds,
-        windowBinding,
-        allowStaleWindowBinding,
-      });
-      snapshotOpenSpace(sourceSpaceId);
-      const closed = closedTabIds.map((tabId) => targets.get(Number(tabId))?.reviewed.tab)
-        .filter(Boolean);
-      for (const tab of closed) forgetClosedTabMetadata(tab);
-      removeTabsFromSpaceSnapshot(sourceSpaceId, closed);
-      await saveState({ persistWindowState: false });
-    },
-    reconcile: async ({ closedTabIds }) => {
-      state = structuredClone(checkpointState);
-      for (const tabId of closedTabIds) {
-        forgetClosedTabMetadata(targets.get(Number(tabId))?.reviewed.tab);
-      }
-      await saveState({ persistWindowState: false });
-      if (isCurrentPanelWindowBinding(windowBinding)) {
-        await refreshTabs({
-          reloadDormant: true,
-          skipSnapshotCleanupForTabIds: closedTabIds,
-          windowBinding,
-        });
-      }
-    },
-  });
-  if (isCurrentPanelWindowBinding(windowBinding)) {
-    await refreshTabsView({ reloadDormant: true, render: false, windowBinding });
-  }
-  return result;
 }
 
 async function tidyTabNamesWithAI(candidates, options = {}) {
@@ -11131,6 +11003,9 @@ function showGroupContextMenu(event, group) {
   }
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
+    ...(group.dormant
+      ? [menuAction('Open Group', (windowBinding) => openDormantGroup(group, { windowBinding }))]
+      : [menuAction('Close Group', (windowBinding) => closeGroupToSaved(group, { windowBinding }))]),
     menuAction('Delete Group', (windowBinding) => deleteGroup(group, { windowBinding })),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })

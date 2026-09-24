@@ -2369,7 +2369,11 @@ async function main() {
     };
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
-    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    card?.querySelector('.group-toggle')?.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: 24, clientY: 24,
+    }));
+    [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+      .find((item) => item.textContent === 'Delete Group')?.click();
     return Boolean(card);
   })()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
@@ -2407,7 +2411,11 @@ async function main() {
     window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
-    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    card?.querySelector('.group-toggle')?.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: 24, clientY: 24,
+    }));
+    [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+      .find((item) => item.textContent === 'Delete Group')?.click();
     return Boolean(card);
   })()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
@@ -3916,34 +3924,28 @@ async function main() {
     if (!moveMaterialized) {
       bugs.push('Move to did not materialize its durable destination group in Chrome.');
     }
-    await evaluate(client, `(() => {
-      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
-      window.__tidyPreviewTitles = [];
-      window.__tidyPreviewObserver?.disconnect();
-      const title = document.querySelector('#actionDialogTitle');
-      window.__tidyPreviewObserver = new MutationObserver(() => {
-        const value = title?.textContent || '';
-        if (value) window.__tidyPreviewTitles.push(value);
-      });
-      window.__tidyPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
-    })()`);
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    const tidyPreview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Tidy Names') return null;
+    const tidyDirectApply = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || []).at(-1);
+      if (operation?.type !== 'tidy-names' || operation.status !== 'applied' ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       return {
-        items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        message: document.querySelector('#actionDialogMessage')?.textContent || '',
-        titles: [...new Set(window.__tidyPreviewTitles || [])],
-        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        operationId: operation.id,
+        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
+        undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
+        renamedCount: Object.keys(stored.renamedTabs || {}).length,
         providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => command.type === 'ai:chat').length,
       };
     })()`);
-    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
-    await waitFor(client, `!document.querySelector('#actionDialog')?.open`);
-    const tidyCancelState = await evaluate(client, `(() => {
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyDirectUndo = await waitFor(client, `(() => {
       const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || [])
+        .find((item) => item.id === ${JSON.stringify(tidyDirectApply.operationId)});
+      if (operation?.status !== 'undone') return null;
       return {
         renamedTabs: stored.renamedTabs || {},
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
@@ -3951,15 +3953,14 @@ async function main() {
       };
     })()`);
     record(
-      'Tidy Names directly opens one concise final preview and Cancel has no side effects',
-      tidyPreview.items > 0 &&
-        tidyPreview.confirmText === 'Apply tidy' &&
-        /^\d+ names? · AI: Z\.ai · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
-        tidyPreview.providerRequests === 1 &&
-        !tidyPreview.titles.includes('Generate Tidy Names preview?') &&
-        tidyCancelState.mutations.length === 0 &&
-        Object.keys(tidyCancelState.renamedTabs).length === 0,
-      JSON.stringify({ tidyPreview, tidyCancelState })
+      'Tidy Names applies without Preview and Undo restores its changes',
+      !tidyDirectApply.previewOpen &&
+        tidyDirectApply.undoText === 'Undo' &&
+        tidyDirectApply.renamedCount > 0 &&
+        tidyDirectApply.providerRequests === 1 &&
+        tidyDirectUndo.mutations.length === 0 &&
+        Object.keys(tidyDirectUndo.renamedTabs).length === 0,
+      JSON.stringify({ tidyDirectApply, tidyDirectUndo })
     );
 
     await evaluate(client, `(() => {
@@ -4201,10 +4202,6 @@ async function main() {
       document.querySelector('#tidyNamesButton').click();
       return true;
     })()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const tidyApplyState = await waitFor(client, `(() => {
       if (document.querySelector('#actionDialog')?.open) return null;
       const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
@@ -4378,6 +4375,70 @@ async function main() {
         shortcutCaptureState.afterClear.value === '' &&
         shortcutCaptureState.afterClear.shortcut === '',
       JSON.stringify(shortcutCaptureState),
+    );
+
+    await evaluate(client, `(() => {
+      document.querySelector('#settingsDialog button[aria-label="Close settings"]')?.click();
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      card?.querySelector('button[aria-label="Close group"]')?.click();
+      return Boolean(card);
+    })()`);
+    const closedTag = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      const saved = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .find((group) => group.title === 'Move Source');
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      if (/could not|failed|changed|moved/i.test(status)) return {
+        error: status,
+        savedRows: saved?.tabs?.length ?? -1,
+        dormantRows: card?.querySelectorAll('.tab-row.dormant').length ?? -1,
+        runtimeIds: (runtime.tabs || []).map((tab) => tab.id),
+      };
+      if (!saved || saved.tabs?.length !== 2 ||
+          !card?.querySelector('button[aria-label="Open group"]') ||
+          (runtime.tabs || []).some((tab) => [201, 202].includes(Number(tab.id)))) return null;
+      return {
+        savedRows: saved.tabs.length,
+        openButton: Boolean(card.querySelector('button[aria-label="Open group"]')),
+        status,
+      };
+    })()`, 7000);
+    record(
+      'Close group preserves the Tag and both pages as dormant rows',
+      closedTag.savedRows === 2 &&
+        closedTag.openButton && closedTag.status.includes('Tag remains saved'),
+      JSON.stringify(closedTag),
+    );
+
+    await evaluate(client, `(() => {
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      card?.querySelector('button[aria-label="Open group"]')?.click();
+    })()`);
+    const reopenedTag = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      const groupTabs = (runtime.tabs || []).filter((tab) => (
+        ['https://example.com/move-alpha', 'https://example.com/move-beta'].includes(tab.url)
+      ));
+      if (groupTabs.length !== 2 || !card?.querySelector('button[aria-label="Close group"]')) return null;
+      return {
+        liveRows: groupTabs.length,
+        grouped: groupTabs.every((tab) => Number(tab.groupId) >= 0),
+        savedGroup: Boolean((stored.spaceSnapshots?.['move-target']?.groups || [])
+          .find((group) => group.title === 'Move Source')),
+      };
+    })()`, 7000);
+    record(
+      'Open group restores its pages in one live Tag',
+      reopenedTag.liveRows === 2 && reopenedTag.grouped && reopenedTag.savedGroup,
+      JSON.stringify(reopenedTag),
     );
 
     const failures = results.filter((result) => !result.ok);

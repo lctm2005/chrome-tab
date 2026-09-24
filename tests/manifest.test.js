@@ -898,7 +898,7 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function addAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*await saveState/);
   assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
   assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
-  assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
+  assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was running/);
   assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
@@ -952,7 +952,7 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /existingNames:\s*state\.renamedTabs/);
   assert.match(source, /preserveExisting:\s*true/);
   assert.match(source, /hasCurrentTidyNamesAICandidates[\s\S]*!tab\.pinned/);
-  assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => \([\s\S]*!tab\.pinned && !duplicateCloseIds\.has\(Number\(tab\.id\)\)/);
+  assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => !tab\.pinned\)/);
   assert.match(source, /const aiCandidates = renameableTabs\.filter/);
   assert.match(source, /planTidyTabNames\(renameableTabs/);
   assert.match(source, /currentTargets\.some\(\(tab\) => tab\.pinned\)/);
@@ -971,11 +971,15 @@ test('Tidy Names renders the original broom initially and after busy state', asy
   assert.match(css, /\.tidy-icon\s*\{[^}]*font-size:\s*15px;[^}]*line-height:\s*1;/);
 });
 
-test('Tidy Names and Auto Group preview changes before applying them', async () => {
+test('Tidy Names applies directly with Undo while Auto Group previews changes', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const tidySource = source.slice(
+    source.indexOf('async function tidyTabNames(options = {})'),
+    source.indexOf('async function tidyTabNamesWithAI'),
+  );
 
-  assert.match(source, /title: 'Preview Tidy Names'/);
-  assert.match(source, /title: 'Rename in panel'/);
+  assert.doesNotMatch(tidySource, /showPlanPreview|Preview Tidy Names|Close duplicate tabs/);
+  assert.match(tidySource, /recordOperation\(\{[\s\S]*type: 'tidy-names'/);
   assert.match(source, /type: 'tidy-names'/);
   assert.doesNotMatch(source, /duplicateTabIds/);
   assert.match(source, /buildOrganizationCandidates/);
@@ -1069,7 +1073,7 @@ test('Auto Group identifies newly organized saved Tags before lifecycle checkpoi
   );
 });
 
-test('Tidy Names and Auto Group generate first and open only their final previews', async () => {
+test('Tidy Names generates then applies directly while Auto Group previews', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const tidySource = source.slice(
     source.indexOf('async function tidyTabNames(options = {})'),
@@ -1082,11 +1086,10 @@ test('Tidy Names and Auto Group generate first and open only their final preview
   assert.doesNotMatch(source, /confirmAIProposalGeneration|confirmText: 'Generate preview'|Generate \$\{action\} preview\?/);
   assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyNamesRequestFromUserGesture\(\)[\s\S]*runTask\(\(windowBinding\) => tidyTabNames\(\{ \.\.\.request, windowBinding \}\)\)/);
   assert.match(tidySource, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
-  assert.match(tidySource, /tidyTabNamesWithAI\([\s\S]*showPlanPreview\(\{/);
-  assert.match(tidySource, /title: 'Preview Tidy Names'/);
-  assert.match(tidySource, /previewSummary\.push\(formatPreviewDuration[\s\S]*message: previewSummary\.join\(' · '\)/);
+  assert.ok(tidySource.indexOf('await tidyTabNamesWithAI') < tidySource.indexOf('await withSharedStateLock(async () => {'));
+  assert.doesNotMatch(tidySource, /showPlanPreview|Preview Tidy Names/);
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
-  assert.match(tidySource, /showPlanPreview\(\{[\s\S]*namingResult\.sourceLabel/);
+  assert.match(tidySource, /setStatus\(`Tidy \$\{statusParts\.join\(' and '\)\}/);
   assert.match(source, /sourceLabel: `Local fallback \(AI unavailable: \$\{reason\}\)`/);
   assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentAutoGroupAICandidates\)/);
   assert.match(source, /function prepareOrganizationAIRequestFromUserGesture\(candidateProbe\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
@@ -1197,11 +1200,11 @@ test('organization commits validate freshness and record Undo only after the app
     'Tidy must verify the merged live/snapshot view before recording Undo',
   );
   assert.match(tidySource, /renameItems\.length === 0 && duplicateTagCount === 0/);
-  assert.match(tidySource, /title: 'Merge duplicate Tags'/);
+  assert.match(tidySource, /duplicateTagSummary\.mergedCount/);
   assert.match(tidySource, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== duplicateTagFingerprint/);
   assert.match(tidySource, /replaceActiveSpaceSnapshotGroups\(currentDuplicateTagPlan\.snapshot\.groups\)[\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences[\s\S]*setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
   assert.match(tidySource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
-  assert.match(tidySource, /This panel moved before Tidy Names could apply the reviewed changes/);
+  assert.match(tidySource, /This panel moved before Tidy Names could apply the planned changes/);
   assert.match(tidySource, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
   assert.match(tidySource, /Tidy Names was saved, but this view could not refresh[\s\S]*showStatusToast\(postCommitWarning, 'info'\)/);
   const rollbackCapture = autoSource.indexOf('const rollback = captureChromeGroupMutationRollback();');

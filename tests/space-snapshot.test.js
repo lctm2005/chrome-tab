@@ -194,7 +194,7 @@ test('Tidy Tag merging keeps the canonical identity when duplicate legacy metada
   assert.deepEqual(result.snapshot.groups, [snapshot.groups[0], snapshot.groups[3]]);
 });
 
-test('Tidy previews the union of saved and live duplicate Tags without double-counting a shared title', () => {
+test('Tidy counts the union of saved and live duplicate Tags without double-counting a shared title', () => {
   assert.deepEqual(combineDuplicateTagMergePlans(
     [
       { title: ' Docs ', mergedCount: 1, appendedRowCount: 2 },

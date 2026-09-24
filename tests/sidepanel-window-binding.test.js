@@ -196,7 +196,7 @@ test('new and saved tab creation stop compensation at the durable commit boundar
   assert.match(cleanupSource, /result\.closedTabIds\.length > 0[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
 });
 
-test('Command Palette tools and group delete buttons keep their gesture-time binding', () => {
+test('Command Palette tools and group close buttons keep their gesture-time binding', () => {
   const palette = functions.get('runSelectedCommandPaletteItem');
   assert.ok(palette);
   const paletteSource = source.slice(palette.start, palette.end);
@@ -212,8 +212,13 @@ test('Command Palette tools and group delete buttons keep their gesture-time bin
     const fnSource = source.slice(fn.start, fn.end);
     assert.match(
       fnSource,
-      /actionButton\('\u00d7', 'Delete group', \(windowBinding\) => \([\s\S]*deleteGroup\(group, \{ windowBinding \}\)/,
+      /actionButton\('↓', 'Close group', \(windowBinding\) => closeGroupToSaved\(group, \{ windowBinding \}\)/,
       `${name} must forward actionButton's gesture-time binding`,
+    );
+    assert.match(
+      fnSource,
+      /actionButton\('↗', 'Open group', \(windowBinding\) => openDormantGroup\(group, \{ windowBinding \}\)/,
+      `${name} must preserve the binding when opening a saved group`,
     );
   }
 });

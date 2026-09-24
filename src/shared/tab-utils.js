@@ -404,45 +404,6 @@ export function planDuplicateUrlClosures(tabs = []) {
   return closeIds;
 }
 
-/** Same page means the full URL except its fragment; query parameters matter. */
-export function planDuplicatePageClosures(tabs = []) {
-  const buckets = new Map();
-  for (const tab of tabs || []) {
-    if (
-      !Number.isSafeInteger(Number(tab?.id)) || Number(tab.id) <= 0 ||
-      !isPageShortcutCapableUrl(tab.url)
-    ) continue;
-    const pageUrl = String(tab.url).trim().split('#')[0];
-    if (!buckets.has(pageUrl)) buckets.set(pageUrl, []);
-    buckets.get(pageUrl).push(tab);
-  }
-
-  const plans = [];
-  for (const [pageUrl, bucket] of buckets) {
-    if (bucket.length < 2) continue;
-    const keep = [...bucket].sort((left, right) => (
-      Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) ||
-      Number(isGroupedTab(right) || Boolean(right.tidyGroupKey && right.tidyGroupKey !== 'ungrouped')) -
-        Number(isGroupedTab(left) || Boolean(left.tidyGroupKey && left.tidyGroupKey !== 'ungrouped')) ||
-      Number(Boolean(right.active)) - Number(Boolean(left.active)) ||
-      Number(left.index ?? 0) - Number(right.index ?? 0)
-    ))[0];
-    const close = bucket.filter((tab) => (
-      Number(tab.id) !== Number(keep.id) && !tab.pinned
-    ));
-    if (close.length === 0) continue;
-    plans.push({
-      pageUrl,
-      keep,
-      close,
-      protectedPinnedCount: bucket.filter((tab) => (
-        tab.pinned && Number(tab.id) !== Number(keep.id)
-      )).length,
-    });
-  }
-  return plans;
-}
-
 function preferredDuplicateUrlTab(tabs) {
   return tabs.find((tab) => tab.active) ||
     tabs.find((tab) => tab.pinned) ||
