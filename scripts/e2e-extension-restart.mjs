@@ -17,7 +17,7 @@ const GROUP_LOGICAL_TITLE = 'Restart Stable Identity Exact Logical Group Name';
 const GROUP_PHYSICAL_TITLE = chromeGroupTitle(GROUP_LOGICAL_TITLE);
 const PANEL_ALIAS = 'Panel-only exact alias after restart';
 const CONTEXT = '# Restart context\nPreserve this exact portable workspace context.';
-const SESSION_KEY_SENTINEL = 'restart-e2e-session-only-key';
+const SESSION_KEY_SENTINEL = 'restart-e2e-persistent-key';
 const SNAPSHOT_IDS = Object.freeze({
   group: 'group:restart-live',
   unique: 'tab:restart-unique',
@@ -260,7 +260,14 @@ async function waitFor(client, sessionId, expression, timeoutMs = 15000) {
     if (lastValue) return lastValue;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out waiting for ${expression}. Last value: ${JSON.stringify(lastValue)}`);
+  const diagnostic = await evaluate(client, sessionId, `(() => ({
+    initialized: document.documentElement.dataset.initialized,
+    keyStatus: document.querySelector('#apiKeyStatus')?.textContent,
+    toast: document.querySelector('#workbenchToast')?.textContent,
+    status: document.querySelector('#settingsStatus')?.textContent,
+    hasKeyInput: Boolean(document.querySelector('#apiKeyInput')?.value),
+  }))()`).catch(() => null);
+  throw new Error(`Timed out waiting for ${expression}. Last value: ${JSON.stringify(lastValue)}; ${JSON.stringify(diagnostic)}`);
 }
 
 async function waitForTarget(client, predicate, timeoutMs = 10000) {
@@ -329,7 +336,9 @@ async function stopChromeGracefully(client, chrome) {
 
 function fixtureStateTemplate() {
   const state = createDefaultState({ browserSessionId: BEFORE_SESSION_ID });
-  state.spaces = [{ id: SPACE_ID, name: SPACE_NAME, icon: SPACE_ICON, color: 'blue' }];
+  state.version = 6;
+  state.spaces = [{ id: SPACE_ID, name: SPACE_NAME, icon: SPACE_ICON, color: 'blue' }, { id: 'inactive', name: 'Inactive Workspace', icon: 'I', color: 'green' }];
+  state.virtualGroups = { 'vgroup:legacy-empty': { spaceId: 'inactive', title: 'Project/Empty Tag', color: 'green', collapsed: true } };
   state.activeSpaceId = SPACE_ID;
   state.onboarding = { version: 2, completed: true, stage: 'done' };
   state.spaceContexts = { [SPACE_ID]: CONTEXT };
@@ -350,6 +359,7 @@ function portableProjectionExpression() {
       id: space.id || '', name: space.name || '', icon: space.icon || '', color: space.color || '',
     })),
     context: saved.spaceContexts?.[${JSON.stringify(SPACE_ID)}] || '',
+    inactiveTags: (saved.spaceSnapshots?.inactive?.groups || []).map((group) => ({ title: group.title, color: group.color, collapsed: group.collapsed, tabCount: group.tabs.length })),
     ai: {
       provider: saved.ai?.provider || '',
       baseUrl: saved.ai?.baseUrl || '',
@@ -374,8 +384,9 @@ function portableProjectionExpression() {
 function expectedPortableProjection(urls) {
   return {
     activeSpaceId: SPACE_ID,
-    spaces: [{ id: SPACE_ID, name: SPACE_NAME, icon: SPACE_ICON, color: 'blue' }],
+    spaces: [{ id: SPACE_ID, name: SPACE_NAME, icon: SPACE_ICON, color: 'blue' }, { id: 'inactive', name: 'Inactive Workspace', icon: 'I', color: 'green' }],
     context: CONTEXT,
+    inactiveTags: [{ title: 'Project/Empty Tag', color: 'green', collapsed: true, tabCount: 0 }],
     ai: {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
@@ -480,7 +491,8 @@ function panelStateExpression(urls) {
       browserSessionId: saved.browserSessionId || '',
       sessionBrowserId: session.spaceTabsBrowserSession || '',
       hasSecret: Object.hasOwn(session, 'spaceTabsSecrets'),
-      sessionKey: session.spaceTabsSecrets?.ai?.apiKey || '',
+      savedKey: (await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get()).spaceTabsSecrets?.ai?.apiKey || '',
+      inputKey: document.querySelector('#apiKeyInput')?.value || '',
       windowState: session.spaceTabsWindowState || null,
       pendingLifecycleKeys: Object.keys(session).filter((key) =>
         key.startsWith('spaceTabsLifecycleEvent:') || key.startsWith('spaceTabsLifecycleSuppression:')),
@@ -592,8 +604,8 @@ function assertPanelState({ state, fixture, urls, expectedPortable, previousIds 
       state: state.browserSessionId,
       session: state.sessionBrowserId,
     });
-    assert(!state.hasSecret && state.sessionKey === '',
-      'Session-only API key survived full Chrome restart', state);
+    assert(!state.hasSecret && state.savedKey === SESSION_KEY_SENTINEL && state.inputKey === SESSION_KEY_SENTINEL,
+      'Encrypted API key was not restored after full Chrome restart', state);
     const activeSpaceIds = state.windowState?.activeSpaceIds || {};
     assert(Object.keys(activeSpaceIds).length === 1 && activeSpaceIds[String(state.currentWindowId)] === SPACE_ID,
       'Window binding was not rebuilt solely for the current Chrome window', activeSpaceIds);
@@ -766,6 +778,7 @@ async function main() {
         [String(duplicateB.id)]: binding(duplicateB, ${JSON.stringify(SNAPSHOT_IDS.group)}, ${JSON.stringify(SNAPSHOT_IDS.duplicateB)}),
         [String(ungrouped.id)]: binding(ungrouped, ${JSON.stringify(SNAPSHOT_IDS.ungroupedGroup)}, ${JSON.stringify(SNAPSHOT_IDS.ungrouped)}),
       };
+      state.spaceSnapshots.inactive = { version: 1, preserveGroups: true, groups: [{ title: 'Project/Empty Tag', color: 'green', collapsed: true, snapshotGroupId: 'vgroup:legacy-empty', tabs: [] }] };
       await chrome.storage.local.set({ spaceTabsState: state });
       await chrome.storage.session.set({
         spaceTabsBrowserSession: ${JSON.stringify(BEFORE_SESSION_ID)},
@@ -801,10 +814,76 @@ async function main() {
     assert(baseline.browserSessionId === BEFORE_SESSION_ID &&
       baseline.sessionBrowserId === BEFORE_SESSION_ID,
     'First process did not use the seeded browser session identity', baseline);
-    assert(baseline.hasSecret && baseline.sessionKey === SESSION_KEY_SENTINEL,
-      'First process did not retain the session-only API key fixture', baseline);
+    assert(!baseline.hasSecret && baseline.savedKey === SESSION_KEY_SENTINEL && baseline.inputKey === SESSION_KEY_SENTINEL,
+      'First process did not migrate the session API key into encrypted storage', baseline);
     assert(baseline.windowState?.activeSpaceIds?.[String(fixture.windowId)] === SPACE_ID,
       'First process did not retain its window binding fixture', baseline.windowState);
+
+    progress('saving the API key through Settings and checking the encrypted record');
+    await evaluate(client, workbench.sessionId, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, workbench.sessionId, `document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, workbench.sessionId, `(() => {
+      document.querySelector('#apiKeyInput').value = ${JSON.stringify(SESSION_KEY_SENTINEL)};
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    await waitFor(client, workbench.sessionId, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.'`);
+    const encryption = await evaluate(client, probe.sessionId, `(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('space-tabs-ai-vault', 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const record = await new Promise((resolve, reject) => {
+        const transaction = db.transaction('auth', 'readonly');
+        const request = transaction.objectStore('auth').get('current');
+        transaction.oncomplete = () => resolve(request.result);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      db.close();
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      return {
+        extractable: record.key.extractable,
+        algorithm: record.key.algorithm.name,
+        hasCiphertext: record.ciphertext.byteLength > 16,
+        plaintextInStorage: JSON.stringify({ local, session, record }).includes(${JSON.stringify(SESSION_KEY_SENTINEL)}),
+      };
+    })()`);
+    assert(encryption.extractable === false && encryption.algorithm === 'AES-GCM' && encryption.hasCiphertext && !encryption.plaintextInStorage,
+      'API key was not encrypted outside workspace/session storage', encryption);
+
+    progress('updating the manifest and reloading the extension in the same Chrome process');
+    await evaluate(client, probe.sessionId, `(async () => {
+      await navigator.locks.request('space-tabs-shared-state', async () => {
+        const { spaceTabsState: saved } = await chrome.storage.local.get('spaceTabsState');
+        saved.virtualGroups = { 'vgroup:legacy-empty': { spaceId: 'inactive', title: 'Project/Empty Tag', color: 'green', collapsed: true } };
+        delete saved.spaceSnapshots.inactive;
+        await chrome.storage.local.set({ spaceTabsState: saved });
+      });
+    })()`);
+
+    const manifestPath = join(extensionFixture, 'manifest.json');
+    const updatedManifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const nextVersion = updatedManifest.version.split('.').map(Number);
+    nextVersion[nextVersion.length - 1] += 1;
+    updatedManifest.version = nextVersion.join('.');
+    await writeFile(manifestPath, JSON.stringify(updatedManifest));
+    await closeTarget(client, workbench.targetId);
+    workbench = null;
+    await client.send('Extensions.loadUnpacked', { path: extensionFixture });
+    await closeTarget(client, probe.targetId);
+    probe = await attachPage(client, probeUrl);
+    assert(await evaluate(client, probe.sessionId, 'chrome.runtime.getManifest().version') === updatedManifest.version,
+      'Chrome did not load the updated extension manifest');
+    workbench = await attachPage(client, workbenchUrl);
+    await expandSavedOnlyGroup(client, workbench.sessionId);
+    const upgraded = await waitFor(client, workbench.sessionId, `(async () => {
+      const captured = await (${panelStateExpression(fixtureServer.urls)});
+      return captured.ready && captured.pendingLifecycleKeys.length === 0 ? captured : null;
+    })()`, 20000);
+    assertPanelState({ state: upgraded, fixture, urls: fixtureServer.urls, expectedPortable });
+    assert(upgraded.savedKey === SESSION_KEY_SENTINEL && upgraded.inputKey === SESSION_KEY_SENTINEL && !upgraded.hasSecret,
+      'Extension update lost the saved API key', upgraded);
 
     progress('closing extension pages and fully exiting the first Chrome process');
     await closeTarget(client, workbench.targetId);
@@ -905,13 +984,66 @@ async function main() {
         afterReload: reloaded.browserSessionId,
       });
 
+    progress('checking that an unreadable key leaves workspace data usable and can be replaced');
+    await closeTarget(client, workbench.targetId);
+    workbench = null;
+    await evaluate(client, probe.sessionId, `(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('space-tabs-ai-vault', 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction('auth', 'readwrite');
+        const store = transaction.objectStore('auth');
+        const request = store.get('current');
+        request.onsuccess = () => {
+          const record = request.result;
+          new Uint8Array(record.ciphertext)[0] ^= 1;
+          store.put(record, 'current');
+        };
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error);
+      });
+      db.close();
+    })()`);
+    workbench = await attachPage(client, workbenchUrl);
+    await waitFor(client, workbench.sessionId, `document.documentElement.dataset.initialized === 'true' && document.querySelector('#apiKeyStatus')?.textContent.includes('could not be read')`);
+    const workspaceAfterKeyFailure = await evaluate(client, probe.sessionId, `(async () => {
+      const { spaceTabsState: saved } = await chrome.storage.local.get('spaceTabsState');
+      return (${portableProjectionExpression()})(saved);
+    })()`);
+    assert(JSON.stringify(workspaceAfterKeyFailure) === JSON.stringify(expectedPortable),
+      'An unreadable credential changed workspace data', workspaceAfterKeyFailure);
+    await evaluate(client, workbench.sessionId, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, workbench.sessionId, `document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, workbench.sessionId, `(() => {
+      document.querySelector('#apiKeyInput').value = ${JSON.stringify(SESSION_KEY_SENTINEL)};
+      document.querySelector('#saveSettingsButton').click();
+    })()`);
+    await waitFor(client, workbench.sessionId, `document.querySelector('#apiKeyStatus')?.textContent === 'API key is encrypted and saved on this device.' && document.querySelector('#workbenchToast')?.textContent === 'Settings saved.'`);
+
+    progress('clearing the API key and checking it stays cleared after a page reload');
+    await evaluate(client, workbench.sessionId, `(() => {
+      document.querySelector('#settingsButton').click();
+      document.querySelector('#clearApiKeyButton').click();
+    })()`);
+    await waitFor(client, workbench.sessionId, `document.querySelector('#apiKeyStatus')?.textContent === 'No API key configured.'`);
+    await client.send('Page.reload', {}, workbench.sessionId);
+    await waitFor(client, workbench.sessionId, `document.documentElement.dataset.initialized === 'true' && document.querySelector('#apiKeyInput')?.value === ''`);
+    const cleared = await evaluate(client, probe.sessionId, `(async () => {
+      const vault = (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault();
+      return !Object.hasOwn(await vault.get(), 'spaceTabsSecrets');
+    })()`);
+    assert(cleared, 'Cleared API key resurfaced after a reload');
+
     progress('same-profile full Chrome restart recovery passed');
     console.log(JSON.stringify({
       mode: 'real-extension-full-restart',
       extensionId,
       summary: { passed: 1, failed: 0, total: 1 },
       result: {
-        name: 'Full Chrome restart restores portable identity and clears session bindings',
+        name: 'Extension update and full Chrome restart preserve workspaces, Tags, and encrypted API keys',
         ok: true,
       },
     }, null, 2));

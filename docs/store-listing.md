@@ -1,6 +1,6 @@
 # Space Tabs Chrome Web Store Listing
 
-Last updated: 2026-07-15
+Last updated: 2026-11-02
 
 ## English (United States)
 
@@ -45,7 +45,7 @@ Features:
 
 Space Tabs is local-first. Core organization works without an account or AI key. There is no telemetry, Space Tabs server, hosted sync service, or persistent script running on every website.
 
-Before Ask Page sends anything, Space Tabs shows the selected provider, the current page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages is included. Generated-response source links are not sent as conversation context. Tidy Names uses your configured provider when available and falls back to local naming rules without sending metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and generate one final preview. No tab or Tag changes until you review that preview and choose Apply. API keys are kept in Chrome session storage and are excluded from workspace data, backups, and release packages.
+Before Ask Page sends anything, Space Tabs shows the selected provider, the current page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages is included. Generated-response source links are not sent as conversation context. Tidy Names uses your configured provider when available and falls back to local naming rules without sending metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and generate one final preview. No tab or Tag changes until you review that preview and choose Apply. API keys are encrypted with AES-GCM in local IndexedDB. They survive extension updates and browser restarts and remain excluded from workspace data, backups, and release packages.
 ```
 
 ## 中文（简体）
@@ -73,7 +73,7 @@ Space Tabs
 
 Ask Page 只读取你点击发送时的当前 HTTP(S) 页面。发送前会明确显示 AI 提供商、当前页面、提取的字符数，以及是否包含近期对话中已存储的消息文本；生成回复中的来源链接不会作为对话上下文发送。回答支持流式输出、Stop 和可点击的单一来源链接。Tidy Names 会在 AI 可用时把已披露的标签页元数据发送给你配置的提供商；AI 未配置或不可用时改用本地命名规则，不发送标签页元数据。Auto Group 需要已配置的 AI。AI 提案只发送已披露的元数据并生成唯一的最终预览；只有在预览中点击 Apply，才会修改标签页或 Tag。应用后支持撤销。
 
-无需账号、无遥测、没有 Space Tabs 中转服务器。工作区数据默认保存在 Chrome 本地；只有当你主动发起 AI 操作时，相关内容才会直接发送给你选择的 AI 提供商。API Key 保存在 Chrome 会话存储中，不会进入普通工作区数据、备份或发布包。
+无需账号、无遥测、没有 Space Tabs 中转服务器。工作区数据默认保存在 Chrome 本地；只有当你主动发起 AI 操作时，相关内容才会直接发送给你选择的 AI 提供商。API Key 使用 AES-GCM 加密保存在本地 IndexedDB 中，扩展更新或浏览器重启后仍会保留，不会进入普通工作区数据、备份或发布包。
 ```
 
 ## Permission Justifications
@@ -112,13 +112,15 @@ Space Tabs stores workspace data locally in Chrome extension storage. This can i
 
 Space Tabs does not sell user data, require an account, collect telemetry, or operate a hosted sync or proxy service. It does not run a persistent content script on every website.
 
-AI is optional. Ask Page uses only the current HTTP(S) page captured when the user sends a question and prioritizes selected text when present. Before sending, Space Tabs shows the provider, page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages will be included; generated-response source links are excluded from the conversation context. Responses stream, can be stopped, and include a clickable link to the single source page. Tidy Names uses the configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and generate one final preview. No tab or Tag changes until the user chooses Apply. The API key stays in Chrome session storage and is excluded from workspace state, backups, and release packages.
+AI is optional. Ask Page uses only the current HTTP(S) page captured when the user sends a question and prioritizes selected text when present. Before sending, Space Tabs shows the provider, page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages will be included; generated-response source links are excluded from the conversation context. Responses stream, can be stopped, and include a clickable link to the single source page. Tidy Names uses the configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed tab metadata and generate one final preview. No tab or Tag changes until the user chooses Apply. The API key is encrypted with AES-GCM in local IndexedDB. It survives extension updates and browser restarts and remains excluded from workspace state, backups, and release packages.
 ```
 
 ## Reviewer Notes
 
 ```text
 Core features do not require an account or AI API key.
+
+Version 0.5.9 retains provider-scoped API keys in an encrypted local IndexedDB vault instead of session storage. The non-extractable Web Crypto encryption key stays in the same browser profile; this is not an OS keychain. Workspace backups still exclude credentials. Existing Spaces, custom names, and legacy virtual Tags are preserved during supported upgrades. Saved pages remain dormant when switching Spaces. Moving already-open tabs to another Space finishes the destination Chrome grouping before reporting success.
 
 Suggested review flow:
 

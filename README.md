@@ -46,6 +46,23 @@ Store preparation docs:
   justifications, reviewer notes, and screenshot plan.
 - `docs/commercialization.md`: free-to-Pro packaging and launch plan.
 
+## Updating Without Losing Your Workspace
+
+Chrome Web Store updates preserve the same extension identity and local data.
+For a source or package installation, replace files in the **same folder** and
+click **Reload** on the existing entry in `chrome://extensions`. Keep that folder
+at the same path. Loading from another directory can create a different extension
+ID and separate storage.
+
+Before uninstalling, changing profiles, or moving to a different extension ID,
+use **Settings → Export Backup**, then **Restore Backup** in the new installation.
+Backups preserve Spaces, Tags, saved pages, and Ask history, but exclude API keys;
+enter your key again after moving. Uninstalling removes local extension data.
+Version 0.5.9 encrypts saved API keys locally and retains them through updates and
+browser restarts. A key already erased by a previous version must be entered once
+again. Local encryption uses a non-extractable Web Crypto key in the same browser
+profile; it is not an OS keychain.
+
 ## Install From Package
 
 1. Run `npm run package`, or download a release zip from `dist/`.
@@ -90,7 +107,7 @@ The setup step and full-page Workbench Settings use the same provider options:
 - `Thinking`: available only for DeepSeek V4 and compatible GLM models. Space
   Tabs sends Enabled or Disabled explicitly; unsupported providers show the
   control as unavailable instead of ignoring it.
-- `API Key`: stored locally by Chrome for the current extension session; Ollama
+- `API Key`: encrypted with AES-GCM and saved in the extension’s local IndexedDB, so it survives extension updates and browser restarts; Ollama
   runs locally and does not require one.
 - `Language`: controls Ask Page output language.
 

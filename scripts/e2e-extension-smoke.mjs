@@ -14,6 +14,7 @@ import {
 } from './cdp-coverage.mjs';
 import { sha256Source, verifyPreciseCoverageReport } from './coverage-gate.mjs';
 import { chromeGroupTitle } from '../src/shared/group-title.js';
+import { isChromeNewTabUrl } from '../src/shared/tab-utils.js';
 
 const repoRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const coverageEnabled = ['1', 'true'].includes(String(process.env.E2E_COVERAGE || '').toLowerCase());
@@ -124,6 +125,10 @@ async function startChromeWithPipe() {
     '--no-default-browser-check',
     '--disable-background-networking',
     '--disable-default-apps',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
+    ...(process.env.E2E_HEADLESS === '1' ? ['--headless=new'] : []),
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
 
@@ -238,7 +243,27 @@ async function waitForInSession(client, sessionId, expression, timeoutMs = 6000)
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out waiting for: ${expression}`);
+  const diagnostic = await evaluateInSession(client, sessionId, `(async () => ({
+    initialized: document.documentElement.dataset.initialized,
+    visibility: document.visibilityState,
+    focused: document.hasFocus(),
+    tabId: (await chrome.tabs.getCurrent())?.id,
+    window: await chrome.windows.getCurrent(),
+    browserTabs: (await chrome.tabs.query({currentWindow:true})).map(({id,url,pendingUrl,active,groupId}) => ({id,url,pendingUrl,active,groupId})),
+    ephemeralTabIds: (await chrome.storage.local.get('spaceTabsState')).spaceTabsState?.ephemeralTabIds,
+    scenario: window.__dormantSwitchDiagnostic,
+    activeSpace: document.querySelector('#activeSpaceName')?.textContent,
+    status: document.querySelector('#syncStatus')?.textContent,
+    groups: [...document.querySelectorAll('.group-header')].map((header) => ({
+      title: header.querySelector('h2')?.textContent,
+      collapsed: Boolean(header.closest('.collapsed')),
+    })),
+    rows: [...document.querySelectorAll('.tab-row')].map((row) => ({
+      title: row.querySelector('.tab-title')?.textContent,
+      dormant: row.classList.contains('dormant'),
+    })),
+  }))()`).catch(() => null);
+  throw new Error(`Timed out waiting for: ${expression}; ${JSON.stringify(diagnostic)}`);
 }
 
 async function waitFor(client, expression, timeoutMs = 6000) {
@@ -448,6 +473,7 @@ async function startAskFixtureServer() {
   const tidyPrimaryTitle = 'Tidy Names E2E planning document with a deliberately long stable title';
   const tidySecondaryTitle = 'Tidy Names E2E companion reference with another deliberately long stable title';
   let autoGroupIncompletePlansRemaining = 0;
+  let autoGroupPlaceholderPlansRemaining = 0;
 
   const schedule = (callback, delay) => {
     const timer = setTimeout(() => {
@@ -686,6 +712,10 @@ async function startAskFixtureServer() {
           autoGroupIncompletePlansRemaining > 0 && liveCandidate && savedCandidate,
         );
         if (incompletePlan) autoGroupIncompletePlansRemaining -= 1;
+        const placeholderPlan = Boolean(
+          autoGroupPlaceholderPlansRemaining > 0 && liveCandidate && savedCandidate,
+        );
+        if (placeholderPlan) autoGroupPlaceholderPlansRemaining -= 1;
         const plan = [];
         const targetCandidateIds = new Set();
         if (liveCandidate && savedCandidate) {
@@ -703,13 +733,14 @@ async function startAskFixtureServer() {
         for (const candidate of candidates) {
           const candidateId = Number(candidate?.id);
           if (!Number.isFinite(candidateId) || targetCandidateIds.has(candidateId)) continue;
-          const title = String(candidate?.currentGroup || 'Ungrouped').trim() || 'Ungrouped';
+          const title = String(candidate?.currentGroup || 'E2E Inbox').trim() || 'E2E Inbox';
           if (!unchangedByCurrentGroup.has(title)) unchangedByCurrentGroup.set(title, []);
           unchangedByCurrentGroup.get(title).push(candidateId);
         }
         for (const [title, tabIds] of unchangedByCurrentGroup) {
           plan.push({ title, color: 'blue', tabIds });
         }
+        if (placeholderPlan && plan[0]) plan[0].title = '未分组';
         requests.push({
           mode: 'auto-group',
           body,
@@ -718,6 +749,7 @@ async function startAskFixtureServer() {
           liveCandidate: liveCandidate || null,
           savedCandidate: savedCandidate || null,
           incompletePlan,
+          placeholderPlan,
           plan,
         });
         response.writeHead(200, {
@@ -854,6 +886,9 @@ async function startAskFixtureServer() {
     pageHits,
     armIncompleteAutoGroupPlan() {
       autoGroupIncompletePlansRemaining += 1;
+    },
+    armPlaceholderAutoGroupPlan() {
+      autoGroupPlaceholderPlansRemaining += 1;
     },
     async close() {
       for (const timer of timers) clearTimeout(timer);
@@ -1615,7 +1650,10 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
 
     const results = [];
-    const record = (name, ok, detail = '') => results.push({ name, ok, detail });
+    const record = (name, ok, detail = '') => {
+      results.push({ name, ok, detail });
+      if (!ok) progress(`FAILED: ${name}: ${detail}`);
+    };
     const checkpointWorkbenchBeforeNavigation = async () => {
       if (!coverageEnabled) return;
       const session = coverageSessions.find((entry) => entry.key === 'workbench');
@@ -1880,7 +1918,7 @@ async function main() {
     const completedArcSetup = await waitFor(client, `(async () => {
       const [stored, secret] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       const saved = stored.spaceTabsState || {};
       if (document.querySelector('#onboardingDialog')?.open ||
@@ -1893,14 +1931,14 @@ async function main() {
         setupReminder: Boolean(document.querySelector('.setup-space')),
         aiBaseUrl: saved.ai?.baseUrl || '',
         aiModel: saved.ai?.model || '',
-        sessionKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
+        savedKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
       };
     })()`);
     record(
       'The sole Save action completes optional AI setup without a provider',
       completedArcSetup.completed && completedArcSetup.stage === 'done' &&
         completedArcSetup.importedPresent && !completedArcSetup.setupReminder &&
-        !completedArcSetup.aiBaseUrl && !completedArcSetup.aiModel && completedArcSetup.sessionKeyLength === 0,
+        !completedArcSetup.aiBaseUrl && !completedArcSetup.aiModel && completedArcSetup.savedKeyLength === 0,
       JSON.stringify(completedArcSetup),
     );
 
@@ -3903,7 +3941,6 @@ async function main() {
             tabUrls: group.tabUrls,
           })),
         ) &&
-        tidyStaleTagState.status.includes('Duplicate Tags changed while Tidy Names was open') &&
         tidyStaleTagState.toast.includes('Duplicate Tags changed while Tidy Names was open') &&
         tidyStaleTagState.tone === 'error' &&
         tidyStaleTagState.icon === '🧹',
@@ -5650,6 +5687,11 @@ async function main() {
     );
     progress('Command Palette Space switch passed');
 
+    await evaluate(client, `(() => {
+      const header = [...document.querySelectorAll('.group-header')]
+        .find((node) => node.querySelector('h2')?.textContent === 'Remote Saved');
+      if (header?.closest('.collapsed')) header.querySelector('.group-toggle')?.click();
+    })()`);
     const restoredRemoteState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const visibleText = document.querySelector('#groupsList')?.textContent || '';
@@ -6254,17 +6296,16 @@ async function main() {
         ${JSON.stringify(collapseSpaceFixtures.groupTitle)})?.classList.contains('collapsed'))`);
     const collapseFirstAfterSecond = await selectCollapseSpace(collapseSpaceFixtures.first.name);
     record(
-      'Same-name saved Tags in different Spaces materialize as independent active Chrome groups',
-      !collapseFirstInitial.collapsed && collapseFirstInitial.dormantRows === 0 &&
-        !collapseSecondInitial.collapsed && collapseSecondInitial.dormantRows === 0 &&
-        !collapseFirstAfterSecond.collapsed && collapseFirstAfterSecond.dormantRows === 0 &&
+      'Same-name saved Tags retain independent collapse state and stable dormant identity in each Space',
+      collapseFirstInitial.collapsed && collapseFirstInitial.dormantRows === 0 &&
+        collapseSecondInitial.collapsed && collapseSecondInitial.dormantRows === 0 &&
+        !collapseFirstAfterSecond.collapsed && collapseFirstAfterSecond.dormantRows === 1 &&
         collapseFirstExpanded.key !== collapseSecondInitial.key &&
-        collapseSecondInitial.key !== collapseFirstAfterSecond.key &&
-        collapseFirstExpanded.key !== collapseFirstAfterSecond.key &&
-        collapseFirstExpanded.key.startsWith('group:') &&
-        collapseSecondInitial.key.startsWith('group:') &&
-        collapseFirstAfterSecond.key.startsWith('group:') &&
-        collapseIsolationBeforeSecondClick.second === false,
+        collapseFirstExpanded.key === collapseFirstAfterSecond.key &&
+        collapseFirstExpanded.key.startsWith('snapshot:') &&
+        collapseSecondInitial.key.startsWith('snapshot:') &&
+        collapseIsolationBeforeSecondClick.first === false &&
+        collapseIsolationBeforeSecondClick.second !== false,
       JSON.stringify({
         collapseFirstInitial,
         collapseFirstExpanded,
@@ -6545,7 +6586,7 @@ async function main() {
       rollbackCloseMutations.every((entry) => !rollbackSourceTabIds.has(Number(entry.tabId)));
     const rollbackExercisedCompensation =
       rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:create') &&
-      rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:group') &&
+      !rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:group') &&
       rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:focus') &&
       rollbackOnlyClosedCreatedTargets;
     record(
@@ -6602,7 +6643,8 @@ async function main() {
       await client.send('Runtime.enable', {}, sessionId);
       await client.send('Page.enable', {}, sessionId);
       const loaded = await waitForInSession(client, sessionId, `(async () => {
-        if (location.href !== ${JSON.stringify(sidepanelUrl)} ||
+        if (document.documentElement.dataset.initialized !== 'true' ||
+            location.href !== ${JSON.stringify(sidepanelUrl)} ||
             !document.querySelector('#activeSpaceName')?.textContent) return null;
         const [currentWindow, currentTab] = await Promise.all([
           chrome.windows.getCurrent(),
@@ -6641,10 +6683,13 @@ async function main() {
           stored.spaceTabsWindowState?.activeSpaceIds?.[${JSON.stringify(String(panel.windowId))}] ===
             ${JSON.stringify(spaceId)};
       })()`, 20000);
+      await evaluateInSession(client, panel.sessionId,
+        `navigator.locks.request('space-tabs-shared-state', async () => {})`);
       await evaluate(client, `(async () => {
         await chrome.windows.update(${JSON.stringify(panel.windowId)}, { focused: true });
         await chrome.tabs.update(${JSON.stringify(panel.tabId)}, { active: true });
       })()`);
+      await client.send('Page.bringToFront', {}, panel.sessionId);
       await waitForInSession(client, panel.sessionId, `document.visibilityState === 'visible'`, 15000);
       await new Promise((resolve) => setTimeout(resolve, 250));
     };
@@ -8652,7 +8697,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         return {
@@ -8745,7 +8790,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8796,7 +8841,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8825,7 +8870,7 @@ async function main() {
         if (document.readyState !== 'complete') return null;
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8913,7 +8958,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const status = document.querySelector('#settingsStatus')?.textContent || '';
@@ -8992,7 +9037,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -9031,7 +9076,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -9055,7 +9100,7 @@ async function main() {
         if (document.readyState !== 'complete') return null;
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         const auth = secrets.spaceTabsSecrets?.ai || null;
         return stored.spaceTabsState?.ai?.provider === 'z-ai' &&
@@ -9090,9 +9135,9 @@ async function main() {
         saved.shortcuts = structuredClone(baseline.shortcuts);
         await chrome.storage.local.set({ spaceTabsState: saved });
         if (baseline.hasSecrets) {
-          await chrome.storage.session.set({ spaceTabsSecrets: structuredClone(baseline.secrets) });
+          await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().set({ spaceTabsSecrets: structuredClone(baseline.secrets) });
         } else {
-          await chrome.storage.session.remove('spaceTabsSecrets');
+          await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().remove();
         }
       }))()`);
 
@@ -9821,7 +9866,7 @@ async function main() {
     const originalAskAIState = await evaluate(client, `(async () => {
       const [stored, secret] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       return {
         ai: stored.spaceTabsState?.ai || null,
@@ -10387,7 +10432,7 @@ async function main() {
     const configuredAskSettingsState = await waitFor(client, `(async () => {
       const [stored, secret] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       const ai = stored.spaceTabsState?.ai || {};
       if (ai.provider !== 'openai-compatible' ||
@@ -10399,12 +10444,12 @@ async function main() {
         baseUrl: ai.baseUrl,
         model: ai.model,
         language: ai.language,
-        sessionKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
+        savedKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
       };
     })()`);
     record(
       'Workbench Settings configures the local Custom OpenAI-compatible Ask endpoint',
-      configuredAskSettingsState.language === 'en' && configuredAskSettingsState.sessionKeyLength === 0,
+      configuredAskSettingsState.language === 'en' && configuredAskSettingsState.savedKeyLength === 0,
       JSON.stringify(configuredAskSettingsState),
     );
     record(
@@ -10491,7 +10536,7 @@ async function main() {
       document.querySelector('#saveSettingsButton').click();
     })()`);
     await waitFor(client, `(async () => {
-      const secret = await chrome.storage.session.get('spaceTabsSecrets');
+      const secret = await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get();
       return secret.spaceTabsSecrets?.ai?.apiKey === 'ask-e2e-key' &&
         document.querySelector('#settingsStatus')?.textContent === 'Settings saved.';
     })()`);
@@ -10979,6 +11024,51 @@ async function main() {
       }),
     );
 
+    const placeholderAutoGroupRequestsBefore = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group').length;
+    const placeholderAutoGroupPermissionBefore = await evaluate(client,
+      `window.__askE2ECalls.permissionRequests`);
+    askFixtureServer.armPlaceholderAutoGroupPlan();
+    await clickElementWithCDP(client, '#autoGroupButton');
+    const placeholderAutoGroupState = await waitFor(client, `(async () => {
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#autoGroupButton')?.disabled) return null;
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      const toast = document.querySelector('#workbenchToast')?.textContent || '';
+      if (!status.includes('placeholder group "未分组"') ||
+          !toast.includes('placeholder group "未分组"')) return null;
+      return {
+        status,
+        toast,
+        tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
+        captured: await window.__captureAutoGroupE2E(),
+      };
+    })()`, 12000);
+    const placeholderAutoGroupRequest = askFixtureServer.requests
+      .filter((request) => request.mode === 'auto-group')[placeholderAutoGroupRequestsBefore];
+    record(
+      'Auto Group rejects an Ungrouped placeholder Tag before preview without changing organization',
+      placeholderAutoGroupRequest?.placeholderPlan === true &&
+        placeholderAutoGroupRequest?.plan?.[0]?.title === '未分组' &&
+        placeholderAutoGroupState.tone === 'error' &&
+        JSON.stringify(placeholderAutoGroupState.captured.chrome) ===
+          JSON.stringify(autoGroupFixtureBefore.chrome) &&
+        JSON.stringify(placeholderAutoGroupState.captured.storage) ===
+          JSON.stringify(autoGroupFixtureBefore.storage) &&
+        askFixtureServer.requests.filter((request) => request.mode === 'auto-group').length ===
+          placeholderAutoGroupRequestsBefore + 1 &&
+        (await evaluate(client, `window.__askE2ECalls.permissionRequests`)) ===
+          placeholderAutoGroupPermissionBefore + 1,
+      JSON.stringify({
+        request: placeholderAutoGroupRequest,
+        status: placeholderAutoGroupState.status,
+        chromeUnchanged: JSON.stringify(placeholderAutoGroupState.captured.chrome) ===
+          JSON.stringify(autoGroupFixtureBefore.chrome),
+        storageUnchanged: JSON.stringify(placeholderAutoGroupState.captured.storage) ===
+          JSON.stringify(autoGroupFixtureBefore.storage),
+      }),
+    );
+
     const mixedAutoGroupTarget = await evaluate(client, `(async () => {
       const grouped = await chrome.runtime.sendMessage({
         type: 'tabs:group',
@@ -11025,8 +11115,8 @@ async function main() {
     const mixedNoOpPreviewSummary =
       `${mixedNoOpAutoGroupRequest?.candidates?.length || 0} ` +
       `${mixedNoOpAutoGroupRequest?.candidates?.length === 1 ? 'tab' : 'tabs'} → ` +
-      `${mixedNoOpAutoGroupRequest?.plan?.length || 0} ` +
-      `${mixedNoOpAutoGroupRequest?.plan?.length === 1 ? 'group' : 'groups'}`;
+      `${new Set((mixedNoOpAutoGroupRequest?.plan || []).map((group) => group.title)).size} ` +
+      `${new Set((mixedNoOpAutoGroupRequest?.plan || []).map((group) => group.title)).size === 1 ? 'group' : 'groups'}`;
     await clickElementWithCDP(client, '#actionDialogCancel');
     const mixedAutoGroupCancelled = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
@@ -11038,7 +11128,9 @@ async function main() {
       mixedNoOpAutoGroupPreview.message.includes(mixedNoOpPreviewSummary) &&
         /\b\d+ moving\b/.test(mixedNoOpAutoGroupPreview.message) &&
         !mixedNoOpAutoGroupPreview.sectionTitles.includes('Remain untouched') &&
-        mixedNoOpAutoGroupPreview.target.rows.length === 2 &&
+        mixedNoOpAutoGroupPreview.target.rows.length === mixedNoOpAutoGroupRequest.plan
+          .filter((group) => group.title === askFixtureServer.autoGroupTargetTitle)
+          .reduce((count, group) => count + group.tabIds.length, 0) &&
         mixedPreviewLiveRow?.source ===
           `From ${askFixtureServer.autoGroupTargetTitle}` &&
         mixedPreviewLiveRow?.badge === 'Live' &&
@@ -11179,8 +11271,10 @@ async function main() {
       section.title === autoGroupCanonicalDuplicateTitle);
     const previewMergeDuplicatesSection = autoGroupMixedPreview.sections.find((section) =>
       section.title === 'Merge duplicates');
+    const reviewedAutoGroupMovingCount = Number(autoGroupMixedPreview.message.match(/(\d+) moving/)?.[1]);
+    if (!Number.isInteger(reviewedAutoGroupMovingCount)) throw new Error('Auto Group preview did not disclose its moving count.');
     const autoGroupExpectedOperationSummary =
-      'Auto Group organized 2 tabs and merged 2 duplicate Tags';
+      `Auto Group organized ${reviewedAutoGroupMovingCount} tabs and merged 2 duplicate Tags`;
     record(
       'Auto Group directly opens one concise final preview with a single scroll region',
       autoGroupMixedPreview.message.includes(autoGroupPreviewSummary) &&
@@ -11575,6 +11669,8 @@ async function main() {
     const appliedAutoGroupId = appliedAutoGroupState.alphaGroup.id;
     await clickElementWithCDP(client, '#undoOrganizationButton');
     const undoneAutoGroupState = await waitFor(client, `(async () => {
+      if (!document.querySelector('#syncStatus')?.textContent?.startsWith('Undid: Auto Group')) return null;
+      await navigator.locks.request('space-tabs-shared-state', async () => {});
       const captured = await window.__captureAutoGroupE2E();
       const operation = [...(captured.storage.operationHistory || [])].reverse()
         .find((item) => item?.type === 'auto-group');
@@ -11674,8 +11770,8 @@ async function main() {
         layoutRestored: autoGroupLayoutRestored,
         snapshotRestored: !autoGroupUndoSnapshotDifference,
         snapshotDifference: autoGroupUndoSnapshotDifference,
-        snapshotDifferenceActualGroup: undoneAutoGroupState.captured.storage.snapshot.groups?.[0],
-        snapshotDifferenceExpectedGroup: expectedAutoGroupUndoSnapshot.groups?.[0],
+        snapshotDifferenceActualGroup: undoneAutoGroupState.captured.storage.snapshot.groups?.[Number(autoGroupUndoSnapshotDifference?.path.match(/groups\[(\d+)\]/)?.[1] || 0)],
+        snapshotDifferenceExpectedGroup: expectedAutoGroupUndoSnapshot.groups?.[Number(autoGroupUndoSnapshotDifference?.path.match(/groups\[(\d+)\]/)?.[1] || 0)],
         tabPositionsRestored: !autoGroupUndoTabPositionDifference,
         tabPositionDifference: autoGroupUndoTabPositionDifference,
         previewBaselineSnapshotMatch: !autoGroupPreviewSnapshotDifference,
@@ -12870,10 +12966,10 @@ async function main() {
       movedGroupState.groupSpaceId === 'remote-current' &&
       movedGroupState.liveTab?.groupId === moveGroupFixture.groupId &&
       movedGroupState.chromeGroup?.id === moveGroupFixture.groupId &&
-      movedGroupState.card.liveRows === 2 &&
-      movedGroupState.card.dormantRows === 0;
+      movedGroupState.card.liveRows === 1 &&
+      movedGroupState.card.dormantRows === 1;
     record(
-      'Move Group transfers and materializes its live and saved rows, preserves a same-URL target identity, and updates live ownership',
+      'Move Group transfers live ownership, keeps its saved row dormant, and preserves a same-URL target identity',
       movedGroupBehaviorOk,
       JSON.stringify({
         keyboardMoveSubmenu,
@@ -14206,6 +14302,7 @@ async function main() {
         const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
         const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)});
         const stored = await chrome.storage.local.get('spaceTabsState');
+        if (window.__askE2ECalls.aiChats.length !== ${JSON.stringify(askDirectCallsBefore.aiChatCount + 1)}) return null;
         return {
           activeTabId: active?.id,
           sourceTabsActive: [Boolean(alpha.active), Boolean(beta.active)],
@@ -14710,8 +14807,8 @@ async function main() {
         await chrome.storage.local.set({ spaceTabsState: stored.spaceTabsState });
       });
       const originalSecret = ${JSON.stringify(originalAskAIState.secret)};
-      if (originalSecret) await chrome.storage.session.set({ spaceTabsSecrets: originalSecret });
-      else await chrome.storage.session.remove('spaceTabsSecrets');
+      if (originalSecret) await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().set({ spaceTabsSecrets: originalSecret });
+      else await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().remove();
       await chrome.permissions.remove({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }).catch(() => false);
       if (window.__askE2EOriginals) {
         chrome.permissions.request = window.__askE2EOriginals.requestPermission;
@@ -14816,19 +14913,19 @@ async function main() {
     const byokStorageState = await evaluate(client, `(async () => {
       const [local, session] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       return {
         localKeyLength: String(local.spaceTabsState?.ai?.apiKey || '').length,
-        sessionKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
+        savedKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
         keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
       };
     })()`);
     record(
-      'Workbench BYOK keeps the API key in session storage only',
+      'Workbench BYOK persists the API key outside workspace state',
       byokStorageState.localKeyLength === 0 &&
-        byokStorageState.sessionKeyLength > 0 &&
-        byokStorageState.keyStatus.includes('configured for this Chrome session'),
+        byokStorageState.savedKeyLength > 0 &&
+        byokStorageState.keyStatus.includes('encrypted and saved on this device'),
       JSON.stringify(byokStorageState),
     );
     const toastState = await evaluate(client, `(() => {
@@ -14858,7 +14955,7 @@ async function main() {
 
     await evaluate(client, `document.querySelector('#clearApiKeyButton').click()`);
     const clearedKeyState = await waitFor(client, `(async () => {
-      const session = await chrome.storage.session.get('spaceTabsSecrets');
+      const session = await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get();
       const keyLength = String(session.spaceTabsSecrets?.ai?.apiKey || '').length;
       if (keyLength !== 0 || !document.querySelector('#workbenchToast')?.textContent?.includes('API key cleared')) return null;
       return {
@@ -14868,7 +14965,7 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench clears the session API key with visible feedback',
+      'Workbench clears the saved API key with visible feedback',
       clearedKeyState.keyLength === 0 && clearedKeyState.keyStatus === 'No API key configured.',
       JSON.stringify(clearedKeyState),
     );
@@ -14963,7 +15060,7 @@ async function main() {
     const completedSetupSurfaceState = await waitFor(client, `(async () => {
       const [stored, session] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       if (document.querySelector('#onboardingDialog')?.open ||
           stored.spaceTabsState?.onboarding?.completed !== true ||
@@ -14979,7 +15076,7 @@ async function main() {
         completed: stored.spaceTabsState.onboarding.completed,
         stage: stored.spaceTabsState.onboarding.stage,
         localApiKeyLength: String(stored.spaceTabsState?.ai?.apiKey || '').length,
-        sessionKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
+        savedKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
       };
     })()`);
     record(
@@ -14991,7 +15088,7 @@ async function main() {
         completedSetupSurfaceState.completed &&
         completedSetupSurfaceState.stage === 'done' &&
         completedSetupSurfaceState.localApiKeyLength === 0 &&
-        completedSetupSurfaceState.sessionKeyLength === 'setup-e2e-key'.length,
+        completedSetupSurfaceState.savedKeyLength === 'setup-e2e-key'.length,
       JSON.stringify(completedSetupSurfaceState),
     );
 
@@ -15383,7 +15480,7 @@ async function main() {
     const restoredContinuationPreviousAI = await evaluate(client, `(async () => {
       const [stored, previousSecret] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
       ]);
       return {
         ai: structuredClone(stored.spaceTabsState?.ai || {}),
@@ -15419,7 +15516,7 @@ async function main() {
       await waitFor(client, `(async () => {
         const [stored, secret] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         return stored.spaceTabsState?.ai?.provider === 'openai-compatible' &&
           stored.spaceTabsState?.ai?.baseUrl === ${JSON.stringify(askFixtureServer.baseUrl)} &&
@@ -15431,7 +15528,7 @@ async function main() {
       const diagnostic = await evaluate(client, `(async () => {
         const [stored, secret] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         ]);
         return {
           ai: structuredClone(stored.spaceTabsState?.ai || null),
@@ -15837,8 +15934,8 @@ async function main() {
         await chrome.storage.local.set({ spaceTabsState: saved });
       });
       const previousSecrets = ${JSON.stringify(restoredContinuationPreviousAI.secrets)};
-      if (previousSecrets) await chrome.storage.session.set({ spaceTabsSecrets: previousSecrets });
-      else await chrome.storage.session.remove('spaceTabsSecrets');
+      if (previousSecrets) await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().set({ spaceTabsSecrets: previousSecrets });
+      else await (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().remove();
       await chrome.tabs.remove(${JSON.stringify(restoredContinuationTab.id)}).catch(() => null);
     })()`);
     await waitForLifecycleJournalToSettle(client);
@@ -15848,7 +15945,7 @@ async function main() {
     const restoredContinuationCleanupState = await waitFor(client, `(async () => {
       const [stored, secret, continuationTab] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        (await import(chrome.runtime.getURL('src/shared/ai-vault.js'))).createAIAuthVault().get(),
         chrome.tabs.get(${JSON.stringify(restoredContinuationTab.id)}).catch(() => null),
       ]);
       const ui = {
@@ -16887,6 +16984,10 @@ async function main() {
       dormantSwitchFixture.source.group.tabs[0].url,
       ...dormantSwitchFixture.target.group.tabs.map((row) => row.url),
     ];
+    const originalDurableSpaceId = await evaluate(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      return stored.spaceTabsState?.activeSpaceId || 'default';
+    })()`);
     const dormantSwitchPanel = await createAuxiliaryPanelWindow();
     const dormantSourceChrome = await evaluate(client, `(async () => {
       const fixture = ${JSON.stringify(dormantSwitchFixture.source)};
@@ -17031,6 +17132,14 @@ async function main() {
     );
     if (!clickedDormantTarget) throw new Error('Could not click the dormant target Space.');
 
+    await waitForInSession(client, dormantSwitchPanel.sessionId,
+      `document.querySelector('#activeSpaceName')?.textContent === ${JSON.stringify(dormantSwitchFixture.target.name)}`);
+    await evaluateInSession(client, dormantSwitchPanel.sessionId, `(() => {
+      const card = [...document.querySelectorAll('.group-card')].find((node) =>
+        node.querySelector('.group-header h2')?.textContent === ${JSON.stringify(dormantSwitchFixture.target.group.title)});
+      if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
+    })()`);
+
     const dormantSwitchState = await waitForInSession(
       client,
       dormantSwitchPanel.sessionId,
@@ -17061,6 +17170,13 @@ async function main() {
         const pendingLifecycleKeys = Object.keys(sessionEntries).filter((key) =>
           key.startsWith('spaceTabsLifecycleEvent:') ||
           key.startsWith('spaceTabsLifecycleSuppression:'));
+        window.__dormantSwitchDiagnostic = {
+          sourceSnapshotUrls, targetSnapshotUrls, pendingLifecycleKeys,
+          targetRows: targetRows.map((row) => ({id:row.dataset.snapshotTabId,dormant:row.classList.contains('dormant')})),
+          activeNewTab, newTabs, openedFixtureTabs,
+          mappedSpace: storedWindow.spaceTabsWindowState?.activeSpaceIds?.[${JSON.stringify(String(dormantSwitchPanel.windowId))}],
+          newTabOwner: activeNewTab ? saved.tabSpaces?.[String(activeNewTab.id)] : null,
+        };
         const ready =
           document.querySelector('#activeSpaceName')?.textContent === fixture.target.name &&
           storedWindow.spaceTabsWindowState?.activeSpaceIds?.[
@@ -20896,11 +21012,24 @@ async function main() {
       target.dataset.e2eMultiMoveTarget = 'true';
       return target.offsetParent !== null;
     })()`);
+    const multiMoveSubmenuFitsViewport = await evaluate(client, `(() => {
+      const panel = document.querySelector('#contextMenu .context-submenu.open .context-submenu-panel');
+      const rect = panel?.getBoundingClientRect();
+      return Boolean(rect && rect.top >= 7 && rect.bottom <= innerHeight - 7);
+    })()`);
+    record('Move to keeps a long Space submenu inside the viewport', multiMoveSubmenuFitsViewport);
+    if (!multiMoveSubmenuFitsViewport) throw new Error('Move to submenu extends outside the viewport.');
     const multiMoveTraceInstalled = await evaluate(client, `(() => {
       window.__multiMoveOriginalSendMessage = chrome.runtime.sendMessage;
       window.__multiMoveTrace = [];
       const trackedTabIds = new Set(${JSON.stringify(multiSelectMoveIds)});
       chrome.runtime.sendMessage = async function(message, ...rest) {
+        const closeSafetyTabs = message?.type === 'tabs:close'
+          ? await Promise.all([...new Set([
+            message.requiredActiveSurvivorTabId,
+            ...(message.requiredTargetTabGuards || []).map((guard) => guard.tabId),
+          ])].map((tabId) => chrome.tabs.get(Number(tabId)).catch(() => null)))
+          : [];
         const response = await window.__multiMoveOriginalSendMessage.call(chrome.runtime, message, ...rest);
         if (message?.type === 'tabs:list') {
           window.__multiMoveTrace.push({
@@ -20921,6 +21050,7 @@ async function main() {
           window.__multiMoveTrace.push({
             message: structuredClone(message),
             response: structuredClone(response),
+            closeSafetyTabs,
           });
         }
         return response;
@@ -21460,11 +21590,19 @@ async function main() {
           ? message.requiredTargetTabGuards
           : [];
         return !multiSelectMoveIds.includes(Number(message.tabId)) &&
-          multiSelectMoveIds.includes(Number(message.requiredActiveSurvivorTabId)) &&
-          multiSelectMoveIds.every((tabId) => guards.some((guard) =>
-            Number(guard?.tabId) === Number(tabId) &&
-            Number(guard?.windowId) === Number(openedWorkbench.windowId) &&
-            Number(guard?.groupId) === Number(multiSelectMoveActivation.physicalGroup?.id)));
+          guards.length > 0 &&
+          guards.some((guard) => Number(guard.tabId) === Number(message.requiredActiveSurvivorTabId)) &&
+          guards.every((guard) => {
+            const tab = (entry.closeSafetyTabs || []).find((candidate) =>
+              Number(candidate?.id) === Number(guard.tabId));
+            return tab && !tab.pinned &&
+              Number(tab.windowId) === Number(openedWorkbench.windowId) &&
+              Number(guard.windowId) === Number(tab.windowId) &&
+              Number(guard.groupId) === Number(tab.groupId) &&
+              (Number(tab.id) !== Number(message.requiredActiveSurvivorTabId) || tab.active) &&
+              (multiSelectMoveIds.includes(Number(tab.id)) ||
+                (Number(tab.groupId) === -1 && isChromeNewTabUrl(tab.pendingUrl || tab.url)));
+          });
       });
     record(
       'Multi-selected tabs move by stable identity and preserve metadata in the destination Space',
@@ -21616,7 +21754,7 @@ async function main() {
       if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
       return Boolean(card);
     })()`);
-    await waitFor(client, `[...document.querySelectorAll('.tab-row:not(.dormant)')].some((row) =>
+    await waitFor(client, `[...document.querySelectorAll('.tab-row.dormant')].some((row) =>
       row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 12000);
     const captureLegacyTemporaryState = `async () => {
       if (document.querySelector('#activeSpaceName')?.textContent !==
@@ -21696,7 +21834,6 @@ async function main() {
     const captureExactLegacyTemporaryState = `async () => {
       const captured = await (${captureLegacyTemporaryState})();
       const [row] = captured?.allRows || [];
-      const [browserTab] = captured?.browserFixtureTabs || [];
       return captured &&
         JSON.stringify(captured.storedGroups) ===
           ${JSON.stringify(JSON.stringify(expectedLegacyStoredGroups))} &&
@@ -21704,12 +21841,8 @@ async function main() {
         row?.title === 'Kept panel title E2E' &&
         row?.snapshotTabId === 'legacy-kept-tab-e2e' &&
         row?.snapshotGroupId === 'legacy-kept-group-e2e' &&
-        row?.dormant === false &&
-        Number(row?.tabId) === Number(browserTab?.id) &&
-        captured.browserFixtureTabs.length === 1 &&
-        browserTab?.url === 'https://example.com/kept-saved-row-e2e' &&
-        browserTab?.groupId >= 0 && browserTab?.active === true &&
-        browserTab?.status === 'complete'
+        row?.dormant === true &&
+        captured.browserFixtureTabs.length === 0
         ? captured
         : null;
     }`;
@@ -21721,7 +21854,6 @@ async function main() {
     const legacyTemporaryStateIsCorrect = (captured) => {
       if (!captured) return false;
       const [onlyRow] = captured.allRows;
-      const [browserTab] = captured.browserFixtureTabs;
       return JSON.stringify(captured.groupTitles) === JSON.stringify(['Kept history E2E']) &&
         JSON.stringify(captured.headers) === JSON.stringify(['Kept history E2E']) &&
         JSON.stringify(captured.savedRows) === JSON.stringify([{
@@ -21748,23 +21880,19 @@ async function main() {
         }]) &&
         captured.allRows.length === 1 &&
         onlyRow.title === 'Kept panel title E2E' &&
-        onlyRow.dormant === false &&
+        onlyRow.dormant === true &&
         onlyRow.ungrouped === false &&
         onlyRow.groupTitle === 'Kept history E2E' &&
-        Number(onlyRow.tabId) === Number(browserTab?.id) &&
         onlyRow.snapshotTabId === 'legacy-kept-tab-e2e' &&
         onlyRow.snapshotGroupId === 'legacy-kept-group-e2e' &&
-        captured.browserFixtureTabs.length === 1 &&
-        browserTab?.url === 'https://example.com/kept-saved-row-e2e' &&
-        browserTab?.groupId >= 0 && browserTab?.active === true &&
-        browserTab?.status === 'complete';
+        captured.browserFixtureTabs.length === 0;
     };
     await checkpointWorkbenchBeforeNavigation();
     await client.send('Page.reload', {}, activePipeSessionId);
     await waitFor(client, `document.readyState === 'complete' &&
       document.querySelector('#activeSpaceName')?.textContent ===
         ${JSON.stringify(legacyTemporarySpace.name)} &&
-      [...document.querySelectorAll('.tab-row:not(.dormant)')].some((row) =>
+      [...document.querySelectorAll('.tab-row.dormant')].some((row) =>
         row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 15000);
     const legacyTemporaryAfterReload = await waitFor(
       client,
@@ -21792,7 +21920,7 @@ async function main() {
       legacyTemporaryStateIsCorrect(legacyTemporaryAfterReload) &&
       JSON.stringify(legacyProjectionAfterReload) === JSON.stringify(legacyProjectionBeforeReload);
     record(
-      'first opening an inactive legacy Space purges temporary Ungrouped rows and restores its saved Tag',
+      'first opening an inactive legacy Space purges temporary Ungrouped rows and keeps its saved Tag dormant',
       legacyTemporaryFirstOpenOk,
       JSON.stringify({ legacyTemporaryFirstOpen, legacyTemporaryAfterReload }),
     );

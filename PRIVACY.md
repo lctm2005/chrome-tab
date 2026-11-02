@@ -1,6 +1,6 @@
 # Space Tabs Privacy Policy
 
-Last updated: 2026-07-15
+Last updated: 2026-11-02
 
 Space Tabs is a Chrome extension for Arc-like browser workspaces, dormant saved
 tabs, and optional BYOK AI.
@@ -30,8 +30,14 @@ Space Tabs may handle:
 ## Local Storage
 
 Space Tabs stores workspace data and preferences in Chrome extension storage on the
-user's device. The optional AI API key is stored in Chrome session storage when
-available and is excluded from normal workspace state and exported backups.
+user's device. The optional AI API key is encrypted with AES-GCM and saved in the extension's
+local IndexedDB with a non-extractable Web Crypto key. It survives extension
+updates and browser restarts, remains bound to its configured provider endpoint,
+and is excluded from normal workspace state and exported backups. Clear API Key
+removes the saved credential. The encryption key resides in the same browser
+profile; this is not an OS keychain and cannot protect against compromised
+extension code or an attacker controlling the device. Uninstalling the extension
+or deleting its browser profile removes this local data.
 
 Space Tabs does not require an account, collect telemetry, or operate a hosted
 sync service in this release. Workspace data is not uploaded to a Space Tabs server. Space Tabs does not

@@ -131,6 +131,7 @@ export function languageInstruction(language) {
 }
 
 export function formatAIError(error) {
+  if (error?.code === 'AI_AUTH_STORAGE') return error.message;
   const message = String(error?.message || error || '').trim();
   if (error?.name === 'AbortError') return 'AI request was stopped.';
   if (/^AI provider rejected the request \(HTTP \d+/i.test(message)) return message;
@@ -190,6 +191,8 @@ export function createPrompt(kind, context = {}) {
           'Do not group merely because tabs share a domain or website; mix different domains when their titles describe the same subject.',
           'Keep unrelated pages separate even when they are from the same domain.',
           'Include every supplied tab id exactly once; do not omit tabs, invent ids, or repeat ids.',
+          'Use specific topical titles; never create Ungrouped, 未分组, Uncategorized, 未分类, Tabs, or an equivalent placeholder group.',
+          'Use slash-separated hierarchy only when every folder has at least two direct children; otherwise return one flat descriptive title.',
           'Return only JSON: [{"title":"Topic","tabIds":[1,2],"color":"blue"}].',
         ].join(' '),
       },

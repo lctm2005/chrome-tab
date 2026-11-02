@@ -1,4 +1,5 @@
 import { chromeGroupTitle } from './group-title.js';
+import { isChromeNewTabUrl } from './tab-utils.js';
 import {
   askSessionKeyAfterTabReplacement,
   rebindAskSessionsForTabReplacement,
@@ -194,6 +195,10 @@ function reduceCreated(state, event, now) {
     createdLifecycleId('group', event, tabId);
   const snapshotTabId = createdLifecycleId('tab', event, tabId);
   const url = cleanText(event.url) || cleanText(eventTab.url);
+  const keepalive = arrayValue(state.ephemeralTabIds).some((id) => Number(id) === tabId);
+  if (keepalive && (!url || isChromeNewTabUrl(url)) && groupId < 0 && !eventTab.pinned) {
+    return state;
+  }
   const title = cleanText(event.title) || cleanText(eventTab.title) || url;
   const binding = {
     tabId,
@@ -212,6 +217,9 @@ function reduceCreated(state, event, now) {
     sessionId: cleanText(event.sessionId),
   };
   let next = cloneLiveMetadataState(state);
+  // A navigation, pin, or native grouping turns a temporary keepalive into a
+  // normal user tab. Do not hide it if the user later returns to New Tab.
+  next.ephemeralTabIds = next.ephemeralTabIds.filter((id) => Number(id) !== tabId);
   if (groupId >= 0) {
     next.groupSpaces[groupId] = spaceId;
     delete next.tabSpaces[tabId];
@@ -366,14 +374,20 @@ function reduceUpdated(state, event, now) {
       binding.provisional = true;
     }
   }
-  const orderedSnapshotGroupIds = uniqueNonEmptyStrings(targetGroup.orderedSnapshotGroupIds);
+  // Native events captured during Undo are replayed after its shared lock is
+  // released. They acknowledge the committed layout rather than a later user
+  // reorder; later events must still be allowed to project physical ordering.
+  const restoreAcknowledgement = isOrganizationRestoreAcknowledgement(originalBinding, event, binding.groupId) &&
+    Number(originalBinding.groupId) === Number(binding.groupId);
+  const orderedSnapshotGroupIds = restoreAcknowledgement
+    ? [] : uniqueNonEmptyStrings(targetGroup.orderedSnapshotGroupIds);
   const orderedSnapshot = next.spaceSnapshots?.[binding.spaceId];
   if (orderedSnapshotGroupIds.length > 0 && orderedSnapshot) {
     const snapshot = cloneSnapshot(orderedSnapshot);
     snapshot.groups = reorderSnapshotGroupSubset(snapshot.groups, orderedSnapshotGroupIds);
     next = setSpaceSnapshot(next, binding.spaceId, withSnapshotTimestamp(snapshot, now));
   }
-  const orderedGroupIds = uniqueChromeTabIds(targetGroup.orderedGroupIds);
+  const orderedGroupIds = restoreAcknowledgement ? [] : uniqueChromeTabIds(targetGroup.orderedGroupIds);
   if (orderedGroupIds.length > 0 && binding.spaceId) {
     const orderedKeys = orderedGroupIds.map((id) => `group:${id}`);
     next.groupOrder[binding.spaceId] = reorderLiveGroupOrder(
@@ -507,7 +521,12 @@ function reduceGroupUpdated(state, event, now) {
   // physical Chrome order included by the background worker can lag a panel
   // drag that deliberately changed only the logical folder order, so only a
   // created/moved (or legacy source-less) event may project ordering here.
-  const mayProjectPhysicalOrder = event.source !== 'updated';
+  const restoredGroupAcknowledgement = Object.values(recordValue(state.tabLifecycle)).some((binding) => (
+      isOrganizationRestoreAcknowledgement(binding, event, groupId) &&
+      Number(binding.groupId) === groupId &&
+      binding.snapshotGroupId === snapshotGroupId
+    ));
+  const mayProjectPhysicalOrder = event.source !== 'updated' && !restoredGroupAcknowledgement;
   const orderedSnapshotGroupIds = mayProjectPhysicalOrder
     ? uniqueNonEmptyStrings(event.orderedSnapshotGroupIds)
     : [];
@@ -525,6 +544,14 @@ function reduceGroupUpdated(state, event, now) {
     next.groupOrder[spaceId] = reorderLiveGroupOrder(next.groupOrder[spaceId], orderedKeys);
   }
   return next;
+}
+
+function isOrganizationRestoreAcknowledgement(binding, event, groupId) {
+  const capturedAt = Number(event.capturedAt);
+  return hasOwn(recordValue(binding), 'organizationRestoredGroupId') &&
+    Number(binding.organizationRestoredGroupId) === Number(groupId) &&
+    Number.isFinite(capturedAt) && capturedAt > 0 &&
+    capturedAt <= Number(binding.organizationRestoredAt);
 }
 
 function reduceGroupRemoved(state, event) {

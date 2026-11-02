@@ -15,6 +15,7 @@ export const RUNTIME_FILES = Object.freeze([
   'sidepanel.js',
   'src/shared/action-safety.js',
   'src/shared/ai-auth.js',
+  'src/shared/ai-vault.js',
   'src/shared/ai-providers.js',
   'src/shared/ai.js',
   'src/shared/arc-import.js',

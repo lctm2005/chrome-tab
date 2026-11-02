@@ -63,7 +63,7 @@ test("renders a privacy page that matches the extension data path", async () => 
   assert.match(html, /Ask Page, Space Tabs reads only the current HTTP\(S\) page/i);
   assert.match(html, /stored text from recent conversation messages/i);
   assert.match(html, /source links are excluded from that conversation context/i);
-  assert.match(html, /Chrome session storage/);
+  assert.match(html, /encrypted with AES-GCM in local IndexedDB/);
   assert.match(html, /does not require an account, collect telemetry/i);
   assert.match(html, /manually choose StorableSidebar\.json/i);
   assert.match(html, /does not persist the source file or a reusable file handle/i);

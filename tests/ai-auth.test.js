@@ -16,7 +16,7 @@ const openAI = {
   apiKey: '  openai-key  ',
 };
 
-test('binds session-only AI keys to the normalized provider endpoint', () => {
+test('binds AI keys to the normalized provider endpoint', () => {
   const auth = createScopedAIAuth(openAI);
 
   assert.deepEqual(aiAuthScope(openAI), {

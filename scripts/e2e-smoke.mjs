@@ -192,7 +192,7 @@ async function sidepanelTarget() {
   let targets = await json(`${base}/json/list`);
   let target = coverageEnabled ? null : targets.find((item) => item.url === sidepanelUrl);
   if (!target) {
-    const initialUrl = coverageEnabled ? 'about:blank' : sidepanelUrl;
+    const initialUrl = 'about:blank';
     target = await json(`${base}/json/new?${encodeURIComponent(initialUrl)}`, { method: 'PUT' });
   }
   return target;
@@ -204,6 +204,7 @@ function createClient(wsUrl) {
   const pending = new Map();
   ws.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === 'Runtime.exceptionThrown') process.stderr.write(`[preview exception] ${message.params?.exceptionDetails?.exception?.description || message.params?.exceptionDetails?.text}\n`);
     if (!message.id) return;
     const record = pending.get(message.id);
     if (!record) return;
@@ -250,7 +251,15 @@ async function waitFor(client, expression, timeoutMs = 5000) {
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out waiting for: ${expression}`);
+  const diagnostic = await evaluate(client, `(() => ({
+    initialized: document.documentElement.dataset.initialized,
+    syncStatus: document.querySelector('#syncStatus')?.textContent,
+    syncError: document.querySelector('#syncStatus')?.title,
+    onboardingOpen: document.querySelector('#onboardingDialog')?.open,
+    onboardingStep: document.querySelector('#onboardingStepLabel')?.textContent,
+    onboarding: JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState?.onboarding,
+  }))()`).catch(() => null);
+  throw new Error(`Timed out waiting for: ${expression}; ${JSON.stringify(diagnostic)}`);
 }
 
 async function startPreviewCoverage(client) {
@@ -392,6 +401,7 @@ async function main() {
     else addEventListener('load', () => resolve(true), { once: true });
   })`);
 
+    await waitFor(client, `document.documentElement.dataset.initialized === 'true'`, 15000);
     if (preview) {
       await evaluate(client, `(() => {
         localStorage.clear();
@@ -733,7 +743,7 @@ async function main() {
     };
     if (${JSON.stringify(preview)}) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
-      sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify({
+      await (await import('./src/shared/ai-vault.js')).createAIAuthVault().set({
         [SECRET_STORAGE_KEY]: {
           ai: {
             provider: 'z-ai',
@@ -741,7 +751,7 @@ async function main() {
             apiKey: 'preview-e2e-key',
           },
         },
-      }));
+      });
     } else {
       await chrome.storage.local.set({ [STORAGE_KEY]: state });
     }
@@ -1058,6 +1068,8 @@ async function main() {
     const fault = window.__ADD_SPACE_ATOMICITY_FAULT__;
     return {
       activeSpaceId: stored.activeSpaceId,
+      runtimeTabs: JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}').tabs || [],
+      ephemeralTabIds: stored.ephemeralTabIds || [],
       rows: document.querySelectorAll('.tab-row').length,
       snapshot: stored.spaceSnapshots?.['e2e-space'] || null,
       storedMatches: (stored.spaces || []).filter((space) =>
@@ -1073,7 +1085,10 @@ async function main() {
   record(
     'retrying Add Space commits one durable active Space with a safe active target tab',
     newEmptySpaceState.activeSpaceId === 'e2e-space' &&
-      newEmptySpaceState.rows === 1 &&
+      newEmptySpaceState.rows === 0 &&
+      newEmptySpaceState.runtimeTabs.length === 1 &&
+      newEmptySpaceState.runtimeTabs[0].active &&
+      newEmptySpaceState.ephemeralTabIds.includes(newEmptySpaceState.runtimeTabs[0].id) &&
       !newEmptySpaceState.snapshot &&
       newEmptySpaceState.storedMatches === 1 &&
       newEmptySpaceState.railMatches === 1 &&
@@ -1191,21 +1206,24 @@ async function main() {
       rows,
       ephemeralTabIds: stored.ephemeralTabIds || [],
       defaultSnapshotGroups: (stored.spaceSnapshots?.default?.groups || []).map((group) => group.title),
+      savedTabCount: (stored.spaceSnapshots?.default?.groups || []).reduce((count, group) => count + group.tabs.length, 0),
+      runtimeTabs: JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}').tabs || [],
       e2eSnapshot: stored.spaceSnapshots?.['e2e-space'] || null,
       carrierMutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => carrierMutations.has(command.type)),
     };
   })()`);
   record(
-    'switching away from a brand-new empty Space restores the target without a placeholder tab',
-    emptySpaceSwitchState.rows.length === 5 &&
-      emptySpaceSwitchState.ephemeralTabIds.length === 0 &&
+    'switching from an empty Space preserves saved tabs dormant and reuses the safe New Tab',
+    emptySpaceSwitchState.rows.length === 0 &&
+      emptySpaceSwitchState.savedTabCount === 5 &&
+      emptySpaceSwitchState.runtimeTabs.length === 1 &&
+      emptySpaceSwitchState.runtimeTabs[0].active &&
+      emptySpaceSwitchState.ephemeralTabIds.length === 1 &&
+      emptySpaceSwitchState.ephemeralTabIds.includes(emptySpaceSwitchState.runtimeTabs[0].id) &&
       ['Research', 'Build', 'Inbox'].every((title) => emptySpaceSwitchState.defaultSnapshotGroups.includes(title)) &&
       !emptySpaceSwitchState.e2eSnapshot &&
-      emptySpaceSwitchState.carrierMutations.filter((command) => command.type === 'tabs:create').length === 5 &&
-      emptySpaceSwitchState.carrierMutations.filter((command) => command.type === 'tabs:close').length === 1 &&
-      emptySpaceSwitchState.carrierMutations.find((command) => command.type === 'tabs:close')
-        ?.payload?.requiredTargetTabGuards?.length === 5 &&
+      emptySpaceSwitchState.carrierMutations.length === 0 &&
       !emptySpaceSwitchState.rows.some((text) => /Untitled|New Tab/i.test(text)),
     JSON.stringify(emptySpaceSwitchState)
   );
@@ -1238,7 +1256,7 @@ async function main() {
   record(
     'Workbench Settings uses the full page with local backup controls',
     settingsState.api === (preview
-      ? 'API key is configured for this Chrome session.'
+      ? 'API key is encrypted and saved on this device.'
       : 'No API key configured.')
       && settingsState.exportBackup
       && settingsState.restoreBackup
@@ -1280,22 +1298,23 @@ async function main() {
   record('saved Workbench shortcuts apply immediately and Save shows visible feedback', true);
   await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
 
-  const settingsAtomicityBaseline = await evaluate(client, `(() => ({
+  const settingsAtomicityBaseline = await evaluate(client, `(async () => ({
     local: localStorage.getItem('spaceTabsState'),
-    session: sessionStorage.getItem('spaceTabsSecrets'),
+    session: JSON.stringify(await (await import('./src/shared/ai-vault.js')).createAIAuthVault().get()),
   }))()`);
   await evaluate(client, `(() => {
-    const originalSetItem = Storage.prototype.setItem;
+    const originalPut = IDBObjectStore.prototype.put;
     let rejectSecretWriteAfterApply = true;
-    Storage.prototype.setItem = function setItemWithOneShotSessionFailure(key, value) {
-      originalSetItem.call(this, key, value);
-      if (this === sessionStorage && key === 'spaceTabsSecrets' && rejectSecretWriteAfterApply) {
+    IDBObjectStore.prototype.put = function putWithOneShotVaultFailure(...args) {
+      const request = originalPut.apply(this, args);
+      if (this.name === 'auth' && rejectSecretWriteAfterApply) {
         rejectSecretWriteAfterApply = false;
-        throw new Error('session write failed after apply');
+        request.addEventListener('success', () => this.transaction.abort());
       }
+      return request;
     };
     window.__restoreSettingsAtomicityStorage__ = () => {
-      Storage.prototype.setItem = originalSetItem;
+      IDBObjectStore.prototype.put = originalPut;
       delete window.__restoreSettingsAtomicityStorage__;
     };
 
@@ -1308,10 +1327,10 @@ async function main() {
     document.querySelector('#saveSettingsButton').click();
     return true;
   })()`);
-  await waitFor(client, `document.querySelector('#workbenchToast')?.dataset.tone === 'error' && document.querySelector('#workbenchToast')?.textContent.includes('session write failed after apply')`);
-  const settingsAtomicityFailure = await evaluate(client, `(() => ({
+  await waitFor(client, `document.querySelector('#workbenchToast')?.dataset.tone === 'error' && document.querySelector('#workbenchToast')?.textContent.includes('API key storage was interrupted.')`);
+  const settingsAtomicityFailure = await evaluate(client, `(async () => ({
     local: localStorage.getItem('spaceTabsState'),
-    session: sessionStorage.getItem('spaceTabsSecrets'),
+    session: JSON.stringify(await (await import('./src/shared/ai-vault.js')).createAIAuthVault().get()),
     toast: document.querySelector('#workbenchToast')?.textContent || '',
     tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
     status: document.querySelector('#settingsStatus')?.textContent || '',
@@ -1322,12 +1341,12 @@ async function main() {
     appliedTheme: document.documentElement.dataset.theme || 'purple',
   }))()`);
   record(
-    'Settings rolls local and session storage back without false success while retaining the full draft',
+    'Settings rolls workspace and encrypted storage back without false success while retaining the full draft',
     settingsAtomicityFailure.local === settingsAtomicityBaseline.local &&
       settingsAtomicityFailure.session === settingsAtomicityBaseline.session &&
       settingsAtomicityFailure.tone === 'error' &&
-      settingsAtomicityFailure.toast.includes('session write failed after apply') &&
-      settingsAtomicityFailure.status.includes('session write failed after apply') &&
+      settingsAtomicityFailure.toast.includes('API key storage was interrupted.') &&
+      settingsAtomicityFailure.status.includes('API key storage was interrupted.') &&
       settingsAtomicityFailure.toast !== 'Settings saved.' &&
       settingsAtomicityFailure.apiKeyDraft === 'preview-e2e-key-after-retry' &&
       settingsAtomicityFailure.languageDraft === 'en' &&
@@ -1343,10 +1362,10 @@ async function main() {
 
   await evaluate(client, `document.querySelector('#saveSettingsButton').click()`);
   await waitFor(client, `document.querySelector('#workbenchToast')?.textContent === 'Settings saved.' && document.querySelector('#workbenchToast')?.dataset.tone === 'success'`);
-  const settingsAtomicityRetry = await evaluate(client, `(() => {
+  const settingsAtomicityRetry = await evaluate(client, `(async () => {
     window.__restoreSettingsAtomicityStorage__?.();
     const local = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-    const session = JSON.parse(sessionStorage.getItem('spaceTabsSecrets') || '{}').spaceTabsSecrets || {};
+    const session = (await (await import('./src/shared/ai-vault.js')).createAIAuthVault().get()).spaceTabsSecrets || {};
     return {
       theme: local.theme,
       language: local.ai?.language,
@@ -1362,7 +1381,7 @@ async function main() {
     };
   })()`);
   record(
-    'retrying the retained Settings draft commits one consistent local/session configuration',
+    'retrying the retained Settings draft commits one consistent workspace/encrypted configuration',
     settingsAtomicityRetry.theme === 'ocean' &&
       settingsAtomicityRetry.language === 'en' &&
       settingsAtomicityRetry.durableApiKey === '' &&
@@ -1562,7 +1581,7 @@ async function main() {
       restoreAtomicityRetry.liveTabOwners.every((owner) =>
         owner.spaceId === restoreAtomicityFixture.id &&
         (!owner.lifecycleSpaceId || owner.lifecycleSpaceId === restoreAtomicityFixture.id)) &&
-      restoreAtomicityRetry.liveGroupOwners.length > 0 &&
+      restoreAtomicityRetry.liveGroupOwners.length === JSON.parse(restoreAtomicityBaseline.previewRuntime).groups.length &&
       restoreAtomicityRetry.liveGroupOwners.every((spaceId) => spaceId === restoreAtomicityFixture.id) &&
       restoreAtomicityRetry.windowSpaceId === restoreAtomicityFixture.id &&
       restoreAtomicityRetry.operations === 1 &&
@@ -1872,19 +1891,19 @@ async function main() {
     };
   })()`, 7000);
   record(
-    'collapsed group preview search + Enter focuses the exact materialized saved identity once',
+    'collapsed group preview search + Enter opens only the selected dormant identity once',
     dormantPreviewLaunch?.query === 'nested-plan' &&
       dormantPreviewLaunch.openPrevented &&
       dormantPreviewLaunch.enterPrevented &&
       dormantPreviewLaunch.before.length === 1 &&
-      dormantPreviewLaunch.before[0].title === 'example.com' &&
-      !dormantPreviewLaunch.before[0].dormant &&
+      dormantPreviewLaunch.before[0].title === 'Nested Plan' &&
+      dormantPreviewLaunch.before[0].dormant &&
       dormantPreviewLaunchState.popoverHidden === true &&
       dormantPreviewLaunchState.previewOpen === 'false' &&
-      dormantPreviewLaunchState.createCommands.length === 0 &&
-      dormantPreviewLaunchState.focusCommands.length === 1 &&
-      Number(dormantPreviewLaunchState.focusCommands[0]?.payload?.tabId) ===
-        Number(dormantPreviewLaunchState.bindingTabId) &&
+      dormantPreviewLaunchState.createCommands.length === 1 &&
+      dormantPreviewLaunchState.createCommands[0].payload.url === 'https://example.com/nested-plan' &&
+      dormantPreviewLaunchState.createCommands[0].payload.active === true &&
+      dormantPreviewLaunchState.focusCommands.length === 0 &&
       dormantPreviewLaunchState.targetTabs[0]?.active === true &&
       dormantPreviewLaunchState.targetTabs[0]?.id === dormantPreviewLaunchState.bindingTabId &&
       dormantPreviewLaunchState.binding.snapshotTabId === dormantPreviewLaunch.snapshotTabId &&
@@ -2669,7 +2688,7 @@ async function main() {
     'dormant imported groups can be dragged into another group',
     dormantNestState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
       dormantNestState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
-      dormantNestState.betaChildren.join(' > ') === 'group:Beta > group:Gamma' &&
+      dormantNestState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
       dormantNestState.gammaDepth === 1,
     JSON.stringify(dormantNestState)
   );
@@ -2710,7 +2729,7 @@ async function main() {
     'dormant imported group nesting keeps storage and DOM hierarchy after reload',
     dormantNestReloadState.titles.join(' > ') === 'Beta > Beta / Gamma > Alpha' &&
       dormantNestReloadState.rootOrder.join(' > ') === 'folder:Beta > group:Alpha' &&
-      dormantNestReloadState.betaChildren.join(' > ') === 'group:Beta > group:Gamma' &&
+      dormantNestReloadState.betaChildren.join(' > ') === 'group:Tabs > group:Gamma' &&
       dormantNestReloadState.gammaFolderTitle === 'Beta',
     JSON.stringify(dormantNestReloadState)
   );
@@ -3831,6 +3850,8 @@ async function main() {
       if (rows.length < 2) return null;
       const commands = window.__SPACE_TABS_PREVIEW_COMMANDS__ || [];
       const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const movedTabs = (runtime.tabs || []).filter((tab) => tab.id === 201 || tab.id === 202);
+      if (movedTabs.length !== 2 || movedTabs[0].groupId < 0 || movedTabs.some((tab) => tab.groupId !== movedTabs[0].groupId)) return null;
       return {
         activeSpaceId: stored.activeSpaceId,
         rows,

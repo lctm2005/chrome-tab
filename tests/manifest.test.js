@@ -259,7 +259,7 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(source, /saveOnboardingAIAndFinish[\s\S]*persistCurrentAIConfiguration\(\)/);
   assert.match(source, /function stateForStorage\(\)[\s\S]*apiKey: ''/);
   assert.match(source, /scopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
-  assert.match(source, /function persistCurrentAIConfiguration\(\)[\s\S]*persistScopedAIConfiguration[\s\S]*readSettings: storageGet[\s\S]*readAuth: secretGet[\s\S]*persistSettings: \(\) => storageSet\(\{ \[STORAGE_KEY\]: stateForStorage\(\) \}\)[\s\S]*persistAuth:[\s\S]*clearAuth:[\s\S]*restoreSettings:[\s\S]*restoreAuth:/);
+  assert.match(source, /function persistCurrentAIConfiguration\(\)[\s\S]*persistScopedAIConfiguration[\s\S]*readSettings: storageGet[\s\S]*readAuth: \(\) => aiAuthVault\.snapshot\(\)[\s\S]*persistSettings: \(\) => storageSet\(\{ \[STORAGE_KEY\]: stateForStorage\(\) \}\)[\s\S]*persistAuth:[\s\S]*clearAuth:[\s\S]*restoreSettings:[\s\S]*restoreAuth:/);
   assert.match(source, /providerInput\.addEventListener\('change', \(\) => handleAIProviderChange/);
   assert.match(source, /baseUrlInput\.addEventListener\('input', \(\) => clearAIKeyAfterEndpointEdit/);
   assert.match(source, /function handleAIProviderChange[\s\S]*apiKeyInput\.value = ''/);

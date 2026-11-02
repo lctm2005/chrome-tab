@@ -489,6 +489,8 @@ test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
   assert.match(prompt[0].content, /mix different domains/);
   assert.match(prompt[0].content, /every supplied tab id exactly once/i);
   assert.match(prompt[0].content, /do not omit tabs/i);
+  assert.match(prompt[0].content, /never create Ungrouped, 未分组/i);
+  assert.match(prompt[0].content, /every folder has at least two direct children/i);
 });
 
 test('uses empty inputs for optional tidy and custom prompt context', () => {

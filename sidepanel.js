@@ -19,6 +19,7 @@ import {
   persistScopedAIConfiguration,
   scopedAIKey,
 } from './src/shared/ai-auth.js';
+import { createAIAuthVault } from './src/shared/ai-vault.js';
 import {
   adoptPortableAskSession,
   appendAskSessionMessage,
@@ -280,6 +281,21 @@ import {
 const legacyConfigName = ['ARC', 'SIDECAR_LOCAL_CONFIG'].join('');
 const localConfig = window.SPACE_TABS_CONFIG || window[legacyConfigName] || {};
 const extensionRuntime = isExtensionRuntime(window);
+let aiAuthStorageError = '';
+const aiAuthVault = createAIAuthVault({
+  readLegacy: async () => {
+    if (extensionRuntime) return chrome.storage.session.get(SECRET_STORAGE_KEY);
+    try {
+      return JSON.parse(sessionStorage.getItem(SECRET_STORAGE_KEY) || '{}');
+    } catch {
+      return {};
+    }
+  },
+  removeLegacy: async () => {
+    if (extensionRuntime) return chrome.storage.session.remove(SECRET_STORAGE_KEY);
+    sessionStorage.removeItem(SECRET_STORAGE_KEY);
+  },
+});
 const pageParams = new URLSearchParams(window.location.search);
 const layoutMode = pageParams.get('layout') === 'workbench'
   ? 'workbench'
@@ -586,13 +602,9 @@ async function init() {
   } catch (error) {
     document.documentElement.dataset.initialized = 'failed';
     els.syncStatus.textContent = 'Failed to initialize';
-    if (activeView === 'ask') {
-      try {
-        await addAskMessage('assistant', formatAIError(error));
-      } catch (persistenceError) {
-        console.error(persistenceError);
-      }
-    }
+    els.syncStatus.title = formatAIError(error);
+    // Initialization errors must not write default state over an unreadable workspace.
+    setStatus(formatAIError(error));
     console.error(error);
   }
 }
@@ -676,7 +688,7 @@ async function syncStateFromStorage(options = {}) {
   const defaults = createDefaultState(localConfig);
   const [stored, secrets, storedWindowState, browserSessionId] = await Promise.all([
     storageGet(),
-    secretGet(),
+    secretGet({ tolerateFailure: true }),
     windowStateGet(),
     currentBrowserSessionId(),
   ]);
@@ -1778,6 +1790,8 @@ function captureLiveOrganization(spaceId = state.activeSpaceId) {
 }
 
 async function restoreLiveOrganization(layout = {}, spaceId = state.activeSpaceId, options = {}) {
+  const originalSnapshot = structuredClone(state.spaceSnapshots?.[spaceId] || null);
+  const restoredGroupIds = new Map((layout.ungroupedTabIds || []).map((tabId) => [Number(tabId), -1]));
   const messageOptions = {
     windowBinding: options.windowBinding,
     allowStaleWindowBinding: options.allowStaleWindowBinding === true,
@@ -1830,7 +1844,31 @@ async function restoreLiveOrganization(layout = {}, spaceId = state.activeSpaceI
     if (restoredGroupId === null) {
       throw new Error(`Could not restore Chrome group "${group.title || 'Tabs'}".`);
     }
+    for (const tabId of tabIds) restoredGroupIds.set(tabId, restoredGroupId);
     rememberRestoredGroupTabOrder(restoredGroupId, tabIds, spaceId);
+  }
+  if (originalSnapshot) {
+    // Recreating Chrome groups changes their numeric ids. Restore the saved
+    // identity by stable row id before the next refresh, including Ungrouped;
+    // otherwise applied-plan bindings can replace the original Tag identity.
+    state.spaceSnapshots[spaceId] = originalSnapshot;
+    const organizationRestoredAt = Date.now();
+    for (const [tabId, groupId] of restoredGroupIds) {
+      const binding = state.tabLifecycle?.[tabId];
+      if (!binding?.snapshotTabId) continue;
+      const matchingGroups = (originalSnapshot.groups || []).filter((group) => (
+        group.snapshotGroupId && (group.tabs || []).some((tab) => tab.snapshotTabId === binding.snapshotTabId)
+      ));
+      if (matchingGroups.length !== 1) continue;
+      state.tabLifecycle[tabId] = {
+        ...binding,
+        groupId,
+        organizationRestoredGroupId: groupId,
+        organizationRestoredAt,
+        snapshotGroupId: matchingGroups[0].snapshotGroupId,
+        spaceId,
+      };
+    }
   }
   await loadTabs({ adopt: false, ...messageOptions });
 }
@@ -5591,6 +5629,9 @@ async function finishMoveToSpace(spaceId, options = {}) {
   if (activated !== true) {
     throw new Error('The destination Space was not opened after the saved move.');
   }
+  // Moved tabs are already live. Materialize their destination Tag before
+  // reporting completion, so Chrome and the panel agree without a reload.
+  await refreshTabs({ adopt: false, reloadDormant: true, windowBinding: options.windowBinding });
 }
 
 async function deleteGroup(group, options = {}) {
@@ -8904,7 +8945,9 @@ async function autoGroupTabs(options = {}) {
           messages: createPrompt('tidy-tabs', {
             tabs: candidates.map((candidate) => ({
               ...compactTabForAI(candidate),
-              currentGroup: candidate.currentGroup?.title || 'Ungrouped',
+              currentGroup: isUngroupedSnapshotGroup(candidate.currentGroup)
+                ? null
+                : candidate.currentGroup?.title || null,
               status: candidate.dormant ? 'saved' : 'live',
             })),
           }),
@@ -11129,6 +11172,14 @@ function setContextSubmenuOpen(wrapper, open) {
   wrapper.classList.toggle('open', open);
   wrapper.querySelector(':scope > .context-submenu-trigger')
     ?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const panel = wrapper.querySelector(':scope > .context-submenu-panel');
+  if (!open || !panel) return;
+  panel.style.top = '-5px';
+  const rect = panel.getBoundingClientRect();
+  // The parent menu fits on screen, but a long Space list can extend below
+  // it. Keep the scrollable submenu inside the viewport as well.
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - 8 - rect.height));
+  panel.style.top = `${-5 + top - rect.top}px`;
 }
 
 function menuSection(item) {
@@ -11543,7 +11594,8 @@ function clearAIKeyAfterEndpointEdit(controls = settingsAIControls()) {
 
 function apiKeyStatusText() {
   if (localConfig.ai?.apiKey) return '';
-  if (state.ai.apiKey) return 'API key is configured for this Chrome session.';
+  if (aiAuthStorageError) return aiAuthStorageError;
+  if (state.ai.apiKey) return 'API key is encrypted and saved on this device.';
   if (!providerRequiresApiKey(state.ai)) return 'Ollama does not require an API key.';
   return 'No API key configured.';
 }
@@ -11747,7 +11799,7 @@ async function persistCurrentAIConfiguration() {
   try {
     return await persistScopedAIConfiguration(state.ai, {
       readSettings: storageGet,
-      readAuth: secretGet,
+      readAuth: () => aiAuthVault.snapshot(),
       persistSettings: () => storageSet({ [STORAGE_KEY]: stateForStorage() }),
       persistAuth: (auth) => secretSet({ [SECRET_STORAGE_KEY]: { ai: auth } }),
       clearAuth: () => secretRemove(SECRET_STORAGE_KEY),
@@ -11757,12 +11809,7 @@ async function persistCurrentAIConfiguration() {
         storageSet,
         storageRemove,
       ),
-      restoreAuth: (snapshot) => restoreStoredKey(
-        snapshot,
-        SECRET_STORAGE_KEY,
-        secretSet,
-        secretRemove,
-      ),
+      restoreAuth: (snapshot) => aiAuthVault.restore(snapshot),
     });
   } catch (error) {
     try {
@@ -11925,23 +11972,26 @@ async function storageRemove(key) {
   localStorage.removeItem(key);
 }
 
-async function secretGet() {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.get(SECRET_STORAGE_KEY);
+async function secretGet({ tolerateFailure = false } = {}) {
   try {
-    return JSON.parse(sessionStorage.getItem(SECRET_STORAGE_KEY) || '{}');
-  } catch {
-    return {};
+    const stored = await aiAuthVault.get();
+    aiAuthStorageError = '';
+    return stored;
+  } catch (error) {
+    aiAuthStorageError = formatAIError(error);
+    if (tolerateFailure) return {};
+    throw error;
   }
 }
 
 async function secretSet(value) {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.set(value);
-  sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify(value));
+  await aiAuthVault.set(value);
+  aiAuthStorageError = '';
 }
 
-async function secretRemove(key) {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.remove(key);
-  sessionStorage.removeItem(key);
+async function secretRemove() {
+  await aiAuthVault.remove();
+  aiAuthStorageError = '';
 }
 
 async function currentBrowserSessionId() {
@@ -12127,7 +12177,7 @@ function runTask(task) {
     } catch (error) {
       const message = formatAIError(error);
       setStatus(message);
-      if (activeView === 'settings') setSettingsStatus(message);
+      if (activeView === 'settings') setSettingsStatus(message, 'error');
       else if (workbenchMode) showStatusToast(message, 'error');
       console.error(error);
     } finally {
@@ -12370,7 +12420,8 @@ function logicalChromeGroupTitleOverride(group = {}) {
 }
 
 function isEphemeralTab(tab) {
-  return ephemeralTabIdSet().has(Number(tab.id)) && isChromeNewTabUrl(tab.url);
+  return !tab.pinned && !isGroupedTab(tab) &&
+    ephemeralTabIdSet().has(Number(tab.id)) && isChromeNewTabUrl(tab.url);
 }
 
 function ephemeralTabIdSet() {
@@ -12399,6 +12450,11 @@ function forgetEphemeralTab(tabId) {
 
 function cleanupEphemeralTabIds(existingTabIds, pendingLifecycleTabIds = []) {
   if (!Array.isArray(state.ephemeralTabIds)) state.ephemeralTabIds = [];
+  const promotedTabIds = new Set(tabs
+    .filter((tab) => tab.pinned || isGroupedTab(tab) || !isChromeNewTabUrl(tab.url))
+    .map((tab) => Number(tab.id)));
+  for (const tabId of promotedTabIds) syntheticPlaceholderTabIds.delete(tabId);
+  state.ephemeralTabIds = state.ephemeralTabIds.filter((id) => !promotedTabIds.has(Number(id)));
   const liveTabIds = new Set(
     (Array.isArray(existingTabIds) ? existingTabIds : tabs.map((tab) => tab.id))
       .map(Number)

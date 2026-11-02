@@ -76,6 +76,62 @@ function lifecycleState(overrides = {}) {
   };
 }
 
+test('native creation events never adopt an extension keepalive into a Space', () => {
+  for (const url of ['', 'chrome://newtab', 'chrome://newtab/']) {
+    const state = lifecycleState({ ephemeralTabIds: [30], tabSpaces: {}, tabLifecycle: {} });
+    const next = reduceTabLifecycleEvent({ state, event: {
+      type: 'created', tabId: 30, spaceId: 'work', sessionId: 'session-current',
+      tab: { id: 30, url, groupId: -1, windowId: 1, pinned: false },
+    } });
+    assert.strictEqual(next, state);
+    assert.equal(next.tabSpaces[30], undefined);
+    assert.equal(next.tabLifecycle[30], undefined);
+  }
+});
+
+test('a keepalive becomes a normal user tab after navigation, pinning, or native grouping', () => {
+  for (const tab of [
+    { url: 'https://example.test/opened', groupId: -1, pinned: false },
+    { url: 'chrome://newtab/', groupId: -1, pinned: true },
+    { url: 'chrome://newtab/', groupId: 55, pinned: false },
+  ]) {
+    const state = lifecycleState({ ephemeralTabIds: [30], tabSpaces: {}, tabLifecycle: {} });
+    const next = reduceTabLifecycleEvent({ state, event: {
+      type: 'created', tabId: 30, spaceId: 'work', sessionId: 'session-current',
+      tab: { id: 30, windowId: 1, ...tab },
+    } });
+    assert.deepEqual(next.ephemeralTabIds, []);
+    assert.equal(next.tabLifecycle[30].url, tab.url);
+    assert.equal(next.tabLifecycle[30].spaceId, 'work');
+    assert.deepEqual(state.ephemeralTabIds, [30], 'promotion must not mutate the previous state');
+  }
+});
+
+test('late native acknowledgements preserve Undo ordering while later user moves still apply', () => {
+  const state = lifecycleState({ groupSpaces: { 100: 'work', 200: 'work' }, groupOrder: { work: ['group:100', 'group:200'] } });
+  state.tabLifecycle[10].organizationRestoredGroupId = 100;
+  state.tabLifecycle[10].organizationRestoredAt = 20;
+  state.spaceSnapshots.work.groups.push({ snapshotGroupId: 'group-second', title: 'Second', color: 'red', tabs: [] });
+  state.spaceSnapshots.work.preserveGroups = true;
+  const physicalOrder = { orderedGroupIds: [200, 100], orderedSnapshotGroupIds: ['group-second', 'group-docs'] };
+  const acknowledgement = {
+    type: 'group-updated', source: 'created', capturedAt: 10,
+    groupId: 100, spaceId: 'work', snapshotGroupId: 'group-docs',
+    group: { id: 100, title: 'Docs', color: 'blue' }, ...physicalOrder,
+  };
+  const acknowledged = reduceTabLifecycleEvent({ state, event: acknowledgement });
+  assert.deepEqual(acknowledged.spaceSnapshots.work.groups.map((group) => group.snapshotGroupId), ['group-docs', 'group-second']);
+  assert.deepEqual(acknowledged.groupOrder.work, ['group:100', 'group:200']);
+  const membershipAcknowledged = reduceTabLifecycleEvent({ state: acknowledged, event: {
+    type: 'updated', tabId: 10, capturedAt: 15, changeInfo: { groupId: 100 },
+    targetGroup: { spaceId: 'work', snapshotGroupId: 'group-docs', title: 'Docs', color: 'blue', ...physicalOrder },
+  } });
+  assert.deepEqual(membershipAcknowledged.spaceSnapshots.work.groups.map((group) => group.snapshotGroupId), ['group-docs', 'group-second']);
+  const moved = reduceTabLifecycleEvent({ state: membershipAcknowledged, event: { ...acknowledgement, source: 'moved', capturedAt: 30 } });
+  assert.deepEqual(moved.spaceSnapshots.work.groups.map((group) => group.snapshotGroupId), ['group-second', 'group-docs']);
+  assert.deepEqual(moved.groupOrder.work, ['group:200', 'group:100']);
+});
+
 test('Tidy remaps merged snapshot and live Chrome group lifecycle references without losing binding metadata', () => {
   const bindings = {
     10: {

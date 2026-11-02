@@ -79,6 +79,7 @@ export function resetChromeSessionBindings(state, sessionId) {
 
   return {
     ...state,
+    spaceSnapshots: preserveVirtualTags(state),
     browserSessionId: nextSessionId,
     groupSpaces: {},
     tabSpaces: {},
@@ -201,6 +202,9 @@ export function forgetActiveSpaceForWindow(windowState, windowId) {
 
 export function mergeStoredState(stored, defaults = createDefaultState()) {
   if (!stored || typeof stored !== 'object') return defaults;
+  if (Number(stored.version) > Number(defaults.version)) {
+    throw new Error('This workspace was saved by a newer Space Tabs version. Update the extension before opening it. Your saved data has not been changed.');
+  }
   const compatibleSpaceModel = Number(stored.version) >= 4 && Number(stored.version) <= Number(defaults.version);
   const spaces = normalizeDefaultSpace(compatibleSpaceModel
     ? validSpaces(stored.spaces, defaults.spaces)
@@ -235,7 +239,9 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
-    onboarding: normalizeOnboarding(stored.onboarding, defaults.onboarding),
+    onboarding: normalizeOnboarding(stored.onboarding, hasExistingWorkspace(stored)
+      ? { version: 2, completed: true, stage: 'done' }
+      : defaults.onboarding),
     lastArcImport: normalizeLastArcImport(stored.lastArcImport),
     operationHistory: normalizeOperationHistory(stored.operationHistory),
     shortcuts: migrateShortcuts(stored.shortcuts, defaults.shortcuts, stored.version, defaults.version),
@@ -245,9 +251,50 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
 
 function normalizeDefaultSpace(spaces, storedVersion = 0) {
   if (Number(storedVersion) >= 7) return spaces;
-  return spaces.map((space) => space.id === 'default'
+  return spaces.map((space) => space.id === 'default' && space.name === 'Space' && space.icon === 'S'
     ? { ...space, name: 'Default', icon: 'D' }
     : space);
+}
+
+function hasExistingWorkspace(stored) {
+  return validSpaces(stored.spaces, []).length > 0 ||
+    Object.keys(stored.spaceSnapshots || {}).length > 0;
+}
+
+// Virtual Tag ids are application data, not Chrome group ids. Older builds
+// kept some Tags only here; promote them to portable snapshots before clearing
+// session-bound maps on update/reload/restart, including empty nested Tags.
+function preserveVirtualTags(state) {
+  const spaces = new Set((state.spaces || []).map((space) => space.id));
+  let snapshots = state.spaceSnapshots;
+  for (const [key, tag] of Object.entries(state.virtualGroups || {})) {
+    if (!key.startsWith('vgroup:') || !spaces.has(tag?.spaceId)) continue;
+    if (snapshots === state.spaceSnapshots) snapshots = { ...(snapshots || {}) };
+    const previous = snapshots[tag.spaceId] || { version: 1, groups: [] };
+    const groups = [...(previous.groups || [])];
+    const index = groups.findIndex((group) => tag.snapshotGroupId
+      ? group.snapshotGroupId === tag.snapshotGroupId
+      : group.title === tag.title && group.color === (tag.color || 'blue'));
+    if (index < 0) {
+      const savedTabs = Object.entries(state.tabLifecycle || {})
+        .filter(([tabId, binding]) => state.tabGroups?.[tabId] === key && binding?.url)
+        .map(([, binding]) => ({
+          title: binding.title || binding.url,
+          url: binding.url,
+          ...(binding.panelTitle ? { panelTitle: binding.panelTitle } : {}),
+          ...(binding.snapshotTabId ? { snapshotTabId: binding.snapshotTabId } : {}),
+        }));
+      groups.push({
+        title: String(tag.title || 'Tabs'),
+        color: tag.color || 'blue',
+        collapsed: Boolean(state.collapsedGroups?.[key] ?? tag.collapsed),
+        snapshotGroupId: tag.snapshotGroupId || key,
+        tabs: savedTabs,
+      });
+    }
+    snapshots[tag.spaceId] = { ...previous, preserveGroups: true, groups };
+  }
+  return snapshots;
 }
 
 function normalizeOnboarding(value, fallback = { version: 2, completed: false, stage: 'choose' }) {
@@ -433,15 +480,5 @@ function validSpaces(spaces, fallback) {
 }
 
 function migrateSpaces(spaces, fallback) {
-  const custom = validSpaces(spaces, [])
-    .filter((space) => !isLegacyBuiltInSpace(space));
-  return custom.length ? custom : fallback;
-}
-
-function isLegacyBuiltInSpace(space) {
-  return (
-    (space.id === 'work' && space.name === 'Work') ||
-    (space.id === 'focus' && space.name === 'Focus') ||
-    (space.id === 'personal' && space.name === 'Personal')
-  );
+  return validSpaces(spaces, fallback);
 }

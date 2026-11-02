@@ -648,7 +648,7 @@ test('migrates v4 Space ownership into v12 without resetting shortcuts', () => {
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
   assert.equal(merged.spaceContexts.work, '# Launch\nShip the store update.');
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
-  assert.deepEqual(merged.onboarding, { version: 2, completed: false, stage: 'choose' });
+  assert.deepEqual(merged.onboarding, { version: 2, completed: true, stage: 'done' });
 });
 
 test('preserves completed onboarding and a valid Arc import undo record', () => {
@@ -735,7 +735,7 @@ test('preserves a bounded normalized operation history for Undo', () => {
   assert.deepEqual(merged.operationHistory[0].after, { fingerprint: 'fingerprint-2' });
 });
 
-test('migrates the legacy default Space and removes obsolete max tokens', () => {
+test('preserves a customized legacy default Space and removes obsolete max tokens', () => {
   const merged = mergeStoredState({
     version: 6,
     activeSpaceId: 'default',
@@ -743,7 +743,7 @@ test('migrates the legacy default Space and removes obsolete max tokens', () => 
     ai: { maxTokens: 1024 },
   }, createDefaultState());
 
-  assert.deepEqual(merged.spaces[0], { id: 'default', name: 'Default', icon: 'D', color: 'blue' });
+  assert.deepEqual(merged.spaces[0], { id: 'default', name: 'Launch review', icon: 'L', color: 'blue' });
   assert.equal(Object.hasOwn(merged.ai, 'maxTokens'), false);
 });
 
@@ -803,7 +803,7 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.collapsedSpaceGroups.custom, true);
 });
 
-test('resets old built-in Spaces during v4 migration and drops old clutter fields', () => {
+test('preserves populated legacy Spaces during migration and drops obsolete fields', () => {
   const merged = mergeStoredState({
     version: 3,
     activeSpaceId: 'work',
@@ -819,11 +819,63 @@ test('resets old built-in Spaces during v4 migration and drops old clutter field
     limits: { splitView: 'old copy' },
   }, createDefaultState());
 
-  assert.equal(merged.activeSpaceId, 'default');
-  assert.deepEqual(merged.spaces.map((space) => space.id), ['default']);
+  assert.equal(merged.activeSpaceId, 'work');
+  assert.deepEqual(merged.spaces.map((space) => space.id), ['work', 'focus', 'personal']);
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal('favorites' in merged, false);
   assert.equal('pinned' in merged, false);
   assert.equal('archived' in merged, false);
   assert.equal('limits' in merged, false);
+});
+
+
+test('promotes legacy virtual Tags into portable snapshots before a new extension session', () => {
+  const before = {
+    ...createDefaultState({ browserSessionId: 'before-update' }),
+    virtualGroups: {
+      'vgroup:docs': { spaceId: 'default', title: 'Project/Docs', color: 'green' },
+      'vgroup:empty': { spaceId: 'default', title: 'Project/Empty', color: 'blue' },
+      'vgroup:existing': { spaceId: 'default', title: 'Existing', color: 'red', snapshotGroupId: 'existing' },
+      'vgroup:deleted': { spaceId: 'deleted', title: 'Deleted' },
+    },
+    tabGroups: { 7: 'vgroup:docs' },
+    tabLifecycle: { 7: { url: 'https://example.com/docs', title: 'Docs', panelTitle: 'My docs', snapshotTabId: 'doc-row' } },
+    collapsedGroups: { 'vgroup:docs': true },
+    spaceSnapshots: { default: { version: 1, groups: [{ title: 'Existing', color: 'red', snapshotGroupId: 'existing', tabs: [] }] } },
+  };
+  const savedBefore = structuredClone(before);
+  const after = resetChromeSessionBindings(before, 'after-update');
+  const snapshot = after.spaceSnapshots.default;
+  assert.equal(snapshot.preserveGroups, true);
+  assert.equal(snapshot.groups.length, 3);
+  assert.deepEqual(snapshot.groups.find((group) => group.title === 'Project/Docs'), {
+    title: 'Project/Docs', color: 'green', collapsed: true, snapshotGroupId: 'vgroup:docs',
+    tabs: [{ url: 'https://example.com/docs', title: 'Docs', panelTitle: 'My docs', snapshotTabId: 'doc-row' }],
+  });
+  assert.equal(snapshot.groups.find((group) => group.title === 'Project/Empty').tabs.length, 0);
+  assert.deepEqual(resetChromeSessionBindings(after, 'another-reload').spaceSnapshots, after.spaceSnapshots);
+  assert.deepEqual(before, savedBefore);
+});
+
+test('refuses to overwrite data written by a newer workspace schema', () => {
+  const stored = { ...createDefaultState(), version: 99 };
+  const before = structuredClone(stored);
+  assert.throws(() => mergeStoredState(stored), /newer Space Tabs version/);
+  assert.deepEqual(stored, before);
+});
+
+test('preserves workspaces and Tag snapshots across every supported schema upgrade', () => {
+  for (let version = 4; version <= 12; version += 1) {
+    const stored = {
+      version,
+      spaces: [{ id: 'default', name: 'My workspace', icon: 'M', color: 'green' }, { id: 'work', name: 'Work', icon: 'W', color: 'blue' }],
+      activeSpaceId: 'work',
+      spaceSnapshots: { work: { version: 1, preserveGroups: true, groups: [{ title: 'Project/Tag', color: 'blue', tabs: [{ url: 'https://example.com', title: 'Saved' }] }] } },
+    };
+    const migrated = mergeStoredState(stored);
+    assert.deepEqual(migrated.spaces, stored.spaces);
+    assert.deepEqual(migrated.spaceSnapshots, stored.spaceSnapshots);
+    assert.equal(migrated.activeSpaceId, 'work');
+    assert.equal(migrated.onboarding.completed, true);
+  }
 });

@@ -9,6 +9,25 @@ export { groupTitleKey } from './group-title.js';
 
 const GROUP_COLORS = ['blue', 'green', 'purple', 'yellow', 'pink', 'cyan', 'orange'];
 const TITLE_PLACEHOLDER_MARKS = '.\u2026\u22ef\u3002';
+const AUTO_GROUP_PLACEHOLDER_TITLE_KEYS = new Set([
+  'tab',
+  'tabs',
+  'ungrouped',
+  'unassigned',
+  'uncategorized',
+  'uncategorised',
+  'unsorted',
+  'no group',
+  'no category',
+  '标签页',
+  '未分组',
+  '无分组',
+  '待分组',
+  '未分类',
+  '无分类',
+  '未归类',
+  '未整理',
+]);
 
 export function isChromeNewTabUrl(value) {
   try {
@@ -236,7 +255,21 @@ export function sanitizeTidyGroups(plannedGroups, tabs) {
     sanitized.push(sanitizedGroup);
   }
 
-  return sanitized.map((group, index) => ({
+  const compactHierarchy = compactUnaryAutoGroupPaths(sanitized);
+  const compactByTitle = new Map();
+  const compactGroups = [];
+  for (const group of compactHierarchy) {
+    const titleKey = groupTitleKey(group.title);
+    const existing = compactByTitle.get(titleKey);
+    if (existing) {
+      existing.tabIds.push(...group.tabIds);
+      continue;
+    }
+    compactByTitle.set(titleKey, group);
+    compactGroups.push(group);
+  }
+
+  return compactGroups.map((group, index) => ({
     ...group,
     color: group.color || GROUP_COLORS[index % GROUP_COLORS.length],
   }));
@@ -253,7 +286,68 @@ export function assertCompleteAutoGroupPlan(plannedGroups = [], tabs = []) {
       `${missingCount === 1 ? 'tab' : 'tabs'} unassigned. Try Auto Group again.`,
     );
   }
+  const placeholderGroup = (plannedGroups || []).find((group) => (
+    autoGroupTitleParts(group?.title).some(isAutoGroupPlaceholderPart)
+  ));
+  if (placeholderGroup) {
+    throw new Error(
+      `AI returned the placeholder group "${placeholderGroup.title}". ` +
+      'Every eligible tab must be assigned to a specific topical group. Try Auto Group again.',
+    );
+  }
   return plannedGroups;
+}
+
+function compactUnaryAutoGroupPaths(groups = []) {
+  const root = autoGroupPathNode();
+  const groupPaths = [];
+  for (const group of groups) {
+    const parts = autoGroupTitleParts(group.title);
+    groupPaths.push(parts);
+    let node = root;
+    for (const part of parts) {
+      if (!node.children.has(part)) node.children.set(part, autoGroupPathNode());
+      node = node.children.get(part);
+    }
+    node.terminal = true;
+  }
+
+  return groups.map((group, groupIndex) => {
+    const parts = groupPaths[groupIndex];
+    const labels = [];
+    let node = root;
+    let partIndex = 0;
+    while (partIndex < parts.length) {
+      let label = parts[partIndex];
+      node = node.children.get(parts[partIndex]);
+      partIndex += 1;
+      while (partIndex < parts.length && !node.terminal && node.children.size === 1) {
+        label += ` · ${parts[partIndex]}`;
+        node = node.children.get(parts[partIndex]);
+        partIndex += 1;
+      }
+      labels.push(label);
+    }
+    return {
+      ...group,
+      title: labels.join(' / '),
+    };
+  });
+}
+
+function autoGroupPathNode() {
+  return { terminal: false, children: new Map() };
+}
+
+function autoGroupTitleParts(title) {
+  return normalizeGroupTitle(title)
+    .split(/\s*\/\s*|\s*·\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function isAutoGroupPlaceholderPart(part) {
+  return AUTO_GROUP_PLACEHOLDER_TITLE_KEYS.has(groupTitleKey(part));
 }
 
 export function plannedRegroupTabIds(plannedGroups = [], candidateTabs = [], liveGroups = []) {

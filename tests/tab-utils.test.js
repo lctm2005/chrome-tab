@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { createFolderTree } from '../src/shared/folder-tree.js';
 import { chromeGroupTitle } from '../src/shared/group-title.js';
 
 import {
@@ -233,6 +234,51 @@ test('keeps complete logical Auto Group titles instead of persisting Chrome disp
   assert.equal(groups[0].title, longTitle);
 });
 
+test('compacts Auto Group hierarchy paths that would render as single-child folders', () => {
+  const groups = sanitizeTidyGroups([
+    { title: 'Work / Client / Docs', color: 'blue', tabIds: [1] },
+    { title: 'Work / Client / Issues', color: 'green', tabIds: [2] },
+    { title: 'Research / Browser / Notes', color: 'purple', tabIds: [3] },
+    { title: 'Research · Browser · Notes', color: 'cyan', tabIds: [6] },
+    { title: 'Archive', color: 'yellow', tabIds: [4] },
+    { title: 'Archive / History', color: 'pink', tabIds: [5] },
+  ], [
+    { id: 1 },
+    { id: 2 },
+    { id: 3 },
+    { id: 4 },
+    { id: 5 },
+    { id: 6 },
+  ]);
+
+  assert.deepEqual(groups.map((group) => group.title), [
+    'Work · Client / Docs',
+    'Work · Client / Issues',
+    'Research · Browser · Notes',
+    'Archive',
+    'Archive / History',
+  ]);
+  assert.deepEqual(groups.find((group) => (
+    group.title === 'Research · Browser · Notes'
+  )).tabIds, [3, 6]);
+
+  const tree = createFolderTree(groups.map((group, index) => ({
+    ...group,
+    id: index + 1,
+    key: `group:${index + 1}`,
+    tabs: group.tabIds.map((id) => ({ id })),
+  })));
+  const folders = [];
+  const visit = (nodes) => nodes.forEach((node) => {
+    if (node.type !== 'folder') return;
+    folders.push(node);
+    visit(node.children);
+  });
+  visit(tree);
+  assert.ok(folders.length > 0);
+  assert.ok(folders.every((folder) => folder.children.length >= 2));
+});
+
 test('rejects an AI group plan that silently leaves eligible tabs unassigned', () => {
   const tabs = [{ id: 1 }, { id: 2 }, { id: 3 }];
   const completePlan = [
@@ -253,6 +299,17 @@ test('rejects an AI group plan that silently leaves eligible tabs unassigned', (
   );
   assert.deepEqual(assertCompleteAutoGroupPlan(), []);
   assert.equal(assertCompleteAutoGroupPlan(null, null), null);
+});
+
+test('rejects complete Auto Group plans that use an Ungrouped placeholder Tag', () => {
+  for (const title of ['Ungrouped', '未分组', 'Work / Uncategorized', '待分组 · 稍后']) {
+    assert.throws(
+      () => assertCompleteAutoGroupPlan([
+        { title, tabIds: [1, 2] },
+      ], [{ id: 1 }, { id: 2 }]),
+      /placeholder group.*specific topical group/i,
+    );
+  }
 });
 
 test('searches tabs by title, URL, and domain', () => {

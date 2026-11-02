@@ -21,7 +21,7 @@ describe("privacy page", () => {
       "Your control",
       "Contact",
     ]);
-    expect(screen.getByText("Last updated July 15, 2026")).toBeVisible();
+    expect(screen.getByText("Last updated November 2, 2026")).toBeVisible();
     expect(screen.getByRole("link", { name: "lctm2005@gmail.com" })).toHaveAttribute("href", "mailto:lctm2005@gmail.com");
     expect(screen.getByText("No proxy server").closest("article")).toHaveTextContent("BYOK requests go directly to your provider.");
     const networkSection = screen.getByRole("heading", { name: "Network requests" }).closest("section");
