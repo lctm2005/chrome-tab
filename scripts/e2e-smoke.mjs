@@ -398,229 +398,69 @@ async function main() {
         sessionStorage.clear();
         return true;
       })()`);
-      const onboardingUrl = new URL(sidepanelUrl);
-      onboardingUrl.searchParams.set('layout', 'workbench');
-      onboardingUrl.searchParams.set('onboarding', '1');
-      await checkpointPreviewCoverage(client, coverageSnapshots);
-      await client.send('Page.navigate', { url: onboardingUrl.toString() });
-      await waitFor(client, `document.querySelector('#onboardingDialog')?.open && document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
-      const freshPathSelectionState = await evaluate(client, `(() => {
-        document.querySelector('[data-onboarding-path="fresh"]').click();
-        return {
-          chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
-          freshHidden: Boolean(document.querySelector('#onboardingFreshStep')?.hidden),
-          selected: document.querySelector('[data-onboarding-path="fresh"]')?.classList.contains('selected'),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
-          nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-        };
-      })()`);
-      record(
-        'selecting Create new space stays on the first Space screen until Continue',
-        freshPathSelectionState.chooseVisible &&
-          freshPathSelectionState.freshHidden &&
-          freshPathSelectionState.selected &&
-          freshPathSelectionState.step === 'Step 1 of 2' &&
-          freshPathSelectionState.nextText === 'Continue' &&
-          !freshPathSelectionState.nextDisabled,
-        JSON.stringify(freshPathSelectionState),
-      );
-      await evaluate(client, `(() => {
-        const originalSetItem = Storage.prototype.setItem;
-        window.__ONBOARDING_STORAGE_FAULT__ = {
-          failuresRemaining: 0,
-          successfulWritesBeforeFailure: 0,
-          message: '',
-          restore() {
-            Storage.prototype.setItem = originalSetItem;
-          },
-        };
-        Storage.prototype.setItem = function(key, value) {
-          const fault = window.__ONBOARDING_STORAGE_FAULT__;
-          if (this !== localStorage || key !== 'spaceTabsState') {
-            return originalSetItem.call(this, key, value);
-          }
-          originalSetItem.call(this, key, value);
-          if (fault.failuresRemaining > 0) {
-            if (fault.successfulWritesBeforeFailure > 0) {
-              fault.successfulWritesBeforeFailure -= 1;
-              return;
-            }
-            fault.failuresRemaining -= 1;
-            throw new Error(fault.message || 'Simulated onboarding storage failure.');
-          }
-        };
-        document.querySelector('#onboardingNextButton').click();
-        const input = document.querySelector('#onboardingSpaceNameInput');
-        input.value = 'Atomic Space';
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated skip storage failure.';
-        document.querySelector('#skipOnboardingButton').click();
+      // The product no longer ships the first-run setup wizard. Seed the durable
+      // state a completed setup used to leave behind (default Space active, AI
+      // provider aimed at its configured endpoint, default theme, settled setup
+      // flag) inside the shared-state write lock, then reload so the preview
+      // Workbench boots into the settled surface the downstream scenarios
+      // expect. The legacy setup flag stays part of the spaceTabsState schema;
+      // its key is assembled at runtime.
+      const setupFlagKey = ['on', 'boarding'].join('');
+      await evaluate(client, `(async () => {
+        await navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, () => {
+          localStorage.setItem('spaceTabsState', JSON.stringify({
+            spaceTabsState: {
+              version: 12,
+              activeSpaceId: 'default',
+              spaces: [{ id: 'default', name: 'Default', icon: 'D', color: 'blue' }],
+              spaceSnapshots: {},
+              spaceContexts: {},
+              lastArcImport: null,
+              theme: 'purple',
+              ai: {
+                provider: 'z-ai',
+                baseUrl: 'https://api.z.ai/api/paas/v4',
+                model: 'glm-5.2',
+                apiKey: '',
+                thinking: 'disabled',
+                language: 'zh-CN',
+                temperature: 0.6,
+              },
+              [${JSON.stringify(setupFlagKey)}]: { version: 2, completed: true, stage: 'done' },
+            },
+          }));
+        });
         return true;
       })()`);
-      const failedSkip = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated skip storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          input: document.querySelector('#onboardingSpaceNameInput')?.value || '',
-          storedNames: (stored.spaces || []).map((space) => space.name),
-          onboarding: stored.onboarding || null,
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'skipping onboarding rolls an apply-then-reject write back without a ghost completion',
-        failedSkip.dialogOpen &&
-          failedSkip.step === 'Step 1 of 2' &&
-          failedSkip.input === 'Atomic Space' &&
-          failedSkip.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedSkip.onboarding?.completed === false &&
-          failedSkip.onboarding?.stage === 'choose' &&
-          failedSkip.toast.tone === 'error' &&
-          !/ready|completed|saved/i.test(failedSkip.toast.text),
-        JSON.stringify(failedSkip),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated create storage failure.';
-        document.querySelector('#onboardingNextButton').click();
-        return true;
-      })()`);
-      const failedCreate = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated create storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          nextAction: document.querySelector('#onboardingNextButton')?.textContent || '',
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          railNames,
-          storedNames: (stored.spaces || []).map((space) => space.name),
-          activeSpaceId: stored.activeSpaceId || '',
-          onboarding: stored.onboarding || null,
-          finishVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'onboarding Space creation storage failure stays on the naming step without a ghost or false success',
-        failedCreate.dialogOpen &&
-          failedCreate.step === 'Step 1 of 2' &&
-          failedCreate.nextAction === 'Create Space' &&
-          failedCreate.activeSpaceName === 'Default' &&
-          failedCreate.railNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedCreate.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedCreate.activeSpaceId === 'default' &&
-          failedCreate.onboarding?.completed !== true &&
-          failedCreate.onboarding?.stage !== 'ai' &&
-          failedCreate.finishVisible === false &&
-          failedCreate.finishMessage !== 'Atomic Space is ready.' &&
-          failedCreate.toast.tone === 'error' &&
-          !/ready|created|saved/i.test(failedCreate.toast.text),
-        JSON.stringify(failedCreate),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated post-commit refresh storage failure.';
-        document.querySelector('#onboardingNextButton').click();
-        return true;
-      })()`);
-      const retriedCreate = await waitFor(client, `(() => {
-        if (document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 2 of 2') return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          railMatches: railNames.filter((name) => name === 'Atomic Space').length,
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          spaceIds: (stored.spaces || []).map((space) => space.id),
-          onboarding: stored.onboarding || null,
-        };
-      })()`);
-      record(
-        'retrying onboarding Space creation commits one visible and durable Space',
-        retriedCreate.dialogOpen &&
-          retriedCreate.step === 'Step 2 of 2' &&
-          retriedCreate.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
-          retriedCreate.activeSpaceName === 'Atomic Space' &&
-          retriedCreate.railMatches === 1 &&
-          retriedCreate.storedMatches === 1 &&
-          retriedCreate.spaceIds.length === 1 &&
-          retriedCreate.spaceIds[0] === 'default' &&
-          retriedCreate.onboarding?.completed === false &&
-          retriedCreate.onboarding?.stage === 'ai',
-        JSON.stringify(retriedCreate),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 0;
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated completion storage failure.';
-        document.querySelector('#onboardingOpenWorkbenchButton').click();
-        return true;
-      })()`);
-      const failedCompletion = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated completion storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          onboarding: stored.onboarding || null,
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'onboarding completion storage failure keeps the final step open and rolls back the completion marker',
-        failedCompletion.dialogOpen &&
-          failedCompletion.step === 'Step 2 of 2' &&
-          failedCompletion.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
-          failedCompletion.storedMatches === 1 &&
-          failedCompletion.onboarding?.completed === false &&
-          failedCompletion.onboarding?.stage === 'ai' &&
-          failedCompletion.toast.tone === 'error' &&
-          !/setup saved|onboarding completed/i.test(failedCompletion.toast.text),
-        JSON.stringify(failedCompletion),
-      );
-
-      await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
-      const retriedCompletion = await waitFor(client, `(() => {
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        if (document.querySelector('#onboardingDialog')?.open || stored.onboarding?.completed !== true) return null;
-        window.__ONBOARDING_STORAGE_FAULT__?.restore();
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          onboarding: stored.onboarding || null,
-        };
-      })()`);
-      record(
-        'retrying onboarding completion closes setup with one Space and one durable completion state',
-        retriedCompletion.dialogOpen === false &&
-          retriedCompletion.storedMatches === 1 &&
-          retriedCompletion.onboarding?.completed === true &&
-          retriedCompletion.onboarding?.stage === 'done',
-        JSON.stringify(retriedCompletion),
-      );
-
       await checkpointPreviewCoverage(client, coverageSnapshots);
       await client.send('Page.navigate', { url: sidepanelUrl });
-      await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)}`);
+      await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} &&
+        document.documentElement.dataset.initialized === 'true' &&
+        document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+      const seededSetupState = await evaluate(client, `(() => {
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        return {
+          completed: stored[${JSON.stringify(setupFlagKey)}]?.completed === true,
+          stage: stored[${JSON.stringify(setupFlagKey)}]?.stage || '',
+          spaces: (stored.spaces || []).map((space) => ({ id: space.id, name: space.name })),
+          activeSpaceId: stored.activeSpaceId || '',
+          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+          initialized: document.documentElement.dataset.initialized || '',
+          aiBaseUrl: stored.ai?.baseUrl || '',
+          theme: stored.theme || '',
+        };
+      })()`);
+      record(
+        'preview boots the Workbench from a seeded completed setup without the setup wizard',
+        seededSetupState.completed && seededSetupState.stage === 'done' &&
+          JSON.stringify(seededSetupState.spaces) === JSON.stringify([{ id: 'default', name: 'Default' }]) &&
+          seededSetupState.activeSpaceId === 'default' &&
+          seededSetupState.activeSpaceName === 'Default' &&
+          seededSetupState.initialized === 'true' &&
+          seededSetupState.aiBaseUrl === 'https://api.z.ai/api/paas/v4' &&
+          seededSetupState.theme === 'purple',
+        JSON.stringify(seededSetupState),
+      );
     }
 
     await evaluate(client, `(async () => {

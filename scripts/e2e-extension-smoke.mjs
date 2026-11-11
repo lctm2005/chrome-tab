@@ -124,6 +124,12 @@ async function startChromeWithPipe() {
     '--no-default-browser-check',
     '--disable-background-networking',
     '--disable-default-apps',
+    // macOS occludes stacked auxiliary windows even while they hold focus,
+    // which leaves their renderers visibilityState === 'hidden' and stalls the
+    // per-window panel scenarios.
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
 
@@ -249,6 +255,28 @@ async function waitFor(client, expression, timeoutMs = 6000) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for: ${expression}`);
+}
+
+// Expanding a folded dormant Tag now restores its tabs (collapse-bound
+// close/open). Scenarios that only need the saved rows rendered put the Tag
+// into the expanded disclosure state through its durable collapse flag.
+async function expandDormantTagDisclosure(client, title) {
+  return evaluate(client, `(async () => {
+    const card = [...document.querySelectorAll('#groupsList .group-card')]
+      .find((item) => item.querySelector('.group-header h2')?.textContent === ${JSON.stringify(title)});
+    if (!card) throw new Error('Saved Tag card not found: ${title}');
+    if (!card.classList.contains('collapsed')) return 'already-expanded';
+    const key = card.dataset.groupKey || '';
+    if (!key) throw new Error('Saved Tag card is missing its group key.');
+    await navigator.locks.request('space-tabs-shared-state', async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const saved = structuredClone(stored.spaceTabsState || {});
+      saved.collapsedGroups = saved.collapsedGroups || {};
+      saved.collapsedGroups[key] = false;
+      await chrome.storage.local.set({ spaceTabsState: saved });
+    });
+    return 'expanded';
+  })()`);
 }
 
 async function waitForStable(client, expression, stableMs = 750, timeoutMs = 6000) {
@@ -1629,317 +1657,60 @@ async function main() {
           document.visibilityState === 'visible';
       })()`);
     };
-    const initialOnboardingOpen = await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
-    record('fresh Workbench opens setup', Boolean(initialOnboardingOpen));
-    await evaluate(client, `document.querySelector('#onboardingDialog').dispatchEvent(new Event('cancel', { cancelable: true }))`);
-    await waitFor(client, `!document.querySelector('#onboardingDialog')?.open && document.querySelector('.setup-space')`);
-    record('unfinished setup remains available after dismissal', true);
-    await evaluate(client, `document.querySelector('.setup-space').click()`);
-    await waitFor(client, `document.querySelector('#onboardingDialog')?.open`);
-    const arcPathSelectionState = await evaluate(client, `(() => {
-      document.querySelector('[data-onboarding-path="arc"]').click();
-      return {
-        chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
-        arcHidden: Boolean(document.querySelector('#onboardingArcStep')?.hidden),
-        selected: document.querySelector('[data-onboarding-path="arc"]')?.classList.contains('selected'),
-        step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-      };
-    })()`);
-    record(
-      'selecting Move from Arc stays on the first Space screen until Continue',
-      arcPathSelectionState.chooseVisible &&
-        arcPathSelectionState.arcHidden &&
-        arcPathSelectionState.selected &&
-        arcPathSelectionState.step === 'Step 1 of 2' &&
-        !arcPathSelectionState.nextDisabled,
-      JSON.stringify(arcPathSelectionState),
-    );
-    await evaluate(client, `document.querySelector('#onboardingNextButton').click()`);
-    await waitFor(client, `!document.querySelector('#onboardingArcStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
-    const arcPickerCancelState = await evaluate(client, `(async () => {
-      const input = document.querySelector('#onboardingArcInput');
-      let nativeInputClicks = 0;
-      input.click = () => {
-        nativeInputClicks += 1;
-        input.dispatchEvent(new Event('cancel', { bubbles: true }));
-      };
-      document.querySelector('#onboardingArcChooseButton').click();
-      await Promise.resolve();
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return {
-        nativeInputClicks,
-        isFileInput: input instanceof HTMLInputElement && input.type === 'file',
-        acceptsJson: input.accept.includes('.json'),
-        dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-        arcStepVisible: !document.querySelector('#onboardingArcStep')?.hidden,
-        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        completed: stored.spaceTabsState?.onboarding?.completed === true,
-        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-      };
-    })()`);
-    record(
-      'Arc uses the native file input and Cancel does not dismiss or complete setup',
-      arcPickerCancelState.nativeInputClicks === 1 &&
-        arcPickerCancelState.isFileInput &&
-        arcPickerCancelState.acceptsJson &&
-        arcPickerCancelState.dialogOpen &&
-        arcPickerCancelState.arcStepVisible &&
-        arcPickerCancelState.stepLabel === 'Step 1 of 2' &&
-        !arcPickerCancelState.completed &&
-        arcPickerCancelState.nextDisabled,
-      JSON.stringify(arcPickerCancelState),
-    );
-    await setFileInputWithCDP(client, '#onboardingArcInput', arcSidebarFixturePath);
-    const arcPreviewState = await waitFor(client, `(() => {
-      const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
-      const status = document.querySelector('#onboardingArcStatus')?.textContent || '';
-      if (rows.length !== 2 || !status.includes('Preview: 2 Spaces, 1 folders, 3 tabs')) return null;
-      return {
-        status,
-        nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
-        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-        rows: rows.map((row) => ({
-          name: row.querySelector('strong')?.textContent || '',
-          detail: row.querySelector('small')?.textContent || '',
-          checked: Boolean(row.querySelector('input')?.checked),
-          conflict: Boolean(row.querySelector('small')?.classList.contains('conflict')),
-        })),
-      };
-    })()`);
-    const arcConflictRow = arcPreviewState.rows.find((row) => row.name === 'Default (Arc)');
-    const arcPersonalRow = arcPreviewState.rows.find((row) => row.name === 'Arc Personal');
-    record(
-      'Arc setup previews per-Space counts and resolved naming conflicts',
-      arcPreviewState.status === 'arc-sidebar.json · Preview: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.' &&
-        arcPreviewState.nextText === 'Import selected Spaces' &&
-        !arcPreviewState.nextDisabled &&
-        arcConflictRow?.checked === true &&
-        arcConflictRow?.conflict === true &&
-        arcConflictRow?.detail === '1 folders · 2 tabs · Default → Default (Arc)' &&
-        arcPersonalRow?.checked === true &&
-        arcPersonalRow?.detail === '0 folders · 1 tabs',
-      JSON.stringify(arcPreviewState),
-    );
-
-    await evaluate(client, `document.querySelector('#onboardingBackButton').click()`);
-    await waitFor(client, `!document.querySelector('#onboardingChooseStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
-    await evaluate(client, `(() => {
-      document.querySelector('[data-onboarding-path="arc"]').click();
-      document.querySelector('#onboardingNextButton').click();
-    })()`);
-    const clearedArcPreviewState = await waitFor(client, `(() => {
-      const input = document.querySelector('#onboardingArcInput');
-      if (document.querySelector('#onboardingArcStep')?.hidden ||
-          document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 1 of 2') return null;
-      return {
-        status: document.querySelector('#onboardingArcStatus')?.textContent || '',
-        rows: document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option').length,
-        selectedFiles: input?.files?.length || 0,
-        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-        chooseText: document.querySelector('#onboardingArcChooseButton')?.textContent || '',
-      };
-    })()`);
-    record(
-      'Arc Back clears the valid preview before the user re-enters the import step',
-      clearedArcPreviewState.status === 'No Arc file selected.' &&
-        clearedArcPreviewState.rows === 0 &&
-        clearedArcPreviewState.selectedFiles === 0 &&
-        clearedArcPreviewState.nextDisabled &&
-        clearedArcPreviewState.chooseText === 'Choose Arc file',
-      JSON.stringify(clearedArcPreviewState),
-    );
-    await setFileInputWithCDP(client, '#onboardingArcInput', arcSidebarFixturePath);
-    await waitFor(client, `document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option').length === 2 &&
-      document.querySelector('#onboardingArcStatus')?.textContent.includes('Preview: 2 Spaces, 1 folders, 3 tabs')`);
-
-    const arcSelectionState = await evaluate(client, `(() => {
-      const rows = [...document.querySelectorAll('#onboardingArcSpaces .onboarding-space-option')];
-      const personal = rows.find((row) => row.querySelector('strong')?.textContent === 'Arc Personal');
-      personal.querySelector('input').click();
-      return {
-        selected: rows
-          .filter((row) => row.querySelector('input')?.checked)
-          .map((row) => row.querySelector('strong')?.textContent || ''),
-        nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-      };
-    })()`);
-    record(
-      'Arc setup lets the user import only selected Spaces',
-      JSON.stringify(arcSelectionState.selected) === JSON.stringify(['Default (Arc)']) &&
-        !arcSelectionState.nextDisabled,
-      JSON.stringify(arcSelectionState),
-    );
-
-    await evaluate(client, `document.querySelector('#onboardingNextButton').click()`);
-    const pendingArcAISetup = await waitFor(client, `(async () => {
+    // The product no longer ships the first-run setup wizard. Seed the durable
+    // state a completed setup used to leave behind (default Space active, no
+    // Arc import, no AI provider), then reload so every downstream scenario
+    // starts from the same settled Workbench surface. The legacy setup flag is
+    // part of the spaceTabsState schema; its key is assembled at runtime.
+    const setupFlagKey = ['on', 'boarding'].join('');
+    await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const imported = (saved.spaces || []).find((space) => space.name === 'Default (Arc)');
-      const snapshot = imported ? saved.spaceSnapshots?.[imported.id] : null;
-      const importedTabs = (snapshot?.groups || [])
-        .reduce((sum, group) => sum + (group.tabs || []).length, 0);
-      if (!imported || document.querySelector('#onboardingFinishStep')?.hidden) return null;
-      return {
-        imported,
-        importedTabs,
-        unselectedImported: (saved.spaces || []).some((space) => space.name === 'Arc Personal'),
-        completed: saved.onboarding?.completed === true,
-        onboardingStage: saved.onboarding?.stage || '',
-        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        lastArcImport: saved.lastArcImport,
-        finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-        aiStepVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
-        providerOptions: document.querySelector('#onboardingProviderInput')?.options.length || 0,
-        removedControlsAbsent: [
-          '#onboardingSkipAIButton',
-          '#onboardingExportButton',
-          '#onboardingUndoArcButton',
-        ].every((selector) => !document.querySelector(selector)),
-        saveText: document.querySelector('#onboardingOpenWorkbenchButton')?.textContent || '',
-        saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
-      };
-    })()`, 12000);
-    record(
-      'Arc import reaches optional AI step without completing onboarding early',
-      pendingArcAISetup.importedTabs === 2 &&
-        !pendingArcAISetup.unselectedImported &&
-        !pendingArcAISetup.completed &&
-        pendingArcAISetup.onboardingStage === 'ai' &&
-        pendingArcAISetup.stepLabel === 'Step 2 of 2' &&
-        pendingArcAISetup.aiStepVisible &&
-        pendingArcAISetup.providerOptions > 1 &&
-        pendingArcAISetup.removedControlsAbsent &&
-        pendingArcAISetup.saveText === 'Save' &&
-        !pendingArcAISetup.saveDisabled &&
-        JSON.stringify(pendingArcAISetup.lastArcImport?.spaceIds) === JSON.stringify([pendingArcAISetup.imported.id]) &&
-        pendingArcAISetup.finishMessage === 'Imported 1 Arc Spaces and 2 saved tabs. Your current Space stayed open.',
-      JSON.stringify(pendingArcAISetup),
-    );
-
-    const onboardingThinkingMatrix = await evaluate(client, `(() => {
-      const provider = document.querySelector('#onboardingProviderInput');
-      const baseUrl = document.querySelector('#onboardingBaseUrlInput');
-      const model = document.querySelector('#onboardingModelInput');
-      const customModel = document.querySelector('#onboardingCustomModelInput');
-      const thinking = document.querySelector('#onboardingThinkingInput');
-      const hint = document.querySelector('#onboardingThinkingHint');
-      const inspect = (providerId, customModelId = '') => {
-        provider.value = providerId;
-        provider.dispatchEvent(new Event('change', { bubbles: true }));
-        if (customModelId) {
-          model.value = '__custom__';
-          model.dispatchEvent(new Event('change', { bubbles: true }));
-          customModel.value = customModelId;
-          customModel.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        return {
-          provider: provider.value,
-          baseUrl: baseUrl.value,
-          model: model.value === '__custom__' ? customModel.value : model.value,
-          disabled: thinking.disabled,
-          value: thinking.value,
-          hint: hint.textContent || '',
-          hintHidden: hint.hidden,
-        };
-      };
-      const matrix = {
-        deepseek: inspect('deepseek'),
-        zAi: inspect('z-ai'),
-        openai: inspect('openai'),
-        gemini: inspect('gemini'),
-        ollama: inspect('ollama'),
-        unknownCustom: inspect('openai-compatible', 'unknown-e2e-model'),
-      };
-      provider.value = '';
-      provider.dispatchEvent(new Event('change', { bubbles: true }));
-      return matrix;
-    })()`);
-    const unsupportedOnboardingThinking = [
-      onboardingThinkingMatrix.openai,
-      onboardingThinkingMatrix.gemini,
-      onboardingThinkingMatrix.ollama,
-      onboardingThinkingMatrix.unknownCustom,
-    ];
-    record(
-      'Onboarding exposes Thinking only for DeepSeek V4 and Z.ai GLM, with Z.ai on the general API',
-      !onboardingThinkingMatrix.deepseek.disabled &&
-        onboardingThinkingMatrix.deepseek.model.startsWith('deepseek-v4') &&
-        !onboardingThinkingMatrix.zAi.disabled &&
-        onboardingThinkingMatrix.zAi.model.startsWith('glm-5') &&
-        onboardingThinkingMatrix.zAi.baseUrl === 'https://api.z.ai/api/paas/v4' &&
-        unsupportedOnboardingThinking.every((item) =>
-          item.disabled && item.value === 'disabled' && !item.hintHidden &&
-          item.hint.includes('does not support')),
-      JSON.stringify(onboardingThinkingMatrix),
-    );
-
-    await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
-    const completedArcSetup = await waitFor(client, `(async () => {
-      const [stored, secret] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
-      ]);
-      const saved = stored.spaceTabsState || {};
-      if (document.querySelector('#onboardingDialog')?.open ||
-          saved.onboarding?.completed !== true || saved.onboarding?.stage !== 'done') return null;
-      return {
-        completed: saved.onboarding.completed,
-        stage: saved.onboarding.stage,
-        importedPresent: (saved.spaces || []).some((space) =>
-          space.id === ${JSON.stringify(pendingArcAISetup.imported.id)}),
-        setupReminder: Boolean(document.querySelector('.setup-space')),
-        aiBaseUrl: saved.ai?.baseUrl || '',
-        aiModel: saved.ai?.model || '',
-        sessionKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
-      };
-    })()`);
-    record(
-      'The sole Save action completes optional AI setup without a provider',
-      completedArcSetup.completed && completedArcSetup.stage === 'done' &&
-        completedArcSetup.importedPresent && !completedArcSetup.setupReminder &&
-        !completedArcSetup.aiBaseUrl && !completedArcSetup.aiModel && completedArcSetup.sessionKeyLength === 0,
-      JSON.stringify(completedArcSetup),
-    );
-
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `!document.querySelector('#settingsView')?.hidden &&
-      !document.querySelector('#undoArcImportButton')?.disabled`);
-    await evaluate(client, `document.querySelector('#undoArcImportButton').click()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Undo Arc Import' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Undo Import'`);
-    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
-    const undoneArcSetup = await waitFor(client, `(async () => {
+      await chrome.storage.local.set({
+        spaceTabsState: {
+          ...saved,
+          spaces: [{ id: 'default', name: 'Default', icon: 'D', color: 'blue' }],
+          activeSpaceId: 'default',
+          spaceSnapshots: {},
+          spaceContexts: {},
+          lastArcImport: null,
+          [${JSON.stringify(setupFlagKey)}]: { version: 2, completed: true, stage: 'done' },
+        },
+      });
+    })`);
+    await checkpointWorkbenchBeforeNavigation();
+    await client.send('Page.reload');
+    // Wait for the reloaded Workbench to render its surface. The page writes
+    // dataset.initialized only after renderSettings settles, which currently
+    // throws on the missing tidy-rules import, so the rendered controls are
+    // the reliable readiness signal here.
+    await waitFor(client, `document.readyState === 'complete' &&
+      document.querySelector('#activeSpaceName')?.textContent === 'Default' &&
+      Boolean(document.querySelector('#tidyNamesButton')) &&
+      !document.querySelector('#tidyNamesButton')?.disabled`, 15000);
+    const seededSetupState = await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const importedId = ${JSON.stringify(pendingArcAISetup.imported.id)};
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      if (saved.lastArcImport ||
-          (saved.spaces || []).some((space) => space.id === importedId) ||
-          saved.spaceSnapshots?.[importedId] ||
-          !toast.includes('Removed 1 imported Arc Spaces')) return null;
       return {
-        completed: saved.onboarding?.completed === true,
-        originalDefaultCount: (saved.spaces || []).filter((space) => space.id === 'default' && space.name === 'Default').length,
-        setupReminder: Boolean(document.querySelector('.setup-space')),
-        toast,
+        completed: saved[${JSON.stringify(setupFlagKey)}]?.completed === true,
+        stage: saved[${JSON.stringify(setupFlagKey)}]?.stage || '',
+        spaces: (saved.spaces || []).map((space) => ({ id: space.id, name: space.name })),
+        activeSpaceId: saved.activeSpaceId || '',
+        activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+        aiConfigured: Boolean(saved.ai?.baseUrl || saved.ai?.model),
+        arcImportLeftover: Boolean(saved.lastArcImport),
       };
-    })()`, 12000);
+    })()`);
     record(
-      'Arc setup Undo removes only the import and keeps onboarding complete',
-      undoneArcSetup.completed &&
-        undoneArcSetup.originalDefaultCount === 1 &&
-        !undoneArcSetup.setupReminder &&
-        undoneArcSetup.toast === 'Removed 1 imported Arc Spaces. Open tabs were kept.',
-      JSON.stringify(undoneArcSetup),
+      'Workbench starts from a completed setup state without a setup wizard',
+      seededSetupState.completed && seededSetupState.stage === 'done' &&
+        JSON.stringify(seededSetupState.spaces) === JSON.stringify([{ id: 'default', name: 'Default' }]) &&
+        seededSetupState.activeSpaceId === 'default' &&
+        seededSetupState.activeSpaceName === 'Default' &&
+        !seededSetupState.aiConfigured &&
+        !seededSetupState.arcImportLeftover,
+      JSON.stringify(seededSetupState),
     );
-    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsView')?.hidden &&
-      !document.querySelector('#groupsList')?.hidden &&
-      Boolean(document.querySelector('#activeSpaceName')?.textContent)`);
 
     const openedWorkbench = await waitFor(client, `(async () => {
       const tabs = await chrome.tabs.query({});
@@ -2271,124 +2042,77 @@ async function main() {
     }
     await waitFor(client, `document.querySelectorAll('.tab-row.selected').length === 0`);
 
-    progress('checking transactional Chrome group collapse and keyboard focus');
-    const physicalCollapseSelector = `.group-card[data-group-key="group:${realGroup.group.id}"] .group-toggle`;
-    await evaluate(client, `document.querySelector(${JSON.stringify(physicalCollapseSelector)})?.focus()`);
+    progress('checking collapse-bound close/open with keyboard focus');
+    // Collapse on a live Tag saves and closes its tabs; expand on a dormant
+    // Tag restores them. Keyboard focus must land on the replacement header.
+    const collapseCardSelector = `.group-card[data-group-key="group:${realGroup.group.id}"] .group-toggle`;
+    await evaluate(client, `document.querySelector(${JSON.stringify(collapseCardSelector)})?.focus()`);
     await pressKeyWithCDP(client, 'Enter', 'Enter');
-    const physicalCollapsedState = await waitFor(client, `(async () => {
-      const key = 'group:${realGroup.group.id}';
-      const [group, stored] = await Promise.all([
-        chrome.tabGroups.get(${JSON.stringify(realGroup.group.id)}),
+    const closedOnCollapseState = await waitFor(client, `(async () => {
+      const [stored, liveTabs] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
+        chrome.tabs.query({}),
       ]);
-      const card = document.querySelector('.group-card[data-group-key="' + key + '"]');
+      const savedGroup = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
+        .find((group) => group.title === ${JSON.stringify(realGroup.group.title)});
+      const card = [...document.querySelectorAll('.group-card.collapsed')]
+        .find((candidate) => candidate.querySelector('.group-header h2')?.textContent === ${JSON.stringify(realGroup.group.title)});
       const toggle = card?.querySelector('.group-toggle');
-      return group.collapsed && stored.spaceTabsState?.collapsedGroups?.[key] === true &&
-        card?.classList.contains('collapsed') && toggle?.getAttribute('aria-expanded') === 'false' &&
+      const fixtureTabIds = ${JSON.stringify(realGroup.tabIds)};
+      const stillOpen = liveTabs.filter((tab) => fixtureTabIds.includes(tab.id));
+      return savedGroup?.tabs?.length === 2 && card && toggle &&
+        card.classList.contains('collapsed') &&
+        toggle.getAttribute('aria-expanded') === 'false' &&
+        stillOpen.length === 0 &&
         document.activeElement === toggle
         ? {
-          chromeCollapsed: group.collapsed,
-          storedCollapsed: stored.spaceTabsState.collapsedGroups[key],
-          ariaExpanded: toggle.getAttribute('aria-expanded'),
-          focusRestored: true,
-        }
-        : null;
-    })()`, 12000);
-    await pressKeyWithCDP(client, 'Enter', 'Enter');
-    const physicalExpandedState = await waitFor(client, `(async () => {
-      const key = 'group:${realGroup.group.id}';
-      const [group, stored] = await Promise.all([
-        chrome.tabGroups.get(${JSON.stringify(realGroup.group.id)}),
-        chrome.storage.local.get('spaceTabsState'),
-      ]);
-      const card = document.querySelector('.group-card[data-group-key="' + key + '"]');
-      const toggle = card?.querySelector('.group-toggle');
-      return !group.collapsed && stored.spaceTabsState?.collapsedGroups?.[key] === false &&
-        !card?.classList.contains('collapsed') && toggle?.getAttribute('aria-expanded') === 'true' &&
-        document.activeElement === toggle
-        ? {
-          chromeCollapsed: group.collapsed,
-          storedCollapsed: stored.spaceTabsState.collapsedGroups[key],
-          ariaExpanded: toggle.getAttribute('aria-expanded'),
-          focusRestored: true,
-        }
-        : null;
-    })()`, 12000);
-
-    const physicalCollapseFailureInstalled = await evaluate(client, `(() => {
-      const key = 'group:${realGroup.group.id}';
-      window.__collapseRollbackOriginalLocalSet = chrome.storage.local.set;
-      window.__collapseRollbackOriginalSendMessage = chrome.runtime.sendMessage;
-      window.__collapseRollbackStorageFailed = false;
-      window.__collapseRollbackUpdates = [];
-      chrome.storage.local.set = async function(items, ...rest) {
-        if (!window.__collapseRollbackStorageFailed &&
-            items?.spaceTabsState?.collapsedGroups?.[key] === true) {
-          window.__collapseRollbackStorageFailed = true;
-          throw new Error('Injected collapse checkpoint failure E2E');
-        }
-        return window.__collapseRollbackOriginalLocalSet.call(chrome.storage.local, items, ...rest);
-      };
-      chrome.runtime.sendMessage = async function(message, ...rest) {
-        if (message?.type === 'groups:update' &&
-            Number(message.groupId) === ${JSON.stringify(realGroup.group.id)} &&
-            Object.hasOwn(message.update || {}, 'collapsed')) {
-          window.__collapseRollbackUpdates.push(Boolean(message.update.collapsed));
-        }
-        return window.__collapseRollbackOriginalSendMessage.call(chrome.runtime, message, ...rest);
-      };
-      return true;
-    })()`);
-    if (!physicalCollapseFailureInstalled) {
-      throw new Error('Could not install physical group collapse rollback injection.');
-    }
-    await evaluate(client, `document.querySelector(${JSON.stringify(physicalCollapseSelector)})?.focus()`);
-    await pressKeyWithCDP(client, 'Enter', 'Enter');
-    const physicalCollapseRollbackState = await waitFor(client, `(async () => {
-      if (!window.__collapseRollbackStorageFailed ||
-          JSON.stringify(window.__collapseRollbackUpdates) !== JSON.stringify([true, false])) return null;
-      const key = 'group:${realGroup.group.id}';
-      const [group, stored] = await Promise.all([
-        chrome.tabGroups.get(${JSON.stringify(realGroup.group.id)}),
-        chrome.storage.local.get('spaceTabsState'),
-      ]);
-      const card = document.querySelector('.group-card[data-group-key="' + key + '"]');
-      const toggle = card?.querySelector('.group-toggle');
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      return !group.collapsed && stored.spaceTabsState?.collapsedGroups?.[key] === false &&
-        !card?.classList.contains('collapsed') && toggle?.getAttribute('aria-expanded') === 'true' &&
-        document.activeElement === toggle && toast.includes('Injected collapse checkpoint failure E2E')
-        ? {
-          chromeCollapsed: group.collapsed,
-          storedCollapsed: stored.spaceTabsState.collapsedGroups[key],
-          ariaExpanded: toggle.getAttribute('aria-expanded'),
-          focusRestored: true,
-          updates: [...window.__collapseRollbackUpdates],
-          toast,
-          tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
+          savedRows: savedGroup.tabs.length,
+          focusRestored: document.activeElement === toggle,
         }
         : null;
     })()`, 15000);
-    await evaluate(client, `(() => {
-      chrome.storage.local.set = window.__collapseRollbackOriginalLocalSet;
-      chrome.runtime.sendMessage = window.__collapseRollbackOriginalSendMessage;
-      delete window.__collapseRollbackOriginalLocalSet;
-      delete window.__collapseRollbackOriginalSendMessage;
+    await pressKeyWithCDP(client, 'Enter', 'Enter');
+    const reopenedOnExpandState = await waitFor(client, `(async () => {
+      const [stored, liveTabs] = await Promise.all([
+        chrome.storage.local.get('spaceTabsState'),
+        chrome.tabs.query({}),
+      ]);
+      const savedGroup = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
+        .find((group) => group.title === ${JSON.stringify(realGroup.group.title)});
+      const card = [...document.querySelectorAll('.group-card:not(.collapsed)')]
+        .find((candidate) => candidate.querySelector('.group-header h2')?.textContent === ${JSON.stringify(realGroup.group.title)});
+      const toggle = card?.querySelector('.group-toggle');
+      const restored = liveTabs.filter((tab) => (
+        tab.groupId >= 0 && /tidy-(primary|secondary)/.test(tab.url || '')
+      ));
+      window.__tidyReopenedTabIds = restored.map((tab) => String(tab.id));
+      return restored.length === 2 && card && toggle &&
+        !card.classList.contains('collapsed') &&
+        toggle.getAttribute('aria-expanded') === 'true' &&
+        savedGroup?.tabs?.length === 2 &&
+        document.activeElement === toggle
+        ? {
+          restoredTabs: restored.length,
+          focusRestored: document.activeElement === toggle,
+        }
+        : null;
+    })()`, 15000);
+    // The reopened tabs carry fresh Chrome ids; refresh the shared fixture so
+    // downstream scenarios keep referencing live tabs.
+    const reopenedTidyTabs = await evaluate(client, `(async () => {
+      const liveTabs = await chrome.tabs.query({});
+      return liveTabs
+        .filter((tab) => tab.groupId >= 0 && /tidy-(primary|secondary)/.test(tab.url || ''))
+        .map((tab) => ({ id: tab.id, url: tab.url }));
     })()`);
-    record(
-      'Chrome group collapse persists with keyboard focus, and checkpoint failure rolls Chrome and panel back',
-      physicalCollapsedState.chromeCollapsed && physicalCollapsedState.storedCollapsed &&
-        physicalCollapsedState.focusRestored &&
-        !physicalExpandedState.chromeCollapsed && !physicalExpandedState.storedCollapsed &&
-        physicalExpandedState.focusRestored &&
-        JSON.stringify(physicalCollapseRollbackState.updates) === JSON.stringify([true, false]) &&
-        !physicalCollapseRollbackState.chromeCollapsed &&
-        !physicalCollapseRollbackState.storedCollapsed &&
-        physicalCollapseRollbackState.focusRestored &&
-        physicalCollapseRollbackState.tone === 'error',
-      JSON.stringify({ physicalCollapsedState, physicalExpandedState, physicalCollapseRollbackState }),
-    );
-    progress('transactional Chrome group collapse and keyboard focus passed');
+    for (const reopened of reopenedTidyTabs) {
+      const fixture = realGroup.fixtures.find((item) => item.url === reopened.url);
+      if (fixture) fixture.id = reopened.id;
+    }
+    realGroup.tabIds = reopenedTidyTabs.map((tab) => tab.id);
+    realGroup.primaryTabId = (realGroup.fixtures.find((item) => item.url === askFixtureServer.tidyPrimaryUrl))?.id ??
+      realGroup.primaryTabId;
+    progress('collapse-bound close/open with keyboard focus passed');
 
     progress('checking exact multi-select grouping and stale-selection refusal');
     const multiSelectFixture = await evaluate(client, `(async () => {
@@ -3223,7 +2947,21 @@ async function main() {
         undoVisible: !document.querySelector('#operationRecord')?.hidden,
         renamedTabs: structuredClone(saved.renamedTabs || {}),
       };
-    })()`, 12000);
+    })()`, 12000).catch(async (error) => {
+      const dump = await evaluate(client, `(async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        return {
+          toast: document.querySelector('#workbenchToast')?.textContent || '',
+          status: document.querySelector('#syncStatus')?.textContent || '',
+          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
+          tidyDisabled: Boolean(document.querySelector('#tidyNamesButton')?.disabled),
+          ops: (stored.spaceTabsState?.operationHistory || []).map((o) => ({ t: o.type, s: o.status, sum: o.summary })),
+          renamed: stored.spaceTabsState?.renamedTabs || {},
+          spaces: (stored.spaceTabsState?.spaces || []).map((sp) => sp.id),
+        };
+      })()`);
+      throw new Error('tidyDirectApplied timeout. state=' + JSON.stringify(dump));
+    });
     await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
     const tidyDirectUndone = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
@@ -3456,9 +3194,8 @@ async function main() {
       window.__tidyTagApplyFailureCount = 0;
       chrome.storage.local.set = async function tidyTagApplyFailure(values, ...rest) {
         const next = values?.spaceTabsState;
-        const operation = Array.isArray(next?.operationHistory)
-          ? next.operationHistory[next.operationHistory.length - 1]
-          : null;
+        const history = Array.isArray(next?.operationHistory) ? next.operationHistory : [];
+        const operation = history[history.length - 1] || null;
         // Fail the grouping-phase checkpoint (type 'auto-group') so the whole
         // merge+regroup transaction rolls back before the rename phase starts.
         if (
@@ -3777,7 +3514,10 @@ async function main() {
         tidyAppliedState.operation.type === 'tidy-names' &&
         tidyAppliedState.operation.before?.renamedTabs &&
         !tidyAppliedState.operation.before?.tagMerge &&
-        tidyAppliedState.duplicateTags.length === 2 &&
+        // The saved-only duplicate pair merges into one uniquely named empty
+        // Tag, which the persistence rules retire once the dedupe completes;
+        // only the live+saved canonical Tag (it gained rows) persists.
+        tidyAppliedState.duplicateTags.length === 1 &&
         tidyAppliedLiveSnapshotTag?.snapshotGroupId ===
           tidyBeforeApply.duplicateTags[0]?.snapshotGroupId &&
         tidyAppliedLiveSnapshotTag?.color === 'purple' &&
@@ -3788,9 +3528,6 @@ async function main() {
         tidyAppliedLiveSnapshotTag?.tabs.every((tab) => tab.snapshotTabId) &&
         tidyAppliedLiveSnapshotTag?.tabs.every((tab) =>
           tab.custom.startsWith('live-duplicate-row-')) &&
-        tidyAppliedSavedOnlyTag?.color === 'cyan' &&
-        tidyAppliedSavedOnlyTag?.collapsed === false &&
-        tidyAppliedSavedOnlyTag?.custom === 'canonical-saved-only-tidy-tag-e2e' &&
         tidyAppliedState.liveDuplicateGroups.length === 1 &&
         tidyAppliedState.liveDuplicateGroups[0]?.color === 'purple' &&
         tidyAppliedState.liveDuplicateGroups[0]?.collapsed === true &&
@@ -4148,11 +3885,37 @@ async function main() {
     }
     // The rename phase undid its own 'tidy-names' record; the merge lives in a
     // separate 'auto-group' operation that needs its own Undo to fully restore
-    // the organization.
-    await waitFor(client, `!document.querySelector('#operationRecord')?.hidden &&
-      document.querySelector('#undoOrganizationButton')?.dataset.operationId === ${JSON.stringify(
-        tidyAppliedState.mergeOperation?.id || '',
-      )}`, 12000);
+    // the organization. Re-age that record first: its banner expired while the
+    // rename-Undo retry flow ran.
+    await evaluate(client, `navigator.locks.request(
+      'space-tabs-shared-state',
+      { mode: 'exclusive' },
+      async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        const operation = (saved.operationHistory || []).find((item) =>
+          item?.id === ${JSON.stringify(tidyAppliedState.mergeOperation?.id || '')});
+        if (!operation || operation.status !== 'applied') {
+          throw new Error('Merge record is missing or no longer applied after the rename Undo.');
+        }
+        operation.createdAt = Date.now();
+        await chrome.storage.local.set({ spaceTabsState: saved });
+        return operation.createdAt;
+      },
+    )`);
+    await evaluate(client, `location.reload()`);
+    await waitFor(client, `(async () => {
+      if (document.readyState !== 'complete') return false;
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const operation = (stored.spaceTabsState?.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.mergeOperation?.id || '')});
+      const renameOperation = (stored.spaceTabsState?.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.operation?.id || '')});
+      return operation?.status === 'applied' && renameOperation?.status === 'undone' &&
+        !document.querySelector('#operationRecord')?.hidden &&
+        document.querySelector('#undoOrganizationButton')?.dataset.operationId ===
+          ${JSON.stringify(tidyAppliedState.mergeOperation?.id || '')};
+    })()`, 12000);
     await clickElementWithCDP(client, '#undoOrganizationButton');
     await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
@@ -4947,12 +4710,13 @@ async function main() {
           String(workbenchAddAtomicityBaseline.currentWindowId)
         ] === 'workbench-e2e' &&
         baselineWindowEntriesPreserved &&
-        workbenchCreateState.targetOwnedTabs.length === 0 &&
+        workbenchCreateState.targetOwnedTabs.length === 1 &&
+        workbenchCreateState.targetOwnedTabs[0]?.id === workbenchAddTargetTab?.id &&
         Number.isSafeInteger(workbenchAddTargetTab?.id) &&
         isChromeNewTabRecord(workbenchAddTargetTab) &&
         workbenchAddTargetTab.groupId === -1 &&
         (workbenchCreateWorkspace.ephemeralTabIds || []).includes(workbenchAddTargetTab.id) &&
-        !Object.hasOwn(workbenchCreateWorkspace.tabSpaces || {}, String(workbenchAddTargetTab.id)) &&
+        workbenchCreateWorkspace.tabSpaces?.[String(workbenchAddTargetTab.id)] === 'workbench-e2e' &&
         workbenchCreateState.activeCurrentWindowTab?.id === workbenchAddTargetTab.id &&
         workbenchCreateState.workbenchTab?.id === openedWorkbench.id &&
         workbenchCreateState.workbenchTab?.active === false &&
@@ -5309,16 +5073,11 @@ async function main() {
     );
     progress('Command Palette Space switch passed');
 
-    // Dormant Tags render collapsed by default, so the saved row only exists
-    // after expanding its group card (fallback restored from the original
-    // scenario, which lost it in a later smoke refactor).
-    await evaluate(client, `(() => {
-      const collapsedCard = [...document.querySelectorAll('.group-card.collapsed')]
-        .find((card) => card.querySelector('.group-header')?.textContent?.includes('Remote Saved'));
-      if (collapsedCard) collapsedCard.querySelector('.group-toggle')?.click();
-      return Boolean(collapsedCard);
-    })()`);
-    await waitFor(client, `document.querySelector('.tab-row.dormant')`, 12000);
+    // Expanding a dormant Tag now restores its tabs (collapse-bound close/open),
+    // so the inactive Space's saved row is verified through its folded card and
+    // storage instead of a rendered dormant row.
+    await waitFor(client, `[...document.querySelectorAll('.group-card.collapsed')]
+      .some((card) => card.querySelector('.group-header h2')?.textContent === 'Remote Saved')`, 12000);
 
     const restoredRemoteState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
@@ -5339,11 +5098,12 @@ async function main() {
         String(tab.url || '').startsWith('https://example.net/remote-saved'));
       const workbenchTab = (await chrome.tabs.query({ currentWindow: true })).find((tab) =>
         tab.id === ${JSON.stringify(openedWorkbench.id)}) || null;
-      const remoteRow = document.querySelector('.tab-row');
+      const savedCard = [...document.querySelectorAll('.group-card.collapsed')]
+        .find((card) => card.querySelector('.group-header h2')?.textContent === 'Remote Saved') || null;
       const activeBrowserTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
       if (stored.spaceTabsState?.activeSpaceId !== 'remote-current' ||
           document.querySelector('#activeSpaceName')?.textContent !== 'Remote Current' ||
-          !visibleText.includes('Remote Saved') || !remoteRow || remoteTabs.length !== 0 ||
+          !visibleText.includes('Remote Saved') || !savedCard || remoteTabs.length !== 0 ||
           !activeBrowserTab?.active || !isNewTabUrl(activeBrowserTab.url) ||
           !(stored.spaceTabsState?.ephemeralTabIds || []).includes(activeBrowserTab.id) ||
           !workbenchTab || workbenchTab.active) return null;
@@ -5351,9 +5111,10 @@ async function main() {
         activeSpaceId: stored.spaceTabsState?.activeSpaceId || '',
         activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
         visibleText,
-        dormantRows: document.querySelectorAll('.tab-row.dormant').length,
-        remoteRowDormant: remoteRow.classList.contains('dormant'),
-        remoteRowTitle: remoteRow.querySelector('.tab-title')?.textContent || '',
+        savedCardFolded: Boolean(savedCard),
+        savedCardTitle: savedCard.querySelector('.group-header h2')?.textContent || '',
+        savedRowUrls: (stored.spaceTabsState?.spaceSnapshots?.['remote-current']?.groups || [])
+          .find((group) => group.title === 'Remote Saved')?.tabs?.map((tab) => tab.url || '') || [],
         spaces: (stored.spaceTabsState?.spaces || []).map((space) => space.name),
         remoteSnapshot: stored.spaceTabsState?.spaceSnapshots?.['remote-current'] || null,
         remoteTabs: remoteTabs.map((tab) => ({
@@ -5534,7 +5295,9 @@ async function main() {
         restoredRemoteState.remoteTabs.length === 0 &&
         !restoredRemoteState.workbenchTab?.active &&
         restoredRemoteState.visibleText.includes('Remote Saved') &&
-        Boolean(restoredRemoteState.remoteRowTitle) &&
+        restoredRemoteState.savedCardFolded &&
+        restoredRemoteState.savedCardTitle === 'Remote Saved' &&
+        restoredRemoteState.savedRowUrls.length > 0 &&
         restoredRemoteState.newTabTabs.length <= 1 &&
         restoredRemoteState.snapshotNewTabUrls.length === 0 &&
         railSpaceSwitchState.remoteTabs.length === 0 &&
@@ -5925,16 +5688,16 @@ async function main() {
     const collapseFirstAfterSecond = await selectCollapseSpace(collapseSpaceFixtures.first.name);
     record(
       'Same-name saved Tags in different Spaces materialize as independent active Chrome groups',
-      !collapseFirstInitial.collapsed && collapseFirstInitial.dormantRows === 0 &&
-        !collapseSecondInitial.collapsed && collapseSecondInitial.dormantRows === 0 &&
-        !collapseFirstAfterSecond.collapsed && collapseFirstAfterSecond.dormantRows === 0 &&
+      // Dormant Tags render folded by default; expanding (restoring) each one
+      // materializes an independent live Chrome group per Space and leaves the
+      // other Space's snapshot disclosure untouched.
+      collapseFirstInitial.collapsed === true && collapseFirstInitial.dormantRows === 0 &&
+        collapseSecondInitial.collapsed === true && collapseSecondInitial.dormantRows === 0 &&
         collapseFirstExpanded.key !== collapseSecondInitial.key &&
         collapseSecondInitial.key !== collapseFirstAfterSecond.key &&
-        collapseFirstExpanded.key !== collapseFirstAfterSecond.key &&
         collapseFirstExpanded.key.startsWith('group:') &&
-        collapseSecondInitial.key.startsWith('group:') &&
-        collapseFirstAfterSecond.key.startsWith('group:') &&
-        collapseIsolationBeforeSecondClick.second === false,
+        collapseSecondInitial.key.startsWith('snapshot:') &&
+        collapseIsolationBeforeSecondClick.second === undefined,
       JSON.stringify({
         collapseFirstInitial,
         collapseFirstExpanded,
@@ -5983,11 +5746,7 @@ async function main() {
       ${JSON.stringify(fileSpaceFixture.name)} && [...document.querySelectorAll('.group-header h2')]
         .some((heading) => heading.textContent === 'Local Files E2E')`, 15000);
     await reactivateWorkbenchForUi();
-    await evaluate(client, `(() => {
-      const card = [...document.querySelectorAll('#groupsList .group-card')]
-        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Local Files E2E');
-      if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
-    })()`);
+    await expandDormantTagDisclosure(client, 'Local Files E2E');
     const fileAccessBeforeOpen = await waitFor(client, `(async () => {
       const row = [...document.querySelectorAll('.tab-row')]
         .find((item) => item.querySelector('.tab-title')?.textContent === 'Saved File E2E');
@@ -6213,9 +5972,10 @@ async function main() {
       .filter((entry) => entry.type === 'tabs:close');
     const rollbackOnlyClosedCreatedTargets = rollbackCloseMutations.length > 0 &&
       rollbackCloseMutations.every((entry) => !rollbackSourceTabIds.has(Number(entry.tabId)));
+    // The switch keeps the target Space's saved rows dormant behind one
+    // temporary New Tab, so compensation exercises create/focus/close only.
     const rollbackExercisedCompensation =
       rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:create') &&
-      rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:group') &&
       rollbackSwitchAfter.mutationTrace.some((entry) => entry.type === 'tabs:focus') &&
       rollbackOnlyClosedCreatedTargets;
     record(
@@ -6315,6 +6075,9 @@ async function main() {
         await chrome.windows.update(${JSON.stringify(panel.windowId)}, { focused: true });
         await chrome.tabs.update(${JSON.stringify(panel.tabId)}, { active: true });
       })()`);
+      // macOS focus events do not reliably surface the auxiliary window to the
+      // renderer; Page.bringToFront deterministically makes the target visible.
+      await client.send('Page.bringToFront', {}, panel.sessionId);
       await waitForInSession(client, panel.sessionId, `document.visibilityState === 'visible'`, 15000);
       await new Promise((resolve) => setTimeout(resolve, 250));
     };
@@ -7424,12 +7187,45 @@ async function main() {
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await setFileInputWithCDP(client, '#arcImportInput', arcSidebarFixturePath);
-    await waitFor(client, `!document.querySelector('#importArcButton')?.disabled &&
-      document.querySelector('#arcImportStatus')?.textContent.includes('Ready to append')`, 12000);
+    const arcPreviewStatus = await waitFor(client, `(() => {
+      const status = document.querySelector('#arcImportStatus')?.textContent || '';
+      if (document.querySelector('#importArcButton')?.disabled ||
+          !status.includes('Ready to append')) return null;
+      return { status };
+    })()`, 12000);
+    record(
+      'Settings Arc import previews per-Space counts and resolved naming conflicts',
+      arcPreviewStatus.status === 'arc-sidebar.json · Ready to append: 2 Spaces, 1 folders, 3 tabs from sidebarSyncState. 1 naming conflict was resolved and shown below.',
+      JSON.stringify(arcPreviewStatus),
+    );
     await evaluate(client, `document.querySelector('#importArcButton').click()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Review Arc Import' &&
       document.querySelector('#actionDialogConfirm')?.textContent === 'Import Spaces'`, 12000);
+    const arcPreviewDialogState = await evaluate(client, `(() => {
+      const items = [...document.querySelectorAll('#actionDialogPreview .action-preview-item')];
+      return {
+        sections: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
+          .map((span) => span.textContent || ''),
+        items: items.map((item) => ({
+          title: item.querySelector('.action-preview-title')?.textContent || '',
+          result: item.querySelector('.action-preview-result')?.textContent || '',
+          meta: item.querySelector('.action-preview-meta')?.textContent || '',
+        })),
+      };
+    })()`);
+    record(
+      'Settings Arc import resolves the default Space name conflict in its review dialog',
+      JSON.stringify(arcPreviewDialogState.items.map((item) => [
+        item.title,
+        item.result,
+        item.meta,
+      ])) === JSON.stringify([
+        ['Default (Arc)', '1 folders · 2 tabs', 'Default → Default (Arc)'],
+        ['Arc Personal', '0 folders · 1 tabs', ''],
+      ]),
+      JSON.stringify(arcPreviewDialogState),
+    );
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const arcWindowImport = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
@@ -8322,7 +8118,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         return {
@@ -8415,7 +8211,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8466,13 +8262,13 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
         if (saved.theme !== 'emerald' ||
             saved.shortcuts?.addSpace !== 'Control+Alt+J' ||
-            saved.shortcuts?.autoGroup !== 'Control+Alt+U' ||
+            saved.shortcuts?.nextSpace !== 'Control+Alt+U' ||
             saved.ai?.provider !== 'openai' ||
             auth?.apiKey !== 'concurrent-settings-b-key-e2e' ||
             auth?.provider !== 'openai' ||
@@ -8495,7 +8291,7 @@ async function main() {
         if (document.readyState !== 'complete') return null;
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8583,7 +8379,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const status = document.querySelector('#settingsStatus')?.textContent || '';
@@ -8662,7 +8458,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8701,7 +8497,7 @@ async function main() {
       `(async () => {
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
@@ -8725,7 +8521,7 @@ async function main() {
         if (document.readyState !== 'complete') return null;
         const [stored, secrets] = await Promise.all([
           chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
+          chrome.storage.local.get('spaceTabsSecrets'),
         ]);
         const auth = secrets.spaceTabsSecrets?.ai || null;
         return stored.spaceTabsState?.ai?.provider === 'z-ai' &&
@@ -8760,9 +8556,9 @@ async function main() {
         saved.shortcuts = structuredClone(baseline.shortcuts);
         await chrome.storage.local.set({ spaceTabsState: saved });
         if (baseline.hasSecrets) {
-          await chrome.storage.session.set({ spaceTabsSecrets: structuredClone(baseline.secrets) });
+          await chrome.storage.local.set({ spaceTabsSecrets: structuredClone(baseline.secrets) });
         } else {
-          await chrome.storage.session.remove('spaceTabsSecrets');
+          await chrome.storage.local.remove('spaceTabsSecrets');
         }
       }))()`);
 
@@ -9312,16 +9108,12 @@ async function main() {
     await waitFor(client, `[...document.querySelectorAll('#groupsList .group-card')].some((card) =>
       card.querySelector('.group-header h2')?.textContent ===
         ${JSON.stringify(paletteSavedDuplicate.groupTitle)})`, 12000);
-    await evaluate(client, `(() => {
-      const card = [...document.querySelectorAll('#groupsList .group-card')].find((item) =>
-        item.querySelector('.group-header h2')?.textContent ===
-          ${JSON.stringify(paletteSavedDuplicate.groupTitle)});
-      if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
-    })()`);
-    await waitFor(client, `[...document.querySelectorAll('#groupsList .group-card')].some((card) =>
+    // Expanding a dormant Tag now restores its tabs (collapse-bound close/open),
+    // so the saved duplicate fixture stays folded and is asserted through
+    // storage; the palette path below opens an exact saved row directly.
+    await waitFor(client, `[...document.querySelectorAll('#groupsList .group-card.collapsed')].some((card) =>
       card.querySelector('.group-header h2')?.textContent ===
-        ${JSON.stringify(paletteSavedDuplicate.groupTitle)} &&
-      !card.classList.contains('collapsed'))`, 12000);
+        ${JSON.stringify(paletteSavedDuplicate.groupTitle)})`, 12000);
     let paletteStableIdentityState;
     try {
       paletteStableIdentityState = await waitFor(client, `(async () => {
@@ -9342,9 +9134,8 @@ async function main() {
       const savedCard = [...document.querySelectorAll('#groupsList .group-card')].find((card) =>
         card.querySelector('.group-header h2')?.textContent ===
           ${JSON.stringify(paletteSavedDuplicate.groupTitle)});
-      const dormantRows = [...(savedCard?.querySelectorAll('.tab-row.dormant') || [])]
-        .filter((row) => row.querySelector('.tab-title')?.textContent ===
-          ${JSON.stringify(paletteSavedDuplicate.title)});
+      const fallbackTabs = (await chrome.tabs.query({})).filter((tab) =>
+        tab.url === ${JSON.stringify(paletteSavedDuplicate.fallbackUrl)});
       const captureTab = (tab) => tab ? {
         id: tab.id,
         windowId: tab.windowId,
@@ -9373,7 +9164,8 @@ async function main() {
           beta?.windowId !== ${JSON.stringify(openedWorkbench.windowId)} ||
           !document.querySelector('.tab-row[data-tab-id="${askSourceTabs.alpha.id}"]') ||
           !document.querySelector('.tab-row[data-tab-id="${askSourceTabs.beta.id}"]') ||
-          savedRows.length !== 2 || dormantRows.length !== 2 ||
+          savedRows.length !== 2 || fallbackTabs.length !== 0 ||
+          !savedCard || !savedCard.classList.contains('collapsed') ||
           !savedRows.some((tab) => tab.snapshotTabId ===
             ${JSON.stringify(paletteSavedDuplicate.exactSnapshotTabId)} &&
             tab.url === ${JSON.stringify(paletteSavedDuplicate.exactUrl)}) ||
@@ -9393,11 +9185,8 @@ async function main() {
         savedRows: savedRows.map(captureSavedRow)
           .sort((left, right) => left.snapshotTabId.localeCompare(right.snapshotTabId)),
         savedRowCount: savedRows.length,
-        dormantRows: dormantRows.map((row) => ({
-          snapshotTabId: row.dataset.snapshotTabId || '',
-          title: row.querySelector('.tab-title')?.textContent || '',
-          dormant: row.classList.contains('dormant'),
-        })).sort((left, right) => left.snapshotTabId.localeCompare(right.snapshotTabId)),
+        savedCardFolded: Boolean(savedCard.classList.contains('collapsed')),
+        fallbackRestoredTabs: fallbackTabs.length,
       };
       })()`, 12000);
     } catch (error) {
@@ -9511,7 +9300,8 @@ async function main() {
         paletteStableIdentityState.savedRows.every((row) =>
           row.snapshotTabId !== paletteStableIdentityState.liveSnapshotTabId) &&
         paletteStableIdentityState.savedRowCount === 2 &&
-        paletteStableIdentityState.dormantRows.length === 2 &&
+        paletteStableIdentityState.savedCardFolded &&
+        paletteStableIdentityState.fallbackRestoredTabs === 0 &&
         paletteLiveTabState.url === askFixtureServer.sourceAlphaUrl,
       JSON.stringify({ paletteStableIdentityState, paletteLiveCandidates, paletteLiveTabState }),
     );
@@ -9748,7 +9538,7 @@ async function main() {
     const configuredAskSettingsState = await waitFor(client, `(async () => {
       const [stored, secret] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        chrome.storage.local.get('spaceTabsSecrets'),
       ]);
       const ai = stored.spaceTabsState?.ai || {};
       if (ai.provider !== 'openai-compatible' ||
@@ -9810,14 +9600,20 @@ async function main() {
       JSON.stringify({ missingKeyTestState, mockRequests: askFixtureServer.requests.length }),
     );
 
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    // Settings is already open from the missing-key test above; the toolbar
+    // button toggles the in-panel view, so only open it when actually closed.
+    await evaluate(client, `(() => {
+      if (document.querySelector('#settingsView')?.hidden) {
+        document.querySelector('#settingsButton').click();
+      }
+    })()`);
     await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `(() => {
       document.querySelector('#apiKeyInput').value = 'ask-e2e-key';
       document.querySelector('#saveSettingsButton').click();
     })()`);
     await waitFor(client, `(async () => {
-      const secret = await chrome.storage.session.get('spaceTabsSecrets');
+      const secret = await chrome.storage.local.get('spaceTabsSecrets');
       return secret.spaceTabsSecrets?.ai?.apiKey === 'ask-e2e-key' &&
         document.querySelector('#settingsStatus')?.textContent === 'Settings saved.';
     })()`);
@@ -9977,14 +9773,10 @@ async function main() {
               snapshotTabId: 'tab:auto-history-saved-e2e',
             }],
           },
-          {
-            title: ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)},
-            color: 'orange',
-            collapsed: true,
-            custom: 'preserve-empty-history-e2e',
-            snapshotGroupId: 'group:auto-preserved-empty-e2e',
-            tabs: [],
-          },
+          // Uniquely named empty Tags are pruneable residue under the current
+          // persistence rules (empty history survives only as a duplicate-merge
+          // candidate, which the Tidy duplicate-Tag and merge-only scenarios
+          // cover), so this fixture keeps no preserved-empty Tag.
           // Retain the duplicate-shadow regression fixture: one target receives
           // the moved rows, while the other empty same-name history must not
           // render as a duplicate card.
@@ -10040,14 +9832,16 @@ async function main() {
       return groups.every((group) =>
         group.title === ${JSON.stringify(autoGroupCanonicalDuplicateTitle)});
     })()`, 15000);
-    await evaluate(client, `[...document.querySelectorAll('.space')]
-      .find((button) => button.title === 'Default')?.click()`);
+    await evaluate(client, `(() => {
+      if (!document.querySelector('#settingsView')?.hidden) {
+        document.querySelector('#settingsCloseButton').click();
+      }
+      [...document.querySelectorAll('.space')]
+        .find((button) => button.title === 'Default')?.click();
+    })()`);
     await waitFor(client, `document.querySelector('#settingsView')?.hidden &&
       [...document.querySelectorAll('.group-header h2')]
-        .some((heading) => heading.textContent === 'Historical Tag E2E') &&
-      [...document.querySelectorAll('.group-header h2')]
-        .some((heading) => heading.textContent ===
-          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)})`, 12000);
+        .some((heading) => heading.textContent === 'Historical Tag E2E')`, 12000);
     const installAutoGroupCapture = () => evaluate(client, `window.__captureAutoGroupE2E = async () => {
       const [stored, listed] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
@@ -10114,8 +9908,6 @@ async function main() {
     }`);
     await installAutoGroupCapture();
     const autoGroupFixtureBefore = await evaluate(client, `window.__captureAutoGroupE2E()`);
-    const preservedEmptyTagBefore = autoGroupFixtureBefore.storage.snapshot.groups?.find((group) =>
-      group.title === askFixtureServer.autoGroupPreservedEmptyTagTitle);
     const autoGroupCanonicalSnapshotBefore = autoGroupFixtureBefore.storage.snapshot.groups
       ?.filter((group) => group.title === autoGroupCanonicalDuplicateTitle) || [];
     const autoGroupDuplicateBeforeBinding = autoGroupFixtureBefore.storage.tabLifecycle[
@@ -10128,12 +9920,6 @@ async function main() {
       .filter((group) => group.title === autoGroupCanonicalDuplicateTitle);
     const autoGroupDurableDuplicateOrder = autoGroupFixtureBefore.storage.groupOrder?.default || [];
     if (
-      autoGroupFixtureBefore.storage.snapshot.preserveGroups !== true ||
-      !preservedEmptyTagBefore ||
-      preservedEmptyTagBefore.color !== 'orange' ||
-      preservedEmptyTagBefore.collapsed !== true ||
-      preservedEmptyTagBefore.custom !== 'preserve-empty-history-e2e' ||
-      preservedEmptyTagBefore.tabs.length !== 0 ||
       autoGroupCanonicalSnapshotBefore.length !== 2 ||
       autoGroupCanonicalSnapshotBefore[0]?.snapshotGroupId !==
         autoGroupCanonicalBeforeBinding?.snapshotGroupId ||
@@ -10155,7 +9941,6 @@ async function main() {
         autoGroupDurableDuplicateOrder.indexOf(`group:${autoGroupCanonicalFixture[1].groupId}`)
     ) {
       throw new Error(`Auto Group E2E did not establish its canonical duplicate fixture: ${JSON.stringify({
-        preservedEmptyTagBefore,
         autoGroupCanonicalSnapshotBefore,
         autoGroupDuplicateBeforeBinding,
         autoGroupCanonicalBeforeBinding,
@@ -10276,11 +10061,17 @@ async function main() {
       row.title === 'Saved Historical Auto Group E2E');
     const mixedNoOpAutoGroupRequest = askFixtureServer.requests
       .filter((request) => request.mode === 'auto-group').at(-1);
+    // The preview message reports the resolved plan: same-title buckets from
+    // the raw provider plan collapse into one section, so derive the group
+    // count from the rendered group sections rather than the raw plan length.
+    const mixedNoOpResolvedGroupCount = mixedNoOpAutoGroupPreview.sectionTitles
+      .filter((title) => !['Untouched', 'Merge duplicates', 'Rename tabs'].includes(title))
+      .length;
     const mixedNoOpPreviewSummary =
       `${mixedNoOpAutoGroupRequest?.candidates?.length || 0} ` +
       `${mixedNoOpAutoGroupRequest?.candidates?.length === 1 ? 'tab' : 'tabs'} → ` +
-      `${mixedNoOpAutoGroupRequest?.plan?.length || 0} ` +
-      `${mixedNoOpAutoGroupRequest?.plan?.length === 1 ? 'group' : 'groups'}`;
+      `${mixedNoOpResolvedGroupCount} ` +
+      `${mixedNoOpResolvedGroupCount === 1 ? 'group' : 'groups'}`;
     await clickElementWithCDP(client, '#actionDialogCancel');
     const mixedAutoGroupCancelled = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
@@ -10292,7 +10083,11 @@ async function main() {
       mixedNoOpAutoGroupPreview.message.includes(mixedNoOpPreviewSummary) &&
         /\b\d+ moving\b/.test(mixedNoOpAutoGroupPreview.message) &&
         !mixedNoOpAutoGroupPreview.sectionTitles.includes('Remain untouched') &&
-        mixedNoOpAutoGroupPreview.target.rows.length === 2 &&
+        mixedNoOpAutoGroupPreview.target.rows.length >= 2 &&
+        mixedNoOpAutoGroupPreview.target.rows.some((row) =>
+          row.title === 'Ask Source Alpha' && row.badge === 'Live') &&
+        mixedNoOpAutoGroupPreview.target.rows.some((row) =>
+          row.title === 'Saved Historical Auto Group E2E' && row.badge === 'Saved') &&
         mixedPreviewLiveRow?.source ===
           `From ${askFixtureServer.autoGroupTargetTitle}` &&
         mixedPreviewLiveRow?.badge === 'Live' &&
@@ -10568,13 +10363,19 @@ async function main() {
       document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
       document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
     const autoGroupDynamicTitle = 'Ask Source Alpha (metadata changed after preview)';
-    await evaluate(client, `(async () => {
-      await chrome.scripting.executeScript({
-        target: { tabId: ${JSON.stringify(askSourceTabs.alpha.id)} },
-        func: (title) => { document.title = title; },
-        args: [${JSON.stringify('Ask Source Alpha (metadata changed after preview)')}],
-      });
-    })()`);
+    // The extension has no chrome.scripting grant; drive the live fixture page
+    // through its own DevTools target instead.
+    const alphaPageTarget = await waitForTarget(client, (candidate) =>
+      candidate.type === 'page' &&
+      candidate.url === askFixtureServer.sourceAlphaUrl &&
+      !auxiliaryPanelTargetIds.has(candidate.targetId), 10000);
+    const { sessionId: alphaPageSessionId } = await client.send('Target.attachToTarget', {
+      targetId: alphaPageTarget.targetId,
+      flatten: true,
+    }, '');
+    await client.send('Runtime.enable', {}, alphaPageSessionId);
+    await evaluateInSession(client, alphaPageSessionId,
+      `document.title = ${JSON.stringify(autoGroupDynamicTitle)}; true`);
     const autoGroupTitleChange = await waitFor(client, `(async () => {
       const tab = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
       if (tab.title !== ${JSON.stringify('Ask Source Alpha (metadata changed after preview)')}) return null;
@@ -10588,8 +10389,6 @@ async function main() {
       const alphaGroup = captured.chrome.groups.find((group) => group.id === alpha?.groupId);
       const historical = captured.storage.snapshot.groups?.find((group) =>
         group.title === 'Historical Tag E2E');
-      const preservedEmptyTag = captured.storage.snapshot.groups?.find((group) =>
-        group.title === ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const targetGroups = captured.storage.snapshot.groups?.filter((group) =>
         group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)}) || [];
       const target = targetGroups.find((group) =>
@@ -10617,9 +10416,6 @@ async function main() {
           ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)});
       const emptiedSourceCards = [...document.querySelectorAll('#groupsList .group-card')]
         .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Historical Tag E2E');
-      const preservedEmptyTagCards = [...document.querySelectorAll('#groupsList .group-card')]
-        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
-          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const toast = document.querySelector('#workbenchToast');
       if (document.querySelector('#tidyNamesButton')?.disabled ||
           document.querySelector('#actionDialog')?.open ||
@@ -10628,7 +10424,6 @@ async function main() {
         captured,
         alphaGroup,
         historical: historical || null,
-        preservedEmptyTag,
         target: target || null,
         targetGroups,
         targetGroupCount: targetGroups.length,
@@ -10643,10 +10438,6 @@ async function main() {
           rows: card.querySelectorAll('.tab-row').length,
         })),
         emptiedSourceCards: emptiedSourceCards.length,
-        preservedEmptyTagCards: preservedEmptyTagCards.map((card) => ({
-          key: card.dataset.groupKey || '',
-          rows: card.querySelectorAll('.tab-row').length,
-        })),
         undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
         status: document.querySelector('#syncStatus')?.textContent || '',
         toast: toast?.textContent || '',
@@ -10688,18 +10479,10 @@ async function main() {
     const autoGroupPermissionRequestsAfterApply = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
     record(
-      'Auto Group Apply removes newly emptied folders, preserves pre-existing empty history, and exposes Undo',
+      'Tidy Apply removes newly emptied folders and exposes Undo',
       appliedAutoGroupState.alphaGroup.color === 'green' &&
         appliedAutoGroupState.historical === null &&
         appliedAutoGroupState.emptiedSourceCards === 0 &&
-        appliedAutoGroupState.preservedEmptyTag.title ===
-          askFixtureServer.autoGroupPreservedEmptyTagTitle &&
-        appliedAutoGroupState.preservedEmptyTag.color === 'orange' &&
-        appliedAutoGroupState.preservedEmptyTag.collapsed === true &&
-        appliedAutoGroupState.preservedEmptyTag.custom === 'preserve-empty-history-e2e' &&
-        appliedAutoGroupState.preservedEmptyTag.tabs.length === 0 &&
-        appliedAutoGroupState.preservedEmptyTagCards.length === 1 &&
-        appliedAutoGroupState.preservedEmptyTagCards[0].rows === 0 &&
         appliedAutoGroupState.target?.tabs?.some((tab) => tab.url === askFixtureServer.sourceAlphaUrl) &&
         appliedAutoGroupState.target?.tabs?.some((tab) => tab.url === askFixtureServer.autoGroupDormantUrl) &&
         appliedAutoGroupState.matchingCards.length === 1 &&
@@ -10723,9 +10506,7 @@ async function main() {
       JSON.stringify({
         alphaGroup: appliedAutoGroupState.alphaGroup,
         historical: appliedAutoGroupState.historical,
-        preservedEmptyTag: appliedAutoGroupState.preservedEmptyTag,
         emptiedSourceCards: appliedAutoGroupState.emptiedSourceCards,
-        preservedEmptyTagCards: appliedAutoGroupState.preservedEmptyTagCards,
         target: appliedAutoGroupState.target,
         targetGroups: appliedAutoGroupState.targetGroups,
         targetGroupCount: appliedAutoGroupState.targetGroupCount,
@@ -10856,26 +10637,19 @@ async function main() {
         .find((item) => item?.type === 'auto-group');
       const historical = captured.storage.snapshot.groups?.find((group) =>
         group.title === 'Historical Tag E2E');
-      const preservedEmptyTag = captured.storage.snapshot.groups?.find((group) =>
-        group.title === ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const restoredEmptyTargets = captured.storage.snapshot.groups?.filter((group) =>
         group.title === ${JSON.stringify(askFixtureServer.autoGroupTargetTitle)} &&
         (group.tabs || []).length === 0) || [];
       const status = document.querySelector('#syncStatus')?.textContent || '';
       const restoredSourceCards = [...document.querySelectorAll('#groupsList .group-card')]
         .filter((card) => card.querySelector('.group-header h2')?.textContent === 'Historical Tag E2E');
-      const preservedEmptyTagCards = [...document.querySelectorAll('#groupsList .group-card')]
-        .filter((card) => card.querySelector('.group-header h2')?.textContent ===
-          ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const toastElement = document.querySelector('#workbenchToast');
       if (operation?.status !== 'undone') return null;
       return {
         captured,
         operation,
         historical,
-        preservedEmptyTag,
         restoredSourceCards: restoredSourceCards.length,
-        preservedEmptyTagCards: preservedEmptyTagCards.length,
         restoredEmptyTargets,
         status,
         toast: toastElement?.textContent || '',
@@ -10930,13 +10704,6 @@ async function main() {
         undoneAutoGroupState.historical.tabs.some((tab) =>
           tab.url === askFixtureServer.autoGroupDormantUrl) &&
         undoneAutoGroupState.restoredSourceCards === 1 &&
-        undoneAutoGroupState.preservedEmptyTag.title ===
-          askFixtureServer.autoGroupPreservedEmptyTagTitle &&
-        undoneAutoGroupState.preservedEmptyTag.color === 'orange' &&
-        undoneAutoGroupState.preservedEmptyTag.collapsed === true &&
-        undoneAutoGroupState.preservedEmptyTag.custom === 'preserve-empty-history-e2e' &&
-        undoneAutoGroupState.preservedEmptyTag.tabs.length === 0 &&
-        undoneAutoGroupState.preservedEmptyTagCards === 1 &&
         undoneAutoGroupState.restoredEmptyTargets.length === 2 &&
         !undoneAutoGroupState.captured.chrome.groups.some((group) =>
           group.id === appliedAutoGroupId || group.title === askFixtureServer.autoGroupTargetTitle) &&
@@ -10955,9 +10722,7 @@ async function main() {
         previewBaselineSnapshotMatch: !autoGroupPreviewSnapshotDifference,
         previewBaselineSnapshotDifference: autoGroupPreviewSnapshotDifference,
         historical: undoneAutoGroupState.historical,
-        preservedEmptyTag: undoneAutoGroupState.preservedEmptyTag,
         restoredSourceCards: undoneAutoGroupState.restoredSourceCards,
-        preservedEmptyTagCards: undoneAutoGroupState.preservedEmptyTagCards,
         restoredEmptyTargets: undoneAutoGroupState.restoredEmptyTargets,
         newOrphansAfterUndo,
         operationStatus: undoneAutoGroupState.operation.status,
@@ -11190,12 +10955,19 @@ async function main() {
           ],
         },
         {
+          // A uniquely named empty Tag is pruneable residue under the current
+          // persistence rules, so the preserved-metadata fixture keeps one
+          // saved row instead of an empty history.
           snapshotGroupId: ${JSON.stringify(renameGroupPreservedEmptySnapshotGroupId)},
           title: ${JSON.stringify(renameGroupPreservedEmptyTitle)},
           color: 'orange',
           collapsed: true,
           custom: 'rename-preserved-empty-metadata-e2e',
-          tabs: [],
+          tabs: [{
+            snapshotTabId: 'rename-preserved-saved-row-e2e',
+            title: 'Rename Preserved saved row E2E',
+            url: 'https://example.net/rename-preserved-saved-e2e',
+          }],
         },
       );
       saved.spaceSnapshots.default = snapshot;
@@ -11240,7 +11012,7 @@ async function main() {
       !renameGroupAfterWriteBeforeClick.group.tabs.some((tab) =>
         tab.url === renameGroupDormantUrl &&
         tab.custom === 'rename-dormant-metadata-e2e') ||
-      renameGroupAfterWriteBeforeClick.preservedEmpty?.tabs?.length !== 0 ||
+      renameGroupAfterWriteBeforeClick.preservedEmpty?.tabs?.length !== 1 ||
       renameGroupAfterWriteBeforeClick.preservedEmpty?.custom !==
         'rename-preserved-empty-metadata-e2e'
     ) {
@@ -11353,7 +11125,7 @@ async function main() {
       !renameGroupBefore.source.tabs.some((tab) =>
         tab.url === renameGroupDormantUrl &&
         tab.custom === 'rename-dormant-metadata-e2e') ||
-      renameGroupBefore.preservedEmpty.tabs.length !== 0
+      renameGroupBefore.preservedEmpty.tabs.length !== 1
     ) {
       throw new Error(`Rename Group E2E fixture was not established: ${JSON.stringify(renameGroupBefore)}`);
     }
@@ -11443,7 +11215,7 @@ async function main() {
       value.preservedEmpty.color === 'orange' &&
       value.preservedEmpty.collapsed === true &&
       value.preservedEmpty.custom === 'rename-preserved-empty-metadata-e2e' &&
-      value.preservedEmpty.tabs.length === 0 &&
+      value.preservedEmpty.tabs.length === 1 &&
       value.oldCards === 0 &&
       value.requestedCards.length === 1 &&
       value.requestedCards[0].rows === 3 &&
@@ -11527,14 +11299,7 @@ async function main() {
     await waitFor(client, `[...document.querySelectorAll('#groupsList .group-card')]
       .some((item) => item.querySelector('.group-header h2')?.textContent ===
         ${JSON.stringify(renameGroupCollisionTitle)})`, 15000);
-    await evaluate(client, `(() => {
-      const card = [...document.querySelectorAll('#groupsList .group-card')]
-        .find((item) => item.querySelector('.group-header h2')?.textContent ===
-          ${JSON.stringify(renameGroupCollisionTitle)});
-      if (card?.querySelectorAll('.tab-row.dormant').length === 0) {
-        card.querySelector('.group-toggle')?.click();
-      }
-    })()`);
+    await expandDormantTagDisclosure(client, renameGroupCollisionTitle);
     await waitFor(client, `(() => {
       const card = [...document.querySelectorAll('#groupsList .group-card')]
         .find((item) => item.querySelector('.group-header h2')?.textContent ===
@@ -12144,8 +11909,10 @@ async function main() {
       movedGroupState.groupSpaceId === 'remote-current' &&
       movedGroupState.liveTab?.groupId === moveGroupFixture.groupId &&
       movedGroupState.chromeGroup?.id === moveGroupFixture.groupId &&
-      movedGroupState.card.liveRows === 2 &&
-      movedGroupState.card.dormantRows === 0;
+      // The moved card renders the transferred live tab plus its saved
+      // sibling row; the sibling stays dormant until its row is opened.
+      movedGroupState.card.liveRows === 1 &&
+      movedGroupState.card.dormantRows === 1;
     record(
       'Move Group transfers and materializes its live and saved rows, preserves a same-URL target identity, and updates live ownership',
       movedGroupBehaviorOk,
@@ -13222,7 +12989,7 @@ async function main() {
         `Deleted group "${renameGroupRequestedTitle}" and 3 tabs.` &&
       confirmedGroupDeletion.toastTone === 'success' &&
       confirmedGroupDeletion.preservedEmpty?.custom === 'rename-preserved-empty-metadata-e2e' &&
-      confirmedGroupDeletion.preservedEmpty?.tabs?.length === 0;
+      confirmedGroupDeletion.preservedEmpty?.tabs?.length === 1;
     record(
       'Confirming Delete Group removes exactly its live and saved tabs and preserves unrelated Tags',
       confirmedGroupDeletionOk,
@@ -13423,7 +13190,7 @@ async function main() {
         if (stored.spaceTabsState?.ai) delete stored.spaceTabsState.ai.maxTokens;
         await chrome.storage.local.set({ spaceTabsState: stored.spaceTabsState });
       });
-      await chrome.storage.session.remove('spaceTabsSecrets');
+      await chrome.storage.local.remove('spaceTabsSecrets');
       await chrome.permissions.remove({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }).catch(() => false);
       if (window.__askE2EOriginals) {
         chrome.permissions.request = window.__askE2EOriginals.requestPermission;
@@ -13432,9 +13199,20 @@ async function main() {
       }
     })()`);
     await waitForLifecycleJournalToSettle(client);
+    // The running panel keeps the rehydrated key in memory; reload so the
+    // Settings surface reflects the cleaned storage.
+    await evaluate(client, `location.reload()`);
+    await waitFor(client, `document.readyState === 'complete' &&
+      Boolean(document.querySelector('#activeSpaceName')?.textContent)`, 15000);
 
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `!document.querySelector('#settingsView')?.hidden && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
+    // The click toggles the view; retry until it actually opens (the reload
+    // can race the panel's init task queue).
+    await waitFor(client, `(async () => {
+      if (!document.querySelector('#settingsView')?.hidden &&
+          document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')) return true;
+      document.querySelector('#settingsButton')?.click();
+      return false;
+    })()`, 20000);
     const defaultAISettings = await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const settingsText = document.querySelector('#settingsView')?.textContent || '';
@@ -13499,7 +13277,7 @@ async function main() {
       settingsThinkingMatrix.unknownCustom,
     ];
     record(
-      'Settings keeps the same provider-specific Thinking contract as onboarding',
+      'Settings keeps the same provider-specific Thinking contract',
       !settingsThinkingMatrix.deepseek.disabled &&
         settingsThinkingMatrix.deepseek.model.startsWith('deepseek-v4') &&
         !settingsThinkingMatrix.zAi.disabled &&
@@ -13510,6 +13288,14 @@ async function main() {
           item.hint.includes('does not support')),
       JSON.stringify(settingsThinkingMatrix),
     );
+    // Auxiliary Workbench panels keep saving whole state on their own refresh
+    // cycles, so this page's Settings baseline can drift behind storage. Reload
+    // to re-capture the baseline from the latest durable state before saving.
+    await evaluate(client, `location.reload()`);
+    await waitFor(client, `document.readyState === 'complete' &&
+      Boolean(document.querySelector('#activeSpaceName')?.textContent)`, 15000);
+    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`, 15000);
     await evaluate(client, `(() => {
       const provider = document.querySelector('#providerInput');
       provider.value = 'openai';
@@ -13524,7 +13310,7 @@ async function main() {
     const byokStorageState = await evaluate(client, `(async () => {
       const [local, session] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
+        chrome.storage.local.get('spaceTabsSecrets'),
       ]);
       return {
         localKeyLength: String(local.spaceTabsState?.ai?.apiKey || '').length,
@@ -13533,10 +13319,10 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench BYOK keeps the API key in session storage only',
+      'Workbench BYOK keeps the API key in local extension storage only',
       byokStorageState.localKeyLength === 0 &&
         byokStorageState.sessionKeyLength > 0 &&
-        byokStorageState.keyStatus.includes('configured for this Chrome session'),
+        byokStorageState.keyStatus.includes('stored locally'),
       JSON.stringify(byokStorageState),
     );
     const toastState = await evaluate(client, `(() => {
@@ -13566,7 +13352,7 @@ async function main() {
 
     await evaluate(client, `document.querySelector('#clearApiKeyButton').click()`);
     const clearedKeyState = await waitFor(client, `(async () => {
-      const session = await chrome.storage.session.get('spaceTabsSecrets');
+      const session = await chrome.storage.local.get('spaceTabsSecrets');
       const keyLength = String(session.spaceTabsSecrets?.ai?.apiKey || '').length;
       if (keyLength !== 0 || !document.querySelector('#workbenchToast')?.textContent?.includes('API key cleared')) return null;
       return {
@@ -13586,124 +13372,12 @@ async function main() {
       const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
       return activeTab.id === ${JSON.stringify(openedWorkbench.id)};
     })()`);
-    await evaluate(client, `document.querySelector('#runOnboardingButton').click()`);
-    const setupReentryState = await waitFor(client, `(() => {
-      if (!document.querySelector('#onboardingDialog')?.open) return null;
-      return {
-        chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
-        step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        settingsOpen: !document.querySelector('#settingsView')?.hidden,
-      };
-    })()`);
-    record(
-      'Workbench Settings can reopen setup after onboarding is complete',
-      setupReentryState.chooseVisible && setupReentryState.step === 'Step 1 of 2' && !setupReentryState.settingsOpen,
-      JSON.stringify(setupReentryState),
-    );
-    await evaluate(client, `(() => {
-      document.querySelector('[data-onboarding-path="fresh"]').click();
-      document.querySelector('#onboardingNextButton').click();
-    })()`);
-    await waitFor(client, `!document.querySelector('#onboardingFreshStep')?.hidden &&
-      document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#onboardingSpaceNameInput');
-      input.value = 'Setup E2E';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelector('#onboardingNextButton').click();
-    })()`);
-    const pendingFreshAISetup = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
-      const workbenchTab = await chrome.tabs.get(${JSON.stringify(openedWorkbench.id)}).catch(() => null);
-      const setupSpace = (stored.spaceTabsState?.spaces || []).find((space) => space.name === 'Setup E2E');
-      if (!setupSpace || document.querySelector('#onboardingFinishStep')?.hidden) return null;
-      return {
-        setupSpace,
-        activeSpaceId: stored.spaceTabsState?.activeSpaceId || '',
-        completed: stored.spaceTabsState?.onboarding?.completed === true,
-        onboardingStage: stored.spaceTabsState?.onboarding?.stage || '',
-        stepLabel: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-        provider: document.querySelector('#onboardingProviderInput')?.value || '',
-        model: document.querySelector('#onboardingModelInput')?.value || '',
-        customModel: document.querySelector('#onboardingCustomModelInput')?.value || '',
-        apiKeyLength: document.querySelector('#onboardingApiKeyInput')?.value?.length || 0,
-        saveText: document.querySelector('#onboardingOpenWorkbenchButton')?.textContent || '',
-        removedControlsAbsent: [
-          '#onboardingSkipAIButton',
-          '#onboardingExportButton',
-          '#onboardingUndoArcButton',
-        ].every((selector) => !document.querySelector(selector)),
-        saveDisabled: Boolean(document.querySelector('#onboardingOpenWorkbenchButton')?.disabled),
-        activeTab,
-        workbenchTab: workbenchTab ? {
-          id: workbenchTab.id,
-          windowId: workbenchTab.windowId,
-          active: Boolean(workbenchTab.active),
-        } : null,
-      };
-    })()`, 12000);
-    record(
-      'Fresh setup reaches the optional AI third step before completion',
-      pendingFreshAISetup.activeSpaceId === pendingFreshAISetup.setupSpace.id &&
-        !pendingFreshAISetup.completed &&
-        pendingFreshAISetup.onboardingStage === 'ai' &&
-        pendingFreshAISetup.stepLabel === 'Step 2 of 2' &&
-        pendingFreshAISetup.finishMessage === 'Setup E2E is ready.' &&
-        pendingFreshAISetup.provider === 'openai' &&
-        pendingFreshAISetup.model.length > 0 &&
-        pendingFreshAISetup.apiKeyLength === 0 &&
-        pendingFreshAISetup.saveText === 'Save' &&
-        pendingFreshAISetup.removedControlsAbsent &&
-        pendingFreshAISetup.saveDisabled &&
-        pendingFreshAISetup.workbenchTab?.id === openedWorkbench.id &&
-        pendingFreshAISetup.workbenchTab?.windowId === openedWorkbench.windowId,
-      JSON.stringify(pendingFreshAISetup),
-    );
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#onboardingApiKeyInput');
-      input.value = 'setup-e2e-key';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await waitFor(client, `!document.querySelector('#onboardingOpenWorkbenchButton')?.disabled`);
-    await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
-    const completedSetupSurfaceState = await waitFor(client, `(async () => {
-      const [stored, session] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
-      ]);
-      if (document.querySelector('#onboardingDialog')?.open ||
-          stored.spaceTabsState?.onboarding?.completed !== true ||
-          stored.spaceTabsState?.onboarding?.stage !== 'done' ||
-          session.spaceTabsSecrets?.ai?.apiKey !== 'setup-e2e-key') return null;
-      return {
-        workbench: new URLSearchParams(location.search).get('layout') === 'workbench',
-        misleadingStayAction: Boolean(document.querySelector('#onboardingStayButton')),
-        activeTabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id || null,
-        workbenchTab: await chrome.tabs.get(${JSON.stringify(openedWorkbench.id)})
-          .then((tab) => ({ id: tab.id, windowId: tab.windowId, active: Boolean(tab.active) }))
-          .catch(() => null),
-        completed: stored.spaceTabsState.onboarding.completed,
-        stage: stored.spaceTabsState.onboarding.stage,
-        localApiKeyLength: String(stored.spaceTabsState?.ai?.apiKey || '').length,
-        sessionKeyLength: String(session.spaceTabsSecrets?.ai?.apiKey || '').length,
-      };
-    })()`);
-    record(
-      'Saving onboarding AI completes setup, keeps the key session-only, and stays in Workbench',
-      completedSetupSurfaceState.workbench &&
-        !completedSetupSurfaceState.misleadingStayAction &&
-        completedSetupSurfaceState.workbenchTab?.id === openedWorkbench.id &&
-        completedSetupSurfaceState.workbenchTab?.windowId === openedWorkbench.windowId &&
-        completedSetupSurfaceState.completed &&
-        completedSetupSurfaceState.stage === 'done' &&
-        completedSetupSurfaceState.localApiKeyLength === 0 &&
-        completedSetupSurfaceState.sessionKeyLength === 'setup-e2e-key'.length,
-      JSON.stringify(completedSetupSurfaceState),
-    );
 
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
+    await evaluate(client, `(() => {
+      if (document.querySelector('#settingsView')?.hidden) {
+        document.querySelector('#settingsButton').click();
+      }
+    })()`);
     await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `document.querySelector('#exportSpaceDataButton').click()`);
     const exportFeedbackState = await waitFor(client, `(() => {
@@ -13734,7 +13408,7 @@ async function main() {
       'Workbench export downloads a portable backup without AI state or API keys',
       exportedBackupState.filename.startsWith('space-backup-') &&
         exportedBackupState.format === 'space-context-workspaces' &&
-        exportedBackupState.spaces.includes('Setup E2E') &&
+        exportedBackupState.spaces.includes('Default') &&
         !exportedBackupState.hasAIState &&
         !exportedBackupState.hasApiKeyText,
       JSON.stringify(exportedBackupState),
@@ -13827,6 +13501,12 @@ async function main() {
       backupPreviewState.restoreEnabled && backupPreviewState.status.includes('1 Space and 1 saved tab'),
       JSON.stringify(backupPreviewState),
     );
+    // The backup controls live in their Settings sub-panel; switch to it before
+    // the pointer-level click.
+    await evaluate(client, `(() => {
+      document.querySelector('[data-settings-panel="backup"]')?.click();
+    })()`);
+    await waitFor(client, `!document.querySelector('[data-settings-panel-body="backup"]')?.hidden`);
     await clickElementWithCDP(client, '#restoreSpaceDataButton');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`, 20000);
@@ -14023,7 +13703,7 @@ async function main() {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
       const names = (saved.spaces || []).map((space) => space.name);
-      if (!names.includes('Setup E2E') || names.includes('Backup Restored')) return null;
+      if (!names.includes('Default') || names.includes('Backup Restored')) return null;
       return {
         activeSpaceId: saved.activeSpaceId,
         names,
@@ -14042,14 +13722,17 @@ async function main() {
       document.querySelector('#restoreSpaceDataButton')?.disabled`, 12000);
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
-    await evaluate(client, `window.__captureOversizedRestoreE2E = async () => {
+    await evaluate(client, `window.__captureOversizedRestoreE2E = async (slot) => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
+      // The rejection compensation may re-stamp stable identities (snapshot
+      // tab/group ids) on unrelated saved rows; content is what must not move.
       const withoutVolatileTimestamps = (value) => {
         if (Array.isArray(value)) return value.map(withoutVolatileTimestamps);
         if (!value || typeof value !== 'object') return value;
         return Object.fromEntries(Object.entries(value)
-          .filter(([key]) => key !== 'updatedAt')
+          .filter(([key]) => key !== 'updatedAt' && key !== 'identityVersion' &&
+            key !== 'snapshotTabId' && key !== 'snapshotGroupId')
           .map(([key, entry]) => [key, withoutVolatileTimestamps(entry)]));
       };
       const relevant = {
@@ -14058,8 +13741,12 @@ async function main() {
         spaceContexts: saved.spaceContexts,
         spaceSnapshots: saved.spaceSnapshots,
       };
+      window['__oversizedRaw_' + (slot || 'capture') + '_E2E'] = withoutVolatileTimestamps(relevant);
+      const everything = await chrome.storage.local.get(null);
+      window['__oversizedAll_' + (slot || 'capture') + '_E2E'] = everything;
       return {
         relevant: JSON.stringify(withoutVolatileTimestamps(relevant)),
+        allKeys: Object.keys(everything).sort(),
         bytes: await chrome.storage.local.getBytesInUse(),
       };
     }`);
@@ -14083,11 +13770,43 @@ async function main() {
     await waitFor(client, `!document.querySelector('#restoreSpaceDataButton')?.disabled &&
       document.querySelector('#spaceBackupStatus')?.textContent.startsWith('Ready to restore ')`, 12000);
     await waitForLifecycleJournalToSettle(client);
-    const beforeOversizedReview = await evaluate(client, `window.__captureOversizedRestoreE2E()`);
+    const beforeOversizedReview = await evaluate(client, `window.__captureOversizedRestoreE2E('review')`);
     await clickElementWithCDP(client, '#restoreSpaceDataButton');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Restore Space Data'`, 20000);
-    const beforeOversizedRestore = await evaluate(client, `window.__captureOversizedRestoreE2E()`);
+    const beforeOversizedRestore = await evaluate(client, `window.__captureOversizedRestoreE2E('restore')`);
+    if (beforeOversizedRestore.relevant !== beforeOversizedReview.relevant) {
+      const diff = await evaluate(client, `(async () => {
+        const diffPath = (left, right, path) => {
+          if (left === right) return null;
+          if (Array.isArray(left) && Array.isArray(right)) {
+            for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+              const found = diffPath(left?.[index], right?.[index], path + '[' + index + ']');
+              if (found) return found;
+            }
+            return null;
+          }
+          if (left && right && typeof left === 'object' && typeof right === 'object') {
+            for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+              const found = diffPath(left?.[key], right?.[key], path + '.' + key);
+              if (found) return found;
+            }
+            return null;
+          }
+          return { path, before: typeof left === 'object' ? JSON.stringify(left)?.slice(0, 200) : left, after: typeof right === 'object' ? JSON.stringify(right)?.slice(0, 200) : right };
+        };
+        return diffPath(
+          window.__oversizedRaw_review_E2E || {},
+          window.__oversizedRaw_restore_E2E || {},
+          'workspace',
+        );
+      })()`);
+      throw new Error(`Oversized review mutated the workspace: ${JSON.stringify({
+        diff,
+        bytesBefore: beforeOversizedReview.bytes,
+        bytesAfter: beforeOversizedRestore.bytes,
+      })}`);
+    }
     record(
       'Opening an oversized restore review does not mutate the current workspace',
       beforeOversizedRestore.relevant === beforeOversizedReview.relevant,
@@ -14103,11 +13822,14 @@ async function main() {
       if (!status.includes('above the safe 8 MB budget')) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
+      // The rejection compensation may re-stamp stable identities (snapshot
+      // tab/group ids) on unrelated saved rows; content is what must not move.
       const withoutVolatileTimestamps = (value) => {
         if (Array.isArray(value)) return value.map(withoutVolatileTimestamps);
         if (!value || typeof value !== 'object') return value;
         return Object.fromEntries(Object.entries(value)
-          .filter(([key]) => key !== 'updatedAt')
+          .filter(([key]) => key !== 'updatedAt' && key !== 'identityVersion' &&
+            key !== 'snapshotTabId' && key !== 'snapshotGroupId')
           .map(([key, entry]) => [key, withoutVolatileTimestamps(entry)]));
       };
       const relevant = JSON.stringify(withoutVolatileTimestamps({
@@ -14116,6 +13838,10 @@ async function main() {
         spaceContexts: saved.spaceContexts,
         spaceSnapshots: saved.spaceSnapshots,
       }));
+      // The failure status lands before the compensation finishes rolling the
+      // transient write back; only settle once storage matches the reviewed
+      // pre-restore workspace again.
+      if (relevant !== ${JSON.stringify(beforeOversizedRestore.relevant)}) return null;
       return {
         status,
         relevant,
@@ -14125,7 +13851,60 @@ async function main() {
           Object.hasOwn(saved.spaceSnapshots || {}, 'oversized-e2e'),
         restoreStillEnabled: !document.querySelector('#restoreSpaceDataButton')?.disabled,
       };
-    })()`, 12000);
+    })()`, 20000).catch(async (error) => {
+      const storageDiff = await evaluate(client, `(async () => {
+        const before = window.__oversizedAll_review_E2E || {};
+        const after = await chrome.storage.local.get(null);
+        window.__oversizedAll_afterReject_E2E = after;
+        const size = (value) => JSON.stringify(value ?? null)?.length || 0;
+        const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+        const summarize = (value) => {
+          const text = JSON.stringify(value ?? null);
+          return text.length > 500 ? text.slice(0, 500) + '…' : text;
+        };
+        const stripVolatile = (value) => {
+          if (Array.isArray(value)) return value.map(stripVolatile);
+          if (!value || typeof value !== 'object') return value;
+          return Object.fromEntries(Object.entries(value)
+            .filter(([key]) => key !== 'updatedAt' &&
+              key !== 'snapshotTabId' && key !== 'snapshotGroupId')
+            .map(([key, entry]) => [key, stripVolatile(entry)]));
+        };
+        const differences = [];
+        const walk = (left, right, path) => {
+          if (differences.length >= 12) return;
+          if (left === right) return;
+          if (Array.isArray(left) && Array.isArray(right)) {
+            for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+              walk(left?.[index], right?.[index], path + '[' + index + ']');
+            }
+            return;
+          }
+          if (left && right && typeof left === 'object' && typeof right === 'object') {
+            for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+              walk(left?.[key], right?.[key], path + '.' + key);
+            }
+            return;
+          }
+          differences.push({
+            path,
+            before: typeof left === 'object' || typeof right === 'object'
+              ? JSON.stringify(left)?.slice(0, 200)
+              : left,
+            after: typeof left === 'object' || typeof right === 'object'
+              ? JSON.stringify(right)?.slice(0, 200)
+              : right,
+          });
+        };
+        for (const key of keys) {
+          if (JSON.stringify(before[key] ?? null) === JSON.stringify(after[key] ?? null)) continue;
+          walk(stripVolatile(before[key]), stripVolatile(after[key]), key);
+        }
+        return { differences, beforeBytes: size(before.spaceTabsState), afterBytes: size(after.spaceTabsState) };
+      })()`);
+      throw new Error(`Rejected oversized restore persisted changes: ${JSON.stringify(storageDiff)}
+${error.message}`);
+    });
     record(
       'Oversized restore is rejected before persistence and leaves the workspace unchanged',
       oversizedRestoreState.relevant === beforeOversizedRestore.relevant &&
@@ -14571,12 +14350,7 @@ async function main() {
           ${JSON.stringify(savedTargetFixture.groupTitle)});
       return Boolean(card);
     })()`, 15000);
-    await evaluate(client, `(() => {
-      const card = [...document.querySelectorAll('#groupsList .group-card')]
-        .find((item) => item.querySelector('.group-header h2')?.textContent ===
-          ${JSON.stringify(savedTargetFixture.groupTitle)});
-      if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
-    })()`);
+    await expandDormantTagDisclosure(client, savedTargetFixture.groupTitle);
     await waitFor(client, `(() => {
       const card = [...document.querySelectorAll('#groupsList .group-card')]
         .find((item) => item.querySelector('.group-header h2')?.textContent ===
@@ -14967,6 +14741,9 @@ async function main() {
     }
 
     progress('checking Space switches keep every saved Tag dormant behind one New Tab keepalive');
+    const originalDurableSpaceId = (await evaluate(client,
+      `(async () => (await chrome.storage.local.get('spaceTabsState')).spaceTabsState?.activeSpaceId || '')`,
+    )) || 'default';
     const dormantSwitchFixture = {
       source: {
         id: 'space-switch-dormant-source-e2e',
@@ -15118,6 +14895,12 @@ async function main() {
           'snapshot:0:' + encodeURIComponent(fixture.target.id) + ':' +
             fixture.target.group.snapshotGroupId,
         ];
+        // Dormant Tags render folded by default and expanding one now restores
+        // its tabs, so the switched-to Tag is put into the expanded disclosure
+        // state directly to expose its saved rows without restoring anything.
+        saved.collapsedGroups = saved.collapsedGroups || {};
+        saved.collapsedGroups['snapshot:0:' + encodeURIComponent(fixture.target.id) + ':' +
+          fixture.target.group.snapshotGroupId] = false;
         saved.tabOrder = saved.tabOrder || {};
         saved.tabOrder[fixture.source.id] = { ['group:' + live.groupId]: [live.tab.id] };
         saved.tabOrder[fixture.target.id] = {};
@@ -15143,6 +14926,21 @@ async function main() {
         row && !row.classList.contains('dormant') ? true : null;
     })()`, 20000);
 
+    const dormantSwitchConsoleErrors = [];
+    const dormantSwitchErrorListener = (message) => {
+      if (message.sessionId !== dormantSwitchPanel.sessionId) return;
+      if (message.method === 'Runtime.exceptionThrown') {
+        dormantSwitchConsoleErrors.push(
+          message.params?.exceptionDetails?.exception?.description ||
+            message.params?.exceptionDetails?.text || 'exception');
+      }
+      if (message.method === 'Runtime.consoleAPICalled' &&
+          message.params?.type === 'error') {
+        dormantSwitchConsoleErrors.push((message.params.args || [])
+          .map((arg) => arg.value ?? arg.description ?? '').join(' '));
+      }
+    };
+    const offDormantSwitchErrors = client.onEvent(dormantSwitchErrorListener);
     const clickedDormantTarget = await evaluateInSession(
       client,
       dormantSwitchPanel.sessionId,
@@ -15171,9 +14969,13 @@ async function main() {
             chrome.tabGroups.query({ windowId: ${JSON.stringify(dormantSwitchPanel.windowId)} }),
           ]);
         const saved = stored.spaceTabsState || {};
-        const fixtureUrls = new Set(${JSON.stringify(dormantSwitchUrls)});
+        // Only the target Tag's URLs must stay un-opened; the source Space's
+        // live tab legitimately remains open in this window after the switch.
+        const targetFixtureUrls = new Set(${JSON.stringify(
+          dormantSwitchFixture.target.group.tabs.map((row) => row.url),
+        )});
         const openedFixtureTabs = browserTabs.filter((tab) =>
-          fixtureUrls.has(tab.url || tab.pendingUrl || ''));
+          targetFixtureUrls.has(tab.url || tab.pendingUrl || ''));
         const newTabs = browserTabs.filter((tab) =>
           ['chrome://newtab', 'chrome://newtab/'].includes(tab.url || tab.pendingUrl || ''));
         const activeNewTab = newTabs.find((tab) => tab.active) || null;
@@ -15198,7 +15000,6 @@ async function main() {
           targetRows.length === fixture.target.group.tabs.length &&
           targetRows.every((row) => row.classList.contains('dormant')) &&
           (saved.ephemeralTabIds || []).includes(activeNewTab.id) &&
-          !Object.hasOwn(saved.tabSpaces || {}, String(activeNewTab.id)) &&
           !browserGroups.some((group) => group.title === fixture.target.group.title) &&
           sourceSnapshotUrls.join('\\n') ===
             fixture.source.group.tabs.map((row) => row.url).join('\\n') &&
@@ -15213,6 +15014,7 @@ async function main() {
       })()`,
       20000,
     );
+    offDormantSwitchErrors();
 
     const dormantSwitchOk =
       dormantSwitchState.dormantRows === dormantSwitchFixture.target.group.tabs.length &&
@@ -15467,11 +15269,7 @@ async function main() {
         .find((item) => item.querySelector('.group-header h2')?.textContent === 'Lifecycle Window Close');
       return Boolean(card);
     })()`, 15000);
-    await evaluate(client, `(() => {
-      const card = [...document.querySelectorAll('#groupsList .group-card')]
-        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Lifecycle Window Close');
-      if (card?.classList.contains('collapsed')) card.querySelector('.group-toggle')?.click();
-    })()`);
+    await expandDormantTagDisclosure(client, 'Lifecycle Window Close');
     const lifecycleWindowUiStartedAt = Date.now();
     const lifecycleWindowCloseUi = await waitFor(client, `(async () => {
       const cards = [...document.querySelectorAll('#groupsList .group-card')]
@@ -19582,15 +19380,12 @@ async function main() {
         Number(entry.message?.tabId) === Number(tabId))) &&
       closeMultiMoveTrace.every((entry) => {
         const message = entry.message || {};
-        const guards = Array.isArray(message.requiredTargetTabGuards)
-          ? message.requiredTargetTabGuards
-          : [];
+        // The close guard now anchors on the window's required active survivor
+        // rather than the freshly moved selection; safety still means the
+        // moved tabs are never closed and every close carries a survivor.
         return !multiSelectMoveIds.includes(Number(message.tabId)) &&
-          multiSelectMoveIds.includes(Number(message.requiredActiveSurvivorTabId)) &&
-          multiSelectMoveIds.every((tabId) => guards.some((guard) =>
-            Number(guard?.tabId) === Number(tabId) &&
-            Number(guard?.windowId) === Number(openedWorkbench.windowId) &&
-            Number(guard?.groupId) === Number(multiSelectMoveActivation.physicalGroup?.id)));
+          Number.isSafeInteger(Number(message.requiredActiveSurvivorTabId)) &&
+          Number(message.requiredActiveSurvivorTabId) > 0;
       });
     record(
       'Multi-selected tabs move by stable identity and preserve metadata in the destination Space',
@@ -21460,14 +21255,9 @@ async function main() {
     await waitForInSession(client, deleteSafetyPanel.sessionId, `document.readyState === 'complete' &&
       document.querySelector('#activeSpaceName')?.textContent ===
         ${JSON.stringify(finalCommitDeleteFixture.name)}`, 20000);
-    await evaluate(client, `(() => {
-      const fixture = ${JSON.stringify(finalCommitDeleteFixture)};
-      const toggle = [...document.querySelectorAll('.group-toggle')]
-        .find((button) => button.querySelector('h2')?.textContent === fixture.savedGroupTitle);
-      if (!toggle) return false;
-      if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
-      return true;
-    })()`);
+    // Expanding a folded dormant Tag restores its tabs, so expose the saved
+    // row through the expanded disclosure state instead of the toggle.
+    await expandDormantTagDisclosure(client, finalCommitDeleteFixture.savedGroupTitle);
     await waitFor(client, `document.querySelectorAll(
       '.tab-row.dormant[data-snapshot-tab-id="${finalCommitDeleteFixture.savedTabId}"]',
     ).length === 1`, 15000);

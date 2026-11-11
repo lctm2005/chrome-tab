@@ -6889,6 +6889,15 @@ function handleGroupHeaderClick(event, group) {
   // and an expanded dormant group toggle the plain disclosure state.
   const currentlyExpanded = !group.collapsed;
   if (group.dormant && !currentlyExpanded) {
+    // Rows already live in another window must not be materialized locally:
+    // expanding only discloses them (they render as Show-in-other-window).
+    const rowsOpenInOtherWindows = (group.tabs || []).some((tab) => (
+      tab.dormant && Number.isFinite(Number(tab.foreignWindowTabId))
+    ));
+    if (rowsOpenInOtherWindows) {
+      runTask((windowBinding) => toggleGroup(group, { windowBinding }));
+      return;
+    }
     runTask((windowBinding) => openDormantGroup(group, { windowBinding }));
     return;
   }
@@ -8342,11 +8351,15 @@ async function applyTidyGroupingPhase(plan = {}, options = {}) {
     const rebasedCandidateIds = rebasedPreviewGroups
       .flatMap((group) => group.tabIds.map(Number));
     const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
+    // A reviewed plan that groups tabs must still cover exactly the eligible
+    // set. Merge-only or rename-only plans legitimately group nothing, so the
+    // duplicate-Tag fingerprints above remain their freshness guard.
     if (
-      rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
+      rebasedPreviewGroups.length > 0 &&
+      (rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
       rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
       rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
-      [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId))
+      [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId)))
     ) {
       throw new Error(
         'The eligible tabs changed while the preview was open. ' +
@@ -9212,6 +9225,10 @@ function focusPanelForShortcuts() {
   if (!target || target.hidden) return;
   if (target === els.groupsList) target.tabIndex = -1;
   panelFocusController.request();
+}
+
+function startTestAIFromUserGesture(controls = settingsAIControls()) {
+  void runTask(() => testAI({ controls }));
 }
 
 async function testAI({ settings = currentAISettingsFromForm(), permissionRequest, controls = settingsAIControls() } = {}) {
