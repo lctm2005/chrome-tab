@@ -427,7 +427,7 @@ function previewAIText(messages = []) {
     .join('\n');
   const input = previewAIInput(messages);
 
-  if (/Group browser tabs into concise topic\/work buckets/i.test(systemText)) {
+  if (/Group browser tabs into concise topic/i.test(systemText)) {
     return JSON.stringify(previewTidyGroups(input));
   }
   if (/Rename browser tabs for a compact sidebar/i.test(systemText)) {

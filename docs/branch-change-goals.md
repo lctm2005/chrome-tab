@@ -51,7 +51,7 @@ The product promise is the combination of:
 
 ### P2: Controlled AI Workflow
 
-- Make Tidy Names and Auto Group produce a proposal before changing anything.
+- Make Tidy produce one proposal before changing anything.
 - Show what will move, rename, merge, or remain untouched.
 - Add one-click Undo and an operation record.
 - Disclose the provider and the exact tab metadata before any AI send so users can verify what leaves the device.

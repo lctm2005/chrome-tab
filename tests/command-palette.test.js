@@ -258,6 +258,6 @@ test('command palette exercises each ranking tier and enforces its visible resul
   }));
   assert.equal(buildCommandPaletteItems({ spaces: manySpaces }).length, 40);
   assert.equal(buildCommandPaletteItems({ spaces: manySpaces, query: 'space' }).length, 40);
-  assert.equal(buildCommandPaletteItems().length, 3);
-  assert.equal(buildCommandPaletteItems({ spaces: null, spaceView: null, query: null }).length, 3);
+  assert.equal(buildCommandPaletteItems().length, 2);
+  assert.equal(buildCommandPaletteItems({ spaces: null, spaceView: null, query: null }).length, 2);
 });

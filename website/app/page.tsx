@@ -103,14 +103,14 @@ export default function Home() {
         <section className="control-section section-wrap">
           <ProductScreenshot
             src="/screenshots/03-tab-context-menu.png"
-            alt="Current Space Tabs Auto Group preview showing live and saved tabs before applying changes"
-            caption="Real Auto Group preview · live and historical tabs stay visible before Apply"
+            alt="Current Space Tabs Tidy preview showing live and saved tabs before applying changes"
+            caption="Real Tidy preview · live and historical tabs stay visible before Apply"
           />
           <div className="section-heading right-copy">
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
-            <p>Tidy Names uses your configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed metadata and generate one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>When Tidy Names or Auto Group sends tab metadata to your provider, Space Tabs shows that metadata first: tab titles, simplified URLs without query strings or fragments, and domains; Auto Group additionally sends each tab&apos;s current Tag and live/saved status. Requests go directly to the endpoint you configured, and your API key stays in Chrome local extension storage on this device.</span></div>
+            <p>Tidy combines duplicate merging, topic grouping, and renaming into one reviewable preview. Prompt rules use your configured provider and are editable in Settings; local script rules keep working without AI. Proposals send only the disclosed metadata—review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied change.</p>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>When Tidy sends tab metadata to your provider, Space Tabs shows that metadata first: tab titles, simplified URLs without query strings or fragments, and domains; topic grouping additionally sends each tab&apos;s current Tag and live/saved status. Requests go directly to the endpoint you configured, and your API key stays in Chrome local extension storage on this device.</span></div>
           </div>
         </section>
 

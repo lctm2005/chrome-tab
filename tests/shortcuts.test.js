@@ -129,8 +129,9 @@ test('merges stored shortcut overrides with defaults and drops unknown actions',
   });
 
   assert.equal(shortcuts.tidyNames, 'Control+Enter');
-  assert.equal(shortcuts.autoGroup, DEFAULT_SHORTCUTS.autoGroup);
+  assert.equal(shortcuts.nextSpace, DEFAULT_SHORTCUTS.nextSpace);
   assert.equal(shortcuts.unknownAction, undefined);
+  assert.equal(shortcuts.autoGroup, undefined);
 });
 
 test('preserves empty stored shortcuts as disabled actions', () => {
@@ -147,15 +148,15 @@ test('preserves empty stored shortcuts as disabled actions', () => {
 test('detects duplicate shortcut assignments in settings', () => {
   const shortcuts = mergeShortcuts({ tidyNames: 'Meta+Enter' });
 
-  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Meta+Enter'), 'tidyNames');
+  assert.equal(findShortcutConflict(shortcuts, 'addSpace', 'Meta+Enter'), 'tidyNames');
   assert.equal(findShortcutConflict(shortcuts, 'tidyNames', 'Meta+Enter'), '');
 });
 
 test('detects concrete Ctrl or Cmd conflicts with a cross-platform primary shortcut', () => {
   const shortcuts = mergeShortcuts({ tidyNames: 'Primary+Enter' });
 
-  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Control+Enter'), 'tidyNames');
-  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Meta+Enter'), 'tidyNames');
+  assert.equal(findShortcutConflict(shortcuts, 'addSpace', 'Control+Enter'), 'tidyNames');
+  assert.equal(findShortcutConflict(shortcuts, 'addSpace', 'Meta+Enter'), 'tidyNames');
   assert.equal(findShortcutConflict({ first: 'Control+Enter' }, 'second', 'Primary+Enter'), 'first');
   assert.equal(findShortcutConflict({ first: 'Alt+Enter' }, 'second', 'Primary+Enter'), '');
 });

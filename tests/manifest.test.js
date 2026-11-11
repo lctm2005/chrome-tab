@@ -690,8 +690,8 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /function refreshTabLifecycleIdentityDecorations\(\)[\s\S]*tabs = tabsWithLifecycleIdentity\(tabs\);[\s\S]*foreignLiveTabs = tabsWithLifecycleIdentity\(foreignLiveTabs\)/);
   assert.match(source, /function organizationForCurrentSpaceState\(spaceId, options = \{\}\)[\s\S]*sourceTabs: tabsWithLifecycleIdentity\(tabs\)/);
   assert.match(source, /function tabsWithLifecycleIdentity\(rawTabs = \[\]\)[\s\S]*delete undecorated\.snapshotGroupId[\s\S]*lifecycleBindingMatchesPhysicalGroup/);
-  assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was running/);
-  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
+  assert.match(source, /async function applyTidyNamingPhase\(plan = \{\}, options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*state\.activeSpaceId !== plan\.sourceSpaceId[\s\S]*The active Space changed while Tidy was running/);
+  assert.match(source, /async function applyTidyGroupingPhase\(plan = \{\}, options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: plan\.organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
@@ -747,7 +747,13 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => !tab\.pinned\)/);
   assert.match(source, /const aiCandidates = renameableTabs\.filter/);
   assert.match(source, /planTidyTabNames\(renameableTabs/);
-  assert.match(source, /currentTargets\.some\(\(tab\) => tab\.pinned\)/);
+  assert.match(source, /const plannedNames = \{ \.\.\.localNames, \.\.\.namingResult\.names \}/);
+  assert.match(
+    source,
+    /namingResult = await tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*rules: renameRuleText,/,
+    'the rename rule text must flow into the tidy-names AI request',
+  );
+  assert.match(source, /currentTargets\.length !== renameItems\.length/);
 });
 
 test('Tidy Names renders the original broom initially and after busy state', async () => {
@@ -757,61 +763,109 @@ test('Tidy Names renders the original broom initially and after busy state', asy
     readFile(new URL('../sidepanel.css', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(html, /<button class="icon-button compact" id="tidyNamesButton" title="Tidy names" aria-label="Tidy Names">\s*<span class="tidy-icon" aria-hidden="true">🧹<\/span>\s*<\/button>/);
+  assert.match(html, /<button class="icon-button compact" id="tidyNamesButton" title="Tidy" aria-label="Tidy">\s*<span class="tidy-icon" aria-hidden="true">🧹<\/span>\s*<\/button>/);
+  assert.doesNotMatch(html, /autoGroupButton/);
   assert.match(source, /const TIDY_NAMES_ICON = `[^`]*<span class="tidy-icon" aria-hidden="true">🧹<\/span>[^`]*`;/);
   assert.match(source, /els\.tidyNamesButton\.innerHTML = tidyBusy \? '\.\.\.' : TIDY_NAMES_ICON/);
   assert.match(css, /\.tidy-icon\s*\{[^}]*font-size:\s*15px;[^}]*line-height:\s*1;/);
 });
 
-test('Tidy Names applies directly with Undo while Auto Group previews changes', async () => {
+test('Tidy runs one consolidated preview and applies grouping then naming phases', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames(options = {})'),
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
+  );
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
+  );
+  const namingSlice = source.slice(
+    source.indexOf('async function applyTidyNamingPhase'),
     source.indexOf('async function tidyTabNamesWithAI'),
   );
 
-  assert.doesNotMatch(tidySource, /showPlanPreview|Preview Tidy Names|Close duplicate tabs/);
-  assert.match(tidySource, /recordOperation\(\{[\s\S]*type: 'tidy-names'/);
-  assert.match(source, /type: 'tidy-names'/);
+  // Unified entry: one button flow replaces tidyTabNames/autoGroupTabs.
+  assert.doesNotMatch(source, /async function tidyTabNames\(|async function autoGroupTabs\(|prepareAutoGroupRequestFromUserGesture|hasCurrentAutoGroupAICandidates|AUTO_GROUP_ICON/);
+  assert.match(tidySlice, /beginPanelAction\('tidyNames'\)/);
+  assert.match(tidySlice, /const refreshed = await refreshOrganizationActionState\(\{ adopt: true, windowBinding \}\)/);
+  assert.match(source, /async function refreshOrganizationActionState[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*loadTabs\(\{ adopt, windowBinding \}\)[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
+  assert.match(source, /showStatusToast\(message, 'error'\)/);
+
+  // Tidy rules drive the pipeline.
+  assert.match(tidySlice, /const rules = normalizeTidyRuleSettings\(state\.tidyRules\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'group-by-topic'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'group-by-domain'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'rename-tabs'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'dedupe-urls'\)/);
+  assert.match(tidySlice, /const groupRuleText = tidyRulePrompt\(rules, 'group-by-topic'\)/);
+  assert.match(tidySlice, /const renameRuleText = tidyRulePrompt\(rules, 'rename-tabs'\)/);
+
+  // Naming plan: AI with the rename rule text, local fallback otherwise.
+  assert.match(tidySlice, /const localNames = planTidyTabNames\(renameableTabs/);
+  assert.match(tidySlice, /namingResult = await tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*rules: renameRuleText,/);
+
+  // Topic grouping plan via AI; domain rule only covers tabs the topic plan missed.
+  assert.match(tidySlice, /purpose: 'auto-group'/);
+  assert.match(tidySlice, /createPrompt\('tidy-tabs', \{[\s\S]*rules: groupRuleText,/);
+  assert.match(tidySlice, /assertCompleteAutoGroupPlan\(plannedGroups, candidates\)/);
+  assert.match(tidySlice, /const topicPlannedIds = new Set\(plannedGroups\.flatMap/);
+  assert.match(tidySlice, /const domainCandidates = candidates\.filter\(\(candidate\) => !topicPlannedIds\.has\(Number\(candidate\.id\)\)\)/);
+  assert.match(tidySlice, /const domainPlan = planTidyGroups\(domainCandidates\)/);
+  assert.doesNotMatch(tidySlice, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
+
+  // URL dedupe plan is rule-gated.
+  assert.match(tidySlice, /const urlCloseIds = dedupeUrlsEnabled \? planDuplicateUrlClosures\(visibleTabs\) : \[\]/);
+
+  // One consolidated preview with the full disclosure sections.
+  assert.match(tidySlice, /title: 'Close duplicate tabs'/);
+  assert.match(tidySlice, /title: 'Untouched'/);
+  assert.match(tidySlice, /const plannedTargetTitleKeys = new Set\(plannedGroups\.map/);
+  assert.match(tidySlice, /title: 'Merge duplicates'/);
+  assert.match(tidySlice, /const mergedDuplicateTitleKeys = new Set/);
+  assert.match(tidySlice, /title: 'Rename tabs'/);
+  assert.doesNotMatch(tidySlice, /title: 'Merge empty duplicates'|title: 'Remain untouched'/);
+  assert.match(tidySlice, /const confirmed = await showPlanPreview\(\{[\s\S]*title: 'Tidy Preview',[\s\S]*confirmText: 'Apply tidy',[\s\S]*variant: 'groups',/);
+  assert.doesNotMatch(source, /title: 'Auto Group Preview'/);
+  assert.match(tidySlice, /message: previewSummary\.join\(' · '\)/);
+  assert.match(tidySlice, /AI returned no valid groups/);
+  assert.match(tidySlice, /Topic grouping needs a configured AI provider\./);
+
+  // Apply order: grouping+merge transaction first, then the pure rename transaction.
+  const previewCall = tidySlice.indexOf('const confirmed = await showPlanPreview({');
+  const groupingCall = tidySlice.indexOf('await applyTidyGroupingPhase({');
+  const namingCall = tidySlice.indexOf('await applyTidyNamingPhase({');
+  assert.ok(previewCall >= 0 && previewCall < groupingCall && groupingCall < namingCall);
+
+  // Grouping phase: merge + regroup transaction recording the auto-group operation.
+  assert.match(groupingSlice, /recordOperation\(\{[\s\S]*type: 'auto-group'/);
+  assert.match(groupingSlice, /applyOrganizationPlanToSnapshot/);
+  assert.match(groupingSlice, /isPageShortcutCapableUrl\(candidate\.url\)/);
+  assert.match(groupingSlice, /Tidy organized \$\{groupedCount\} \$\{groupedCount === 1 \? 'tab' : 'tabs'\}/);
+  assert.match(groupingSlice, /Tidy merged \$\{plan\.duplicateGroupCount\} duplicate/);
+
+  // Naming phase: pure rename transaction recording the tidy-names operation.
+  assert.match(namingSlice, /recordOperation\(\{[\s\S]*type: 'tidy-names'/);
+  assert.match(namingSlice, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
+  assert.doesNotMatch(namingSlice, /showPlanPreview|mergeDuplicateSnapshotTags|plannedGroups/);
   assert.doesNotMatch(source, /duplicateTabIds/);
   assert.match(source, /buildOrganizationCandidates/);
   assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
-  assert.match(source, /candidate\.currentGroup\?\.title/);
-  assert.match(source, /title: 'Auto Group Preview'/);
-  assert.match(source, /title: 'Untouched'/);
-  assert.match(source, /const plannedTargetTitleKeys = new Set\(plannedGroups\.map/);
-  assert.match(source, /title: 'Merge duplicates'/);
-  assert.match(source, /const mergedDuplicateTitleKeys = new Set/);
-  assert.doesNotMatch(source, /title: 'Merge empty duplicates'/);
-  assert.match(source, /variant: 'groups'/);
-  assert.match(source, /AI returned no valid groups/);
-  assert.match(source, /applyOrganizationPlanToSnapshot/);
-  assert.match(source, /type: 'auto-group'/);
-  assert.match(source, /No live or saved http\(s\) tabs are available to organize/);
-  assert.match(source, /extensionRuntime && candidates\.length > 0 && !hasUsableAISettings\(aiSettings\)/);
-  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*beginPanelAction\('autoGroup'\);\s*try \{\s*const refreshed = await refreshOrganizationActionState\(\{[\s\S]*adopt: true,[\s\S]*windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /async function refreshOrganizationActionState[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*loadTabs\(\{ adopt, windowBinding \}\)[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
-  assert.match(source, /showStatusToast\(message, 'error'\)/);
-  assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
-  assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function foreignOpenOrganizationCandidateIds'),
-  );
-  assert.match(autoSource, /assertCompleteAutoGroupPlan\(plannedGroups, candidates\)/);
-  assert.match(autoSource, /resolvedPlan\.previewGroups/);
-  assert.doesNotMatch(autoSource, /title: 'Remain untouched'/);
 });
 
-test('Auto Group delegates cross-window candidate safety and revalidates it after confirmation', async () => {
+test('Tidy delegates cross-window candidate safety and revalidates it after confirmation', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const shared = await readFile(
     new URL('../src/shared/organization-plan.js', import.meta.url),
     'utf8',
   );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const planSlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
+  );
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
   );
   const foreignSource = functionSource(source, 'foreignOpenOrganizationCandidateIds');
 
@@ -821,31 +875,31 @@ test('Auto Group delegates cross-window candidate safety and revalidates it afte
   assert.match(shared, /candidate\.snapshotTabId === foreign\.snapshotTabId/);
   assert.match(foreignSource, /foreignLiveTabs\.filter[\s\S]*entityBelongsToSpace\(tab, state, spaceId\)[\s\S]*organizationCandidateIdsOpenInOtherWindows/);
   assert.ok(
-    autoSource.indexOf('const foreignCandidateIds = foreignOpenOrganizationCandidateIds') <
-      autoSource.indexOf("send('ai:chat'"),
+    planSlice.indexOf('const foreignCandidateIds = foreignOpenOrganizationCandidateIds') <
+      planSlice.indexOf("send('ai:chat'"),
   );
-  assert.match(autoSource, /const rebasedPreviewGroups = rebaseOrganizationPlan\(\{[\s\S]*plannedGroups: previewGroups/);
-  assert.match(autoSource, /resolveOrganizationPlanChanges\(\{[\s\S]*plannedGroups: rebasedPreviewGroups/);
-  assert.match(autoSource, /currentResolvedPlan\.previewGroups\)[\s\S]*JSON\.stringify\(rebasedPreviewGroups\)/);
-  assert.match(autoSource, /const rebasedPlannedGroups = currentResolvedPlan\.plannedGroups/);
-  assert.match(autoSource, /rebasedPreviewGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
-  assert.match(autoSource, /An Auto Group target is now open in another window[\s\S]*review a fresh preview/);
+  assert.match(groupingSlice, /const rebasedPreviewGroups = rebaseOrganizationPlan\(\{[\s\S]*plannedGroups: plan\.previewGroups/);
+  assert.match(groupingSlice, /resolveOrganizationPlanChanges\(\{[\s\S]*plannedGroups: rebasedPreviewGroups/);
+  assert.match(groupingSlice, /currentResolvedPlan\.previewGroups\)[\s\S]*JSON\.stringify\(rebasedPreviewGroups\)/);
+  assert.match(groupingSlice, /const rebasedPlannedGroups = currentResolvedPlan\.plannedGroups/);
+  assert.match(groupingSlice, /rebasedPreviewGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
+  assert.match(groupingSlice, /A Tidy target is now open in another window[\s\S]*review a fresh preview/);
 });
 
-test('Auto Group identifies newly organized saved Tags before lifecycle checkpointing', async () => {
+test('Tidy identifies newly organized saved Tags before lifecycle checkpointing', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
   );
   assert.match(
-    autoSource,
+    groupingSlice,
     /ensureSnapshotLifecycleIds\(\s*organizedSnapshot,\s*createSnapshotLifecycleId,?\s*\)[\s\S]*mergeDuplicateSnapshotTags\([\s\S]*checkpointAutoGroupLifecycleBindings/,
   );
   assert.ok(
-    autoSource.indexOf('mergedGroups = await mergeDuplicateGroupsInActiveSpace') <
-      autoSource.indexOf('remapMergedSnapshotGroupReferences(\n            appliedDuplicateSnapshotPlan'),
-    'Auto Group must choose the canonical physical Tag before remapping duplicate saved identities',
+    groupingSlice.indexOf('mergedGroups = await mergeDuplicateGroupsInActiveSpace') <
+      groupingSlice.indexOf('remapMergedSnapshotGroupReferences(\n          appliedDuplicateSnapshotPlan'),
+    'Tidy must choose the canonical physical Tag before remapping duplicate saved identities',
   );
   assert.match(
     functionSource(source, 'activeChromeGroupsByTitle'),
@@ -865,40 +919,39 @@ test('Auto Group identifies newly organized saved Tags before lifecycle checkpoi
   );
 });
 
-test('Tidy Names generates then applies directly while Auto Group previews', async () => {
+test('Tidy generates AI plans with rule text then applies through the unified preview', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames(options = {})'),
-    source.indexOf('async function tidyTabNamesWithAI'),
-  );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
   );
   assert.doesNotMatch(source, /confirmAIProposalGeneration|confirmText: 'Generate preview'|Generate \$\{action\} preview\?/);
-  assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyNamesRequestFromUserGesture\(\)[\s\S]*runTask\(\(windowBinding\) => tidyTabNames\(\{ \.\.\.request, windowBinding \}\)\)/);
-  assert.match(tidySource, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
-  assert.ok(tidySource.indexOf('await tidyTabNamesWithAI') < tidySource.indexOf('await withSharedStateLock(async () => {'));
-  assert.doesNotMatch(tidySource, /showPlanPreview|Preview Tidy Names/);
+  assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyRequestFromUserGesture\(\)[\s\S]*runTask\(\(windowBinding\) => runTidy\(\{ \.\.\.request, windowBinding \}\)\)/);
+  assert.match(source, /function prepareTidyRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentTidyRunCandidates\)/);
+  assert.match(tidySlice, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
+  assert.ok(
+    tidySlice.indexOf('await tidyTabNamesWithAI') < tidySlice.indexOf('const confirmed = await showPlanPreview({'),
+    'the naming plan must be ready before the consolidated preview opens',
+  );
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
-  assert.match(tidySource, /setStatus\(`Tidy \$\{statusParts\.join\(' and '\)\}/);
+  assert.match(tidySlice, /setStatus\(`Tidy updated \$\{currentSpace\(\)\.name\}: \$\{statusParts\.join\(', '\)/);
   assert.match(source, /sourceLabel: `Local fallback \(AI unavailable: \$\{reason\}\)`/);
-  assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentAutoGroupAICandidates\)/);
   assert.match(source, /function prepareOrganizationAIRequestFromUserGesture\(candidateProbe\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
   assert.match(source, /permissionRequest\.catch\(\(\) => null\)/);
-  assert.match(autoSource, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
-  assert.match(autoSource, /purpose: 'auto-group'/);
-  assert.match(autoSource, /itemCount: candidates\.length/);
-  assert.match(autoSource, /title: 'Auto Group Preview'/);
-  assert.match(autoSource, /message: previewSummary\.join\(' · '\)/);
-  assert.doesNotMatch(autoSource, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
-  assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
-  assert.match(source, /Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent/);
-  assert.match(source, /If the provider is unavailable, it falls back to local naming/);
-  assert.match(source, /Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent/);
-  assert.match(source, /only duplicate Tags to clean up, they can still be merged locally after one preview/);
+  assert.match(tidySlice, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
+  assert.match(tidySlice, /purpose: 'auto-group'/);
+  assert.match(tidySlice, /itemCount: candidates\.length/);
+  assert.match(tidySlice, /title: 'Tidy Preview'/);
+  assert.match(tidySlice, /confirmText: 'Apply tidy'/);
+  assert.match(tidySlice, /message: previewSummary\.join\(' · '\)/);
+  assert.doesNotMatch(tidySlice, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
+  assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*Sends only the disclosed tab titles, simplified URLs, and domains[\s\S]*aria-label/);
+  assert.match(source, /Tidy with \$\{provider\.label\}: merges duplicate Tags, regroups tabs by topic/);
+  assert.match(source, /Tidy merges duplicate Tags locally and renames tabs with local rules without sending tab metadata/);
+  assert.match(source, /Script rules and local naming still run when AI is unavailable/);
+  assert.match(source, /Topic grouping needs a configured AI provider/);
   assert.match(source, /function hasUsableAISettings[\s\S]*baseUrl[\s\S]*model[\s\S]*providerRequiresApiKey/);
-  assert.ok(autoSource.indexOf("send('ai:chat'") < autoSource.indexOf("title: 'Auto Group Preview'"));
+  assert.ok(tidySlice.indexOf("send('ai:chat'") < tidySlice.indexOf("title: 'Tidy Preview'"));
 });
 
 test('organization previews have one bounded scroll area and fixed actions', async () => {
@@ -969,13 +1022,17 @@ test('organization Undo banner expires after ten seconds without deleting histor
 
 test('organization commits validate freshness and record Undo only after the applied state refreshes', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames(options = {})'),
-    source.indexOf('async function tidyTabNamesWithAI'),
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
   );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
+  );
+  const namingSlice = source.slice(
+    source.indexOf('async function applyTidyNamingPhase'),
+    source.indexOf('async function tidyTabNamesWithAI'),
   );
   const undoSource = source.slice(
     source.indexOf('async function undoLastOperation'),
@@ -985,49 +1042,54 @@ test('organization commits validate freshness and record Undo only after the app
 
   assert.match(source, /fingerprintTidyNameTargets\(currentTargets, state\.renamedTabs, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
   assert.match(source, /organizationForCurrentSpaceState\(operation\.spaceId, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
-  assert.match(tidySource, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
+
+  // The rename phase is a pure rename transaction and records Undo after verification.
+  assert.match(namingSlice, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
   assert.ok(
-    tidySource.indexOf('const refreshed = await refreshTabsView({') <
-      tidySource.indexOf('recordOperation({'),
+    namingSlice.indexOf('const refreshed = await refreshTabsView({') <
+      namingSlice.indexOf('recordOperation({'),
     'Tidy must verify the merged live/snapshot view before recording Undo',
   );
-  assert.match(tidySource, /renameItems\.length === 0 && duplicateTagCount === 0/);
-  assert.match(tidySource, /duplicateTagSummary\.mergedCount/);
-  assert.match(tidySource, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== duplicateTagFingerprint/);
-  assert.match(tidySource, /replaceActiveSpaceSnapshotGroups\(currentDuplicateTagPlan\.snapshot\.groups\)[\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences[\s\S]*setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
-  assert.match(tidySource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
-  assert.match(tidySource, /This panel moved before Tidy Names could apply the planned changes/);
-  assert.match(tidySource, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
-  assert.match(tidySource, /Tidy Names was saved, but this view could not refresh[\s\S]*showStatusToast\(postCommitWarning, 'info'\)/);
-  const rollbackCapture = autoSource.indexOf('const rollback = captureChromeGroupMutationRollback();');
-  const authoritativeLoad = autoSource.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
-  const snapshotRefresh = autoSource.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
-  const membershipCapture = autoSource.indexOf('rollback.membership = captureTabGroupMembership(');
-  const transaction = autoSource.indexOf('await runPlanInFlight(() => runChromeGroupMutationTransaction({');
-  const refreshedView = autoSource.indexOf('const refreshed = await refreshTabsView({');
-  const operationRecord = autoSource.indexOf('recordOperation({');
-  const checkpoint = autoSource.indexOf('checkpoint: async () => {');
-  const workspaceSave = autoSource.indexOf('saveState({ persistWindowState: false, windowBinding })');
+  assert.match(namingSlice, /refreshedTargets\.length !== renameItems\.length/);
+  assert.match(namingSlice, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(namingSlice, /This panel moved before Tidy could apply the planned renames/);
+  assert.match(namingSlice, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
+  assert.match(namingSlice, /Tidy stopped before its planned renames could be committed\. Nothing was changed\./);
+
+  // The grouping phase owns duplicate merges and regrouping in one transaction.
+  assert.match(tidySlice, /duplicateTagSummary\.merges/);
+  assert.match(groupingSlice, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== plan\.duplicateGroupFingerprint/);
+  assert.match(groupingSlice, /replaceActiveSpaceSnapshotGroups\([\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences/);
+  assert.match(groupingSlice, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(tidySlice, /showStatusToast\(postCommitWarning, 'info'\)/);
+  const rollbackCapture = groupingSlice.indexOf('const rollback = captureChromeGroupMutationRollback();');
+  const authoritativeLoad = groupingSlice.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
+  const snapshotRefresh = groupingSlice.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
+  const membershipCapture = groupingSlice.indexOf('rollback.membership = captureTabGroupMembership(');
+  const transaction = groupingSlice.indexOf('await runPlanInFlight(() => runChromeGroupMutationTransaction({');
+  const refreshedView = groupingSlice.indexOf('const refreshed = await refreshTabsView({');
+  const operationRecord = groupingSlice.indexOf('recordOperation({');
+  const checkpoint = groupingSlice.indexOf('checkpoint: async () => {');
+  const workspaceSave = groupingSlice.indexOf('saveState({ persistWindowState: false, windowBinding })');
   assert.ok(
     rollbackCapture >= 0 && rollbackCapture < authoritativeLoad && authoritativeLoad < snapshotRefresh &&
     snapshotRefresh < membershipCapture && membershipCapture < transaction &&
     transaction < refreshedView && refreshedView < operationRecord && operationRecord < checkpoint &&
     checkpoint < workspaceSave,
-    'Auto Group must capture durable memory before refresh side effects, then verify, record Undo, and commit once',
+    'Tidy must capture durable memory before refresh side effects, then verify, record Undo, and commit once',
   );
-  assert.match(autoSource, /const beforeLive = captureLiveOrganization\(sourceSpaceId\);[\s\S]*rollback\.membership = captureTabGroupMembership\([\s\S]*beforeLive\.tabs\.map\(\(tab\) => tab\.tabId\)[\s\S]*runChromeGroupMutationTransaction\(\{/);
-  assert.equal(autoSource.match(/saveState\(/g)?.length, 1, 'Auto Group has one durable workspace checkpoint');
-  assert.match(autoSource, /checkpoint: async \(\) => \{[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true/);
-  assert.match(autoSource, /rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding,[\s\S]*persistRestoredState: true/);
-  assert.match(autoSource, /const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds\([\s\S]*const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags\([\s\S]*identifiedOrganizedSnapshot/);
-  assert.match(autoSource, /replaceActiveSpaceSnapshotGroups\([\s\S]*appliedDuplicateSnapshotPlan\.snapshot\.groups,[\s\S]*appliedDuplicateSnapshotPlan\.snapshot,[\s\S]*remapMergedSnapshotGroupReferences/);
-  assert.match(autoSource, /mergeDuplicateSnapshotTags\(state\.spaceSnapshots\?\.\[sourceSpaceId\]\)\.mergedCount > 0/);
-  assert.match(autoSource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
-  assert.match(autoSource, /Auto Group was saved, but this panel moved before its view could refresh/);
-  assert.match(autoSource, /Auto Group was saved, but this view could not refresh/);
-  assert.match(autoSource, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
-  assert.match(autoSource, /Chrome could not (?:apply|create) the proposed group/);
-  assert.doesNotMatch(autoSource, /withoutOperationRecord|createRollbackFailureError/);
+  assert.match(groupingSlice, /const beforeLive = captureLiveOrganization\(sourceSpaceId\);[\s\S]*rollback\.membership = captureTabGroupMembership\([\s\S]*beforeLive\.tabs\.map\(\(tab\) => tab\.tabId\)[\s\S]*runChromeGroupMutationTransaction\(\{/);
+  assert.equal(groupingSlice.match(/saveState\(/g)?.length, 1, 'Tidy has one durable workspace checkpoint');
+  assert.match(groupingSlice, /checkpoint: async \(\) => \{[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true/);
+  assert.match(groupingSlice, /rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding,[\s\S]*persistRestoredState: true/);
+  assert.match(groupingSlice, /const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds\([\s\S]*const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags\([\s\S]*identifiedOrganizedSnapshot/);
+  assert.match(groupingSlice, /replaceActiveSpaceSnapshotGroups\([\s\S]*appliedDuplicateSnapshotPlan\.snapshot\.groups,[\s\S]*appliedDuplicateSnapshotPlan\.snapshot,[\s\S]*remapMergedSnapshotGroupReferences/);
+  assert.match(groupingSlice, /mergeDuplicateSnapshotTags\(state\.spaceSnapshots\?\.\[sourceSpaceId\]\)\.mergedCount > 0/);
+  assert.match(groupingSlice, /Tidy was saved, but this panel moved before its view could refresh/);
+  assert.match(groupingSlice, /Tidy was saved, but this view could not refresh/);
+  assert.match(groupingSlice, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
+  assert.match(groupingSlice, /Chrome could not (?:apply|create) the proposed group/);
+  assert.doesNotMatch(groupingSlice, /withoutOperationRecord|createRollbackFailureError/);
   assert.match(source, /import \{[\s\S]{0,240}createRollbackAggregateError,[\s\S]{0,240}createRollbackFailureError,[\s\S]{0,240}withoutOperationRecord,[\s\S]{0,240}\} from '\.\/src\/shared\/operation-safety\.js'/);
   assert.match(source, /await assertOperationUndoIsFresh\(operation, \{ windowBinding \}\)/);
   assert.match(source, /operation\.type === 'tidy-names'[\s\S]*setLiveTabPanelTitle\(state, tabId, previousName\)/);
@@ -1035,8 +1097,7 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(undoSource, /Tidy Names Undo was saved, but this view could not refresh/);
   assert.match(undoSource, /operation\.type === 'auto-group'[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true[\s\S]*Auto Group Undo could save its checkpoint/);
   assert.match(undoSource, /Auto Group Undo was saved, but this panel moved before its view could refresh[\s\S]*Auto Group Undo was saved, but this view could not refresh/);
-  assert.match(source, /Auto Group with \$\{provider\.label\}:[^`]+merges duplicate Tags locally/);
-  assert.match(source, /If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview/);
+  assert.match(source, /Tidy with \$\{provider\.label\}: merges duplicate Tags, regroups tabs by topic/);
   assert.match(source, /type: 'restore-backup'[\s\S]*after: \{ portableFingerprint: fingerprintPortableWorkspaceContent\(state\) \}/);
   assert.match(source, /snapshotIdentities: beforeSnapshotIdentities/);
   assert.match(source, /restoreSnapshotIdentityOverlay\([\s\S]*operation\.before\?\.snapshotIdentities/);
@@ -1388,7 +1449,7 @@ test('Chrome group mutations and Auto Group Undo rollback browser side effects b
   const helper = await readFile(new URL('../src/shared/chrome-group-transaction.js', import.meta.url), 'utf8');
   const autoGroupRollbackSource = functionSource(source, 'restoreAutoGroupUndoAfterFailure');
   const captureLiveSource = functionSource(source, 'captureLiveOrganization');
-  const autoGroupSource = functionSource(source, 'autoGroupTabs');
+  const autoGroupSource = functionSource(source, 'applyTidyGroupingPhase');
 
   assert.match(source, /from '\.\/src\/shared\/chrome-group-transaction\.js'/);
   assert.match(source, /captureChromeGroupMutationMemory,[\s\S]*captureChromeGroupTitleRollback,[\s\S]*captureTabGroupMembership,[\s\S]*projectChromeGroupRollbackMemory,[\s\S]*resolveChromeGroupIdReplacement/);

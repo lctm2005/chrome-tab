@@ -16,9 +16,9 @@ involved and what will change before anything is applied.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Pinned tabs: stay open across Space switches and are never silently renamed, grouped, dragged, cleared, or closed by Space actions. Deleting their Space moves their ownership to the fallback Space.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
-- Tidy and Auto Group: two AI-assisted organizing actions over your tabs. Tidy renames live tabs and merges duplicate Tags directly with Undo; Auto Group re-groups tabs by topic, requires configured AI, sends only the disclosed tab metadata, and opens one reviewable preview before applying.
+- Tidy: one action that merges duplicate Tags, regroups tabs, and renames them. Each step is a configurable rule in Settings — local script rules (duplicate Tag merging, duplicate-URL closing, grouping by domain) run without AI, while prompt rules (grouping by topic, renaming) use your configured provider and are editable. Tidy shows one reviewable preview before applying and supports Undo afterward.
 - Close group: turn an active Tag into a saved, inactive Tag without deleting its pages. Open group restores its saved pages; Delete Group remains a separate action.
-- Recovery: use the 10-second Undo prompt after Tidy, Auto Group, or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
+- Recovery: use the 10-second Undo prompt after Tidy or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
 - Command palette: switch Spaces and find tabs with `Cmd/Ctrl+K`.
 - Drag sorting: reorder tab groups and tabs inside a Space.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
@@ -123,8 +123,7 @@ Default bindings:
 | Action | Shortcut |
 | --- | --- |
 | Toggle panel | `Alt+S` |
-| Tidy names | `Ctrl+Alt+T` |
-| Auto group | `Ctrl+Alt+G` |
+| Tidy | `Ctrl+Alt+T` |
 | Add Space | `Ctrl+Alt+N` |
 | Previous Space | `Ctrl+Alt+Left` |
 | Next Space | `Ctrl+Alt+Right` |

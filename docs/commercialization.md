@@ -34,8 +34,8 @@ Free release:
 - Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
-- Tidy Names applies names and duplicate Tag merges directly with Undo. Auto Group shows one final preview, requires Apply, and supports Undo.
-- BYOK AI organization: Tidy Names and Auto Group disclose the tab metadata
+- One Tidy action shows a single reviewable preview (grouping, renaming, duplicate merging, duplicate-URL closing) and supports Undo.
+- BYOK AI organization: Tidy discloses the tab metadata
   they send, go directly to the user-configured provider, and change tabs or
   Tags only after preview confirmation, with Undo.
 

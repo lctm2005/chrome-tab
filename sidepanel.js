@@ -275,13 +275,6 @@ const LIFECYCLE_CLEANUP_GRACE_MS = 500;
 const TIDY_NAMES_ICON = `
   <span class="tidy-icon" aria-hidden="true">🧹</span>
 `;
-const AUTO_GROUP_ICON = `
-  <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
-    <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
-    <path d="M7.4 5.5h9.2a1.4 1.4 0 0 1 1.3.9l.8 2.1H5.3l.8-2.1a1.4 1.4 0 0 1 1.3-.9Z"></path>
-    <path d="M9 12.7h6"></path>
-  </svg>
-`;
 
 let state = createDefaultState(localConfig);
 let settingsBaseline = null;
@@ -347,7 +340,6 @@ const els = {
   openWorkbenchButton: document.querySelector('#openWorkbenchButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
-  autoGroupButton: document.querySelector('#autoGroupButton'),
   groupsList: document.querySelector('#groupsList'),
   testAIButton: document.querySelector('#testAIButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
@@ -739,7 +731,6 @@ function bindEvents() {
     runTask((windowBinding) => undoLastOperation(operationId, { windowBinding }));
   });
   els.tidyNamesButton.addEventListener('click', startTidyNamesFromUserGesture);
-  els.autoGroupButton.addEventListener('click', startAutoGroupFromUserGesture);
   els.collapseGroupsButton.addEventListener('click', () => runTask((windowBinding) => (
     toggleSpaceGroups({ windowBinding })
   )));
@@ -843,8 +834,7 @@ function hasBlockingDialogOpen() {
 }
 
 function prepareOrganizationRequestForAction(action) {
-  if (action === 'tidy' || action === 'tidyNames') return prepareTidyNamesRequestFromUserGesture();
-  if (action === 'auto-group' || action === 'autoGroup') return prepareAutoGroupRequestFromUserGesture();
+  if (action === 'tidy' || action === 'tidyNames') return prepareTidyRequestFromUserGesture();
   return null;
 }
 
@@ -875,10 +865,7 @@ async function runSelectedCommandPaletteItem(prepared = {}) {
     return;
   }
   if (item.action === 'tidy') {
-    await tidyTabNames({ ...(prepared.organizationRequest || {}), windowBinding });
-  }
-  else if (item.action === 'auto-group') {
-    await autoGroupTabs({ ...(prepared.organizationRequest || {}), windowBinding });
+    await runTidy({ ...(prepared.organizationRequest || {}), windowBinding });
   }
   else if (item.action === 'settings') {
     if (!isCurrentPanelWindowBinding(windowBinding)) {
@@ -992,11 +979,7 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
 async function runShortcutAction(action, organizationRequest = null, options = {}) {
   const windowBinding = options.windowBinding;
   if (action === 'tidyNames') {
-    await tidyTabNames({ ...(organizationRequest || {}), windowBinding });
-    return;
-  }
-  if (action === 'autoGroup') {
-    await autoGroupTabs({ ...(organizationRequest || {}), windowBinding });
+    await runTidy({ ...(organizationRequest || {}), windowBinding });
     return;
   }
   if (action === 'addSpace') {
@@ -1350,7 +1333,6 @@ function render() {
   els.groupsList.hidden = !showSources;
   if (!showSources) hideGroupPreview();
   els.tidyNamesButton.hidden = !showSources;
-  els.autoGroupButton.hidden = !showSources;
   els.collapseGroupsButton.hidden = !showSources;
   els.openWorkbenchButton.hidden = workbenchMode;
   els.settingsButton.classList.toggle('active', isSettingsView);
@@ -1374,16 +1356,11 @@ function render() {
 function updateOrganizationActionDisclosures() {
   const provider = providerById(state.ai.provider);
   const hasAI = hasUsableAISettings(state.ai);
-  const tidyDisclosure = hasAI
-    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. It also merges duplicate Tags locally. If the provider is unavailable, it falls back to local naming. Changes apply directly and can be undone.`
-    : 'Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent. Changes apply directly and can be undone.';
-  els.tidyNamesButton.title = tidyDisclosure;
-  els.tidyNamesButton.setAttribute('aria-label', tidyDisclosure);
   const disclosure = hasAI
-    ? `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status. It also merges duplicate Tags locally, then opens one preview before applying.`
-    : 'Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent. If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview.';
-  els.autoGroupButton.title = disclosure;
-  els.autoGroupButton.setAttribute('aria-label', disclosure);
+    ? `Tidy with ${provider.label}: merges duplicate Tags, regroups tabs by topic, and renames tabs per your Tidy rules. Sends only the disclosed tab titles, simplified URLs, and domains, then opens one preview before applying. Script rules and local naming still run when AI is unavailable. Undo is available afterward.`
+    : 'Tidy merges duplicate Tags locally and renames tabs with local rules without sending tab metadata. Topic grouping needs a configured AI provider. One preview opens before anything applies, and Undo is available afterward.';
+  els.tidyNamesButton.title = disclosure;
+  els.tidyNamesButton.setAttribute('aria-label', disclosure);
 }
 
 function hasUsableAISettings(settings = {}) {
@@ -7831,338 +7808,10 @@ function hasCurrentTidyNamesAICandidates() {
   )));
 }
 
-function prepareTidyNamesRequestFromUserGesture() {
-  return prepareOrganizationAIRequestFromUserGesture(hasCurrentTidyNamesAICandidates);
-}
-
-function startTidyNamesFromUserGesture() {
-  const request = prepareTidyNamesRequestFromUserGesture();
-  void runTask((windowBinding) => tidyTabNames({ ...request, windowBinding }));
-}
-
-async function tidyTabNames(options = {}) {
-  const windowBinding = options.windowBinding;
-  const aiSettings = options.aiSettings || structuredClone(state.ai);
-  const permissionRequest = options.permissionRequest || Promise.resolve(true);
-  const permissionRequested = options.permissionRequested === true;
-  beginPanelAction('tidyNames');
-  try {
-    const refreshed = await refreshOrganizationActionState({
-      adopt: false,
-      windowBinding,
-    });
-    if (refreshed === false) return;
-    const sourceSpaceId = state.activeSpaceId;
-    snapshotOpenSpace(sourceSpaceId);
-    const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-      version: 1,
-      updatedAt: Date.now(),
-      groups: [],
-    });
-    const duplicateTagPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
-    const duplicateLiveBuckets = duplicateActiveGroupBuckets();
-    const duplicateLiveGroupCount = duplicateLiveBuckets
-      .reduce((sum, bucket) => sum + bucket.length - 1, 0);
-    const duplicateTagSummary = combineDuplicateTagMergePlans(
-      duplicateTagPlan.merges,
-      duplicateLiveBuckets.map((bucket) => ({
-        title: bucket[0]?.title,
-        mergedCount: bucket.length - 1,
-      })),
-    );
-    const duplicateTagCount = duplicateTagSummary.mergedCount;
-    const duplicateTagFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
-    const visibleTabs = spaceView
-      .flatMap((group) => group.tabs)
-      .filter((tab) => (
-        !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
-      ));
-    if (visibleTabs.length === 0 && duplicateTagCount === 0) {
-      setStatus('No tabs or duplicate Tags in this Space to tidy.');
-      return;
-    }
-
-    const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
-    if (renameableTabs.length === 0 && duplicateTagCount === 0) {
-      setStatus('No unpinned tabs in this Space to rename.');
-      return;
-    }
-
-    const aiCandidates = renameableTabs.filter((tab) => !hasManualPanelName(tab.id));
-    const useAI = aiCandidates.length > 0 && hasUsableAISettings(aiSettings);
-    if (useAI) {
-      const provider = providerById(aiSettings.provider);
-      setStatus(`Tidying ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'} with ${provider.label}...`);
-    }
-
-    const localNames = planTidyTabNames(renameableTabs, {
-      existingNames: state.renamedTabs,
-      preserveExisting: true,
-    });
-    const namingResult = useAI
-      ? await tidyTabNamesWithAI(aiCandidates, {
-        permissionRequest: permissionRequested ? permissionRequest : null,
-        settings: aiSettings,
-        windowBinding,
-      })
-      : { names: {}, sourceLabel: 'Local naming' };
-    if (!isCurrentPanelWindowBinding(windowBinding)) {
-      throw new Error(
-        'This panel moved to another Chrome window before Tidy Names could apply. ' +
-        'Nothing was changed; run Tidy Names again in the current window.',
-      );
-    }
-    const plannedNames = { ...localNames, ...namingResult.names };
-    const renameItems = renameableTabs
-      .map((tab) => ({
-        id: Number(tab.id),
-        title: tab.displayTitle || tab.title || 'Untitled',
-        result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
-        meta: tab.domain,
-      }))
-      .filter((item) => item.title !== item.result);
-    if (renameItems.length === 0 && duplicateTagCount === 0) {
-      setStatus('Tidy Names found no changes to apply.');
-      return;
-    }
-    const renameTargetIds = new Set(renameItems.map((item) => item.id));
-    const renameTargetFingerprint = fingerprintTidyNameTargets(
-      visibleTabs.filter((tab) => renameTargetIds.has(Number(tab.id))),
-      state.renamedTabs,
-    );
-
-    let committed = false;
-    let postCommitWarning = '';
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) {
-        throw new Error(
-          'This panel moved before Tidy Names could apply the planned changes. ' +
-          'Nothing was changed; run Tidy Names again in the current window.',
-        );
-      }
-      if (state.activeSpaceId !== sourceSpaceId) {
-        throw new Error('The active Space changed while Tidy Names was running. Run it again in the current Space.');
-      }
-      const rollback = captureChromeGroupMutationRollback();
-      const loaded = await loadTabs({ adopt: false, windowBinding });
-      if (loaded === false) {
-        throw new Error(
-          'This panel moved before Tidy Names could apply the planned changes. ' +
-          'Nothing was changed; run Tidy Names again in the current window.',
-        );
-      }
-      snapshotOpenSpace(sourceSpaceId);
-      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-        version: 1,
-        updatedAt: Date.now(),
-        groups: [],
-      });
-      const targetIds = new Set(renameItems.map((item) => item.id));
-      const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-      if (
-        currentTargets.length !== renameItems.length ||
-        currentTargets.some((tab) => tab.pinned) ||
-        fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== renameTargetFingerprint
-      ) {
-        throw new Error('Tabs changed while Tidy Names was running. Run it again before applying names.');
-      }
-      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateTagFingerprint) {
-        throw new Error('Duplicate Tags changed while Tidy Names was running. Run it again.');
-      }
-      const currentDuplicateTagPlan = mergeDuplicateSnapshotTags(currentSnapshot);
-      if (
-        currentDuplicateTagPlan.mergedCount !== duplicateTagPlan.mergedCount ||
-        countDuplicateActiveGroups() !== duplicateLiveGroupCount
-      ) {
-        throw new Error('Duplicate Tags changed while Tidy Names was running. Run it again.');
-      }
-      const beforeNames = Object.fromEntries(renameItems.map((item) => [
-        item.id,
-        Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
-      ]));
-      const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
-      const beforeSnapshot = structuredClone(currentSnapshot);
-      const beforeLive = captureLiveOrganization(sourceSpaceId);
-      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
-      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
-        currentDuplicateTagPlan.snapshotGroupIdReplacements,
-      );
-      rollback.membership = captureTabGroupMembership(
-        tabs,
-        groups,
-        beforeLive.tabs.map((tab) => tab.tabId),
-      );
-      await runChromeGroupMutationTransaction({
-        apply: async () => {
-          if (currentDuplicateTagPlan.mergedCount > 0) {
-            replaceActiveSpaceSnapshotGroups(currentDuplicateTagPlan.snapshot.groups);
-          }
-          // Select and merge the canonical physical Tag while each live group
-          // still carries its original saved identity. If references are
-          // remapped first, both groups appear canonical and display order can
-          // incorrectly preserve the duplicate's Chrome group and metadata.
-          await mergeDuplicateGroupsInActiveSpace({
-            windowBinding,
-            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
-          });
-          remapMergedSnapshotGroupReferences(
-            currentDuplicateTagPlan.snapshotGroupIdReplacements,
-          );
-          // Merge the saved Tag records before writing names. Otherwise the
-          // pre-apply merged clone can overwrite a just-written panelTitle,
-          // which is especially visible for opened saved-target rows that are
-          // intentionally excluded from passive snapshot refreshes.
-          for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
-          const refreshed = await refreshTabsView({
-            reloadDormant: true,
-            render: false,
-            windowBinding,
-          });
-          if (refreshed === false) {
-            throw new Error('This panel moved before Tidy Names could verify the merged Tags.');
-          }
-          const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-          if (refreshedTargets.length !== renameItems.length) {
-            throw new Error('Tabs changed while Tidy Names was being applied. The change was rolled back.');
-          }
-          if (
-            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
-            countDuplicateActiveGroups() > 0
-          ) {
-            throw new Error('Tidy Names could not finish merging duplicate Tags. The change was rolled back.');
-          }
-          const summaryParts = [];
-          if (renameItems.length > 0) {
-            summaryParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`);
-          }
-          if (duplicateTagCount > 0) {
-            summaryParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
-          }
-          const appliedOrganization = duplicateTagCount > 0
-            ? organizationForCurrentSpaceState(sourceSpaceId)
-            : null;
-          recordOperation({
-            type: 'tidy-names',
-            spaceId: sourceSpaceId,
-            summary: `Tidy Names ${summaryParts.join(' and ')}`,
-            before: {
-              renamedTabs: beforeNames,
-              ...(duplicateTagCount > 0 ? {
-                tagMerge: true,
-                snapshot: beforeSnapshot,
-                live: beforeLive,
-                snapshotGroupReferences: beforeSnapshotGroupReferences,
-              } : {}),
-            },
-            after: {
-              renamedTabs: afterNames,
-              ...(renameItems.length > 0 ? {
-                targetFingerprint: fingerprintTidyNameTargets(
-                  refreshedTargets,
-                  state.renamedTabs,
-                ),
-              } : {}),
-              ...(duplicateTagCount > 0 ? {
-                organizationFingerprint: appliedOrganization.fingerprint,
-                organizationFingerprintParts: appliedOrganization.fingerprintParts,
-              } : {}),
-            },
-          });
-        },
-        checkpoint: async () => {
-          const saved = await saveState({ persistWindowState: false, windowBinding });
-          if (saved !== true) {
-            throw new Error('This panel moved before Tidy Names could save the merged Tags.');
-          }
-        },
-        rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
-          windowBinding,
-          persistRestoredState: true,
-        }),
-      });
-      committed = true;
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        postCommitWarning = 'Tidy Names was saved, but this panel moved before its view could refresh.';
-      } else {
-        try {
-          render();
-          renderOperationRecord();
-        } catch (error) {
-          console.error(error);
-          postCommitWarning =
-            'Tidy Names was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
-        }
-      }
-    });
-    if (!committed) {
-      throw new Error('Tidy Names stopped before its planned changes could be committed. Nothing was changed.');
-    }
-    if (postCommitWarning) {
-      setStatus(postCommitWarning);
-      showStatusToast(postCommitWarning, 'info');
-      return;
-    }
-    const statusParts = [];
-    if (renameItems.length > 0) {
-      statusParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel`);
-    }
-    if (duplicateTagCount > 0) {
-      statusParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
-    }
-    setStatus(`Tidy ${statusParts.join(' and ')}${renameItems.length > 0 ? ` · ${namingResult.sourceLabel}` : ''}.`);
-  } finally {
-    endPanelAction();
-  }
-}
-
-async function tidyTabNamesWithAI(candidates, options = {}) {
-  const settings = options.settings || structuredClone(state.ai);
-  if (!hasUsableAISettings(settings) || candidates.length === 0) {
-    return { names: {}, sourceLabel: 'Local naming' };
-  }
-
-  try {
-    await (options.permissionRequest || ensureAIHostPermission(settings));
-    const response = await send('ai:chat', {
-      settings,
-      purpose: 'tidy-names',
-      itemCount: candidates.length,
-      messages: createPrompt('tidy-names', {
-        tabs: candidates.map(compactTabForAI),
-        language: settings.language,
-      }),
-    }, { windowBinding: options.windowBinding });
-    if (response.finishReason === 'length') {
-      throw new Error('The provider reached the Tidy Names output limit before returning a complete list.');
-    }
-    const names = parseTidyNames(response.text, candidates);
-    if (Object.keys(names).length === 0) {
-      throw new Error('AI returned no usable names.');
-    }
-    return {
-      names,
-      sourceLabel: `AI: ${providerById(settings.provider).label}`,
-    };
-  } catch (error) {
-    const reason = formatAIError(error);
-    setStatus(`${reason} Using local naming instead.`);
-    return {
-      names: {},
-      sourceLabel: `Local fallback (AI unavailable: ${reason})`,
-    };
-  }
-}
-
-function hasManualPanelName(tabId) {
-  return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
-}
-
-function prepareAutoGroupRequestFromUserGesture() {
-  return prepareOrganizationAIRequestFromUserGesture(hasCurrentAutoGroupAICandidates);
-}
-
-function hasCurrentAutoGroupAICandidates() {
+function hasCurrentTidyRunCandidates() {
+  // Duplicate Tags and saved-row merges can act even without live tabs, and
+  // grouping/naming candidates cover the AI paths, so ask both questions.
+  if (hasCurrentTidyNamesAICandidates()) return true;
   try {
     const sourceSpaceId = state.activeSpaceId;
     const snapshot = state.spaceSnapshots?.[sourceSpaceId] || { version: 1, groups: [] };
@@ -8175,30 +7824,38 @@ function hasCurrentAutoGroupAICandidates() {
       !foreignCandidateIds.has(Number(tab.id)) &&
       !tab.pinned &&
       isPageShortcutCapableUrl(tab.url)
-    ));
+    )) || fingerprintTidyDuplicateTags(snapshot) !== '';
   } catch {
     // Requesting up front is safer than losing the click gesture when local state is malformed.
     return true;
   }
 }
 
-function startAutoGroupFromUserGesture() {
-  const request = prepareAutoGroupRequestFromUserGesture();
-  void runTask((windowBinding) => autoGroupTabs({ ...request, windowBinding }));
+function prepareTidyRequestFromUserGesture() {
+  return prepareOrganizationAIRequestFromUserGesture(hasCurrentTidyRunCandidates);
 }
 
-async function autoGroupTabs(options = {}) {
+function startTidyNamesFromUserGesture() {
+  const request = prepareTidyRequestFromUserGesture();
+  void runTask((windowBinding) => runTidy({ ...request, windowBinding }));
+}
+
+async function runTidy(options = {}) {
   const windowBinding = options.windowBinding;
   const startedAt = performance.now();
   const aiSettings = options.aiSettings || structuredClone(state.ai);
   const permissionRequest = options.permissionRequest || Promise.resolve(true);
   const permissionRequested = options.permissionRequested === true;
-  beginPanelAction('autoGroup');
+  const rules = normalizeTidyRuleSettings(state.tidyRules);
+  const groupTopicEnabled = tidyRuleEnabled(rules, 'group-by-topic');
+  const groupDomainEnabled = tidyRuleEnabled(rules, 'group-by-domain');
+  const renameEnabled = tidyRuleEnabled(rules, 'rename-tabs');
+  const dedupeUrlsEnabled = tidyRuleEnabled(rules, 'dedupe-urls');
+  const groupRuleText = tidyRulePrompt(rules, 'group-by-topic');
+  const renameRuleText = tidyRulePrompt(rules, 'rename-tabs');
+  beginPanelAction('tidyNames');
   try {
-    const refreshed = await refreshOrganizationActionState({
-      adopt: true,
-      windowBinding,
-    });
+    const refreshed = await refreshOrganizationActionState({ adopt: true, windowBinding });
     if (refreshed === false) return;
     const sourceSpaceId = state.activeSpaceId;
     snapshotOpenSpace(sourceSpaceId);
@@ -8217,10 +7874,7 @@ async function autoGroupTabs(options = {}) {
       !tab.pinned &&
       isPageShortcutCapableUrl(tab.url)
     ));
-    const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(
-      sourceSnapshot,
-      sourceSnapshot.updatedAt,
-    );
+    const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
     const duplicateLiveBuckets = duplicateActiveGroupBuckets();
     const duplicateLiveGroupCount = duplicateLiveBuckets
       .reduce((sum, bucket) => sum + bucket.length - 1, 0);
@@ -8233,54 +7887,89 @@ async function autoGroupTabs(options = {}) {
     );
     const duplicateGroupCount = duplicateTagSummary.mergedCount;
     const duplicateGroupFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
-    if (candidates.length === 0 && duplicateGroupCount === 0) {
-      const message = foreignCandidateIds.size > 0
-        ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
-        : 'No live or saved http(s) tabs are available to organize in this Space.';
-      setStatus(message);
-      showStatusToast(message, 'error');
-      return;
+    const visibleTabs = spaceView
+      .flatMap((group) => group.tabs)
+      .filter((tab) => (
+        !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
+      ));
+
+    const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
+    const aiCandidates = renameableTabs.filter((tab) => !hasManualPanelName(tab.id));
+    const useRenameAI = renameEnabled && aiCandidates.length > 0 && hasUsableAISettings(aiSettings);
+    const localNames = planTidyTabNames(renameableTabs, {
+      existingNames: state.renamedTabs,
+      preserveExisting: true,
+    });
+    let namingResult = { names: {}, sourceLabel: 'Local naming' };
+    if (useRenameAI) {
+      const provider = providerById(aiSettings.provider);
+      setStatus(`Tidying ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'} with ${provider.label}...`);
+      namingResult = await tidyTabNamesWithAI(aiCandidates, {
+        permissionRequest: permissionRequested ? permissionRequest : null,
+        settings: aiSettings,
+        windowBinding,
+        rules: renameRuleText,
+      });
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(
+          'This panel moved to another Chrome window before Tidy could apply. ' +
+          'Nothing was changed; run Tidy again in the current window.',
+        );
+      }
     }
-    if (extensionRuntime && candidates.length > 0 && !hasUsableAISettings(aiSettings)) {
-      const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
-      setStatus(message);
-      showStatusToast(message, 'error');
-      return;
-    }
+    const plannedNames = { ...localNames, ...namingResult.names };
+    const renameItems = renameEnabled
+      ? renameableTabs
+        .map((tab) => ({
+          id: Number(tab.id),
+          title: tab.displayTitle || tab.title || 'Untitled',
+          result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
+          meta: tab.domain,
+        }))
+        .filter((item) => item.title !== item.result)
+      : [];
+
     let plannedGroups = [];
-    if (candidates.length > 0) {
-      try {
-        const provider = providerById(aiSettings.provider);
-        setStatus(`Generating Auto Group preview with ${provider.label} for ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}...`);
-        if (permissionRequested) await permissionRequest;
-        else await ensureAIHostPermission(aiSettings);
-        const response = await send('ai:chat', {
-          settings: aiSettings,
-          purpose: 'auto-group',
-          itemCount: candidates.length,
-          messages: createPrompt('tidy-tabs', {
-            tabs: candidates.map((candidate) => ({
-              ...compactTabForAI(candidate),
-              currentGroup: candidate.currentGroup?.title || 'Ungrouped',
-              status: candidate.dormant ? 'saved' : 'live',
-            })),
-          }),
-        }, { windowBinding });
-        if (!isCurrentPanelWindowBinding(windowBinding)) {
-          throw new Error(
-            'This panel moved to another Chrome window before Auto Group could create a preview.',
-          );
+    let skippedTopicNotice = '';
+    if (groupTopicEnabled && candidates.length > 0) {
+      if (!hasUsableAISettings(aiSettings)) {
+        skippedTopicNotice =
+          'Topic grouping needs a configured AI provider. Add your API key in Settings to group by topic.';
+      } else {
+        try {
+          const provider = providerById(aiSettings.provider);
+          setStatus(`Generating Tidy grouping preview with ${provider.label} for ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}...`);
+          if (permissionRequested) await permissionRequest;
+          else await ensureAIHostPermission(aiSettings);
+          const response = await send('ai:chat', {
+            settings: aiSettings,
+            purpose: 'auto-group',
+            itemCount: candidates.length,
+            messages: createPrompt('tidy-tabs', {
+              rules: groupRuleText,
+              tabs: candidates.map((candidate) => ({
+                ...compactTabForAI(candidate),
+                currentGroup: candidate.currentGroup?.title || 'Ungrouped',
+                status: candidate.dormant ? 'saved' : 'live',
+              })),
+            }),
+          }, { windowBinding });
+          if (!isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error(
+              'This panel moved to another Chrome window before Tidy could create a preview.',
+            );
+          }
+          if (response.finishReason === 'length') {
+            throw new Error('The provider reached the Tidy output limit. No groups were changed; try again with fewer tabs.');
+          }
+          plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
+          if (plannedGroups.length === 0) {
+            throw new Error('AI returned no valid groups. Check the configured model and try again.');
+          }
+          assertCompleteAutoGroupPlan(plannedGroups, candidates);
+        } catch (error) {
+          throw new Error(`${formatAIError(error)} Tidy stopped without making changes.`);
         }
-        if (response.finishReason === 'length') {
-          throw new Error('The provider reached the Auto Group output limit. No groups were changed; try again with fewer tabs.');
-        }
-        plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
-        if (plannedGroups.length === 0) {
-          throw new Error('AI returned no valid groups. Check the configured model and try again.');
-        }
-        assertCompleteAutoGroupPlan(plannedGroups, candidates);
-      } catch (error) {
-        throw new Error(`${formatAIError(error)} Auto Group stopped without making changes.`);
       }
     }
 
@@ -8291,18 +7980,76 @@ async function autoGroupTabs(options = {}) {
     });
     const previewGroups = resolvedPlan.previewGroups;
     plannedGroups = resolvedPlan.plannedGroups;
-    if (plannedGroups.length === 0 && duplicateGroupCount === 0) {
-      const message = 'Auto Group proposed no changes. These tabs are already organized.';
+
+    // The local domain rule only buckets tabs the topic plan left untouched.
+    const topicPlannedIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
+    if (groupDomainEnabled) {
+      const domainCandidates = candidates.filter((candidate) => !topicPlannedIds.has(Number(candidate.id)));
+      const domainPlan = planTidyGroups(domainCandidates);
+      const combined = [...plannedGroups];
+      for (const domainGroup of domainPlan) {
+        const existing = combined.find((group) => (
+          groupTitleKey(group.title) === groupTitleKey(domainGroup.title)
+        ));
+        if (existing) {
+          for (const tabId of domainGroup.tabIds) {
+            if (!existing.tabIds.map(Number).includes(Number(tabId))) existing.tabIds.push(tabId);
+          }
+        } else {
+          combined.push(domainGroup);
+        }
+      }
+      if (combined.length > plannedGroups.length || combined.some((group, index) => group !== plannedGroups[index])) {
+        const domainResolved = resolveOrganizationPlanChanges({
+          plannedGroups: combined,
+          candidates,
+          existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
+        });
+        plannedGroups = domainResolved.plannedGroups;
+      }
+    }
+
+    const urlCloseIds = dedupeUrlsEnabled ? planDuplicateUrlClosures(visibleTabs) : [];
+
+    if (
+      plannedGroups.length === 0 &&
+      renameItems.length === 0 &&
+      urlCloseIds.length === 0 &&
+      duplicateGroupCount === 0
+    ) {
+      const message = skippedTopicNotice ||
+        (foreignCandidateIds.size > 0 && candidates.length === 0
+          ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
+          : 'Tidy found no changes to apply. These tabs are already organized.');
       setStatus(message);
-      showStatusToast(message, 'success');
+      showStatusToast(message, skippedTopicNotice ? 'info' : 'success');
       return;
     }
+
     const regroupedTabIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
     const regroupedCount = regroupedTabIds.size;
     const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
-    let groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
     const previewGroupedCount = previewGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
-    const previewSections = previewGroups.map((group) => ({
+    const previewSections = [];
+    if (urlCloseIds.length > 0) {
+      const closeById = new Map(visibleTabs.map((tab) => [Number(tab.id), tab]));
+      previewSections.push({
+        title: 'Close duplicate tabs',
+        color: 'red',
+        kind: 'notice',
+        countLabel: `${urlCloseIds.length} ${urlCloseIds.length === 1 ? 'tab' : 'tabs'}`,
+        items: urlCloseIds.map((tabId) => {
+          const tab = closeById.get(Number(tabId));
+          return {
+            title: tab?.displayTitle || tab?.title || 'Untitled',
+            meta: 'Same URL is already open; this copy closes',
+            badge: 'Duplicate',
+          };
+        }),
+      });
+    }
+    previewSections.push(...previewGroups.map((group) => ({
       title: group.title,
       color: group.color,
       kind: 'group',
@@ -8315,7 +8062,7 @@ async function autoGroupTabs(options = {}) {
           badge: tab?.dormant ? 'Saved' : 'Live',
         };
       }),
-    }));
+    })));
     const candidateIds = new Set(candidates.map((candidate) => Number(candidate.id)));
     const notSentCandidates = organization.candidates.filter((candidate) => !candidateIds.has(Number(candidate.id)));
     const plannedTargetTitleKeys = new Set(plannedGroups.map((group) => groupTitleKey(group.title)));
@@ -8368,6 +8115,19 @@ async function autoGroupTabs(options = {}) {
         })),
       });
     }
+    if (renameItems.length > 0) {
+      previewSections.push({
+        title: 'Rename tabs',
+        color: 'cyan',
+        kind: 'notice',
+        countLabel: `${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
+        items: renameItems.map((item) => ({
+          title: item.title,
+          meta: `${item.meta || 'no domain'} · renamed to`,
+          badge: item.result,
+        })),
+      });
+    }
     const previewSummary = [];
     if (plannedGroups.length > 0) {
       previewSummary.push(`${previewGroupedCount} ${previewGroupedCount === 1 ? 'tab' : 'tabs'} → ${previewGroups.length} ${previewGroups.length === 1 ? 'group' : 'groups'}`);
@@ -8376,313 +8136,489 @@ async function autoGroupTabs(options = {}) {
     if (duplicateGroupCount > 0) {
       previewSummary.push(`${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'merge' : 'merges'}`);
     }
+    if (renameItems.length > 0) {
+      previewSummary.push(`${renameItems.length} ${renameItems.length === 1 ? 'rename' : 'renames'}`);
+    }
+    if (urlCloseIds.length > 0) {
+      previewSummary.push(`${urlCloseIds.length} duplicate ${urlCloseIds.length === 1 ? 'tab' : 'tabs'} closing`);
+    }
     previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
     const confirmed = await showPlanPreview({
-      title: 'Auto Group Preview',
+      title: 'Tidy Preview',
       message: previewSummary.join(' · '),
-      confirmText: 'Apply groups',
+      confirmText: 'Apply tidy',
       sections: previewSections,
       variant: 'groups',
     });
     if (!confirmed) return;
 
-    let committed = false;
     let createdGroups = 0;
     let mergedGroups = 0;
     let postCommitWarning = '';
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) {
-        throw new Error(
-          'This panel moved before Auto Group could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      if (state.activeSpaceId !== sourceSpaceId) {
-        throw new Error('The active Space changed while Auto Group was open. Run it again in the current Space.');
-      }
-      // `loadTabs({ adopt: true })` and `snapshotOpenSpace` intentionally stage
-      // ownership/lifecycle refreshes for a successful commit. A failed Apply
-      // must still be a durable no-op, so capture storage-backed memory before
-      // either of those preparatory mutations runs. Physical Chrome membership
-      // is captured separately after the authoritative tab refresh below.
-      const rollback = captureChromeGroupMutationRollback();
-      const loaded = await loadTabs({ adopt: true, windowBinding });
-      if (loaded === false) {
-        throw new Error(
-          'This panel moved before Auto Group could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      snapshotOpenSpace(sourceSpaceId);
-      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-        version: 1,
-        updatedAt: Date.now(),
-        groups: [],
-      });
-      const currentOrganization = buildOrganizationCandidates({
-        liveGroups: buildSpaceViewForSpace(sourceSpaceId),
-        snapshot: currentSnapshot,
-      });
-      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateGroupFingerprint) {
-        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
-      }
-      const currentDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(currentSnapshot);
-      if (
-        currentDuplicateSnapshotPlan.mergedCount !== duplicateSnapshotPlan.mergedCount ||
-        countDuplicateActiveGroups() !== duplicateLiveGroupCount
-      ) {
-        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
-      }
-      const rebasedPreviewGroups = rebaseOrganizationPlan({
-        previewCandidates: organization.candidates,
-        currentCandidates: currentOrganization.candidates,
-        plannedGroups: previewGroups,
-      });
-      const currentResolvedPlan = resolveOrganizationPlanChanges({
-        plannedGroups: rebasedPreviewGroups,
-        candidates: currentOrganization.candidates,
-        existingGroups: organizationTargetGroups(sourceSpaceId, currentSnapshot),
-      });
-      if (JSON.stringify(currentResolvedPlan.previewGroups) !== JSON.stringify(rebasedPreviewGroups)) {
-        throw new Error('An Auto Group target changed while the preview was open. Review a fresh preview before applying groups.');
-      }
-      const rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
-      groupedCount = rebasedPlannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
-      const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds(
-        currentOrganization,
+    if (plannedGroups.length > 0 || duplicateGroupCount > 0) {
+      await applyTidyGroupingPhase({
         sourceSpaceId,
-      );
-      if (rebasedPreviewGroups.some((group) => (
-        group.tabIds.some((candidateId) => currentForeignCandidateIds.has(Number(candidateId)))
-      ))) {
-        throw new Error(
-          'An Auto Group target is now open in another window. ' +
-          'Open Space Tabs there or review a fresh preview before applying groups.',
-        );
-      }
-      const currentEligibleCandidateIds = new Set(currentOrganization.candidates
-        .filter((candidate) => (
-          !currentForeignCandidateIds.has(Number(candidate.id)) &&
-          !candidate.pinned &&
-          isPageShortcutCapableUrl(candidate.url)
-        ))
-        .map((candidate) => Number(candidate.id)));
-      const rebasedCandidateIds = rebasedPreviewGroups
-        .flatMap((group) => group.tabIds.map(Number));
-      const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
-      if (
-        rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
-        rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
-        rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
-        [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId))
-      ) {
-        throw new Error(
-          'The eligible tabs changed while Auto Group was open. ' +
-          'Review a fresh preview before applying groups.',
-        );
-      }
-
-      const beforeSnapshot = structuredClone(currentSnapshot);
-      const beforeLive = captureLiveOrganization(sourceSpaceId);
-      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
-      const organizedSnapshot = applyOrganizationPlanToSnapshot({
-        snapshot: currentSnapshot,
-        candidates: currentOrganization.candidates,
-        plannedGroups: rebasedPlannedGroups,
+        sourceSnapshot,
+        organization,
+        foreignCandidateIds,
+        duplicateSnapshotPlan,
+        duplicateLiveGroupCount,
+        duplicateGroupCount,
+        duplicateGroupFingerprint,
+        previewGroups,
+        plannedGroups,
+        aiSettings,
+        windowBinding,
+        onProgress: (created, merged) => {
+          createdGroups = created;
+          mergedGroups = merged;
+        },
+        onWarning: (message) => {
+          postCommitWarning = message;
+        },
       });
-      // Auto Group can create a new saved target (including when Chrome's
-      // compact physical title differs from the logical saved Tag title).
-      // Give every new target a durable identity before lifecycle bindings are
-      // checkpointed and before duplicate Tags are merged.
-      const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds(
-        organizedSnapshot,
-        createSnapshotLifecycleId,
-      );
-      const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(
-        identifiedOrganizedSnapshot,
-      );
-      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
-        appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
-      );
-      rollback.membership = captureTabGroupMembership(
-        tabs,
-        groups,
-        beforeLive.tabs.map((tab) => tab.tabId),
-      );
-      const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
-      const livePlannedGroups = rebasedPlannedGroups
-        .map((group) => ({
-          ...group,
-          tabIds: group.tabIds
-            .map((candidateId) => Number(candidateById.get(Number(candidateId))?.source?.live?.tabId))
-            .filter(Number.isFinite),
-        }))
-        .filter((group) => group.tabIds.length > 0);
-
-      // Concurrent refreshes must not strip preserveGroups while the plan's
-      // emptied target groups are still being filled by Chrome mutations.
-      const runPlanInFlight = async (transaction) => {
-        inFlightOrganizationPlanSpaceIds.add(sourceSpaceId);
-        try {
-          return await transaction();
-        } finally {
-          inFlightOrganizationPlanSpaceIds.delete(sourceSpaceId);
-        }
-      };
-      await runPlanInFlight(() => runChromeGroupMutationTransaction({
-        apply: async () => {
-          replaceActiveSpaceSnapshotGroups(
-            appliedDuplicateSnapshotPlan.snapshot.groups,
-            appliedDuplicateSnapshotPlan.snapshot,
-          );
-          dormantSpaceViewSpaceId = '';
-
-          // Preserve the physical Tag whose live tabs still own the canonical
-          // snapshot identity. Remapping every duplicate reference first would
-          // erase that distinction and let incidental display order win.
-          mergedGroups = await mergeDuplicateGroupsInActiveSpace({
-            windowBinding,
-            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
-          });
-          remapMergedSnapshotGroupReferences(
-            appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
-          );
-          if (mergedGroups) {
-            const reloaded = await loadTabs({ adopt: false, windowBinding });
-            if (reloaded === false) {
-              throw new Error('This panel moved before duplicate groups could finish merging.');
-            }
-          }
-          const existingGroupsByTitle = activeChromeGroupsByTitle();
-          for (const group of livePlannedGroups) {
-            const titleKey = groupTitleKey(group.title);
-            let groupId = existingGroupsByTitle.get(titleKey)?.id;
-            if (Number.isFinite(Number(groupId))) {
-              const nextGroupId = await addTabsToChromeGroup(
-                groupId,
-                group.tabIds,
-                state.activeSpaceId,
-                { windowBinding },
-              );
-              if (nextGroupId === null) {
-                throw new Error(`Chrome could not apply the proposed group "${group.title}".`);
-              }
-              groupId = nextGroupId;
-            } else {
-              groupId = await createChromeGroup(group.tabIds, {
-                title: group.title,
-                color: group.color || nextGroupColor(),
-                collapsed: Boolean(group.collapsed),
-                windowBinding,
-              });
-              if (groupId === null) {
-                throw new Error(`Chrome could not create the proposed group "${group.title}".`);
-              }
-              existingGroupsByTitle.set(titleKey, {
-                id: groupId,
-                title: group.title,
-                color: group.color,
-              });
-              createdGroups += 1;
-            }
-          }
-
-          mergedGroups += await mergeDuplicateGroupsInActiveSpace({ windowBinding });
-          const loadedAfterGrouping = await loadTabs({ adopt: false, windowBinding });
-          if (loadedAfterGrouping === false) {
-            throw new Error('This panel moved before Auto Group could verify the Chrome groups.');
-          }
-          checkpointAutoGroupLifecycleBindings(
-            rebasedPlannedGroups,
-            candidateById,
-            sourceSpaceId,
-          );
-          const refreshed = await refreshTabsView({
-            reloadDormant: true,
-            render: false,
-            windowBinding,
-          });
-          if (refreshed === false) {
-            throw new Error('This panel moved before Auto Group could verify the saved Space view.');
-          }
-          if (
-            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
-            countDuplicateActiveGroups() > 0
-          ) {
-            throw new Error('Auto Group could not finish merging duplicate Tags. The change was rolled back.');
-          }
-          assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
-
-          const operationSummary = groupedCount > 0
-            ? `Auto Group organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}` +
-              (duplicateGroupCount > 0
-                ? ` and merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`
-                : '')
-            : `Auto Group merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`;
-          recordOperation({
-            type: 'auto-group',
-            spaceId: sourceSpaceId,
-            summary: operationSummary,
-            before: {
-              snapshot: beforeSnapshot,
-              live: beforeLive,
-              snapshotGroupReferences: beforeSnapshotGroupReferences,
-            },
-            after: {
-              organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
-            },
-          });
+    }
+    if (renameItems.length > 0) {
+      await applyTidyNamingPhase({
+        sourceSpaceId,
+        renameItems,
+        namingResult,
+        windowBinding,
+        onWarning: (message) => {
+          postCommitWarning = postCommitWarning || message;
         },
-        checkpoint: async () => {
-          const saved = await saveState({ persistWindowState: false, windowBinding });
-          if (saved !== true) {
-            throw new Error('This panel moved before Auto Group could save its workspace checkpoint.');
-          }
-        },
-        rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
-          windowBinding,
-          persistRestoredState: true,
-        }),
-      }));
-      // The plan has settled: drop its scaffold flag so the next save stops
-      // preserving emptied target groups as permanent empty Tags.
-      const settledSnapshot = state.spaceSnapshots?.[sourceSpaceId];
-      if (settledSnapshot?.preserveGroups) delete settledSnapshot.preserveGroups;
-      committed = true;
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        postCommitWarning =
-          'Auto Group was saved, but this panel moved before its view could refresh.';
-      } else {
-        try {
-          render();
-        } catch (error) {
-          console.error(error);
-          postCommitWarning =
-            'Auto Group was saved, but this view could not refresh. Reopen Space Tabs to see the saved groups.';
-        }
+      });
+    }
+
+    if (urlCloseIds.length > 0) {
+      // Close each duplicate by id through the reviewed single-tab close so
+      // snapshot rows, saved order, and lifecycle metadata stay consistent.
+      const closeById = new Map(tabs.map((tab) => [Number(tab.id), tab]));
+      for (const tabId of urlCloseIds) {
+        const tab = closeById.get(Number(tabId));
+        if (!tab) continue;
+        const hostGroup = spaceView.find((group) => (group.tabs || []).some((candidate) => (
+          Number(candidate.id) === Number(tabId)
+        )));
+        await closeTab(tab, hostGroup?.key || '', { windowBinding });
       }
-    });
-    if (!committed) {
-      throw new Error('Auto Group stopped before its reviewed changes could be committed. Nothing was changed.');
     }
+
+    const statusParts = [];
+    if (groupedCount > 0) statusParts.push(`grouped ${groupedCount} tabs`);
+    if (createdGroups) statusParts.push(`created ${createdGroups}`);
+    if (duplicateGroupCount > 0) {
+      statusParts.push(`merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`);
+    }
+    if (renameItems.length > 0) {
+      statusParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel`);
+    }
+    if (urlCloseIds.length > 0) {
+      statusParts.push(`closed ${urlCloseIds.length} duplicate ${urlCloseIds.length === 1 ? 'tab' : 'tabs'}`);
+    }
+    setStatus(`Tidy updated ${currentSpace().name}: ${statusParts.join(', ') || 'nothing changed'}.`);
     if (postCommitWarning) {
-      setStatus(postCommitWarning);
       showStatusToast(postCommitWarning, 'info');
-      return;
+    } else if (skippedTopicNotice) {
+      showStatusToast(skippedTopicNotice, 'info');
     }
-    const parts = [];
-    if (createdGroups) parts.push(`created ${createdGroups}`);
-    if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
-    if (duplicateGroupCount) {
-      parts.push(
-        `merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`,
-      );
-    }
-    setStatus(`Auto group updated ${currentSpace().name}: ${parts.join(', ') || 'nothing changed'}.`);
   } finally {
     endPanelAction();
   }
+}
+
+async function applyTidyGroupingPhase(plan = {}, options = {}) {
+  const sourceSpaceId = plan.sourceSpaceId;
+  const windowBinding = options.windowBinding;
+  let committed = false;
+  let createdGroups = 0;
+  let mergedGroups = 0;
+  await withSharedStateLock(async () => {
+    const synchronized = await syncStateFromStorage({ windowBinding });
+    if (synchronized === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the reviewed changes. ' +
+        'Nothing was changed; review a fresh preview in the current window.',
+      );
+    }
+    if (state.activeSpaceId !== sourceSpaceId) {
+      throw new Error('The active Space changed while Tidy was open. Run it again in the current Space.');
+    }
+    const rollback = captureChromeGroupMutationRollback();
+    const loaded = await loadTabs({ adopt: true, windowBinding });
+    if (loaded === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the reviewed changes. ' +
+        'Nothing was changed; review a fresh preview in the current window.',
+      );
+    }
+    snapshotOpenSpace(sourceSpaceId);
+    const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [],
+    });
+    const currentOrganization = buildOrganizationCandidates({
+      liveGroups: buildSpaceViewForSpace(sourceSpaceId),
+      snapshot: currentSnapshot,
+    });
+    if (fingerprintTidyDuplicateTags(currentSnapshot) !== plan.duplicateGroupFingerprint) {
+      throw new Error('Duplicate Tags changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const currentDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(currentSnapshot);
+    if (
+      currentDuplicateSnapshotPlan.mergedCount !== plan.duplicateSnapshotPlan.mergedCount ||
+      countDuplicateActiveGroups() !== plan.duplicateLiveGroupCount
+    ) {
+      throw new Error('Duplicate Tags changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const rebasedPreviewGroups = rebaseOrganizationPlan({
+      previewCandidates: plan.organization.candidates,
+      currentCandidates: currentOrganization.candidates,
+      plannedGroups: plan.previewGroups,
+    });
+    const currentResolvedPlan = resolveOrganizationPlanChanges({
+      plannedGroups: rebasedPreviewGroups,
+      candidates: currentOrganization.candidates,
+      existingGroups: organizationTargetGroups(sourceSpaceId, currentSnapshot),
+    });
+    if (JSON.stringify(currentResolvedPlan.previewGroups) !== JSON.stringify(rebasedPreviewGroups)) {
+      throw new Error('A Tidy target changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
+    const groupedCount = rebasedPlannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds(
+      currentOrganization,
+      sourceSpaceId,
+    );
+    if (rebasedPreviewGroups.some((group) => (
+      group.tabIds.some((candidateId) => currentForeignCandidateIds.has(Number(candidateId)))
+    ))) {
+      throw new Error(
+        'A Tidy target is now open in another window. ' +
+        'Open Space Tabs there or review a fresh preview before applying.',
+      );
+    }
+    const currentEligibleCandidateIds = new Set(currentOrganization.candidates
+      .filter((candidate) => (
+        !currentForeignCandidateIds.has(Number(candidate.id)) &&
+        !candidate.pinned &&
+        isPageShortcutCapableUrl(candidate.url)
+      ))
+      .map((candidate) => Number(candidate.id)));
+    const rebasedCandidateIds = rebasedPreviewGroups
+      .flatMap((group) => group.tabIds.map(Number));
+    const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
+    if (
+      rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
+      rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
+      rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
+      [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId))
+    ) {
+      throw new Error(
+        'The eligible tabs changed while the preview was open. ' +
+        'Review a fresh preview before applying.',
+      );
+    }
+
+    const beforeSnapshot = structuredClone(currentSnapshot);
+    const beforeLive = captureLiveOrganization(sourceSpaceId);
+    const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
+    const organizedSnapshot = applyOrganizationPlanToSnapshot({
+      snapshot: currentSnapshot,
+      candidates: currentOrganization.candidates,
+      plannedGroups: rebasedPlannedGroups,
+    });
+    const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds(
+      organizedSnapshot,
+      createSnapshotLifecycleId,
+    );
+    const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(
+      identifiedOrganizedSnapshot,
+    );
+    const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
+      appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+    );
+    rollback.membership = captureTabGroupMembership(
+      tabs,
+      groups,
+      beforeLive.tabs.map((tab) => tab.tabId),
+    );
+    const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
+    const livePlannedGroups = rebasedPlannedGroups
+      .map((group) => ({
+        ...group,
+        tabIds: group.tabIds
+          .map((candidateId) => Number(candidateById.get(Number(candidateId))?.source?.live?.tabId))
+          .filter(Number.isFinite),
+      }))
+      .filter((group) => group.tabIds.length > 0);
+
+    const runPlanInFlight = async (transaction) => {
+      inFlightOrganizationPlanSpaceIds.add(sourceSpaceId);
+      try {
+        return await transaction();
+      } finally {
+        inFlightOrganizationPlanSpaceIds.delete(sourceSpaceId);
+      }
+    };
+    await runPlanInFlight(() => runChromeGroupMutationTransaction({
+      apply: async () => {
+        replaceActiveSpaceSnapshotGroups(
+          appliedDuplicateSnapshotPlan.snapshot.groups,
+          appliedDuplicateSnapshotPlan.snapshot,
+        );
+        dormantSpaceViewSpaceId = '';
+
+        mergedGroups = await mergeDuplicateGroupsInActiveSpace({
+          windowBinding,
+          canonicalGroupIdsByTitle: canonicalLiveGroupIds,
+        });
+        remapMergedSnapshotGroupReferences(
+          appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+        );
+        if (mergedGroups) {
+          const reloaded = await loadTabs({ adopt: false, windowBinding });
+          if (reloaded === false) {
+            throw new Error('This panel moved before duplicate groups could finish merging.');
+          }
+        }
+        const existingGroupsByTitle = activeChromeGroupsByTitle();
+        for (const group of livePlannedGroups) {
+          const titleKey = groupTitleKey(group.title);
+          let groupId = existingGroupsByTitle.get(titleKey)?.id;
+          if (Number.isFinite(Number(groupId))) {
+            const nextGroupId = await addTabsToChromeGroup(
+              groupId,
+              group.tabIds,
+              state.activeSpaceId,
+              { windowBinding },
+            );
+            if (nextGroupId === null) {
+              throw new Error(`Chrome could not apply the proposed group "${group.title}".`);
+            }
+            groupId = nextGroupId;
+          } else {
+            groupId = await createChromeGroup(group.tabIds, {
+              title: group.title,
+              color: group.color || nextGroupColor(),
+              collapsed: Boolean(group.collapsed),
+              windowBinding,
+            });
+            if (groupId === null) {
+              throw new Error(`Chrome could not create the proposed group "${group.title}".`);
+            }
+            existingGroupsByTitle.set(titleKey, {
+              id: groupId,
+              title: group.title,
+              color: group.color,
+            });
+            createdGroups += 1;
+          }
+        }
+
+        mergedGroups += await mergeDuplicateGroupsInActiveSpace({ windowBinding });
+        const loadedAfterGrouping = await loadTabs({ adopt: false, windowBinding });
+        if (loadedAfterGrouping === false) {
+          throw new Error('This panel moved before Tidy could verify the Chrome groups.');
+        }
+        checkpointAutoGroupLifecycleBindings(
+          rebasedPlannedGroups,
+          candidateById,
+          sourceSpaceId,
+        );
+        const refreshed = await refreshTabsView({
+          reloadDormant: true,
+          render: false,
+          windowBinding,
+        });
+        if (refreshed === false) {
+          throw new Error('This panel moved before Tidy could verify the saved Space view.');
+        }
+        if (
+          mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
+          countDuplicateActiveGroups() > 0
+        ) {
+          throw new Error('Tidy could not finish merging duplicate Tags. The change was rolled back.');
+        }
+        assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
+
+        const operationSummary = groupedCount > 0
+          ? `Tidy organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}` +
+            (plan.duplicateGroupCount > 0
+              ? ` and merged ${plan.duplicateGroupCount} duplicate ${plan.duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`
+              : '')
+          : `Tidy merged ${plan.duplicateGroupCount} duplicate ${plan.duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`;
+        recordOperation({
+          type: 'auto-group',
+          spaceId: sourceSpaceId,
+          summary: operationSummary,
+          before: {
+            snapshot: beforeSnapshot,
+            live: beforeLive,
+            snapshotGroupReferences: beforeSnapshotGroupReferences,
+          },
+          after: {
+            organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
+          },
+        });
+      },
+      checkpoint: async () => {
+        const saved = await saveState({ persistWindowState: false, windowBinding });
+        if (saved !== true) {
+          throw new Error('This panel moved before Tidy could save its workspace checkpoint.');
+        }
+      },
+      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
+        windowBinding,
+        persistRestoredState: true,
+      }),
+    }));
+    const settledSnapshot = state.spaceSnapshots?.[sourceSpaceId];
+    if (settledSnapshot?.preserveGroups) delete settledSnapshot.preserveGroups;
+    committed = true;
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      options.onWarning('Tidy was saved, but this panel moved before its view could refresh.');
+    } else {
+      try {
+        render();
+      } catch (error) {
+        console.error(error);
+        options.onWarning('Tidy was saved, but this view could not refresh. Reopen Space Tabs to see the saved groups.');
+      }
+    }
+    if (options.onProgress) options.onProgress(createdGroups, mergedGroups);
+    if (!committed) {
+      throw new Error('Tidy stopped before its reviewed changes could be committed. Nothing was changed.');
+    }
+  });
+}
+
+async function applyTidyNamingPhase(plan = {}, options = {}) {
+  const windowBinding = options.windowBinding;
+  let committed = false;
+  await withSharedStateLock(async () => {
+    const synchronized = await syncStateFromStorage({ windowBinding });
+    if (synchronized === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the planned renames. ' +
+        'Nothing was changed; run Tidy again in the current window.',
+      );
+    }
+    if (state.activeSpaceId !== plan.sourceSpaceId) {
+      throw new Error('The active Space changed while Tidy was running. Run it again in the current Space.');
+    }
+    const rollback = captureChromeGroupMutationRollback();
+    const loaded = await loadTabs({ adopt: false, windowBinding });
+    if (loaded === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the planned renames. ' +
+        'Nothing was changed; run Tidy again in the current window.',
+      );
+    }
+    snapshotOpenSpace(plan.sourceSpaceId);
+    const renameItems = plan.renameItems;
+    const targetIds = new Set(renameItems.map((item) => item.id));
+    const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+    if (currentTargets.length !== renameItems.length) {
+      throw new Error('Tabs changed while Tidy was running. Run it again before applying names.');
+    }
+    const beforeNames = Object.fromEntries(renameItems.map((item) => [
+      item.id,
+      Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
+    ]));
+    const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
+    await runChromeGroupMutationTransaction({
+      apply: async () => {
+        for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
+        const refreshed = await refreshTabsView({
+          reloadDormant: true,
+          render: false,
+          windowBinding,
+        });
+        if (refreshed === false) {
+          throw new Error('This panel moved before Tidy could verify the renamed tabs.');
+        }
+        const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+        if (refreshedTargets.length !== renameItems.length) {
+          throw new Error('Tabs changed while Tidy was applying names. The change was rolled back.');
+        }
+        recordOperation({
+          type: 'tidy-names',
+          spaceId: plan.sourceSpaceId,
+          summary: `Tidy renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
+          before: { renamedTabs: beforeNames },
+          after: {
+            renamedTabs: afterNames,
+            targetFingerprint: fingerprintTidyNameTargets(
+              refreshedTargets,
+              state.renamedTabs,
+            ),
+          },
+        });
+      },
+      checkpoint: async () => {
+        const saved = await saveState({ persistWindowState: false, windowBinding });
+        if (saved !== true) {
+          throw new Error('This panel moved before Tidy could save the renamed tabs.');
+        }
+      },
+      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
+        windowBinding,
+        persistRestoredState: true,
+      }),
+    });
+    committed = true;
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      options.onWarning('Tidy was saved, but this panel moved before its view could refresh.');
+    }
+  });
+  if (!committed) {
+    throw new Error('Tidy stopped before its planned renames could be committed. Nothing was changed.');
+  }
+}
+
+async function tidyTabNamesWithAI(candidates, options = {}) {
+  const settings = options.settings || structuredClone(state.ai);
+  if (!hasUsableAISettings(settings) || candidates.length === 0) {
+    return { names: {}, sourceLabel: 'Local naming' };
+  }
+
+  try {
+    await (options.permissionRequest || ensureAIHostPermission(settings));
+    const response = await send('ai:chat', {
+      settings,
+      purpose: 'tidy-names',
+      itemCount: candidates.length,
+      messages: createPrompt('tidy-names', {
+        tabs: candidates.map(compactTabForAI),
+        language: settings.language,
+        ...(options.rules ? { rules: options.rules } : {}),
+      }),
+    }, { windowBinding: options.windowBinding });
+    if (response.finishReason === 'length') {
+      throw new Error('The provider reached the Tidy Names output limit before returning a complete list.');
+    }
+    const names = parseTidyNames(response.text, candidates);
+    if (Object.keys(names).length === 0) {
+      throw new Error('AI returned no usable names.');
+    }
+    return {
+      names,
+      sourceLabel: `AI: ${providerById(settings.provider).label}`,
+    };
+  } catch (error) {
+    const reason = formatAIError(error);
+    setStatus(`${reason} Using local naming instead.`);
+    return {
+      names: {},
+      sourceLabel: `Local fallback (AI unavailable: ${reason})`,
+    };
+  }
+}
+
+function hasManualPanelName(tabId) {
+  return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
 }
 
 function foreignOpenOrganizationCandidateIds(organization, spaceId) {
@@ -9216,8 +9152,7 @@ function endPanelAction() {
 }
 
 function panelActionStatus(action) {
-  if (action === 'tidyNames') return 'Tidying tab names...';
-  if (action === 'autoGroup') return 'Auto grouping tabs...';
+  if (action === 'tidyNames') return 'Tidying tabs...';
   return 'Working...';
 }
 
@@ -9229,16 +9164,12 @@ function formatPreviewDuration(milliseconds) {
 
 function updatePanelActionUI() {
   const tidyBusy = activePanelAction === 'tidyNames';
-  const groupBusy = activePanelAction === 'autoGroup';
   const busy = Boolean(activePanelAction);
 
   els.tidyNamesButton.disabled = busy;
-  els.autoGroupButton.disabled = busy;
   els.collapseGroupsButton.disabled = busy;
   els.tidyNamesButton.innerHTML = tidyBusy ? '...' : TIDY_NAMES_ICON;
-  els.autoGroupButton.innerHTML = groupBusy ? '...' : AUTO_GROUP_ICON;
   els.tidyNamesButton.classList.toggle('busy', tidyBusy);
-  els.autoGroupButton.classList.toggle('busy', groupBusy);
 }
 
 function focusPanelForShortcuts() {

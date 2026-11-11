@@ -148,13 +148,12 @@ export function formatAIError(error) {
 export function createPrompt(kind, context = {}) {
   const instruction = languageInstruction(context.language || 'auto');
   if (kind === 'tidy-tabs') {
+    const ruleText = String(context.rules || '').trim();
     return [
       {
         role: 'system',
         content: [
-          'Group browser tabs into concise topic/work buckets using page titles first, then URLs only as supporting context.',
-          'Do not group merely because tabs share a domain or website; mix different domains when their titles describe the same subject.',
-          'Keep unrelated pages separate even when they are from the same domain.',
+          ...(ruleText ? [ruleText] : []),
           'Include every supplied tab id exactly once; do not omit tabs, invent ids, or repeat ids.',
           'Return only JSON: [{"title":"Topic","tabIds":[1,2],"color":"blue"}].',
         ].join(' '),
@@ -167,14 +166,13 @@ export function createPrompt(kind, context = {}) {
   }
 
   if (kind === 'tidy-names') {
+    const ruleText = String(context.rules || '').trim();
     return [
       {
         role: 'system',
         content: [
-          'Rename browser tabs for a compact sidebar using page titles and headings first, then URLs only as supporting context.',
+          ...(ruleText ? [ruleText] : []),
           'Rename only the tabs supplied in the input; do not invent ids or include tabs that are not present.',
-          'Prefer short recognizable app/project/task names over raw domains, IP addresses, tracking tokens, or generic page chrome.',
-          'Keep names concise, usually 2-6 words, and preserve important product names, repo names, issue/PR numbers, and non-English labels.',
           'Return only JSON: [{"id":1,"title":"Concise Name"}].',
           instruction,
         ].join(' '),

@@ -137,8 +137,9 @@ test('window-derived user mutations explicitly scope reads, browser commands, an
     'moveGroupBlockIntoContext',
     'moveGroupBlockBesideContext',
     'reorderTab',
-    'tidyTabNames',
-    'autoGroupTabs',
+    'runTidy',
+    'applyTidyGroupingPhase',
+    'applyTidyNamingPhase',
     'undoLastOperation',
     'exportSpaceData',
     'restoreSpaceData',
@@ -201,8 +202,7 @@ test('Command Palette tools and group close buttons keep their gesture-time bind
   assert.ok(palette);
   const paletteSource = source.slice(palette.start, palette.end);
   assert.match(paletteSource, /activateSpace\(item\.spaceId, \{ windowBinding \}\)/);
-  assert.match(paletteSource, /tidyTabNames\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
-  assert.match(paletteSource, /autoGroupTabs\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
+  assert.match(paletteSource, /runTidy\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
   assert.match(paletteSource, /item\.action === 'settings'[\s\S]*activeView = 'settings';[\s\S]*render\(\)/);
   assert.match(paletteSource, /isCurrentPanelWindowBinding\(windowBinding\)/);
 
@@ -265,7 +265,7 @@ test('Chrome-group rollback can finish in the original window after the host mov
   assert.match(undoRollbackSource, /allowStaleWindowBinding: Boolean\(options\.windowBinding\)/);
   assert.match(undoRollbackSource, /isCurrentPanelWindowBinding\(options\.windowBinding\)[\s\S]*refreshTabs/);
 
-  const autoGroup = functions.get('autoGroupTabs');
+  const autoGroup = functions.get('applyTidyGroupingPhase');
   const autoGroupSource = source.slice(autoGroup.start, autoGroup.end);
   assert.match(
     autoGroupSource,

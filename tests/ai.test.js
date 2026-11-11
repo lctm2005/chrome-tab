@@ -359,19 +359,32 @@ test('adds language instructions to AI prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
-test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
+test('tidy-tabs prompt opens with the editable rules and keeps fixed completeness constraints', () => {
+  const rules = 'Group browser tabs into concise topic buckets. Use page titles first.';
   const prompt = createPrompt('tidy-tabs', {
+    rules,
     tabs: [
       { id: 1, title: 'AI browser tab grouping research', url: 'https://example.com/a' },
       { id: 2, title: 'Chrome extension AI tab organizer', url: 'https://another.example/b' },
     ],
   });
 
-  assert.match(prompt[0].content, /page titles first/);
-  assert.match(prompt[0].content, /Do not group merely because tabs share a domain/);
-  assert.match(prompt[0].content, /mix different domains/);
-  assert.match(prompt[0].content, /every supplied tab id exactly once/i);
-  assert.match(prompt[0].content, /do not omit tabs/i);
+  assert.ok(prompt[0].content.startsWith(`${rules} `));
+  assert.match(prompt[0].content, /Include every supplied tab id exactly once/i);
+  assert.match(prompt[0].content, /do not omit tabs, invent ids, or repeat ids/i);
+  assert.match(prompt[0].content, /Return only JSON/);
+  assert.match(prompt[0].content, /\[\{"title":"Topic","tabIds":\[1,2\],"color":"blue"\}\]/);
+});
+
+test('tidy-tabs prompt without rules keeps only the fixed constraints', () => {
+  const prompt = createPrompt('tidy-tabs', {
+    tabs: [
+      { id: 1, title: 'AI browser tab grouping research', url: 'https://example.com/a' },
+    ],
+  });
+
+  assert.ok(prompt[0].content.startsWith('Include every supplied tab id exactly once'));
+  assert.match(prompt[0].content, /Return only JSON/);
 });
 
 test('uses empty inputs for optional tidy and custom prompt context', () => {
@@ -382,18 +395,31 @@ test('uses empty inputs for optional tidy and custom prompt context', () => {
 });
 
 test('asks tidy-names AI to rename only the supplied tabs', () => {
+  const rules = 'Rename browser tabs for a compact sidebar using page titles first.';
   const prompt = createPrompt('tidy-names', {
     tabs: [
       { id: 1, title: '67.216.201.49 - 入站', url: 'https://67.216.201.49:44374/secret/panel/inbounds' },
       { id: 2, title: 'GitHub - openai/codex/pull/123', url: 'https://github.com/openai/codex/pull/123' },
     ],
     language: 'zh-CN',
+    rules,
   });
 
-  assert.match(prompt[0].content, /Rename browser tabs/);
+  assert.ok(prompt[0].content.startsWith(`${rules} `));
   assert.match(prompt[0].content, /only the tabs supplied/);
   assert.match(prompt[0].content, /Return only JSON/);
   assert.match(prompt[0].content, /Respond in Simplified Chinese/);
+});
+
+test('tidy-names prompt without rules keeps only the fixed constraints', () => {
+  const prompt = createPrompt('tidy-names', {
+    tabs: [
+      { id: 1, title: 'GitHub - openai/codex/pull/123', url: 'https://github.com/openai/codex/pull/123' },
+    ],
+  });
+
+  assert.ok(prompt[0].content.startsWith('Rename only the tabs supplied in the input'));
+  assert.match(prompt[0].content, /Return only JSON/);
 });
 
 test('parses tidy-tabs JSON even when the model wraps it in markdown', () => {

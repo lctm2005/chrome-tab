@@ -358,15 +358,6 @@ h1 {
   border-color: var(--accent);
 }
 
-.archive-icon {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2.2;
-}
 
 .operation-record {
   display: flex;

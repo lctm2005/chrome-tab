@@ -8,7 +8,6 @@ export function buildCommandPaletteItems({ spaces = [], spaceView = [], query = 
   ]));
   const commands = [
     { id: 'command:tidy', kind: 'command', action: 'tidy', icon: '🧹', title: 'Tidy tab names', meta: 'Command' },
-    { id: 'command:auto-group', kind: 'command', action: 'auto-group', icon: 'AG', title: 'Auto Group tabs', meta: 'Command' },
     { id: 'command:settings', kind: 'command', action: 'settings', icon: '⚙', title: 'Open Settings', meta: 'Command' },
   ];
   const spaceItems = availableSpaces.map((space) => ({

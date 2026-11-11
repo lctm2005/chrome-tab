@@ -313,7 +313,7 @@ test('sensible defaults build the pure command candidates and run without host c
 
   assert.equal(controller.open(), true);
   assert.equal(input.focusCount, 1);
-  assert.equal(controller.getState().items.length, 3);
+  assert.equal(controller.getState().items.length, 2);
   assert.equal(controller.handleKeydown(keyboardEvent('Enter', input)), true);
   assert.equal(dialog.closeCount, 1);
 });

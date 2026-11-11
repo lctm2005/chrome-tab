@@ -1,7 +1,6 @@
 export const SHORTCUT_ACTIONS = [
   { id: 'togglePanel', label: 'Toggle panel', defaultShortcut: 'Alt+S' },
   { id: 'tidyNames', label: 'Tidy names', defaultShortcut: 'Control+Alt+T' },
-  { id: 'autoGroup', label: 'Auto group', defaultShortcut: 'Control+Alt+G' },
   { id: 'addSpace', label: 'Add Space', defaultShortcut: 'Control+Alt+N' },
   { id: 'previousSpace', label: 'Previous Space', defaultShortcut: 'Control+Alt+ArrowLeft' },
   { id: 'nextSpace', label: 'Next Space', defaultShortcut: 'Control+Alt+ArrowRight' },

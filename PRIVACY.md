@@ -16,9 +16,9 @@ Space Tabs may handle:
 - Arc `StorableSidebar.json` files when the user explicitly selects one for an
   import. Space Tabs reads the selected file locally and never modifies it.
 - Tab titles, simplified URLs without query strings or fragments, and domains
-  when the user starts Tidy Names with usable AI settings. Tidy Names uses
+  when the user starts Tidy with usable AI settings. Tidy uses
   local naming rules and sends no tab metadata when AI is unconfigured or
-  unavailable. Auto Group additionally sends current Tag and live/saved status
+  unavailable. Topic grouping additionally sends current Tag and live/saved status
   when the user starts it with configured AI.
 - User-provided AI provider settings and an optional AI API key.
 - Local `file://` page URLs present in open tabs, Arc imports, or backups. Space
@@ -50,10 +50,10 @@ tab URLs from entering the regular profile's shared extension storage.
 Core Space, Arc import, folder, shortcut, export, restore, and tab management
 features work locally.
 
-Before Tidy Names or Auto Group sends anything, Space Tabs shows the selected
+Before Tidy sends anything, Space Tabs shows the selected
 provider and the tab metadata being sent: tab titles, simplified URLs without
-query strings or fragments, and domains (Auto Group additionally sends
-current Tag and live/saved status). Tidy Names sends the disclosed tab
+query strings or fragments, and domains (topic grouping additionally sends
+current Tag and live/saved status). Rename sends the disclosed tab
 metadata directly to the configured provider when AI is available; if AI is
 unconfigured or the request fails, it uses local naming rules without sending
 metadata (or without sending again after a failed provider request). Auto
@@ -76,7 +76,7 @@ Space Tabs requests Chrome permissions to:
   restore, switch, move, and delete actions can inspect or update other windows.
 - Store local Space data and preferences.
 - Request access only to the selected AI provider endpoint at the explicit
-  action that needs it (Test AI, Tidy Names, and Auto Group sends).
+  action that needs it (Test AI and Tidy sends).
 - Recognize, restore, and manage saved local-file tabs only after the user
   manually enables Chrome's **Allow access to file URLs** setting. The declared
   `file:///*` host permission does not bypass that user-controlled toggle.

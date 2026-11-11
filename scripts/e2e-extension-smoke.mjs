@@ -668,7 +668,7 @@ async function startAskFixtureServer() {
         }));
         return;
       }
-      if (systemText.includes('Group browser tabs into concise topic/work buckets')) {
+      if (systemText.includes('Group browser tabs into concise topic or work buckets')) {
         let candidates = [];
         try {
           const parsed = JSON.parse(lastUserMessage);
@@ -1905,7 +1905,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open &&
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden &&
       !document.querySelector('#undoArcImportButton')?.disabled`);
     await evaluate(client, `document.querySelector('#undoArcImportButton').click()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
@@ -1936,8 +1936,8 @@ async function main() {
         undoneArcSetup.toast === 'Removed 1 imported Arc Spaces. Open tabs were kept.',
       JSON.stringify(undoneArcSetup),
     );
-    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
+    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden &&
       !document.querySelector('#groupsList')?.hidden &&
       Boolean(document.querySelector('#activeSpaceName')?.textContent)`);
 
@@ -2012,9 +2012,10 @@ async function main() {
       saved.spaceSnapshots.default = snapshot;
       await chrome.storage.local.set({ spaceTabsState: saved });
     })`);
-    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
-    const dormantAutoGroupState = await waitFor(client, `(async () => {
-      const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    const dormantTidyState = await waitFor(client, `(async () => {
+      const message = 'Topic grouping needs a configured AI provider. ' +
+        'Add your API key in Settings to group by topic.';
       const status = document.querySelector('#syncStatus')?.textContent || '';
       const toast = document.querySelector('#workbenchToast')?.textContent || '';
       if (status !== message || toast !== message) return null;
@@ -2032,13 +2033,13 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench Auto Group includes saved historical Tags before checking BYOK',
-      dormantAutoGroupState.tone === 'error' &&
-        dormantAutoGroupState.liveHttpTabs === 0 &&
-        dormantAutoGroupState.savedTagStored &&
-        !dormantAutoGroupState.previewOpen &&
-        !dormantAutoGroupState.status.includes('Open saved tabs'),
-      JSON.stringify(dormantAutoGroupState),
+      'Workbench Tidy keeps saved historical Tags and skips topic grouping with an info notice when AI is missing',
+      dormantTidyState.tone === 'info' &&
+        dormantTidyState.liveHttpTabs === 0 &&
+        dormantTidyState.savedTagStored &&
+        !dormantTidyState.previewOpen &&
+        !dormantTidyState.status.includes('Open saved tabs'),
+      JSON.stringify(dormantTidyState),
     );
     await evaluate(client, `navigator.locks.request(
       'space-tabs-shared-state',
@@ -3140,26 +3141,34 @@ async function main() {
         groups: (listed.groups || []).map((group) => ({ id: group.id, title: group.title })),
       };
     })()`);
-    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
-    await waitFor(client, `document.querySelector('#syncStatus')?.textContent?.includes('Auto Group needs a configured AI provider')`);
-    const autoGroupMissingKeyState = await evaluate(client, `(async () => {
+    const tidyWithoutAIRequestsBefore = askFixtureServer.requests.length;
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    const tidyWithoutAIPreview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
+      return {
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section')]
+          .map((section) => section.querySelector('h3 span')?.textContent || ''),
+      };
+    })()`, 12000);
+    const tidyWithoutAIState = await evaluate(client, `(async () => {
       const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
       return {
         url: location.href,
-        status: document.querySelector('#syncStatus')?.textContent || '',
-        toast: document.querySelector('#workbenchToast')?.textContent || '',
-        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
         groups: (listed.groups || []).map((group) => ({ id: group.id, title: group.title })),
       };
     })()`);
+    await clickElementWithCDP(client, '#actionDialogCancel');
+    await waitFor(client, `!document.querySelector('#actionDialog')?.open &&
+      !document.querySelector('#tidyNamesButton')?.disabled`);
     record(
-      'Workbench Auto Group reports missing BYOK without navigation or mutations',
-      autoGroupMissingKeyState.url === autoGroupBefore.url &&
-        autoGroupMissingKeyState.status.includes('Auto Group needs a configured AI provider') &&
-        autoGroupMissingKeyState.toast.includes('Auto Group needs a configured AI provider') &&
-        !autoGroupMissingKeyState.previewOpen &&
-        JSON.stringify(autoGroupMissingKeyState.groups) === JSON.stringify(autoGroupBefore.groups),
-      JSON.stringify(autoGroupMissingKeyState),
+      'Workbench Tidy without BYOK opens the consolidated preview from local rules without provider requests or mutations',
+      tidyWithoutAIState.url === autoGroupBefore.url &&
+        JSON.stringify(tidyWithoutAIState.groups) === JSON.stringify(autoGroupBefore.groups) &&
+        tidyWithoutAIPreview.confirmText === 'Apply tidy' &&
+        askFixtureServer.requests.length === tidyWithoutAIRequestsBefore,
+      JSON.stringify({ tidyWithoutAIPreview, tidyWithoutAIState }),
     );
 
     const tidyDuplicate = await evaluate(client, `(async () => {
@@ -3179,7 +3188,7 @@ async function main() {
       return { id: tab.id, status: tab.status, title: tab.title, url: tab.url };
     })()`, 12000);
     record(
-      'Tidy Names duplicate reaches a stable local title and URL before direct apply',
+      'Tidy Names duplicate reaches a stable local title and URL before the Tidy preview',
       stableTidyDuplicate.status === 'complete' &&
         stableTidyDuplicate.url === askFixtureServer.tidyPrimaryUrl &&
         stableTidyDuplicate.title === askFixtureServer.tidyPrimaryTitle,
@@ -3195,8 +3204,15 @@ async function main() {
     })()`);
     const tidyProviderCallsBefore = askFixtureServer.requests.length;
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    const tidyDirectPreviewConfirm = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
+      return document.querySelector('#actionDialogConfirm')?.textContent || '';
+    })()`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
     const tidyDirectApplied = await waitFor(client, `(async () => {
-      if (document.querySelector('#tidyNamesButton')?.disabled) return null;
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
       const operation = [...(saved.operationHistory || [])].reverse()
@@ -3204,7 +3220,6 @@ async function main() {
       if (!operation) return null;
       return {
         operationId: operation.id,
-        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
         undoVisible: !document.querySelector('#operationRecord')?.hidden,
         renamedTabs: structuredClone(saved.renamedTabs || {}),
       };
@@ -3219,12 +3234,13 @@ async function main() {
       return { renamedTabs: structuredClone(saved.renamedTabs || {}) };
     })()`, 12000);
     record(
-      'Workbench Tidy Names applies directly and Undo restores panel names',
-      !tidyDirectApplied.previewOpen && tidyDirectApplied.undoVisible &&
+      'Workbench Tidy applies through one Tidy Preview and Undo restores panel names',
+      tidyDirectPreviewConfirm === 'Apply tidy' && tidyDirectApplied.undoVisible &&
         JSON.stringify(tidyDirectApplied.renamedTabs) !== JSON.stringify(tidyDirectBefore.renamedTabs) &&
         JSON.stringify(tidyDirectUndone.renamedTabs) === JSON.stringify(tidyDirectBefore.renamedTabs) &&
-        askFixtureServer.requests.length > tidyProviderCallsBefore,
-      JSON.stringify({ tidyDirectBefore, tidyDirectApplied, tidyDirectUndone }),
+        // Local naming without a configured provider must not round-trip the fixture provider.
+        askFixtureServer.requests.length === tidyProviderCallsBefore,
+      JSON.stringify({ tidyDirectPreviewConfirm, tidyDirectBefore, tidyDirectApplied, tidyDirectUndone }),
     );
     await evaluate(client, `location.reload()`);
     await waitFor(client, `document.readyState === 'complete' &&
@@ -3443,11 +3459,12 @@ async function main() {
         const operation = Array.isArray(next?.operationHistory)
           ? next.operationHistory[next.operationHistory.length - 1]
           : null;
+        // Fail the grouping-phase checkpoint (type 'auto-group') so the whole
+        // merge+regroup transaction rolls back before the rename phase starts.
         if (
           window.__tidyTagApplyFailureCount === 0 &&
-          operation?.type === 'tidy-names' &&
-          operation?.status === 'applied' &&
-          operation?.before?.tagMerge === true
+          operation?.type === 'auto-group' &&
+          operation?.status === 'applied'
         ) {
           window.__tidyTagApplyFailureCount += 1;
           throw new Error('Tidy duplicate Tag checkpoint failure E2E');
@@ -3464,6 +3481,10 @@ async function main() {
       throw new Error('Could not install Tidy duplicate-Tag checkpoint failure injection.');
     }
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
     await waitFor(client, `window.__tidyTagApplyFailureCount === 1 &&
       !document.querySelector('#actionDialog')?.open &&
       !document.querySelector('#tidyNamesButton')?.disabled &&
@@ -3611,13 +3632,20 @@ async function main() {
       document.readyState === 'complete' &&
       !document.querySelector('#tidyNamesButton')?.disabled`, 15000);
     await clickElementWithCDP(client, '#tidyNamesButton');
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
     await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
           document.querySelector('#tidyNamesButton')?.disabled) return false;
       const stored = await chrome.storage.local.get('spaceTabsState');
-      const operation = [...(stored.spaceTabsState?.operationHistory || [])].reverse()
-        .find((item) => item?.type === 'tidy-names');
-      return operation?.status === 'applied' && operation?.before?.tagMerge === true;
+      const history = [...(stored.spaceTabsState?.operationHistory || [])].reverse();
+      const mergeOperation = history.find((item) => item?.type === 'auto-group');
+      const renameOperation = history.find((item) => item?.type === 'tidy-names');
+      return mergeOperation?.status === 'applied' &&
+        String(mergeOperation?.summary || '').includes('Tidy merged') &&
+        renameOperation?.status === 'applied';
     })()`, 15000);
     const tidyAppliedBannerState = await evaluate(client, `({
       recordText: document.querySelector('#operationRecordText')?.textContent || '',
@@ -3675,8 +3703,11 @@ async function main() {
       if (!targetIds.every((tabId) =>
         actualNames[tabId] === operation.after.renamedTabs[tabId] &&
         panelNames[tabId] === operation.after.renamedTabs[tabId])) return null;
+      const mergeOperation = [...(saved.operationHistory || [])].reverse()
+        .find((item) => item?.type === 'auto-group');
       return {
         operation,
+        mergeOperation,
         targetIds,
         actualNames,
         panelNames,
@@ -3740,7 +3771,12 @@ async function main() {
         JSON.stringify(tidyAppliedState.chromeTabs) === JSON.stringify(tidyChromeBefore) &&
         tidyBeforeApply.duplicateTags.length === 5 &&
         tidyBeforeApply.liveDuplicateGroups.length === 2 &&
-        tidyAppliedState.operation.before?.tagMerge === true &&
+        tidyAppliedState.mergeOperation?.type === 'auto-group' &&
+        tidyAppliedState.mergeOperation?.status === 'applied' &&
+        tidyAppliedState.mergeOperation?.after?.organizationFingerprint &&
+        tidyAppliedState.operation.type === 'tidy-names' &&
+        tidyAppliedState.operation.before?.renamedTabs &&
+        !tidyAppliedState.operation.before?.tagMerge &&
         tidyAppliedState.duplicateTags.length === 2 &&
         tidyAppliedLiveSnapshotTag?.snapshotGroupId ===
           tidyBeforeApply.duplicateTags[0]?.snapshotGroupId &&
@@ -4110,11 +4146,27 @@ async function main() {
         },
       })}`);
     }
+    // The rename phase undid its own 'tidy-names' record; the merge lives in a
+    // separate 'auto-group' operation that needs its own Undo to fully restore
+    // the organization.
+    await waitFor(client, `!document.querySelector('#operationRecord')?.hidden &&
+      document.querySelector('#undoOrganizationButton')?.dataset.operationId === ${JSON.stringify(
+        tidyAppliedState.mergeOperation?.id || '',
+      )}`, 12000);
+    await clickElementWithCDP(client, '#undoOrganizationButton');
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const operation = (stored.spaceTabsState?.operationHistory || []).find((item) =>
+        item?.id === ${JSON.stringify(tidyAppliedState.mergeOperation?.id || '')});
+      return operation?.status === 'undone' ||
+        document.querySelector('#workbenchToast')?.dataset.tone === 'error';
+    })()`, 30000);
+    await waitForLifecycleJournalToSettle(client);
     const tidyUndoneState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
       const operation = (saved.operationHistory || []).find((item) =>
-        item?.id === ${JSON.stringify(tidyAppliedState.operation.id)});
+        item?.id === ${JSON.stringify(tidyAppliedState.mergeOperation?.id || '')});
       if (operation?.status !== 'undone') return null;
       const listed = await chrome.runtime.sendMessage({ type: 'tabs:list' });
       const targetIds = ${JSON.stringify(tidyAppliedState.targetIds)};
@@ -4235,9 +4287,9 @@ async function main() {
             ?.tabs.find((tab) => tab.snapshotTabId === tidySavedTargetBeforeBinding?.snapshotTabId)
             ?.panelTitle || '') &&
         JSON.stringify(tidyUndoneState.chromeTabs) === JSON.stringify(tidyChromeBefore) &&
-        tidyUndoneState.toast === `Undid: ${tidyAppliedState.operation.summary}.` &&
+        tidyUndoneState.toast === `Undid: ${tidyAppliedState.mergeOperation?.summary || ''}.` &&
         (tidyUndoneState.operationRecordHidden ||
-          tidyUndoneState.operationRecordText !== tidyAppliedState.operation.summary),
+          tidyUndoneState.operationRecordText !== tidyAppliedState.mergeOperation?.summary),
       JSON.stringify({
         operationStatus: tidyUndoneState.operation.status,
         namesRestored: JSON.stringify(tidyUndoneState.renamedTabs) ===
@@ -4368,13 +4420,17 @@ async function main() {
       .filter((title) => title.textContent?.trim() === ${JSON.stringify(tidyMergeOnlyTitle)})
       .length === 2`, 15000);
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
+    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
+      document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
     const tidyMergeOnlyApplied = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
           document.querySelector('#tidyNamesButton')?.disabled) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
       const operation = [...(saved.operationHistory || [])].reverse()
-        .find((item) => item?.type === 'tidy-names' && item?.status === 'applied');
+        .find((item) => item?.type === 'auto-group' && item?.status === 'applied');
       const duplicateTags = (saved.spaceSnapshots?.default?.groups || [])
         .filter((group) => group.title === ${JSON.stringify(tidyMergeOnlyTitle)});
       // The merged Tag is uniquely named and empty, so the persistence rules
@@ -4405,10 +4461,10 @@ async function main() {
     })()`, 15000);
     record(
       'Merge-only Tidy Apply records organization-only safety data and Undo restores both Tags',
-      Object.keys(tidyMergeOnlyApplied.operation.after?.renamedTabs || {}).length === 0 &&
-        !tidyMergeOnlyApplied.operation.after?.targetFingerprint &&
+      tidyMergeOnlyApplied.operation.type === 'auto-group' &&
+        tidyMergeOnlyApplied.operation.before?.live && tidyMergeOnlyApplied.operation.before?.snapshot &&
+        !tidyMergeOnlyApplied.operation.before?.renamedTabs &&
         Boolean(tidyMergeOnlyApplied.operation.after?.organizationFingerprint) &&
-        tidyMergeOnlyApplied.operation.before?.tagMerge === true &&
         tidyMergeOnlyApplied.duplicateTags.length === 0 &&
         tidyMergeOnlyApplied.status.includes('merged 1 duplicate Tag') &&
         tidyMergeOnlyApplied.icon === '🧹' &&
@@ -7366,7 +7422,7 @@ async function main() {
       (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
         ${JSON.stringify(openedWorkbench.id)})()`);
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await setFileInputWithCDP(client, '#arcImportInput', arcSidebarFixturePath);
     await waitFor(client, `!document.querySelector('#importArcButton')?.disabled &&
       document.querySelector('#arcImportStatus')?.textContent.includes('Ready to append')`, 12000);
@@ -7391,8 +7447,8 @@ async function main() {
         ownerSpaceName: importedSpaces[0].name,
       };
     })()`, 15000);
-    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden`);
 
     await selectSpaceInAuxiliaryPanel(primaryPanel, 'Default', 'default');
     await selectSpaceInAuxiliaryPanel(secondaryPanel, 'Remote Current', 'remote-current');
@@ -7568,7 +7624,7 @@ async function main() {
       };
     })()`, 12000);
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open &&
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden &&
       !document.querySelector('#undoArcImportButton')?.disabled`);
     await evaluate(client, `document.querySelector('#undoArcImportButton').click()`);
     const arcWindowUndoDialog = await waitFor(client, `(() => {
@@ -7694,8 +7750,8 @@ async function main() {
         arcWindowUndoState,
       }),
     );
-    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden`);
     progress('two-window Arc Undo ownership passed');
 
     progress('checking stale two-Workbench confirmations and settings merges');
@@ -8060,7 +8116,7 @@ async function main() {
       `document.querySelector('#settingsButton').click()`,
     );
     await waitForInSession(client, concurrencyWorkbenchA.sessionId,
-      `document.querySelector('#settingsDialog')?.open &&
+      `!document.querySelector('#settingsView')?.hidden &&
         !document.querySelector('#undoArcImportButton')?.disabled`, 10000);
     await evaluateInSession(
       client,
@@ -8283,12 +8339,12 @@ async function main() {
         if (document.querySelector('#actionDialog')?.open) {
           document.querySelector('#actionDialogCancel')?.click();
         }
-        if (document.querySelector('#settingsDialog')?.open) {
-          document.querySelector('#settingsDialog').close();
+        if (!document.querySelector('#settingsView')?.hidden) {
+          document.querySelector('#settingsCloseButton').click();
         }
         document.querySelector('#settingsButton').click();
       })()`);
-      await waitForInSession(client, panel.sessionId, `document.querySelector('#settingsDialog')?.open &&
+      await waitForInSession(client, panel.sessionId, `!document.querySelector('#settingsView')?.hidden &&
         document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]') &&
         document.querySelector('#providerInput')?.options.length > 1`, 10000);
     };
@@ -8298,8 +8354,8 @@ async function main() {
           if (document.querySelector('#actionDialog')?.open) {
             document.querySelector('#actionDialogCancel')?.click();
           }
-          if (document.querySelector('#settingsDialog')?.open) {
-            document.querySelector('#settingsDialog').close();
+          if (!document.querySelector('#settingsView')?.hidden) {
+            document.querySelector('#settingsCloseButton').click();
           }
         })()`);
         await client.send('Page.reload', {}, panel.sessionId);
@@ -8339,17 +8395,17 @@ async function main() {
         provider.value = 'openai';
         provider.dispatchEvent(new Event('change', { bubbles: true }));
         document.querySelector('#apiKeyInput').value = 'concurrent-settings-b-key-e2e';
-        const autoGroup = document.querySelector(
-          '.shortcut-input[data-shortcut-action="autoGroup"]'
+        const nextSpace = document.querySelector(
+          '.shortcut-input[data-shortcut-action="nextSpace"]'
         );
-        autoGroup.dataset.shortcut = 'Control+Alt+U';
-        autoGroup.value = 'Ctrl + Alt + U';
+        nextSpace.dataset.shortcut = 'Control+Alt+U';
+        nextSpace.value = 'Ctrl + Alt + U';
         document.querySelector('#saveSettingsButton').click();
         return {
           provider: provider.value,
           baseUrl: document.querySelector('#baseUrlInput')?.value || '',
           model: document.querySelector('#modelInput')?.value || '',
-          autoGroup: autoGroup.dataset.shortcut,
+          nextSpace: nextSpace.dataset.shortcut,
         };
       })()`,
     );
@@ -8364,7 +8420,7 @@ async function main() {
         const saved = stored.spaceTabsState || {};
         const auth = secrets.spaceTabsSecrets?.ai || null;
         if (saved.ai?.provider !== 'openai' ||
-            saved.shortcuts?.autoGroup !== 'Control+Alt+U' ||
+            saved.shortcuts?.nextSpace !== 'Control+Alt+U' ||
             auth?.apiKey !== 'concurrent-settings-b-key-e2e' ||
             auth?.provider !== 'openai' ||
             document.querySelector('#settingsStatus')?.textContent !== 'Settings saved.') return null;
@@ -8445,7 +8501,7 @@ async function main() {
         const auth = secrets.spaceTabsSecrets?.ai || null;
         return saved.theme === 'emerald' &&
           saved.shortcuts?.addSpace === 'Control+Alt+J' &&
-          saved.shortcuts?.autoGroup === 'Control+Alt+U' &&
+          saved.shortcuts?.nextSpace === 'Control+Alt+U' &&
           auth?.apiKey === 'concurrent-settings-b-key-e2e'
           ? { theme: saved.theme, shortcuts: structuredClone(saved.shortcuts), auth: structuredClone(auth) }
           : null;
@@ -8461,7 +8517,7 @@ async function main() {
         concurrentSettingsASave.before.key === concurrentSettingsAOldForm.key &&
         concurrentSettingsMerged.theme === 'emerald' &&
         concurrentSettingsMerged.shortcuts.addSpace === 'Control+Alt+J' &&
-        concurrentSettingsMerged.shortcuts.autoGroup === 'Control+Alt+U' &&
+        concurrentSettingsMerged.shortcuts.nextSpace === 'Control+Alt+U' &&
         concurrentSettingsMerged.auth.apiKey === 'concurrent-settings-b-key-e2e' &&
         concurrentSettingsMergedReloaded.auth.apiKey === 'concurrent-settings-b-key-e2e',
       JSON.stringify({
@@ -8483,9 +8539,9 @@ async function main() {
       tidy.value = 'Ctrl + Alt + Y';
     })()`);
     await evaluateInSession(client, concurrencyWorkbenchB.sessionId, `(() => {
-      const autoGroup = document.querySelector('.shortcut-input[data-shortcut-action="autoGroup"]');
-      autoGroup.dataset.shortcut = 'Control+Alt+Y';
-      autoGroup.value = 'Ctrl + Alt + Y';
+      const nextSpace = document.querySelector('.shortcut-input[data-shortcut-action="nextSpace"]');
+      nextSpace.dataset.shortcut = 'Control+Alt+Y';
+      nextSpace.value = 'Ctrl + Alt + Y';
       document.querySelector('#saveSettingsButton').click();
     })()`);
     const concurrentShortcutBCommitted = await waitForInSession(
@@ -8494,7 +8550,7 @@ async function main() {
       `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = stored.spaceTabsState || {};
-        return saved.shortcuts?.autoGroup === 'Control+Alt+Y' &&
+        return saved.shortcuts?.nextSpace === 'Control+Alt+Y' &&
           document.querySelector('#settingsStatus')?.textContent === 'Settings saved.'
           ? { shortcuts: structuredClone(saved.shortcuts) }
           : null;
@@ -8506,12 +8562,12 @@ async function main() {
       concurrencyWorkbenchA.sessionId,
       `(() => {
         const tidy = document.querySelector('.shortcut-input[data-shortcut-action="tidyNames"]');
-        const autoGroup = document.querySelector('.shortcut-input[data-shortcut-action="autoGroup"]');
+        const nextSpace = document.querySelector('.shortcut-input[data-shortcut-action="nextSpace"]');
         const before = {
           tidyNames: tidy?.dataset.shortcut || '',
-          autoGroup: autoGroup?.dataset.shortcut || '',
+          nextSpace: nextSpace?.dataset.shortcut || '',
         };
-        if (before.tidyNames !== 'Control+Alt+Y' || before.autoGroup !== 'Control+Alt+U') {
+        if (before.tidyNames !== 'Control+Alt+Y' || before.nextSpace !== 'Control+Alt+U') {
           return { clicked: false, before };
         }
         document.querySelector('#saveSettingsButton').click();
@@ -8531,7 +8587,7 @@ async function main() {
         ]);
         const saved = stored.spaceTabsState || {};
         const status = document.querySelector('#settingsStatus')?.textContent || '';
-        if (saved.shortcuts?.autoGroup !== 'Control+Alt+Y' ||
+        if (saved.shortcuts?.nextSpace !== 'Control+Alt+Y' ||
             saved.shortcuts?.tidyNames === 'Control+Alt+Y' ||
             secrets.spaceTabsSecrets?.ai?.apiKey !== 'concurrent-settings-b-key-e2e' ||
             !/conflict|already|same shortcut|another action|changed/i.test(status)) return null;
@@ -8551,7 +8607,7 @@ async function main() {
         if (document.readyState !== 'complete') return null;
         const stored = await chrome.storage.local.get('spaceTabsState');
         const shortcuts = stored.spaceTabsState?.shortcuts || {};
-        return shortcuts.autoGroup === 'Control+Alt+Y' && shortcuts.tidyNames !== 'Control+Alt+Y'
+        return shortcuts.nextSpace === 'Control+Alt+Y' && shortcuts.tidyNames !== 'Control+Alt+Y'
           ? structuredClone(shortcuts)
           : null;
       })()`,
@@ -8559,12 +8615,12 @@ async function main() {
     );
     record(
       'Settings rejects a concurrent cross-action shortcut conflict without overwriting the newer binding',
-      concurrentShortcutBCommitted.shortcuts.autoGroup === 'Control+Alt+Y' &&
+      concurrentShortcutBCommitted.shortcuts.nextSpace === 'Control+Alt+Y' &&
         concurrentShortcutAClick.before.tidyNames === 'Control+Alt+Y' &&
-        concurrentShortcutConflict.shortcuts.autoGroup === 'Control+Alt+Y' &&
+        concurrentShortcutConflict.shortcuts.nextSpace === 'Control+Alt+Y' &&
         concurrentShortcutConflict.shortcuts.tidyNames !== 'Control+Alt+Y' &&
         concurrentShortcutConflict.auth.apiKey === 'concurrent-settings-b-key-e2e' &&
-        concurrentShortcutConflictReloaded.autoGroup === 'Control+Alt+Y' &&
+        concurrentShortcutConflictReloaded.nextSpace === 'Control+Alt+Y' &&
         concurrentShortcutConflictReloaded.tidyNames !== 'Control+Alt+Y',
       JSON.stringify({
         bCommitted: concurrentShortcutBCommitted,
@@ -9675,7 +9731,7 @@ async function main() {
       })`, 12000);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `(() => {
       const provider = document.querySelector('#providerInput');
       provider.value = 'openai-compatible';
@@ -9755,7 +9811,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `(() => {
       document.querySelector('#apiKeyInput').value = 'ask-e2e-key';
       document.querySelector('#saveSettingsButton').click();
@@ -9786,8 +9842,8 @@ async function main() {
       }, chat: testAIChat }),
     );
 
-    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
+    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden`);
     const autoGroupCanonicalDuplicateTitle = 'Auto Group Canonical Duplicate E2E';
     const autoGroupCanonicalPhysicalTitle = chromeGroupTitle(autoGroupCanonicalDuplicateTitle);
     const autoGroupCanonicalFixture = await evaluate(client, `(async () => {
@@ -9986,7 +10042,7 @@ async function main() {
     })()`, 15000);
     await evaluate(client, `[...document.querySelectorAll('.space')]
       .find((button) => button.title === 'Default')?.click()`);
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden &&
       [...document.querySelectorAll('.group-header h2')]
         .some((heading) => heading.textContent === 'Historical Tag E2E') &&
       [...document.querySelectorAll('.group-header h2')]
@@ -10118,12 +10174,12 @@ async function main() {
     const incompleteAutoGroupPermissionBefore = await evaluate(client,
       `window.__askE2ECalls.permissionRequests`);
     askFixtureServer.armIncompleteAutoGroupPlan();
-    await clickElementWithCDP(client, '#autoGroupButton');
+    await clickElementWithCDP(client, '#tidyNamesButton');
     let incompleteAutoGroupState;
     try {
       incompleteAutoGroupState = await waitFor(client, `(async () => {
         if (document.querySelector('#actionDialog')?.open ||
-            document.querySelector('#autoGroupButton')?.disabled) return null;
+            document.querySelector('#tidyNamesButton')?.disabled) return null;
         const status = document.querySelector('#syncStatus')?.textContent || '';
         const toast = document.querySelector('#workbenchToast')?.textContent || '';
         if (!status.includes('incomplete group plan with 1 eligible tab unassigned') ||
@@ -10140,7 +10196,7 @@ async function main() {
         status: document.querySelector('#syncStatus')?.textContent || '',
         toast: document.querySelector('#workbenchToast')?.textContent || '',
         tone: document.querySelector('#workbenchToast')?.dataset.tone || '',
-        buttonDisabled: Boolean(document.querySelector('#autoGroupButton')?.disabled),
+        buttonDisabled: Boolean(document.querySelector('#tidyNamesButton')?.disabled),
         dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
         dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
       })`);
@@ -10192,10 +10248,10 @@ async function main() {
     }
     await waitForLifecycleJournalToSettle(client);
     const mixedAutoGroupBefore = await evaluate(client, `window.__captureAutoGroupE2E()`);
-    await clickElementWithCDP(client, '#autoGroupButton');
+    await clickElementWithCDP(client, '#tidyNamesButton');
     const mixedNoOpAutoGroupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
       const sections = [...document.querySelectorAll('#actionDialogPreview .action-preview-section')]
         .map((section) => ({
           title: section.querySelector('h3 span')?.textContent || '',
@@ -10228,7 +10284,7 @@ async function main() {
     await clickElementWithCDP(client, '#actionDialogCancel');
     const mixedAutoGroupCancelled = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#autoGroupButton')?.disabled) return null;
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       return window.__captureAutoGroupE2E();
     })()`);
     record(
@@ -10295,12 +10351,12 @@ async function main() {
       });
       window.__autoGroupPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
     })()`);
-    await clickElementWithCDP(client, '#autoGroupButton');
+    await clickElementWithCDP(client, '#tidyNamesButton');
     let autoGroupMixedPreview;
     try {
       autoGroupMixedPreview = await waitFor(client, `(() => {
         if (!document.querySelector('#actionDialog')?.open ||
-            document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+            document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
         const sections = [...document.querySelectorAll('#actionDialogPreview .action-preview-section')]
           .map((section) => ({
             title: section.querySelector('h3 span')?.textContent || '',
@@ -10325,7 +10381,7 @@ async function main() {
           message: document.querySelector('#actionDialogMessage')?.textContent || '',
           confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
           titles: [...new Set(window.__autoGroupPreviewTitles || [])],
-          disclosure: document.querySelector('#autoGroupButton')?.getAttribute('aria-label') || '',
+          disclosure: document.querySelector('#tidyNamesButton')?.getAttribute('aria-label') || '',
           scroll: {
             dialogOverflowY: dialog ? getComputedStyle(dialog).overflowY : '',
             formOverflowY: form ? getComputedStyle(form).overflowY : '',
@@ -10378,9 +10434,9 @@ async function main() {
     const previewMergeDuplicatesSection = autoGroupMixedPreview.sections.find((section) =>
       section.title === 'Merge duplicates');
     const autoGroupExpectedOperationSummary =
-      'Auto Group organized 2 tabs and merged 2 duplicate Tags';
+      'Tidy organized 2 tabs and merged 2 duplicate Tags';
     record(
-      'Auto Group directly opens one concise final preview with a single scroll region',
+      'Tidy directly opens one concise final preview with a single scroll region',
       autoGroupMixedPreview.message.includes(autoGroupPreviewSummary) &&
         autoGroupMixedPreview.message.length <= 72 &&
         /(?:\d+ ms|\d+(?:\.\d+)? s)$/.test(autoGroupMixedPreview.message) &&
@@ -10391,13 +10447,13 @@ async function main() {
         !autoGroupMixedPreview.message.includes('Nothing is sent until you choose Generate preview') &&
         !autoGroupMixedPreview.titles.includes('Generate Auto Group preview?') &&
         !autoGroupMixedPreview.sections.some((section) => section.title === 'Remain untouched') &&
-        autoGroupMixedPreview.disclosure.includes('titles, simplified URLs, domains, current Tags, and live/saved status') &&
+        autoGroupMixedPreview.disclosure.includes('disclosed tab titles, simplified URLs, and domains') &&
         autoGroupMixedPreview.scroll.dialogOverflowY === 'hidden' &&
         autoGroupMixedPreview.scroll.formOverflowY === 'hidden' &&
         autoGroupMixedPreview.scroll.previewOverflowY === 'auto' &&
         !autoGroupMixedPreview.scroll.dialogScrollable &&
         !autoGroupMixedPreview.scroll.formScrollable &&
-        autoGroupMixedPreview.confirmText === 'Apply groups' &&
+        autoGroupMixedPreview.confirmText === 'Apply tidy' &&
         autoGroupMixedPreview.proposal.rows.length === 2 &&
         previewSavedRow?.badge === 'Saved' &&
         previewSavedRow?.source === 'From Historical Tag E2E' &&
@@ -10431,7 +10487,7 @@ async function main() {
     await clickElementWithCDP(client, '#actionDialogCancel');
     const autoGroupApplyPreviewCancelledState = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#autoGroupButton')?.disabled) return null;
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       return window.__captureAutoGroupE2E();
     })()`);
     record(
@@ -10450,10 +10506,10 @@ async function main() {
       }),
     );
 
-    await clickElementWithCDP(client, '#autoGroupButton');
+    await clickElementWithCDP(client, '#tidyNamesButton');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Auto Group Preview' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply groups'`, 12000);
+      document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
     const autoGroupStaleNewTab = await evaluate(client, `(async () => {
       const created = await chrome.runtime.sendMessage({
         type: 'tabs:create',
@@ -10472,9 +10528,9 @@ async function main() {
     await clickElementWithCDP(client, '#actionDialogConfirm');
     const autoGroupNewCandidateRejected = await waitFor(client, `(async () => {
       if (document.querySelector('#actionDialog')?.open ||
-          document.querySelector('#autoGroupButton')?.disabled) return null;
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       const status = document.querySelector('#syncStatus')?.textContent || '';
-      if (!status.includes('eligible tabs changed while Auto Group was open')) return null;
+      if (!status.includes('eligible tabs changed while the preview was open')) return null;
       const captured = await window.__captureAutoGroupE2E();
       const newTab = captured.chrome.tabs.find((tab) =>
         tab.id === ${JSON.stringify(autoGroupStaleNewTab.id)});
@@ -10507,10 +10563,10 @@ async function main() {
     })()`, 12000);
     await waitForLifecycleJournalToSettle(client);
 
-    await clickElementWithCDP(client, '#autoGroupButton');
+    await clickElementWithCDP(client, '#tidyNamesButton');
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Auto Group Preview' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply groups'`, 12000);
+      document.querySelector('#actionDialogTitle')?.textContent === 'Tidy Preview' &&
+      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`, 12000);
     const autoGroupDynamicTitle = 'Ask Source Alpha (metadata changed after preview)';
     await evaluate(client, `(async () => {
       await chrome.scripting.executeScript({
@@ -10565,7 +10621,7 @@ async function main() {
         .filter((card) => card.querySelector('.group-header h2')?.textContent ===
           ${JSON.stringify(askFixtureServer.autoGroupPreservedEmptyTagTitle)});
       const toast = document.querySelector('#workbenchToast');
-      if (document.querySelector('#autoGroupButton')?.disabled ||
+      if (document.querySelector('#tidyNamesButton')?.disabled ||
           document.querySelector('#actionDialog')?.open ||
           (operation?.status !== 'applied' && toast?.dataset.tone !== 'error')) return null;
       return {
@@ -10653,7 +10709,7 @@ async function main() {
         newOrphansAfterApply.length === 0 &&
         appliedAutoGroupState.operation.spaceId === 'default' &&
         appliedAutoGroupState.undoText === 'Undo' &&
-        appliedAutoGroupState.status.includes('Auto group updated Default') &&
+        appliedAutoGroupState.status.includes('Tidy updated Default') &&
         autoGroupTitleChange.title === autoGroupDynamicTitle &&
         autoGroupTitleChange.url === askFixtureServer.sourceAlphaUrl &&
         autoGroupProviderRequestsAfterApply === autoGroupRequestsBefore + 3 &&
@@ -10771,6 +10827,28 @@ async function main() {
     );
 
     const appliedAutoGroupId = appliedAutoGroupState.alphaGroup.id;
+    // One Tidy run commits two operations: the merge/regroup transaction
+    // ('auto-group') and the panel rename transaction ('tidy-names'). Undo the
+    // rename record first, then undo the grouping record to fully restore the
+    // organization.
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const history = [...(stored.spaceTabsState?.operationHistory || [])].reverse();
+      const renameOperation = history.find((item) => item?.type === 'tidy-names');
+      return renameOperation?.status === 'applied' &&
+        document.querySelector('#undoOrganizationButton')?.dataset.operationId ===
+          renameOperation?.id;
+    })()`, 12000);
+    await clickElementWithCDP(client, '#undoOrganizationButton');
+    await waitFor(client, `(async () => {
+      const stored = await chrome.storage.local.get('spaceTabsState');
+      const history = [...(stored.spaceTabsState?.operationHistory || [])].reverse();
+      const renameOperation = history.find((item) => item?.type === 'tidy-names');
+      const groupingOperation = history.find((item) => item?.type === 'auto-group');
+      return renameOperation?.status === 'undone' && groupingOperation?.status === 'applied' &&
+        document.querySelector('#undoOrganizationButton')?.dataset.operationId ===
+          groupingOperation?.id;
+    })()`, 30000);
     await clickElementWithCDP(client, '#undoOrganizationButton');
     const undoneAutoGroupState = await waitFor(client, `(async () => {
       const captured = await window.__captureAutoGroupE2E();
@@ -10985,7 +11063,7 @@ async function main() {
     await evaluate(client, `location.reload()`);
     await waitFor(client, `document.readyState === 'complete' &&
       document.documentElement.dataset.initialized === 'true' &&
-      !document.querySelector('#autoGroupButton')?.disabled`, 15000);
+      !document.querySelector('#tidyNamesButton')?.disabled`, 15000);
     await installAutoGroupCapture();
 
     const renameGroupOldTitle = 'Rename Source Group E2E';
@@ -13189,31 +13267,38 @@ async function main() {
     const tidyAIRequestsBefore = askFixtureServer.requests
       .filter((request) => request.mode === 'tidy-names').length;
     await clickElementWithCDP(client, '#tidyNamesButton');
+    const tidyAIPreviewConfirm = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
+      return document.querySelector('#actionDialogConfirm')?.textContent || '';
+    })()`, 12000);
+    const tidyAIRequest = askFixtureServer.requests
+      .filter((request) => request.mode === 'tidy-names')[tidyAIRequestsBefore];
+    const tidyAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
+      .filter((request) => request.purpose === 'tidy-names').at(-1)`);
+    await clickElementWithCDP(client, '#actionDialogConfirm');
     const tidyDirectState = await waitFor(client, `(async () => {
-      if (document.querySelector('#tidyNamesButton')?.disabled) return null;
+      if (document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
       const stored = await chrome.storage.local.get('spaceTabsState');
       const operation = [...(stored.spaceTabsState?.operationHistory || [])].reverse()
         .find((item) => item?.type === 'tidy-names' && item.status === 'applied');
       if (!operation) return null;
       return {
         operationId: operation.id,
-        previewOpen: Boolean(document.querySelector('#actionDialog')?.open),
         undoVisible: !document.querySelector('#operationRecord')?.hidden,
       };
     })()`, 12000);
-    const tidyAIRequest = askFixtureServer.requests
-      .filter((request) => request.mode === 'tidy-names')[tidyAIRequestsBefore];
-    const tidyAIChat = await evaluate(client, `window.__askE2ECalls.aiChats
-      .filter((request) => request.purpose === 'tidy-names').at(-1)`);
     record(
-      'Tidy Names applies without Preview with its fixed 8K budget and Undo',
-      tidyAIRequest?.body?.stream === false &&
+      'Tidy applies through one preview with its fixed 8K naming budget and Undo',
+      tidyAIPreviewConfirm === 'Apply tidy' &&
+        tidyAIRequest?.body?.stream === false &&
         tidyAIRequest?.body?.max_tokens === 8_192 &&
         tidyAIChat?.purpose === 'tidy-names' &&
         tidyAIChat?.itemCount === tidyAIRequest?.candidates?.length &&
         tidyAIChat.itemCount > 0 &&
         tidyAIChat.itemCount <= 80 &&
-        !tidyDirectState.previewOpen && tidyDirectState.undoVisible,
+        tidyDirectState.undoVisible,
       JSON.stringify({ request: {
         stream: tidyAIRequest?.body?.stream,
         maxTokens: tidyAIRequest?.body?.max_tokens,
@@ -13349,10 +13434,10 @@ async function main() {
     await waitForLifecycleJournalToSettle(client);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
     const defaultAISettings = await evaluate(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
-      const settingsText = document.querySelector('#settingsDialog')?.textContent || '';
+      const settingsText = document.querySelector('#settingsView')?.textContent || '';
       return {
         maxTokensInputPresent: Boolean(document.querySelector('#maxTokensInput')),
         hasMaxOutputCopy: /Max output/i.test(settingsText),
@@ -13507,7 +13592,7 @@ async function main() {
       return {
         chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
         step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-        settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
+        settingsOpen: !document.querySelector('#settingsView')?.hidden,
       };
     })()`);
     record(
@@ -13619,7 +13704,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `document.querySelector('#exportSpaceDataButton').click()`);
     const exportFeedbackState = await waitFor(client, `(() => {
       const status = document.querySelector('#spaceBackupStatus')?.textContent || '';
@@ -13754,7 +13839,7 @@ async function main() {
       const rows = (saved.spaceSnapshots?.['backup-restored']?.groups || [])
         .flatMap((group) => group.tabs || []);
       if (saved.activeSpaceId !== 'backup-restored' ||
-          document.querySelector('#settingsDialog')?.open ||
+          !document.querySelector('#settingsView')?.hidden ||
           auxiliaryBinding?.spaceId !== 'backup-restored' ||
           externalBinding?.spaceId !== 'backup-restored' ||
           rows.filter((tab) => tab.url === ${JSON.stringify(askFixtureServer.restoreWindowCloseUrl)}).length !== 1 ||
@@ -13915,7 +14000,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `(() => {
       const file = new File(
         [${JSON.stringify(downloadedBackup.text)}],
@@ -13953,10 +14038,10 @@ async function main() {
       JSON.stringify(exportRoundTripState),
     );
     progress('real export-to-restore round trip passed');
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
+    await waitFor(client, `document.querySelector('#settingsView')?.hidden &&
       document.querySelector('#restoreSpaceDataButton')?.disabled`, 12000);
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
+    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`);
     await evaluate(client, `window.__captureOversizedRestoreE2E = async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
@@ -14056,7 +14141,7 @@ async function main() {
       }),
     );
     progress('oversized restore rollback passed');
-    await evaluate(client, `document.querySelector('#settingsDialog').close()`);
+    await evaluate(client, `document.querySelector('#settingsCloseButton').click()`);
 
     progress('checking durable native tab lifecycle while extension UI is unavailable');
     await evaluate(client, `document.querySelector('.add-space').click()`);
