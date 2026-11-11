@@ -1,5 +1,6 @@
 import { normalizeAIProviderSettings } from './ai-providers.js';
 import { normalizeArcImportToken } from './action-safety.js';
+import { normalizeTidyRuleSettings } from './tidy-rules.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
@@ -9,8 +10,6 @@ export const BROWSER_SESSION_STORAGE_KEY = 'spaceTabsBrowserSession';
 export const BROWSER_SESSION_CARRYOVER_STORAGE_KEY = 'spaceTabsBrowserSessionCarryover';
 export const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
-const LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT = 'Meta+Enter';
-const LEGACY_DEFAULT_ASK_ABORT_SHORTCUT = 'Control+C';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 const DOMESTIC_CODING_AI_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
@@ -44,10 +43,9 @@ export function createDefaultState(localConfig = {}) {
     tabOrder: {},
     collapsedGroups: {},
     collapsedSpaceGroups: {},
-    askSessions: {},
-    activeAskSessionKey: '',
     spaceContexts: {},
     spaceSnapshots: {},
+    tidyRules: normalizeTidyRuleSettings(),
     onboarding: {
       version: 2,
       completed: false,
@@ -252,10 +250,9 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     tabOrder: compatibleSpaceModel ? { ...defaults.tabOrder, ...(stored.tabOrder || {}) } : defaults.tabOrder,
     collapsedGroups: compatibleSpaceModel ? { ...defaults.collapsedGroups, ...(stored.collapsedGroups || {}) } : defaults.collapsedGroups,
     collapsedSpaceGroups: { ...defaults.collapsedSpaceGroups, ...(stored.collapsedSpaceGroups || {}) },
-    askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
-    activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
+    tidyRules: normalizeTidyRuleSettings(stored.tidyRules),
     onboarding: normalizeOnboarding(stored.onboarding, defaults.onboarding),
     lastArcImport: normalizeLastArcImport(stored.lastArcImport),
     operationHistory: normalizeOperationHistory(stored.operationHistory),
@@ -369,20 +366,6 @@ function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVer
     normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT
   ) {
     shortcuts.togglePanel = defaultShortcuts.togglePanel;
-  }
-  if (
-    Number(storedVersion) < 9 &&
-    Number(currentVersion) >= 9 &&
-    normalizeShortcut(storedShortcuts.askSubmit) === LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT
-  ) {
-    shortcuts.askSubmit = defaultShortcuts.askSubmit;
-  }
-  if (
-    Number(storedVersion) < 10 &&
-    Number(currentVersion) >= 10 &&
-    normalizeShortcut(storedShortcuts.askAbort) === LEGACY_DEFAULT_ASK_ABORT_SHORTCUT
-  ) {
-    shortcuts.askAbort = defaultShortcuts.askAbort;
   }
   return shortcuts;
 }
