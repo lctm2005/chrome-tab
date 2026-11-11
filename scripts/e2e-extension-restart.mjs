@@ -439,8 +439,9 @@ function expectedPortableProjection(urls) {
 
 function panelStateExpression(urls) {
   return `(async () => {
-    const [stored, session, browserTabs, browserGroups, currentWindow] = await Promise.all([
+    const [stored, localAll, session, browserTabs, browserGroups, currentWindow] = await Promise.all([
       chrome.storage.local.get('spaceTabsState'),
+      chrome.storage.local.get(null),
       chrome.storage.session.get(null),
       chrome.tabs.query({}),
       chrome.tabGroups.query({}),
@@ -479,8 +480,9 @@ function panelStateExpression(urls) {
       currentWindowId: currentWindow.id,
       browserSessionId: saved.browserSessionId || '',
       sessionBrowserId: session.spaceTabsBrowserSession || '',
-      hasSecret: Object.hasOwn(session, 'spaceTabsSecrets'),
-      sessionKey: session.spaceTabsSecrets?.ai?.apiKey || '',
+      hasSecret: Object.hasOwn(localAll, 'spaceTabsSecrets'),
+      sessionKey: localAll.spaceTabsSecrets?.ai?.apiKey || '',
+      sessionSecret: Object.hasOwn(session, 'spaceTabsSecrets'),
       windowState: session.spaceTabsWindowState || null,
       pendingLifecycleKeys: Object.keys(session).filter((key) =>
         key.startsWith('spaceTabsLifecycleEvent:') || key.startsWith('spaceTabsLifecycleSuppression:')),
@@ -592,8 +594,10 @@ function assertPanelState({ state, fixture, urls, expectedPortable, previousIds 
       state: state.browserSessionId,
       session: state.sessionBrowserId,
     });
-    assert(!state.hasSecret && state.sessionKey === '',
-      'Session-only API key survived full Chrome restart', state);
+    assert(state.hasSecret && state.sessionKey === SESSION_KEY_SENTINEL,
+      'The locally stored API key did not survive full Chrome restart', state);
+    assert(!state.sessionSecret,
+      'A legacy session-area API key came back after full Chrome restart', state);
     const activeSpaceIds = state.windowState?.activeSpaceIds || {};
     assert(Object.keys(activeSpaceIds).length === 1 && activeSpaceIds[String(state.currentWindowId)] === SPACE_ID,
       'Window binding was not rebuilt solely for the current Chrome window', activeSpaceIds);
@@ -766,10 +770,8 @@ async function main() {
         [String(duplicateB.id)]: binding(duplicateB, ${JSON.stringify(SNAPSHOT_IDS.group)}, ${JSON.stringify(SNAPSHOT_IDS.duplicateB)}),
         [String(ungrouped.id)]: binding(ungrouped, ${JSON.stringify(SNAPSHOT_IDS.ungroupedGroup)}, ${JSON.stringify(SNAPSHOT_IDS.ungrouped)}),
       };
-      await chrome.storage.local.set({ spaceTabsState: state });
-      await chrome.storage.session.set({
-        spaceTabsBrowserSession: ${JSON.stringify(BEFORE_SESSION_ID)},
-        spaceTabsWindowState: { activeSpaceIds: { [String(window.id)]: ${JSON.stringify(SPACE_ID)} } },
+      await chrome.storage.local.set({
+        spaceTabsState: state,
         spaceTabsSecrets: {
           ai: {
             provider: 'openai',
@@ -778,6 +780,10 @@ async function main() {
             apiKey: ${JSON.stringify(SESSION_KEY_SENTINEL)},
           },
         },
+      });
+      await chrome.storage.session.set({
+        spaceTabsBrowserSession: ${JSON.stringify(BEFORE_SESSION_ID)},
+        spaceTabsWindowState: { activeSpaceIds: { [String(window.id)]: ${JSON.stringify(SPACE_ID)} } },
       });
       return {
         windowId: window.id,
@@ -802,7 +808,7 @@ async function main() {
       baseline.sessionBrowserId === BEFORE_SESSION_ID,
     'First process did not use the seeded browser session identity', baseline);
     assert(baseline.hasSecret && baseline.sessionKey === SESSION_KEY_SENTINEL,
-      'First process did not retain the session-only API key fixture', baseline);
+      'First process did not retain the locally stored API key fixture', baseline);
     assert(baseline.windowState?.activeSpaceIds?.[String(fixture.windowId)] === SPACE_ID,
       'First process did not retain its window binding fixture', baseline.windowState);
 
@@ -825,25 +831,29 @@ async function main() {
     probe = await attachPage(client, probeUrl);
 
     const prePanelRestart = await evaluate(client, probe.sessionId, `(async () => {
-      const [session, stored, tabs] = await Promise.all([
+      const [session, local, tabs] = await Promise.all([
         chrome.storage.session.get(null),
-        chrome.storage.local.get('spaceTabsState'),
+        chrome.storage.local.get(null),
         chrome.tabs.query({}),
       ]);
       return {
         runtimeId: chrome.runtime.id,
-        hasSecret: Object.hasOwn(session, 'spaceTabsSecrets'),
+        hasSecret: Object.hasOwn(local, 'spaceTabsSecrets'),
+        secretKey: local.spaceTabsSecrets?.ai?.apiKey || '',
         hasWindowState: Object.hasOwn(session, 'spaceTabsWindowState'),
+        sessionSecret: Object.hasOwn(session, 'spaceTabsSecrets'),
         sessionBrowserId: session.spaceTabsBrowserSession || '',
-        portable: (${portableProjectionExpression()})(stored.spaceTabsState || {}),
+        portable: (${portableProjectionExpression()})(local.spaceTabsState || {}),
         fixtureUrls: tabs.map((tab) => tab.url || tab.pendingUrl || '')
           .filter((url) => Object.values(${JSON.stringify(fixtureServer.urls)}).includes(url)),
       };
     })()`);
     assert(prePanelRestart.runtimeId === extensionId,
       'The same unpacked extension fixture did not reopen with its original id', prePanelRestart);
-    assert(!prePanelRestart.hasSecret && !prePanelRestart.hasWindowState,
-      'Session API key or window binding survived before the app reopened', prePanelRestart);
+    assert(prePanelRestart.hasSecret && prePanelRestart.secretKey === SESSION_KEY_SENTINEL &&
+      !prePanelRestart.sessionSecret && !prePanelRestart.hasWindowState,
+      'The durable API key did not outlive the browser restart, or stale session state came back',
+      prePanelRestart);
     assert(prePanelRestart.sessionBrowserId !== BEFORE_SESSION_ID,
       'The old browser session id survived full Chrome exit', prePanelRestart);
     assert(JSON.stringify(prePanelRestart.portable) === JSON.stringify(expectedPortable),

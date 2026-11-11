@@ -30,8 +30,9 @@ Space Tabs may handle:
 ## Local Storage
 
 Space Tabs stores workspace data and preferences in Chrome extension storage on the
-user's device. The optional AI API key is stored in Chrome session storage when
-available and is excluded from normal workspace state and exported backups.
+user's device. The optional AI API key is stored in Chrome local extension
+storage (it stays in this browser profile and never leaves the device) and is
+excluded from normal workspace state and exported backups.
 
 Space Tabs does not require an account, collect telemetry, or operate a hosted
 sync service in this release. Workspace data is not uploaded to a Space Tabs server. Space Tabs does not

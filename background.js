@@ -24,10 +24,12 @@ import { extractCurrentPage } from './src/shared/page-extraction.js';
 import { chromeGroupTitle } from './src/shared/group-title.js';
 import { normalizePanelWindowId, shouldRouteToPanel } from './src/shared/panel-routing.js';
 import {
+  BROWSER_SESSION_CARRYOVER_STORAGE_KEY,
   BROWSER_SESSION_STORAGE_KEY,
   createDefaultState,
   forgetActiveSpaceForWindow,
   mergeStoredState,
+  pickBrowserSessionId,
   resetChromeSessionBindings,
   serializeGroup,
   serializeTab,
@@ -70,6 +72,11 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onStartup?.addListener(() => {
+  // A browser restart reassigns Chrome tab and group ids, so the session id
+  // must rotate. onStartup fires during profile load, before any panel can
+  // resolve the id, so removing the carryover here guarantees the next id is
+  // fresh while an extension reload keeps the previous one.
+  void chrome.storage.local.remove(BROWSER_SESSION_CARRYOVER_STORAGE_KEY).catch(() => undefined);
   scheduleLifecycleDrain();
   return recoverAskStreamsAtWorkerStart();
 });
@@ -982,14 +989,28 @@ function lifecycleEventWindowId(event = {}) {
 }
 
 async function getOrCreateBrowserSessionId() {
-  const stored = await chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY);
-  const existing = stored[BROWSER_SESSION_STORAGE_KEY];
-  if (typeof existing === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(existing)) return existing;
-  const sessionId = crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await chrome.storage.session.set({ [BROWSER_SESSION_STORAGE_KEY]: sessionId });
-  return sessionId;
+  const [storedSession, storedLocal] = await Promise.all([
+    chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY),
+    chrome.storage.local.get(BROWSER_SESSION_CARRYOVER_STORAGE_KEY),
+  ]);
+  const picked = pickBrowserSessionId({
+    sessionValue: storedSession[BROWSER_SESSION_STORAGE_KEY],
+    carryoverValue: storedLocal[BROWSER_SESSION_CARRYOVER_STORAGE_KEY],
+    randomId: crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  });
+  const writes = [];
+  if (picked.source !== 'session') {
+    writes.push(chrome.storage.session.set({ [BROWSER_SESSION_STORAGE_KEY]: picked.sessionId }));
+  }
+  if (picked.source === 'new') {
+    writes.push(chrome.storage.local.set({
+      [BROWSER_SESSION_CARRYOVER_STORAGE_KEY]: picked.sessionId,
+    }));
+  }
+  await Promise.all(writes);
+  return picked.sessionId;
 }
 
 async function enrichLifecycleEvent(state, event) {

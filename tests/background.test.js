@@ -4641,6 +4641,32 @@ test('runtime startup drains a journal entry left by an earlier worker', async (
   )));
 });
 
+test('a failing session carryover cleanup does not block browser startup work', async () => {
+  const startupKey = `${LIFECYCLE_EVENT_PREFIX}startup-carryover-failure`;
+  const background = await loadBackground({
+    storage: lifecycleStorage(lifecycleWorkspace(), {
+      [startupKey]: {
+        type: 'removed',
+        tabId: 11,
+        windowId: 1,
+        isWindowClosing: false,
+        eventId: 'startup-carryover-failure',
+        capturedAt: 210,
+        sequence: 1,
+      },
+    }),
+    behavior: {
+      'storage.local.remove': async () => {
+        throw new Error('carryover cleanup failed');
+      },
+    },
+  });
+
+  await background.startup();
+  await waitFor(() => background.storageSession[startupKey] === undefined);
+  assert.equal(background.storageLocal[STORAGE_KEY].tabLifecycle[11], undefined);
+});
+
 test('journal ordering is deterministic when timestamps and worker-local sequences tie', async () => {
   const firstKey = `${LIFECYCLE_EVENT_PREFIX}same-time-a`;
   const secondKey = `${LIFECYCLE_EVENT_PREFIX}same-time-b`;

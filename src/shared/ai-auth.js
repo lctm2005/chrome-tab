@@ -32,6 +32,24 @@ export function scopedAIKey(auth, settings = {}) {
   return apiKey;
 }
 
+/**
+ * Recovers a stored key whose endpoint scope drifted from the current
+ * settings, for example when a provider catalog renames a base URL. A key for
+ * the same provider is still the user's key: it is returned with `drifted`
+ * so the caller can rewrite the stored scope instead of losing the secret.
+ * Keys bound to another provider stay invisible rather than being adopted.
+ */
+export function reconcileScopedAIKey(auth, settings = {}) {
+  const strict = scopedAIKey(auth, settings);
+  if (strict) return { apiKey: strict, drifted: false };
+  if (!auth || typeof auth !== 'object') return null;
+  const apiKey = String(auth.apiKey || '').trim();
+  if (!apiKey) return null;
+  const scope = aiAuthScope(settings);
+  if (String(auth.provider || '') !== scope.provider) return null;
+  return { apiKey, drifted: true };
+}
+
 export function assertSafeAIAuthTransport(settings = {}) {
   const apiKey = String(settings?.apiKey || '').trim();
   if (!apiKey || !providerRequiresApiKey(settings)) return true;
@@ -64,16 +82,7 @@ export async function persistScopedAIConfiguration(settings, operations) {
         rollback: () => operations.restoreAuth(previousAuth),
       },
     ]
-    : [
-      {
-        apply: () => operations.clearAuth(),
-        rollback: () => operations.restoreAuth(previousAuth),
-      },
-      {
-        apply: () => operations.persistSettings(),
-        rollback: () => operations.restoreSettings(previousSettings),
-      },
-    ];
+    : clearStepsFor(settings, operations, previousAuth, previousSettings);
   const attempted = [];
   try {
     for (const step of steps) {
@@ -99,6 +108,37 @@ export async function persistScopedAIConfiguration(settings, operations) {
     throw error;
   }
   return auth;
+}
+
+/**
+ * Builds the steps for saving settings without a key. A stored key is only
+ * cleared when the current settings still resolve to the same scope, meaning
+ * the user saw this exact key in the form and removed it. A secret saved for
+ * a different (or unreadable) scope survives, because the form could not have
+ * been showing it and clearing it would silently destroy recoverable data.
+ */
+function clearStepsFor(settings, operations, previousAuth, previousSettings) {
+  const extract = typeof operations?.authFromSnapshot === 'function'
+    ? operations.authFromSnapshot
+    : (snapshot) => snapshot;
+  const candidate = extract(previousAuth);
+  const scoped = candidate && typeof candidate === 'object'
+    ? createScopedAIAuth(candidate)
+    : null;
+  const scope = aiAuthScope(settings);
+  const ownsStoredKey = !scoped || (
+    scoped.provider === scope.provider &&
+    scoped.baseUrl === scope.baseUrl
+  );
+  const clearStep = {
+    apply: () => operations.clearAuth(),
+    rollback: () => operations.restoreAuth(previousAuth),
+  };
+  const settingsStep = {
+    apply: () => operations.persistSettings(),
+    rollback: () => operations.restoreSettings(previousSettings),
+  };
+  return ownsStoredKey ? [clearStep, settingsStep] : [settingsStep];
 }
 
 function isLoopbackHostname(value) {

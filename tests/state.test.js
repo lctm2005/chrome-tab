@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import {
   activeSpaceForStorage,
   activeSpaceForWindow,
+  BROWSER_SESSION_CARRYOVER_STORAGE_KEY,
   createDefaultState,
   forgetActiveSpaceForWindow,
   mergeStoredState,
   normalizeWindowSpaceState,
+  pickBrowserSessionId,
   reassignDeletedSpaceWindows,
   rememberActiveSpaceForWindow,
   resetChromeSessionBindings,
@@ -79,6 +81,54 @@ test('keeps the exact state object when the normalized browser session is unchan
     operationHistory: null,
   }, 'next-session');
   assert.deepEqual(resetWithoutHistory.operationHistory, []);
+});
+
+test('pickBrowserSessionId reuses the live session value when storage still has one', () => {
+  const picked = pickBrowserSessionId({
+    sessionValue: ' live-session ',
+    carryoverValue: 'stale-carryover',
+    randomId: 'fresh-uuid',
+  });
+  assert.deepEqual(picked, { sessionId: 'live-session', source: 'session' });
+});
+
+test('pickBrowserSessionId recovers the carryover id after an extension reload', () => {
+  const picked = pickBrowserSessionId({
+    sessionValue: '',
+    carryoverValue: ' carried-over-session ',
+    randomId: 'fresh-uuid',
+  });
+  assert.deepEqual(picked, { sessionId: 'carried-over-session', source: 'carryover' });
+});
+
+test('pickBrowserSessionId generates a new session only when both stores are empty', () => {
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '', carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: undefined, carryoverValue: null, randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+});
+
+test('pickBrowserSessionId treats unsafe ids as absent', () => {
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '__proto__', carryoverValue: 'safe-carryover', randomId: 'fresh-uuid' }),
+    { sessionId: 'safe-carryover', source: 'carryover' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: 'bad\u0000session', carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: 'a'.repeat(201), carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '', carryoverValue: '', randomId: '  ' }),
+    { sessionId: '', source: 'new' },
+  );
 });
 
 test('clears only Chrome-session bindings and live-id undo after the browser session changes', () => {

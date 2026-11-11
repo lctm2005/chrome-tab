@@ -6,6 +6,7 @@ export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
 export const WINDOW_STATE_KEY = 'spaceTabsWindowState';
 export const BROWSER_SESSION_STORAGE_KEY = 'spaceTabsBrowserSession';
+export const BROWSER_SESSION_CARRYOVER_STORAGE_KEY = 'spaceTabsBrowserSessionCarryover';
 export const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
 const LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT = 'Meta+Enter';
@@ -93,6 +94,26 @@ export function resetChromeSessionBindings(state, sessionId) {
     operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
       .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
   };
+}
+
+/**
+ * Resolves the current browser session id without treating an extension
+ * reload as a browser restart.
+ *
+ * Chrome tab and group ids survive extension updates and manual reloads, so
+ * the volatile chrome.storage.session id must be recoverable. The carryover
+ * copy in chrome.storage.local provides that recovery. Only a genuine browser
+ * restart may rotate the id: the background clears the carryover on
+ * `chrome.runtime.onStartup`, which always fires before a panel can open.
+ */
+export function pickBrowserSessionId({ sessionValue = '', carryoverValue = '', randomId = '' } = {}) {
+  const sessionId = normalizeBrowserSessionId(sessionValue);
+  if (sessionId) return { sessionId, source: 'session' };
+
+  const carryoverId = normalizeBrowserSessionId(carryoverValue);
+  if (carryoverId) return { sessionId: carryoverId, source: 'carryover' };
+
+  return { sessionId: normalizeBrowserSessionId(randomId), source: 'new' };
 }
 
 export function normalizeWindowSpaceState(value, spaces = []) {
