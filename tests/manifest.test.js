@@ -124,7 +124,7 @@ test('sidepanel exposes Workbench, Arc import, and portable backup controls', as
   assert.match(source, /state\.onboarding\?\.completed === true/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
   assert.match(html, /id="workbenchToast"/);
-  assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
+  assert.match(styles, /html\[data-layout="workbench"\] \.settings-view/);
   assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
   assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
   assert.match(html, /class="arc-import-settings"/);
@@ -1140,7 +1140,7 @@ test('Settings keeps Chrome global shortcut handling out of the compact shortcut
   assert.match(renderShortcutSource, /filter\(\(action\) => action\.id !== 'togglePanel'\)/);
   assert.match(source, /function shortcutConflict\(shortcuts\)[\s\S]*delete panelShortcuts\.togglePanel/);
   assert.match(source, /findReservedShortcutConflict\(panelShortcuts\[action\.id\]\)/);
-  assert.match(source, /function hasBlockingDialogOpen\(\)[\s\S]*dialog !== els\.settingsDialog/);
+  assert.match(source, /function hasBlockingDialogOpen\(\)[\s\S]*querySelectorAll\('dialog\[open\]'\)/);
   assert.match(source, /import \{ createPanelKeyboardController \} from '\.\/src\/shared\/panel-keyboard\.js'/);
   assert.match(source, /const panelKeyboardController = createPanelKeyboardController\(\{[\s\S]*getShortcuts: \(\) => mergeShortcuts\(state\.shortcuts\)[\s\S]*hasBlockingDialogOpen,[\s\S]*dispatchShortcutAction: \(action\) => \{[\s\S]*prepareOrganizationRequestForAction\(action\)[\s\S]*runTask\(\(windowBinding\) => runShortcutAction\(action, organizationRequest, \{[\s\S]*windowBinding,[\s\S]*\}\)\)/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
@@ -1260,10 +1260,10 @@ test('custom context menus expose menu semantics and a complete keyboard focus m
   );
 });
 
-test('every dialog exposes a stable accessible name', async () => {
+test('every dialog and settings surface exposes a stable accessible name', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   assert.match(html, /<dialog id="actionDialog" aria-labelledby="actionDialogTitle">/);
-  assert.match(html, /<dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">[\s\S]*id="settingsDialogTitle"/);
+  assert.match(html, /<main class="settings-view" id="settingsView" hidden>[\s\S]*id="settingsDialogTitle"/);
   assert.match(html, /<dialog id="commandPaletteDialog"[^>]*aria-labelledby="commandPaletteTitle"[\s\S]*id="commandPaletteTitle"/);
 });
 

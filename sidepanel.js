@@ -375,7 +375,13 @@ const els = {
   actionDialogClose: document.querySelector('#actionDialogClose'),
   actionDialogCancel: document.querySelector('#actionDialogCancel'),
   actionDialogConfirm: document.querySelector('#actionDialogConfirm'),
-  settingsDialog: document.querySelector('#settingsDialog'),
+  settingsView: document.querySelector('#settingsView'),
+  settingsNav: document.querySelector('#settingsNav'),
+  settingsCloseButton: document.querySelector('#settingsCloseButton'),
+  tidyRulesList: document.querySelector('#tidyRulesList'),
+  tidyGroupPromptInput: document.querySelector('#tidyGroupPromptInput'),
+  tidyRenamePromptInput: document.querySelector('#tidyRenamePromptInput'),
+  resetTidyRulesButton: document.querySelector('#resetTidyRulesButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
@@ -428,7 +434,10 @@ const commandPaletteController = createCommandPaletteController({
   getData: () => ({ spaces: state.spaces, spaceView: commandPaletteSpaceView() }),
   canOpen: () => !els.actionDialog.open,
   beforeOpen: () => {
-    if (els.settingsDialog.open && !workbenchMode) els.settingsDialog.close();
+    if (activeView === 'settings') {
+      activeView = 'space';
+      render();
+    }
   },
   prepareSelection: prepareCommandPaletteSelectionFromUserGesture,
   onSelect: (prepared) => void runTask((windowBinding) => runSelectedCommandPaletteItem({
@@ -457,7 +466,6 @@ const panelKeyboardController = createPanelKeyboardController({
   },
 });
 
-if (workbenchMode) document.querySelector('.shell').append(els.settingsDialog);
 
 init();
 
@@ -712,9 +720,9 @@ function bindEvents() {
   document.addEventListener('visibilitychange', panelFocusController.handleVisibilityChange);
   window.addEventListener('blur', panelFocusController.handleWindowBlur);
   window.addEventListener('pagehide', panelFocusController.handleWindowBlur);
-  els.settingsButton.addEventListener('click', () => runTask(async (windowBinding) => {
-    if (!workbenchMode) {
-      await openWorkbench({ view: 'settings', windowBinding });
+  els.settingsButton.addEventListener('click', () => runTask(async () => {
+    if (activeView === 'settings') {
+      exitSettingsView();
       return;
     }
     state.tempTheme = state.theme || 'purple';
@@ -782,19 +790,12 @@ function bindEvents() {
     }
   });
 
-  els.settingsDialog.addEventListener('close', () => {
-    clearSettingsArcSelection();
-    if (state.tempTheme) {
-      applyTheme(state.theme);
-      delete state.tempTheme;
-    }
-    if (workbenchMode && activeView === 'settings') {
-      activeView = 'space';
-      const url = new URL(window.location.href);
-      url.searchParams.delete('view');
-      window.history.replaceState(null, '', url);
-      render();
-    }
+  els.settingsCloseButton.addEventListener('click', () => runTask(() => exitSettingsView()));
+
+  els.settingsNav.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-settings-panel]');
+    if (!button) return;
+    showSettingsPanel(button.dataset.settingsPanel);
   });
 
   els.commandPaletteInput.addEventListener('input', commandPaletteController.handleInput);
@@ -821,9 +822,24 @@ function bindPanelWindowEvents() {
   chrome.tabs.onMoved?.addListener(handleChromeHostTabMoved);
 }
 
+function exitSettingsView({ restoreTheme = true } = {}) {
+  clearSettingsArcSelection();
+  if (restoreTheme && state.tempTheme) {
+    applyTheme(state.theme);
+    delete state.tempTheme;
+  }
+  if (activeView === 'settings') {
+    activeView = 'space';
+    const url = new URL(window.location.href);
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
+    render();
+  }
+}
+
 function hasBlockingDialogOpen() {
   return [...document.querySelectorAll('dialog[open]')]
-    .some((dialog) => !workbenchMode || dialog !== els.settingsDialog);
+    .some(Boolean);
 }
 
 function prepareOrganizationRequestForAction(action) {
@@ -865,14 +881,13 @@ async function runSelectedCommandPaletteItem(prepared = {}) {
     await autoGroupTabs({ ...(prepared.organizationRequest || {}), windowBinding });
   }
   else if (item.action === 'settings') {
-    if (!workbenchMode) await openWorkbench({ view: 'settings', windowBinding });
-    else {
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        throw new Error('This Workbench moved to another Chrome window before Settings could open.');
-      }
-      activeView = 'settings';
-      render();
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      throw new Error('This panel moved to another Chrome window before Settings could open.');
     }
+    state.tempTheme = state.theme || 'purple';
+    renderSettings();
+    activeView = 'settings';
+    render();
   }
 }
 
@@ -1326,7 +1341,7 @@ function render() {
 
   const isSpaceView = activeView === 'space';
   const isSettingsView = activeView === 'settings';
-  const showSources = workbenchMode || isSpaceView;
+  const showSources = (workbenchMode || isSpaceView) && !isSettingsView;
   const groupsCollapsed = showSources && isSpaceGroupsCollapsed();
   els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
@@ -1339,10 +1354,7 @@ function render() {
   els.collapseGroupsButton.hidden = !showSources;
   els.openWorkbenchButton.hidden = workbenchMode;
   els.settingsButton.classList.toggle('active', isSettingsView);
-  if (workbenchMode) {
-    if (isSettingsView && !els.settingsDialog.open) els.settingsDialog.show();
-    if (!isSettingsView && els.settingsDialog.open) els.settingsDialog.close();
-  }
+  els.settingsView.hidden = !isSettingsView;
   els.collapseGroupsButton.innerHTML = groupsCollapsed
     ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
     : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
@@ -3222,7 +3234,6 @@ function spaceButtonLabel(text) {
 }
 
 async function openWorkbench(options = {}) {
-  if (els.settingsDialog.open) els.settingsDialog.close();
   if (workbenchMode) return;
 
   const url = extensionRuntime
@@ -9491,7 +9502,7 @@ async function restoreSpaceData(options = {}) {
     pendingSpaceBackup = null;
     els.spaceBackupInput.value = '';
     els.restoreSpaceDataButton.disabled = true;
-    els.settingsDialog.close();
+    exitSettingsView();
     render();
   } catch (error) {
     postCommitWarning ||= 'The backup restore was saved, but this view could not finish refreshing. Reopen Space Tabs to see the restored data.';
@@ -10360,6 +10371,7 @@ function renderActionDialogPreview(sections = [], variant = 'changes') {
 
 function renderSettings() {
   renderSettingsAISection();
+  renderTidyRulesSettings();
   els.undoArcImportButton.disabled = !(state.lastArcImport?.spaceIds || [])
     .some((spaceId) => state.spaces.some((space) => space.id === spaceId));
 
@@ -10373,7 +10385,55 @@ function renderSettings() {
     ai: state.ai,
     theme: state.theme,
     shortcuts: state.shortcuts,
+    tidyRules: state.tidyRules,
   });
+}
+
+let activeSettingsPanel = 'ai';
+
+function showSettingsPanel(panelId) {
+  if (!els.settingsView.querySelector(`[data-settings-panel-body="${panelId}"]`)) return;
+  activeSettingsPanel = panelId;
+  for (const button of els.settingsNav.querySelectorAll('[data-settings-panel]')) {
+    button.classList.toggle('active', button.dataset.settingsPanel === panelId);
+  }
+  for (const body of els.settingsView.querySelectorAll('[data-settings-panel-body]')) {
+    body.hidden = body.dataset.settingsPanelBody !== panelId;
+  }
+}
+
+function renderTidyRulesSettings() {
+  const rules = normalizeTidyRuleSettings(state.tidyRules);
+  els.tidyRulesList.replaceChildren(...TIDY_RULES.map((rule) => {
+    const row = document.createElement('label');
+    row.className = 'tidy-rule-row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.tidyRule = rule.id;
+    checkbox.checked = tidyRuleEnabled(rules, rule.id);
+    checkbox.disabled = rule.locked === true;
+    const text = document.createElement('span');
+    text.className = 'tidy-rule-label';
+    text.textContent = rule.locked ? `${rule.label} (always on)` : rule.label;
+    text.title = rule.description || rule.label;
+    row.append(checkbox, text);
+    return row;
+  }));
+  els.tidyGroupPromptInput.value = tidyRulePrompt(rules, 'group-by-topic');
+  els.tidyRenamePromptInput.value = tidyRulePrompt(rules, 'rename-tabs');
+}
+
+function collectTidyRuleSettingsFromControls() {
+  const enabled = {};
+  const texts = {};
+  for (const checkbox of els.tidyRulesList.querySelectorAll('input[data-tidy-rule]')) {
+    enabled[checkbox.dataset.tidyRule] = checkbox.checked;
+  }
+  const groupPrompt = els.tidyGroupPromptInput.value.trim();
+  const renamePrompt = els.tidyRenamePromptInput.value.trim();
+  if (groupPrompt) texts['group-by-topic'] = groupPrompt;
+  if (renamePrompt) texts['rename-tabs'] = renamePrompt;
+  return normalizeTidyRuleSettings({ enabled, texts });
 }
 
 function renderSettingsAISection() {
@@ -10566,6 +10626,7 @@ async function saveSettings() {
   const aiSettings = currentAISettingsDraftFromForm();
   const selectedTheme = state.tempTheme || settingsBaseline?.theme || state.theme;
   const baseline = structuredClone(settingsBaseline);
+  const tidyRules = collectTidyRuleSettingsFromControls();
   const draft = {
     ai: aiSettings,
     theme: selectedTheme,
@@ -10603,6 +10664,7 @@ async function saveSettings() {
       state.ai = mergedAI;
       state.shortcuts = merged.settings.shortcuts;
       state.theme = merged.settings.theme;
+      state.tidyRules = tidyRules;
       delete state.tempTheme;
       await persistCurrentAIConfiguration();
     });
@@ -10621,12 +10683,8 @@ async function saveSettings() {
     setSettingsStatus(mergeFailure);
     return;
   }
-  if (workbenchMode) {
-    renderSettings();
-    setSettingsStatus('Settings saved.');
-  } else {
-    els.settingsDialog.close();
-  }
+  renderSettings();
+  setSettingsStatus('Settings saved.');
   render();
 }
 

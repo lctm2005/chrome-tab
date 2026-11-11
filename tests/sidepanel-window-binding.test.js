@@ -203,7 +203,7 @@ test('Command Palette tools and group close buttons keep their gesture-time bind
   assert.match(paletteSource, /activateSpace\(item\.spaceId, \{ windowBinding \}\)/);
   assert.match(paletteSource, /tidyTabNames\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
   assert.match(paletteSource, /autoGroupTabs\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
-  assert.match(paletteSource, /openWorkbench\(\{ view: 'settings', windowBinding \}\)/);
+  assert.match(paletteSource, /item\.action === 'settings'[\s\S]*activeView = 'settings';[\s\S]*render\(\)/);
   assert.match(paletteSource, /isCurrentPanelWindowBinding\(windowBinding\)/);
 
   for (const name of ['createGroupCard', 'createFolderTabs']) {

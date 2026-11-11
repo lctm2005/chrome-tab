@@ -1337,7 +1337,6 @@ dialog::backdrop {
   animation: fadeIn 0.2s ease;
 }
 
-.settings,
 .action-form {
   display: flex;
   flex-direction: column;
@@ -1345,9 +1344,127 @@ dialog::backdrop {
   padding: 18px;
 }
 
-.settings {
-  max-height: calc(min(88vh, 720px) - 2px);
+.settings-view {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.settings-view[hidden] {
+  display: none !important;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.settings-nav {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.settings-nav-item {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.settings-nav-item.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.settings-panels {
+  flex: 1;
   overflow: auto;
+  padding: 16px;
+}
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 560px;
+}
+
+.settings-panel[hidden] {
+  display: none !important;
+}
+
+.settings-panel-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.tidy-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tidy-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.tidy-rule-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+}
+
+.tidy-rule-label {
+  min-width: 0;
+}
+
+.settings-view label,
+.settings-view .settings-panel {
+  color: var(--text);
+}
+
+.settings-view textarea {
+  resize: vertical;
+  min-height: 64px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
 }
 
 .dialog-title {
@@ -1982,57 +2099,46 @@ html[data-layout="workbench"] #openWorkbenchButton {
   display: none;
 }
 
-html[data-layout="workbench"] #settingsDialog {
+html[data-layout="workbench"] .settings-view {
   position: static;
   grid-column: 3;
   grid-row: 3;
-  width: auto;
-  height: 100%;
-  max-height: none;
-  margin: 0;
-  overflow: hidden;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-  animation: none;
+  z-index: auto;
+  background: rgba(0, 0, 0, 0.05);
 }
 
-html[data-layout="workbench"] #settingsDialog::backdrop {
-  display: none;
-}
-
-html[data-layout="workbench"] #settingsDialog .settings {
+html[data-layout="workbench"] .settings-panels .settings-panel {
   display: grid;
-  height: 100%;
-  max-height: none;
+  max-width: none;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
   gap: 14px 16px;
-  overflow: auto;
-  padding: 20px 24px 28px;
 }
 
-html[data-layout="workbench"] #settingsDialog .dialog-title,
-html[data-layout="workbench"] #settingsDialog .api-key-state,
-html[data-layout="workbench"] #settingsDialog #testAIButton,
-html[data-layout="workbench"] #settingsDialog .settings-status,
-html[data-layout="workbench"] #settingsDialog .space-data-settings,
-html[data-layout="workbench"] #settingsDialog .arc-import-settings,
-html[data-layout="workbench"] #settingsDialog .shortcut-settings,
-html[data-layout="workbench"] #settingsDialog menu {
+html[data-layout="workbench"] .settings-panel[hidden] {
+  display: none !important;
+}
+
+html[data-layout="workbench"] .settings-panel-hint,
+html[data-layout="workbench"] .tidy-rules-list,
+html[data-layout="workbench"] .settings-view label,
+html[data-layout="workbench"] .settings-head,
+html[data-layout="workbench"] .settings-footer {
   grid-column: 1 / -1;
 }
 
-html[data-layout="workbench"] #settingsDialog .dialog-title {
+html[data-layout="workbench"] .settings-head {
   position: sticky;
+  top: 0;
   z-index: 2;
-  top: -20px;
-  margin: -20px -24px 2px;
+  margin: 0 -24px 2px;
   border-bottom: 1px solid var(--line);
   padding: 18px 24px 14px;
   background: var(--bg-elevated);
+}
+
+html[data-layout="workbench"] .settings-view .settings-head h2 {
+  font-size: 16px;
 }
 
 .workbench-toast {
@@ -2109,15 +2215,6 @@ html[data-layout="workbench"] #settingsDialog .dialog-title {
 .workbench-toast.visible {
   opacity: 1;
   transform: translate(-50%, 0) scale(1);
-}
-
-html[data-layout="workbench"] #settingsDialog menu {
-  position: sticky;
-  bottom: -28px;
-  margin: 4px -24px -28px;
-  border-top: 1px solid var(--line);
-  padding: 14px 24px 20px;
-  background: var(--bg-elevated);
 }
 
 @media (max-width: 680px) {
