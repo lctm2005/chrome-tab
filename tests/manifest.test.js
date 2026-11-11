@@ -258,7 +258,7 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(source, /state\.onboarding = \{ version: 2, completed: true, stage: 'done' \}/);
   assert.match(source, /saveOnboardingAIAndFinish[\s\S]*persistCurrentAIConfiguration\(\)/);
   assert.match(source, /function stateForStorage\(\)[\s\S]*apiKey: ''/);
-  assert.match(source, /scopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
+  assert.match(source, /reconcileScopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
   assert.match(source, /function persistCurrentAIConfiguration\(\)[\s\S]*persistScopedAIConfiguration[\s\S]*readSettings: storageGet[\s\S]*readAuth: secretGet[\s\S]*persistSettings: \(\) => storageSet\(\{ \[STORAGE_KEY\]: stateForStorage\(\) \}\)[\s\S]*persistAuth:[\s\S]*clearAuth:[\s\S]*restoreSettings:[\s\S]*restoreAuth:/);
   assert.match(source, /providerInput\.addEventListener\('change', \(\) => handleAIProviderChange/);
   assert.match(source, /baseUrlInput\.addEventListener\('input', \(\) => clearAIKeyAfterEndpointEdit/);
@@ -1211,7 +1211,7 @@ test('organization commits validate freshness and record Undo only after the app
   const authoritativeLoad = autoSource.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
   const snapshotRefresh = autoSource.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
   const membershipCapture = autoSource.indexOf('rollback.membership = captureTabGroupMembership(');
-  const transaction = autoSource.indexOf('await runChromeGroupMutationTransaction({');
+  const transaction = autoSource.indexOf('await runPlanInFlight(() => runChromeGroupMutationTransaction({');
   const refreshedView = autoSource.indexOf('const refreshed = await refreshTabsView({');
   const operationRecord = autoSource.indexOf('recordOperation({');
   const checkpoint = autoSource.indexOf('checkpoint: async () => {');
@@ -1331,7 +1331,7 @@ test('backup restore discloses and immediately adopts currently open browser tab
   assert.match(restoreSource, /adoptAllOpenTabsIntoRestoredActiveSpace\(\{ windowBinding \}\)/);
   assert.match(adoptOpenTabsSource, /send\('tabs:listAll', \{\}, \{ windowBinding: options\.windowBinding \}\)[\s\S]*isCurrentPanelWindowBinding\(options\.windowBinding\)[\s\S]*adoptUnassignedEntities\([\s\S]*adoptGroups: true[\s\S]*snapshotOpenSpace\(state\.activeSpaceId, \{[\s\S]*sourceTabs: openTabs,[\s\S]*sourceGroups: openGroups/);
   assert.match(source, /adopt: operation\.type === 'restore-backup'/);
-  assert.match(source, /sanitizeSnapshotWithLifecycleIds\(\s*state\.spaceSnapshots\[spaceId\],\s*createSnapshotLifecycleId/);
+  assert.match(source, /sanitizeSnapshotWithLifecycleIds\(\s*storedSnapshot,\s*createSnapshotLifecycleId/);
 });
 
 test('non-Ask task failures never become persisted Ask conversation messages', async () => {

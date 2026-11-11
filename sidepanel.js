@@ -14,9 +14,11 @@ import {
   providerSupportsThinking,
 } from './src/shared/ai-providers.js';
 import {
+  aiAuthScope,
   assertSafeAIAuthTransport,
   createScopedAIAuth,
   persistScopedAIConfiguration,
+  reconcileScopedAIKey,
   scopedAIKey,
 } from './src/shared/ai-auth.js';
 import {
@@ -101,6 +103,7 @@ import {
 import {
   dormantSnapshotGroupIndexFromKey as snapshotGroupIndexFromKey,
   dormantSnapshotGroupKey,
+  findDormantSnapshotGroupIndex,
   projectDormantSnapshotGroupRemoval,
   projectDormantSnapshotGroupRename,
   projectOpenedDormantTabRemoval,
@@ -144,10 +147,12 @@ import {
 import {
   activeSpaceForStorage,
   activeSpaceForWindow,
+  BROWSER_SESSION_CARRYOVER_STORAGE_KEY,
   BROWSER_SESSION_STORAGE_KEY,
   createDefaultState,
   mergeStoredState,
   normalizeWindowSpaceState,
+  pickBrowserSessionId,
   reassignDeletedSpaceWindows,
   rememberActiveSpaceForWindow,
   resetChromeSessionBindings,
@@ -210,6 +215,7 @@ import {
   removeSnapshotTabs,
   retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
+  snapshotEmptyTagIsMergeCandidate,
   snapshotGroupShouldPersist,
   snapshotHasPersistentContent,
   snapshotTabCount,
@@ -313,6 +319,9 @@ let dormantSpaceView = [];
 let dormantSpaceViewSpaceId = '';
 let snapshotLifecycleIdSequence = 0;
 let lifecycleCleanupObservations = {};
+// Space ids with an Auto Group plan currently applying. Their snapshots keep
+// preserveGroups until the plan settles; see sanitizeStoredSpaceSnapshot.
+const inFlightOrganizationPlanSpaceIds = new Set();
 const syntheticPlaceholderTabIds = new Set();
 let activeView = workbenchMode && pageParams.get('view') === 'settings'
   ? 'settings'
@@ -708,7 +717,18 @@ async function syncStateFromStorage(options = {}) {
     };
     nextState.ai.apiKey = scopedAIKey(createScopedAIAuth(localConfig.ai), nextState.ai);
   } else {
-    nextState.ai.apiKey = scopedAIKey(secrets[SECRET_STORAGE_KEY]?.ai, nextState.ai);
+    const reconciled = reconcileScopedAIKey(secrets[SECRET_STORAGE_KEY]?.ai, nextState.ai);
+    nextState.ai.apiKey = reconciled?.apiKey || '';
+    if (reconciled?.drifted) {
+      // Endpoint migrations can rename a base URL while the stored key stays
+      // valid for the same provider. Rewrite the stored scope so the key is
+      // never stranded behind a scope mismatch (and later destroyed by a save).
+      void secretSet({
+        [SECRET_STORAGE_KEY]: {
+          ai: { apiKey: reconciled.apiKey, ...aiAuthScope(nextState.ai) },
+        },
+      }).catch(() => undefined);
+    }
   }
 
   if (tempTheme) nextState.tempTheme = tempTheme;
@@ -732,46 +752,51 @@ async function syncStateFromStorage(options = {}) {
 }
 
 async function saveState({ persistWindowState = true, windowBinding = null } = {}) {
-  if (!persistWindowState) {
-    return commitWindowBoundWrite({
-      isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
-      write: () => persistStorageStep({
-        key: STORAGE_KEY,
-        value: stateForStorage(),
-        get: storageGet,
-        set: storageSet,
-        remove: storageRemove,
-      }),
+  // The panel writes the whole workspace key, so every save must be serialized
+  // against background journal drains. Taking the lock here (re-entrantly)
+  // protects all call sites instead of relying on each caller to remember it.
+  return withSharedStateLock(async () => {
+    if (!persistWindowState) {
+      return commitWindowBoundWrite({
+        isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
+        write: () => persistStorageStep({
+          key: STORAGE_KEY,
+          value: stateForStorage(),
+          get: storageGet,
+          set: storageSet,
+          remove: storageRemove,
+        }),
+      });
+    }
+    if (!isCurrentPanelWindowBinding(windowBinding)) return false;
+    const workspaceState = stateForStorage();
+    const nextWindowSpaceState = rememberActiveSpaceForWindow(
+      windowSpaceState,
+      windowBinding ? windowBinding.windowId : panelWindowId,
+      state.activeSpaceId,
+      state.spaces,
+    );
+    await persistStoragePair({
+      key: WINDOW_STATE_KEY,
+      value: nextWindowSpaceState,
+      get: windowStateGet,
+      set: windowStateSet,
+      remove: windowStateRemove,
+    }, {
+      key: STORAGE_KEY,
+      value: workspaceState,
+      get: storageGet,
+      set: storageSet,
+      remove: storageRemove,
     });
-  }
-  if (!isCurrentPanelWindowBinding(windowBinding)) return false;
-  const workspaceState = stateForStorage();
-  const nextWindowSpaceState = rememberActiveSpaceForWindow(
-    windowSpaceState,
-    windowBinding ? windowBinding.windowId : panelWindowId,
-    state.activeSpaceId,
-    state.spaces,
-  );
-  await persistStoragePair({
-    key: WINDOW_STATE_KEY,
-    value: nextWindowSpaceState,
-    get: windowStateGet,
-    set: windowStateSet,
-    remove: windowStateRemove,
-  }, {
-    key: STORAGE_KEY,
-    value: workspaceState,
-    get: storageGet,
-    set: storageSet,
-    remove: storageRemove,
+    // A resolved pair write is durable even if the Workbench moved while the
+    // browser was replying. Only the pre-write guard above may report `false`;
+    // callers can therefore distinguish a no-op from a committed stale view.
+    if (isCurrentPanelWindowBinding(windowBinding)) {
+      windowSpaceState = nextWindowSpaceState;
+    }
+    return true;
   });
-  // A resolved pair write is durable even if the Workbench moved while the
-  // browser was replying. Only the pre-write guard above may report `false`;
-  // callers can therefore distinguish a no-op from a committed stale view.
-  if (isCurrentPanelWindowBinding(windowBinding)) {
-    windowSpaceState = nextWindowSpaceState;
-  }
-  return true;
 }
 
 function bindEvents() {
@@ -1234,6 +1259,7 @@ async function loadTabs({
   adopt = false,
   adoptGroups = false,
   skipSnapshotCleanupForTabIds = [],
+  skipOwnershipRestoreGroupIds = [],
   windowBinding = null,
   allowStaleWindowBinding = false,
 } = {}) {
@@ -1288,6 +1314,7 @@ async function loadTabs({
     state,
     allContentTabs,
     response.allGroups || groups,
+    { skipGroupIds: skipOwnershipRestoreGroupIds },
   );
   for (const [groupId, logicalTitle] of Object.entries(ownershipMetadata.groupTitles || {})) {
     logicalChromeGroupTitles.set(Number(groupId), logicalTitle);
@@ -2527,6 +2554,9 @@ function snapshotUrlIdentity(url) {
 }
 
 function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId) {
+  // Emptied saved Tags are filtered AFTER mapping: the row key embeds the
+  // snapshot array index, and filtering first would shift the indexes so
+  // mutations would resolve to the wrong Tag.
   return (snapshot?.groups || [])
     .map((group, groupIndex) => {
       const title = Object.hasOwn(group, 'title') ? String(group.title ?? '') : 'Ungrouped';
@@ -2565,7 +2595,14 @@ function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId)
           };
         }),
       };
-    });
+    })
+    // An emptied saved Tag is unremovable noise unless its title still
+    // collides with another Tag, which makes it a candidate the user can
+    // merge with the local Tidy. Keep those visible; drop the rest.
+    .filter((entry) => (
+      entry.tabs.length > 0 ||
+      snapshotEmptyTagIsMergeCandidate(snapshot, { title: entry.title })
+    ));
 }
 
 function renderGroups() {
@@ -4675,13 +4712,17 @@ function destructiveGroupDeletionStatus(title, result = {}) {
   const deletedCount = Number(result.deletedTabCount) || 0;
   const skippedCount = Number(result.skippedTabCount) || 0;
   const remainingGroups = Number(result.remainingTargetGroups) || 0;
+  const unresolvedSavedGroups = Number(result.unresolvedSavedGroupCount) || 0;
   const skipped = skippedCount > 0
     ? ` Skipped ${formatCount(skippedCount, 'tab')} that changed after review.`
     : '';
+  const unresolved = unresolvedSavedGroups > 0
+    ? ` ${formatCount(unresolvedSavedGroups, 'saved group')} could not be removed from saved state; reopen the Space and delete again.`
+    : '';
   if (remainingGroups > 0) {
-    return `Deleted ${formatCount(deletedCount, 'tab')} from "${cleanTitle}", but the group remains.${skipped}`;
+    return `Deleted ${formatCount(deletedCount, 'tab')} from "${cleanTitle}", but the group remains.${skipped}${unresolved}`;
   }
-  return `Deleted group "${cleanTitle}" and ${formatCount(deletedCount, 'tab')}.${skipped}`;
+  return `Deleted group "${cleanTitle}" and ${formatCount(deletedCount, 'tab')}.${skipped}${unresolved}`;
 }
 
 function handleTabClick(event, tab) {
@@ -5749,7 +5790,10 @@ async function deleteGroup(group, options = {}) {
   if (group.dormant) {
     const checkpoint = captureWorkspaceMemoryCheckpoint();
     try {
-      deleteDormantSnapshotGroup(group);
+      const removed = deleteDormantSnapshotGroup(group);
+      if (!removed) {
+        throw new Error(`Saved group "${group.displayTitle || group.title}" is no longer in this Space's saved state. Refresh and try again.`);
+      }
       await persistDormantSnapshotMutation({
         windowBinding,
         staleMessage: 'This panel moved to another Chrome window before the saved group could be deleted.',
@@ -5967,6 +6011,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
   const reviewedTargets = new Map();
   const targetSpaceId = state.activeSpaceId;
   let remainingTargetGroups = 0;
+  let unresolvedSavedGroupCount = 0;
   const result = await runGuardedDestructiveTabClose({
     tabIds: liveTabIds,
     checkpoint: async () => {
@@ -6020,10 +6065,17 @@ async function deleteGroupsAndTabs(groups, options = {}) {
     ),
     commit: async ({ closedTabIds }) => {
       const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
+      // Ownership restore must not re-bind the groups this transaction is
+      // deleting, or the cleanup below would see them as owned elsewhere.
+      const deletedGroupIds = groups
+        .filter((group) => group && group.id !== 'ungrouped' && !isVirtualGroupKey(group.key))
+        .map((group) => Number(group.id))
+        .filter(Number.isSafeInteger);
       await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
       await loadTabs({
         adopt: false,
         skipSnapshotCleanupForTabIds: closedTabIds,
+        skipOwnershipRestoreGroupIds: deletedGroupIds,
         windowBinding,
         allowStaleWindowBinding,
       });
@@ -6038,6 +6090,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
         await loadTabs({
           adopt: false,
           skipSnapshotCleanupForTabIds: closedTabIds,
+          skipOwnershipRestoreGroupIds: deletedGroupIds,
           windowBinding,
           allowStaleWindowBinding,
         });
@@ -6054,10 +6107,11 @@ async function deleteGroupsAndTabs(groups, options = {}) {
         )))
         .map((group) => group.key));
       const removedGroups = groups.filter((group) => !survivingGroupKeys.has(group.key));
-      deleteDormantSnapshotGroups(removedGroups.filter((group) => group.dormant));
-      for (const group of removedGroups.filter((item) => !item.dormant)) {
-        deleteDormantSnapshotGroup(group);
-      }
+      const unresolvedSavedGroups = [
+        ...deleteDormantSnapshotGroups(removedGroups.filter((group) => group.dormant)),
+        ...removedGroups.filter((item) => !item.dormant && !deleteDormantSnapshotGroup(item)),
+      ];
+      unresolvedSavedGroupCount = unresolvedSavedGroups.length;
       for (const group of groups.filter((item) => survivingGroupKeys.has(item.key))) {
         removeTabsFromSpaceSnapshot(targetSpaceId, (group.tabs || []).filter((tab) => (
           tab.dormant || closedIds.has(Number(tab.id))
@@ -6111,6 +6165,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
     deletedTabCount: result.closedTabIds.length + dormantTabCount,
     skippedTabCount: result.skippedTabs.length,
     remainingTargetGroups,
+    unresolvedSavedGroupCount,
   };
 }
 
@@ -6145,22 +6200,34 @@ async function ensureActiveSpaceHasOpenTabAfterClosing(
 }
 
 function deleteDormantSnapshotGroups(groups) {
-  if (!groups.length) return;
+  if (!groups.length) return [];
   const snapshot = activeSpaceSnapshot();
-  if (!snapshot) return;
+  if (!snapshot) return [...groups];
   const records = snapshotGroupRecords(snapshot);
   const snapshotGroupIds = new Set(groups
     .map((group) => String(group?.snapshotGroupId || ''))
     .filter(Boolean));
   const indexes = new Set(groups.map((group) => snapshotGroupIndexFromKey(group.key)).filter((index) => index >= 0));
-  if (snapshotGroupIds.size === 0 && indexes.size === 0) return;
+  if (snapshotGroupIds.size === 0 && indexes.size === 0) return [...groups];
+  const matchedIds = new Set();
+  const matchedIndexes = new Set();
   replaceActiveSpaceSnapshotGroups(records
-    .filter((record) => (
-      record.group.snapshotGroupId
-        ? !snapshotGroupIds.has(String(record.group.snapshotGroupId))
-        : !indexes.has(record.index)
-    ))
+    .filter((record) => {
+      const matched = record.group.snapshotGroupId
+        ? snapshotGroupIds.has(String(record.group.snapshotGroupId))
+        : indexes.has(record.index);
+      if (matched) {
+        if (record.group.snapshotGroupId) matchedIds.add(String(record.group.snapshotGroupId));
+        else matchedIndexes.add(record.index);
+      }
+      return !matched;
+    })
     .map((record) => record.group));
+  return groups.filter((group) => {
+    const snapshotGroupId = String(group?.snapshotGroupId || '');
+    if (snapshotGroupId) return !matchedIds.has(snapshotGroupId);
+    return !matchedIndexes.has(snapshotGroupIndexFromKey(group.key));
+  });
 }
 
 function replaceGroupOrderKeys(replacements, fallbackOrder = []) {
@@ -7340,9 +7407,16 @@ function sanitizeStoredSpaceSnapshots() {
 
 function sanitizeStoredSpaceSnapshot(spaceId) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return null;
+  const storedSnapshot = state.spaceSnapshots[spaceId];
+  // preserveGroups only scaffolds an in-flight Auto Group plan. Left sticky it
+  // keeps emptied Tags alive forever, so drop the flag (and let the sanitize
+  // pass purge the emptied rows) unless the plan is running right now.
+  if (storedSnapshot?.preserveGroups && !inFlightOrganizationPlanSpaceIds.has(spaceId)) {
+    delete storedSnapshot.preserveGroups;
+  }
   const snapshot = dropTemporarySnapshotGroups(
     sanitizeSnapshotWithLifecycleIds(
-      state.spaceSnapshots[spaceId],
+      storedSnapshot,
       createSnapshotLifecycleId,
     ),
   );
@@ -7376,11 +7450,13 @@ function renameDormantSnapshotGroup(group, title) {
 function deleteDormantSnapshotGroup(group) {
   const spaceId = state.activeSpaceId;
   const snapshot = state.spaceSnapshots?.[spaceId];
+  if (findDormantSnapshotGroupIndex(snapshot, group) < 0) return false;
   commitDormantSnapshotProjection(
     spaceId,
     snapshot,
     projectDormantSnapshotGroupRemoval(snapshot, group, Date.now()),
   );
+  return true;
 }
 
 function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
@@ -9257,7 +9333,17 @@ async function autoGroupTabs(options = {}) {
         }))
         .filter((group) => group.tabIds.length > 0);
 
-      await runChromeGroupMutationTransaction({
+      // Concurrent refreshes must not strip preserveGroups while the plan's
+      // emptied target groups are still being filled by Chrome mutations.
+      const runPlanInFlight = async (transaction) => {
+        inFlightOrganizationPlanSpaceIds.add(sourceSpaceId);
+        try {
+          return await transaction();
+        } finally {
+          inFlightOrganizationPlanSpaceIds.delete(sourceSpaceId);
+        }
+      };
+      await runPlanInFlight(() => runChromeGroupMutationTransaction({
         apply: async () => {
           replaceActiveSpaceSnapshotGroups(
             appliedDuplicateSnapshotPlan.snapshot.groups,
@@ -9371,7 +9457,11 @@ async function autoGroupTabs(options = {}) {
           windowBinding,
           persistRestoredState: true,
         }),
-      });
+      }));
+      // The plan has settled: drop its scaffold flag so the next save stops
+      // preserving emptied target groups as permanent empty Tags.
+      const settledSnapshot = state.spaceSnapshots?.[sourceSpaceId];
+      if (settledSnapshot?.preserveGroups) delete settledSnapshot.preserveGroups;
       committed = true;
       if (!isCurrentPanelWindowBinding(windowBinding)) {
         postCommitWarning =
@@ -11640,7 +11730,7 @@ function clearAIKeyAfterEndpointEdit(controls = settingsAIControls()) {
 
 function apiKeyStatusText() {
   if (localConfig.ai?.apiKey) return '';
-  if (state.ai.apiKey) return 'API key is configured for this Chrome session.';
+  if (state.ai.apiKey) return 'API key is stored locally in this browser profile.';
   if (!providerRequiresApiKey(state.ai)) return 'Ollama does not require an API key.';
   return 'No API key configured.';
 }
@@ -12022,53 +12112,101 @@ async function storageRemove(key) {
   localStorage.removeItem(key);
 }
 
+// The scoped AI key lives in chrome.storage.local so it survives browser
+// restarts and extension reloads. Key name is unchanged; only the storage
+// area moved. Values written by older versions to the volatile session area
+// are migrated on first read and removed there.
 async function secretGet() {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.get(SECRET_STORAGE_KEY);
+  if (extensionRuntime && chrome.storage.local) {
+    const storedLocal = await chrome.storage.local.get(SECRET_STORAGE_KEY);
+    if (Object.hasOwn(storedLocal, SECRET_STORAGE_KEY)) return storedLocal;
+    const legacy = chrome.storage.session
+      ? await chrome.storage.session.get(SECRET_STORAGE_KEY)
+      : {};
+    if (Object.hasOwn(legacy, SECRET_STORAGE_KEY)) {
+      await chrome.storage.local.set({ [SECRET_STORAGE_KEY]: legacy[SECRET_STORAGE_KEY] });
+      await chrome.storage.session.remove(SECRET_STORAGE_KEY).catch(() => undefined);
+      return { [SECRET_STORAGE_KEY]: legacy[SECRET_STORAGE_KEY] };
+    }
+    return storedLocal;
+  }
   try {
-    return JSON.parse(sessionStorage.getItem(SECRET_STORAGE_KEY) || '{}');
+    return JSON.parse(localStorage.getItem(SECRET_STORAGE_KEY) || '{}');
   } catch {
     return {};
   }
 }
 
 async function secretSet(value) {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.set(value);
-  sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify(value));
+  if (extensionRuntime && chrome.storage.local) return chrome.storage.local.set(value);
+  localStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify(value));
 }
 
 async function secretRemove(key) {
-  if (extensionRuntime && chrome.storage.session) return chrome.storage.session.remove(key);
+  if (extensionRuntime && chrome.storage.local) {
+    await chrome.storage.local.remove(key);
+    if (chrome.storage.session) {
+      await chrome.storage.session.remove(key).catch(() => undefined);
+    }
+    return;
+  }
+  localStorage.removeItem(key);
   sessionStorage.removeItem(key);
 }
 
 async function currentBrowserSessionId() {
-  let stored = {};
-  if (extensionRuntime && chrome.storage.session) {
-    stored = await chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY);
-  } else {
+  const readValue = async () => {
+    if (extensionRuntime && chrome.storage.session) {
+      const [storedSession, storedLocal] = await Promise.all([
+        chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY),
+        chrome.storage.local.get(BROWSER_SESSION_CARRYOVER_STORAGE_KEY),
+      ]);
+      return {
+        sessionValue: storedSession?.[BROWSER_SESSION_STORAGE_KEY],
+        carryoverValue: storedLocal?.[BROWSER_SESSION_CARRYOVER_STORAGE_KEY],
+      };
+    }
     try {
-      stored = JSON.parse(sessionStorage.getItem(BROWSER_SESSION_STORAGE_KEY) || '{}');
+      const storedSession = JSON.parse(sessionStorage.getItem(BROWSER_SESSION_STORAGE_KEY) || '{}');
+      const storedLocal = JSON.parse(localStorage.getItem(BROWSER_SESSION_CARRYOVER_STORAGE_KEY) || '{}');
+      return {
+        sessionValue: storedSession?.[BROWSER_SESSION_STORAGE_KEY],
+        carryoverValue: storedLocal?.[BROWSER_SESSION_CARRYOVER_STORAGE_KEY],
+      };
     } catch {
-      stored = {};
+      return { sessionValue: '', carryoverValue: '' };
+    }
+  };
+  const { sessionValue, carryoverValue } = await readValue();
+  const picked = pickBrowserSessionId({
+    sessionValue,
+    carryoverValue,
+    randomId: crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  });
+  if (picked.source === 'session') return picked.sessionId;
+
+  const writes = [];
+  if (extensionRuntime && chrome.storage.session) {
+    writes.push(chrome.storage.session.set({ [BROWSER_SESSION_STORAGE_KEY]: picked.sessionId }));
+    if (picked.source === 'new') {
+      writes.push(chrome.storage.local.set({
+        [BROWSER_SESSION_CARRYOVER_STORAGE_KEY]: picked.sessionId,
+      }));
+    }
+  } else {
+    sessionStorage.setItem(BROWSER_SESSION_STORAGE_KEY, JSON.stringify({
+      [BROWSER_SESSION_STORAGE_KEY]: picked.sessionId,
+    }));
+    if (picked.source === 'new') {
+      localStorage.setItem(BROWSER_SESSION_CARRYOVER_STORAGE_KEY, JSON.stringify({
+        [BROWSER_SESSION_CARRYOVER_STORAGE_KEY]: picked.sessionId,
+      }));
     }
   }
-  const existing = stored?.[BROWSER_SESSION_STORAGE_KEY];
-  if (isGeneratedBrowserSessionId(existing)) return existing;
-
-  const sessionId = crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const value = { [BROWSER_SESSION_STORAGE_KEY]: sessionId };
-  if (extensionRuntime && chrome.storage.session) {
-    await chrome.storage.session.set(value);
-  } else {
-    sessionStorage.setItem(BROWSER_SESSION_STORAGE_KEY, JSON.stringify(value));
-  }
-  return sessionId;
-}
-
-function isGeneratedBrowserSessionId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+  await Promise.all(writes);
+  return picked.sessionId;
 }
 
 async function windowStateGet() {
@@ -12236,9 +12374,20 @@ function runTask(task) {
   return queuedTask;
 }
 
+// Re-entrancy depth for this panel context. Web Locks are not re-entrant, and
+// saveState now takes the shared lock itself, so nested callers (loadState,
+// withFreshSpaceStateMutation) must reuse the held lock instead of deadlocking.
+let sharedStateLockDepth = 0;
+
 async function withSharedStateLock(task) {
   if (!extensionRuntime || !navigator.locks?.request) return task();
-  return navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
+  if (sharedStateLockDepth > 0) return task();
+  sharedStateLockDepth += 1;
+  try {
+    return await navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
+  } finally {
+    sharedStateLockDepth -= 1;
+  }
 }
 
 async function withFreshSpaceStateMutation(task, options = {}) {

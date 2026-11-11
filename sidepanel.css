@@ -1297,6 +1297,20 @@ menu button:disabled,
   flex-shrink: 0;
 }
 
+/* The Ask Page entry must stay discoverable: its brain icon carries no
+   meaning on its own, so the sidepanel dock keeps its text label visible. */
+html[data-layout="sidepanel"] .dock-tools .space.ask-page {
+  width: auto;
+  grid-template-columns: auto auto;
+  column-gap: 6px;
+  padding: 0 10px;
+}
+
+html[data-layout="sidepanel"] .dock-tools .space.ask-page .space-label {
+  display: block;
+  max-width: 72px;
+}
+
 .space {
   display: grid;
   width: 32px;

@@ -4381,7 +4381,9 @@ async function main() {
         .find((item) => item?.type === 'tidy-names' && item?.status === 'applied');
       const duplicateTags = (saved.spaceSnapshots?.default?.groups || [])
         .filter((group) => group.title === ${JSON.stringify(tidyMergeOnlyTitle)});
-      if (!operation || duplicateTags.length !== 1) return null;
+      // The merged Tag is uniquely named and empty, so the persistence rules
+      // retire it: cleanup is complete only when both empty duplicates are gone.
+      if (!operation || duplicateTags.length !== 0) return null;
       return {
         operation,
         duplicateTags,
@@ -4411,7 +4413,7 @@ async function main() {
         !tidyMergeOnlyApplied.operation.after?.targetFingerprint &&
         Boolean(tidyMergeOnlyApplied.operation.after?.organizationFingerprint) &&
         tidyMergeOnlyApplied.operation.before?.tagMerge === true &&
-        tidyMergeOnlyApplied.duplicateTags[0]?.custom === 'merge-only-canonical-e2e' &&
+        tidyMergeOnlyApplied.duplicateTags.length === 0 &&
         tidyMergeOnlyApplied.status.includes('merged 1 duplicate Tag') &&
         tidyMergeOnlyApplied.icon === '🧹' &&
         tidyMergeOnlyUndone.duplicateTags[0]?.custom === 'merge-only-canonical-e2e' &&
@@ -5307,7 +5309,7 @@ async function main() {
           windowId: workbenchTab.windowId,
         },
       };
-    })()`, 12000);
+    })()`, 12000)
 
     await evaluate(client, `window.__workbenchSwitchTrace.setPhase('rail-to-workbench', {
       targetSpaceId: 'workbench-e2e',
