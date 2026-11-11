@@ -100,46 +100,24 @@ test('sidepanel exposes portable backup controls without Ask Page, Context, or S
   assert.doesNotMatch(source, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"|currentSpaceContextForAI|summarizeCurrentPage/);
 });
 
-test('sidepanel exposes focused onboarding and full-page Workbench Settings', async () => {
+test('sidepanel exposes Workbench, Arc import, and portable backup controls', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
   for (const id of [
     'openWorkbenchButton',
-    'onboardingDialog',
-    'onboardingArcInput',
-    'onboardingArcChooseButton',
     'arcImportChooseButton',
     'undoArcImportButton',
-    'onboardingProviderInput',
-    'onboardingBaseUrlInput',
-    'onboardingModelInput',
-    'onboardingCustomModelInput',
-    'onboardingApiKeyInput',
-    'onboardingThinkingLabel',
-    'onboardingThinkingInput',
-    'onboardingThinkingHint',
-    'onboardingTestAIButton',
-    'onboardingOpenWorkbenchButton',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  for (const id of ['onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
+  for (const id of ['onboardingDialog', 'onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
     assert.doesNotMatch(html, new RegExp(`id="${id}"`));
-    assert.doesNotMatch(source, new RegExp(`\\b${id}\\b`));
   }
   assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
-  assert.match(html, /id="onboardingOpenWorkbenchButton">Save</);
   assert.match(source, /function updateAIThinkingControl[\s\S]*providerSupportsThinking\(candidate\)[\s\S]*thinkingInput\.disabled = !supported[\s\S]*does not support Space Tabs’ Thinking control/);
-  assert.match(html, /<option value="" selected>No provider<\/option>/);
-  assert.match(html, /id="onboardingLanguageInput"[\s\S]*value="zh-CN"[\s\S]*value="en"[\s\S]*value="auto"/);
-  assert.match(source, /function onboardingAIControls\(\)[\s\S]*languageInput: els\.onboardingLanguageInput/);
-  assert.match(source, /renderOnboardingAISettings[\s\S]*controls\.languageInput\.value = state\.ai\?\.language \|\| 'zh-CN'/);
-  assert.match(source, /async function saveOnboardingAIAndFinish\(options = \{\}\)[\s\S]*if \(!onboardingAIControls\(\)\.providerInput\.value\) \{[\s\S]*await finishOnboarding\(true, \{ \.\.\.options, clearAI: true \}\)/);
-  assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
-  assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);
   assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
   assert.match(source, /send\('tabs:openUnique'/);
@@ -150,33 +128,17 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
   assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
   assert.match(html, /class="arc-import-settings"/);
-  assert.match(html, /data-onboarding-path="arc"/);
-  assert.doesNotMatch(html, /data-onboarding-path="arc" hidden/);
   assert.doesNotMatch(html, /Arc import is not available/i);
-  assert.match(html, /id="onboardingArcInput" type="file"/);
   assert.match(html, /id="arcImportInput" type="file"/);
-  assert.match(source, /function startArcFileSelectionFromUserGesture\(target\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);
+  assert.match(source, /function startArcFileSelectionFromUserGesture\(\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);
   assert.doesNotMatch(source, /showOpenFilePicker|rememberArcFileHandle|loadRememberedArcFileHandle|rememberedArcFileHandle/);
   assert.doesNotMatch(source, /indexedDB(?:\?\.|\.)open(?:\?\.)?\(/);
   assert.match(source, /clearLegacyArcFileHandleStorage[\s\S]*deleteDatabase\?\.\('space-tabs-local-files'\)/);
   assert.doesNotMatch(html, /arcImportUseButton|authorized Arc file|Authorize Arc file/i);
-  assert.match(source, /onboardingArcInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
   assert.match(source, /arcImportInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
-  assert.match(source, /if \(event\.target !== event\.currentTarget\) return/);
-  assert.match(source, /async function previewOnboardingArcFile[\s\S]*selectionGeneration !== onboardingArcSelectionGeneration[\s\S]*onboardingStep !== 1 \|\| onboardingPath !== 'arc'/);
   assert.match(source, /async function previewArcImportFile[\s\S]*selectionGeneration !== arcImportSelectionGeneration/);
-  assert.match(source, /function clearOnboardingArcSelection[\s\S]*pendingOnboardingArcText = '';[\s\S]*onboardingArcInput\.value = '';[\s\S]*onboardingArcSpaces\.replaceChildren\(\)/);
-  assert.match(source, /function chooseOnboardingPath\(path\)[\s\S]*path === 'fresh'[\s\S]*clearOnboardingArcSelection\(\)/);
-  assert.match(source, /function goBackOnboarding\(\)[\s\S]*onboardingPath === 'arc'[\s\S]*clearOnboardingArcSelection\(\)/);
-  assert.match(source, /async function applyArcOnboarding[\s\S]*finally \{[\s\S]*clearOnboardingArcSelection\(\{ preserveStatus: true \}\)/);
-  assert.match(source, /async function finishOnboarding[\s\S]*clearOnboardingArcSelection\(\);[\s\S]*onboardingApiKeyInput\.value = '';/);
-  assert.match(source, /async function finishOnboarding[\s\S]*captureWorkspaceMemoryCheckpoint\(\)[\s\S]*persistStorageStep\([\s\S]*restoreWorkspaceMemoryCheckpoint\(checkpoint\)/);
-  assert.match(source, /async function applyFreshOnboardingFromCurrentState[\s\S]*committedCheckpoint = captureWorkspaceMemoryCheckpoint\(\)[\s\S]*restoreWorkspaceMemoryCheckpoint\(committedCheckpoint, \{ renderView: true \}\)[\s\S]*was created and saved, but its tabs could not refresh[\s\S]*return true/);
   assert.match(source, /function arcPlanResolutionSignature[\s\S]*preview\.sourceSpaceId,[\s\S]*preview\.resolvedId,[\s\S]*preview\.resolvedName/);
   assert.match(source, /async function importArcFile[\s\S]*arcPlanResolutionSignature\(pendingArcImportPlan\) !== arcPlanResolutionSignature\(latestPlan\)[\s\S]*previewInvalidated = true/);
-  assert.match(source, /state\.onboarding = \{ version: 2, completed: false, stage: 'ai' \}/);
-  assert.match(source, /state\.onboarding = \{ version: 2, completed: true, stage: 'done' \}/);
-  assert.match(source, /saveOnboardingAIAndFinish[\s\S]*persistCurrentAIConfiguration\(\)/);
   assert.match(source, /function stateForStorage\(\)[\s\S]*apiKey: ''/);
   assert.match(source, /reconcileScopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
   assert.match(source, /function persistCurrentAIConfiguration\(\)[\s\S]*persistScopedAIConfiguration[\s\S]*readSettings: storageGet[\s\S]*readAuth: secretGet[\s\S]*persistSettings: \(\) => storageSet\(\{ \[STORAGE_KEY\]: stateForStorage\(\) \}\)[\s\S]*persistAuth:[\s\S]*clearAuth:[\s\S]*restoreSettings:[\s\S]*restoreAuth:/);
@@ -188,36 +150,14 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
-test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', async () => {
+test('sidepanel keeps the compact Settings and group-hover surfaces', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
-  const choosePathSource = functionSource(source, 'chooseOnboardingPath');
 
-  assert.match(
-    html,
-    /data-onboarding-path="fresh">[\s\S]*?<strong>Create new space<\/strong>[\s\S]*?data-onboarding-path="arc">[\s\S]*?<strong>Move from Arc<\/strong>/,
-  );
-  assert.doesNotMatch(
-    html,
-    /Skip setup|Start with one thing|Create a focused Space\.|Preview and choose the Spaces to import\./,
-  );
-  assert.match(
-    html,
-    /<footer class="onboarding-footer" id="onboardingFooter">[\s\S]*?id="onboardingBackButton"[\s\S]*?id="skipOnboardingButton">Skip<\/button>[\s\S]*?id="onboardingNextButton">Continue<\/button>[\s\S]*?<\/footer>/,
-  );
-  assert.match(source, /onboardingFooter\.classList\.toggle\('no-back', isChoose\)/);
-  assert.match(styles, /\.onboarding-footer\.no-back\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
-  assert.match(
-    html,
-    /id="onboardingProgress"[\s\S]*?<small>Space<\/small>[\s\S]*?<small>AI<\/small>[\s\S]*?<\/div>/,
-  );
-  assert.doesNotMatch(html, /<small>Choose<\/small>|AI &amp; ready|Keep Chrome\.<br>Bring your Arc workflow/);
-  assert.match(html, /id="onboardingStepLabel">Step 1 of 2<\/span>/);
-  assert.match(styles, /\.onboarding-progress\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
-  assert.match(choosePathSource, /onboardingPath = path;[\s\S]*renderOnboarding\(\)/);
-  assert.doesNotMatch(choosePathSource, /onboardingStep\s*=|startArcFileSelectionFromUserGesture|\.focus\(/);
-  assert.match(source, /const visibleStep = isFinish \? 1 : 0;[\s\S]*`Step \$\{visibleStep \+ 1\} of 2`/);
+  assert.doesNotMatch(html, /data-onboarding-path|onboarding-footer|onboardingProgress|onboardingStepLabel/);
+  assert.doesNotMatch(html, /Skip setup|Start with one thing|Create a focused Space\.|Preview and choose the Spaces to import\./);
+  assert.doesNotMatch(source, /onboardingFooter|const visibleStep = isFinish \? 1 : 0;/);
 
   assert.doesNotMatch(html, /Panel Shortcuts|Toggle panel is a Chrome global shortcut/);
   assert.match(html, /<section class="shortcut-settings">\s*<div id="shortcutsList" class="shortcuts-list"><\/div>/);
@@ -233,13 +173,12 @@ test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', as
   );
 });
 
-test('Workbench setup preserves its surface while Space switching keeps target Tags dormant', async () => {
+test('Space switching keeps target Tags dormant across guarded cleanup', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const switchSource = functionSource(source, 'switchSpace');
   const materializeSource = functionSource(source, 'materializeSpaceSwitchTarget');
   const closeSource = functionSource(source, 'closeSpaceSwitchSourceTabs');
 
-  assert.match(source, /runOnboardingButton[\s\S]*activeView = 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
   assert.match(source, /async function activateSpace\(spaceId, options = \{\}\)[\s\S]*return switchSpace\(spaceId, \{ \.\.\.options, windowBinding \}\)/);
   assert.match(source, /if \(spaceId === state\.activeSpaceId\) \{[\s\S]*activeView = 'space';[\s\S]*render\(\);[\s\S]*return true;[\s\S]*\}\s*return switchSpace/);
   assert.match(switchSource, /options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)[\s\S]*withCreatedTabCheckpointRollback\(createdTabIds[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*planSpaceSwitch\(/);
@@ -266,24 +205,9 @@ test('Workbench setup preserves its surface while Space switching keeps target T
   assert.match(closeSource, /spaceSwitchTargetTabGuards\([\s\S]*verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\([\s\S]*requiredActiveSurvivorTabId[\s\S]*requiredTargetTabGuards/);
 });
 
-test('new Space transactions roll back to pre-insert storage without undoing a committed switch', async () => {
+test('Space switch honors caller rollback checkpoints for newly inserted targets', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const onboardingSource = functionSource(source, 'applyFreshOnboardingFromCurrentState');
   const switchSource = functionSource(source, 'switchSpace');
-
-  const checkpointIndex = onboardingSource.indexOf('const checkpoint = captureWorkspaceMemoryCheckpoint()');
-  const insertIndex = onboardingSource.indexOf('state.spaces.push(targetSpace)');
-  const switchIndex = onboardingSource.indexOf('const switched = await switchSpace(targetSpace.id');
-  assert.ok(
-    checkpointIndex >= 0 && checkpointIndex < insertIndex && insertIndex < switchIndex,
-    'fresh onboarding must checkpoint the durable workspace before inserting its new Space',
-  );
-  assert.match(onboardingSource, /const switched = await switchSpace\(targetSpace\.id, \{[\s\S]*rollbackCheckpoint: checkpoint,[\s\S]*windowBinding: options\.windowBinding[\s\S]*if \(switched !== true\)/,
-    'fresh onboarding must give Space switching the pre-insert checkpoint');
-  assert.doesNotMatch(onboardingSource, /switched !== true \|\| !isCurrentPanelWindowBinding/,
-    'a host-window change after switchSpace reports success must not roll back its committed Space');
-  assert.match(onboardingSource, /if \(canReuseDefault\) \{[\s\S]*saved !== true \|\| !isCurrentPanelWindowBinding/,
-    'the direct-save onboarding path must retain its pre-commit window guard');
 
   assert.match(switchSource, /const checkpoint = options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)/,
     'switchSpace must prefer a caller checkpoint that predates a newly inserted target');
@@ -1158,10 +1082,7 @@ test('Arc import and backup restore separate pre-commit rollback from post-commi
     restoreSource.indexOf('const selectedBackup = pendingSpaceBackup'),
     restoreSource.indexOf('const ok = await askConfirm'),
   );
-  const arcSource = [
-    functionSource(source, 'applyArcOnboarding'),
-    functionSource(source, 'importArcFile'),
-  ].join('\n');
+  const arcSource = functionSource(source, 'importArcFile');
 
   assert.match(source, /function assertCurrentStateFitsStorage[\s\S]*assertWorkspaceStorageBudget/);
   assert.match(source, /function captureWorkspaceMemoryCheckpoint[\s\S]*function restoreWorkspaceMemoryCheckpoint/);
@@ -1180,10 +1101,10 @@ test('Arc import and backup restore separate pre-commit rollback from post-commi
   assert.match(restoreSource, /Space data changed while confirmation was open\. Nothing was restored; review the selected backup and confirm again\./);
   assert.match(restoreSource, /backup restore was saved, but this view could not finish refreshing/i);
   assert.doesNotMatch(restoreSource, /restoreFailedWorkspaceMutation/);
-  assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 2);
-  assert.equal((arcSource.match(/runDurableCommitBoundary\(\{/g) || []).length, 2);
-  assert.equal((arcSource.match(/restoreWorkspaceMemoryCheckpoint\(beforeImport, \{ renderView: true \}\)/g) || []).length, 2);
-  assert.ok((arcSource.match(/The import was saved, but this view could not refresh/g) || []).length >= 2);
+  assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 1);
+  assert.equal((arcSource.match(/runDurableCommitBoundary\(\{/g) || []).length, 1);
+  assert.equal((arcSource.match(/restoreWorkspaceMemoryCheckpoint\(beforeImport, \{ renderView: true \}\)/g) || []).length, 1);
+  assert.ok((arcSource.match(/The import was saved, but this view could not refresh/g) || []).length >= 1);
   assert.doesNotMatch(arcSource, /restoreFailedWorkspaceMutation/);
 });
 
@@ -1342,7 +1263,6 @@ test('custom context menus expose menu semantics and a complete keyboard focus m
 test('every dialog exposes a stable accessible name', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   assert.match(html, /<dialog id="actionDialog" aria-labelledby="actionDialogTitle">/);
-  assert.match(html, /<dialog id="onboardingDialog"[^>]*aria-label="Set up Space Tabs"/);
   assert.match(html, /<dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">[\s\S]*id="settingsDialogTitle"/);
   assert.match(html, /<dialog id="commandPaletteDialog"[^>]*aria-labelledby="commandPaletteTitle"[\s\S]*id="commandPaletteTitle"/);
 });

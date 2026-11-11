@@ -317,12 +317,6 @@ let pendingArcImportText = '';
 let pendingArcImportPlan = null;
 let arcImportSelectionGeneration = 0;
 let pendingSpaceBackup = null;
-let pendingOnboardingArcPlan = null;
-let pendingOnboardingArcText = '';
-let onboardingArcSelectionGeneration = 0;
-let onboardingStep = 0;
-let onboardingPath = '';
-let onboardingResult = '';
 let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
@@ -382,38 +376,6 @@ const els = {
   actionDialogCancel: document.querySelector('#actionDialogCancel'),
   actionDialogConfirm: document.querySelector('#actionDialogConfirm'),
   settingsDialog: document.querySelector('#settingsDialog'),
-  runOnboardingButton: document.querySelector('#runOnboardingButton'),
-  settingsOpenWorkbenchButton: document.querySelector('#settingsOpenWorkbenchButton'),
-  onboardingDialog: document.querySelector('#onboardingDialog'),
-  onboardingProgress: document.querySelector('#onboardingProgress'),
-  onboardingStepLabel: document.querySelector('#onboardingStepLabel'),
-  onboardingChooseStep: document.querySelector('#onboardingChooseStep'),
-  onboardingFreshStep: document.querySelector('#onboardingFreshStep'),
-  onboardingArcStep: document.querySelector('#onboardingArcStep'),
-  onboardingFinishStep: document.querySelector('#onboardingFinishStep'),
-  onboardingFooter: document.querySelector('#onboardingFooter'),
-  onboardingSpaceNameInput: document.querySelector('#onboardingSpaceNameInput'),
-  onboardingArcInput: document.querySelector('#onboardingArcInput'),
-  onboardingArcChooseButton: document.querySelector('#onboardingArcChooseButton'),
-  onboardingArcStatus: document.querySelector('#onboardingArcStatus'),
-  onboardingArcSpaces: document.querySelector('#onboardingArcSpaces'),
-  onboardingFinishMessage: document.querySelector('#onboardingFinishMessage'),
-  onboardingProviderInput: document.querySelector('#onboardingProviderInput'),
-  onboardingBaseUrlInput: document.querySelector('#onboardingBaseUrlInput'),
-  onboardingModelInput: document.querySelector('#onboardingModelInput'),
-  onboardingCustomModelLabel: document.querySelector('#onboardingCustomModelLabel'),
-  onboardingCustomModelInput: document.querySelector('#onboardingCustomModelInput'),
-  onboardingLanguageInput: document.querySelector('#onboardingLanguageInput'),
-  onboardingApiKeyInput: document.querySelector('#onboardingApiKeyInput'),
-  onboardingThinkingLabel: document.querySelector('#onboardingThinkingLabel'),
-  onboardingThinkingInput: document.querySelector('#onboardingThinkingInput'),
-  onboardingThinkingHint: document.querySelector('#onboardingThinkingHint'),
-  onboardingTestAIButton: document.querySelector('#onboardingTestAIButton'),
-  onboardingAIStatus: document.querySelector('#onboardingAIStatus'),
-  onboardingBackButton: document.querySelector('#onboardingBackButton'),
-  onboardingNextButton: document.querySelector('#onboardingNextButton'),
-  skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
-  onboardingOpenWorkbenchButton: document.querySelector('#onboardingOpenWorkbenchButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
@@ -464,7 +426,7 @@ const commandPaletteController = createCommandPaletteController({
   results: els.commandPaletteResults,
   document,
   getData: () => ({ spaces: state.spaces, spaceView: commandPaletteSpaceView() }),
-  canOpen: () => !els.onboardingDialog.open && !els.actionDialog.open,
+  canOpen: () => !els.actionDialog.open,
   beforeOpen: () => {
     if (els.settingsDialog.open && !workbenchMode) els.settingsDialog.close();
   },
@@ -535,7 +497,6 @@ async function init() {
     bindEvents();
     document.documentElement.dataset.initialized = 'true';
     renderSettings();
-    await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
     document.documentElement.dataset.initialized = 'failed';
@@ -769,15 +730,6 @@ function bindEvents() {
     const operationId = els.undoOrganizationButton.dataset.operationId || '';
     runTask((windowBinding) => undoLastOperation(operationId, { windowBinding }));
   });
-  els.settingsOpenWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    openWorkbench({ windowBinding })
-  )));
-  els.runOnboardingButton.addEventListener('click', () => {
-    els.settingsDialog.close();
-    activeView = 'space';
-    render();
-    openOnboarding({ restart: true });
-  });
   els.tidyNamesButton.addEventListener('click', startTidyNamesFromUserGesture);
   els.autoGroupButton.addEventListener('click', startAutoGroupFromUserGesture);
   els.collapseGroupsButton.addEventListener('click', () => runTask((windowBinding) => (
@@ -820,62 +772,6 @@ function bindEvents() {
     event.preventDefault();
     runTask((windowBinding) => saveSettings({ windowBinding }));
   });
-  els.onboardingSpaceNameInput.addEventListener('input', renderOnboarding);
-  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
-    button.addEventListener('click', () => chooseOnboardingPath(button.dataset.onboardingPath));
-  }
-  els.onboardingArcInput.addEventListener('change', () => runTask((windowBinding) => (
-    previewOnboardingArcFile(null, { windowBinding })
-  )));
-  els.onboardingArcInput.addEventListener('cancel', (event) => event.stopPropagation());
-  els.onboardingArcChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('onboarding'));
-  els.onboardingArcSpaces.addEventListener('change', renderOnboarding);
-  els.onboardingProviderInput.addEventListener('change', () => {
-    if (!els.onboardingProviderInput.value) {
-      renderOnboardingAISettings({ selectNoProvider: true });
-      renderOnboarding();
-      return;
-    }
-    handleAIProviderChange(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingModelInput.addEventListener('change', () => {
-    const controls = onboardingAIControls();
-    updateCustomModelVisibility(controls);
-    updateAIThinkingControl(controls);
-    renderOnboarding();
-  });
-  els.onboardingCustomModelInput.addEventListener('input', () => {
-    updateAIThinkingControl(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingBaseUrlInput.addEventListener('input', () => {
-    clearAIKeyAfterEndpointEdit(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingLanguageInput.addEventListener('change', renderOnboarding);
-  els.onboardingApiKeyInput.addEventListener('input', renderOnboarding);
-  els.onboardingThinkingInput.addEventListener('change', renderOnboarding);
-  els.onboardingTestAIButton.addEventListener('click', () => startTestAIFromUserGesture(onboardingAIControls()));
-  els.onboardingBackButton.addEventListener('click', goBackOnboarding);
-  els.onboardingNextButton.addEventListener('click', () => runTask((windowBinding) => (
-    continueOnboarding({ windowBinding })
-  )));
-  els.skipOnboardingButton.addEventListener('click', () => runTask((windowBinding) => (
-    finishOnboarding(false, { windowBinding })
-  )));
-  els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    saveOnboardingAIAndFinish({ windowBinding })
-  )));
-  els.onboardingDialog.addEventListener('cancel', (event) => {
-    if (event.target !== event.currentTarget) return;
-    event.preventDefault();
-    clearOnboardingArcSelection();
-    els.onboardingApiKeyInput.value = '';
-    els.onboardingDialog.close();
-    render();
-  });
-
   els.themeOptions.addEventListener('click', (event) => {
     const btn = event.target.closest('.theme-option');
     if (!btn) return;
@@ -3298,19 +3194,6 @@ function renderSpaces() {
     return button;
   });
 
-  const setupButton = document.createElement('button');
-  setupButton.className = 'space setup-space';
-  setupButton.type = 'button';
-  setupButton.title = 'Finish setup';
-  setupButton.setAttribute('aria-label', 'Finish setup');
-  setupButton.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4"></path><path d="M12 17v4"></path><path d="M3 12h4"></path><path d="M17 12h4"></path><circle cx="12" cy="12" r="4"></circle></svg>`;
-  setupButton.querySelector('svg').classList.add('space-mark');
-  setupButton.append(spaceButtonLabel('Finish setup'));
-  setupButton.addEventListener('click', () => runTask(async (windowBinding) => {
-    if (workbenchMode) openOnboarding();
-    else await openWorkbench({ windowBinding });
-  }));
-
   const addButton = document.createElement('button');
   addButton.className = 'space add-space';
   addButton.type = 'button';
@@ -3328,12 +3211,7 @@ function renderSpaces() {
   spacesGroup.setAttribute('aria-label', 'Spaces');
   spacesGroup.replaceChildren(...spaceButtons, addButton);
 
-  const toolsGroup = document.createElement('div');
-  toolsGroup.className = 'dock-group dock-tools';
-  toolsGroup.setAttribute('aria-label', 'Space tools');
-  toolsGroup.replaceChildren(...(state.onboarding?.completed ? [] : [setupButton]));
-
-  els.spacesList.replaceChildren(spacesGroup, toolsGroup);
+  els.spacesList.replaceChildren(spacesGroup);
 }
 
 function spaceButtonLabel(text) {
@@ -3364,274 +3242,13 @@ async function openWorkbench(options = {}) {
   }
 }
 
-async function maybeShowOnboarding() {
-  const forcedPreview = new URLSearchParams(window.location.search).get('onboarding') === '1';
-  if (!extensionRuntime && !forcedPreview) return;
-  if (state.onboarding?.completed) return;
-  if (extensionRuntime && !workbenchMode) {
-    await openWorkbench();
-    return;
-  }
-  openOnboarding();
-}
-
-function startArcFileSelectionFromUserGesture(target) {
-  const input = target === 'onboarding' ? els.onboardingArcInput : els.arcImportInput;
+function startArcFileSelectionFromUserGesture() {
+  const input = els.arcImportInput;
   // File System Access API pickers reject Arc's file under macOS ~/Library as
   // a sensitive system location. A native file input can read the exact file
   // the user explicitly chooses, so Arc import must always use this path.
   input.value = '';
   input.click();
-}
-
-function clearOnboardingArcSelection({ preserveStatus = false } = {}) {
-  onboardingArcSelectionGeneration += 1;
-  pendingOnboardingArcPlan = null;
-  pendingOnboardingArcText = '';
-  els.onboardingArcInput.value = '';
-  els.onboardingArcChooseButton.textContent = 'Choose Arc file';
-  els.onboardingArcSpaces.replaceChildren();
-  if (!preserveStatus) els.onboardingArcStatus.textContent = 'No Arc file selected.';
-}
-
-function openOnboarding(options = {}) {
-  const resumeAI = options.restart !== true &&
-    !state.onboarding?.completed && state.onboarding?.stage === 'ai';
-  onboardingStep = resumeAI ? 2 : 0;
-  onboardingPath = '';
-  onboardingResult = resumeAI ? 'Your workspace is ready.' : '';
-  clearOnboardingArcSelection();
-  els.onboardingSpaceNameInput.value = currentSpace()?.id === 'default' ? 'Default' : 'New Space';
-  renderOnboardingAISettings();
-  renderOnboarding();
-  if (!els.onboardingDialog.open) els.onboardingDialog.showModal();
-}
-
-function chooseOnboardingPath(path) {
-  if (path !== 'fresh' && path !== 'arc') return;
-  if (path === 'fresh') clearOnboardingArcSelection();
-  onboardingPath = path;
-  renderOnboarding();
-}
-
-function goBackOnboarding() {
-  if (onboardingStep <= 0) return;
-  if (onboardingStep === 1 && onboardingPath === 'arc') clearOnboardingArcSelection();
-  onboardingStep -= 1;
-  if (onboardingStep === 0) onboardingPath = '';
-  renderOnboarding();
-}
-
-function renderOnboarding() {
-  const isChoose = onboardingStep === 0;
-  const isSetup = onboardingStep === 1;
-  const isFinish = onboardingStep === 2;
-  els.onboardingChooseStep.hidden = !isChoose;
-  els.onboardingFreshStep.hidden = !(isSetup && onboardingPath === 'fresh');
-  els.onboardingArcStep.hidden = !(isSetup && onboardingPath === 'arc');
-  els.onboardingFinishStep.hidden = !isFinish;
-  els.onboardingFooter.hidden = isFinish;
-  els.onboardingFooter.classList.toggle('no-back', isChoose);
-  els.onboardingBackButton.hidden = isChoose;
-  els.skipOnboardingButton.hidden = isFinish;
-  const visibleStep = isFinish ? 1 : 0;
-  els.onboardingStepLabel.textContent = `Step ${visibleStep + 1} of 2`;
-  els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
-
-  const progress = [...els.onboardingProgress.querySelectorAll('span')];
-  progress.forEach((item, index) => {
-    item.classList.toggle('active', index === visibleStep);
-    item.classList.toggle('complete', index < visibleStep);
-  });
-  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
-    button.classList.toggle('selected', button.dataset.onboardingPath === onboardingPath);
-  }
-
-  if (isChoose) {
-    els.onboardingNextButton.textContent = 'Continue';
-    els.onboardingNextButton.disabled = !onboardingPath;
-  } else if (onboardingPath === 'fresh') {
-    els.onboardingNextButton.textContent = 'Create Space';
-    els.onboardingNextButton.disabled = !els.onboardingSpaceNameInput.value.trim();
-  } else {
-    els.onboardingNextButton.textContent = 'Import selected Spaces';
-    els.onboardingNextButton.disabled = selectedOnboardingArcSpaceIds().length === 0;
-  }
-  if (isFinish) updateOnboardingAIActionState();
-}
-
-async function continueOnboarding(options = {}) {
-  if (onboardingStep === 0) {
-    if (!onboardingPath) return;
-    onboardingStep = 1;
-    renderOnboarding();
-    requestAnimationFrame(() => {
-      if (onboardingPath === 'fresh') els.onboardingSpaceNameInput.focus();
-      else els.onboardingArcChooseButton.focus();
-    });
-    return;
-  }
-  if (onboardingStep !== 1) return;
-  const applied = onboardingPath === 'fresh'
-    ? await applyFreshOnboarding(options)
-    : await applyArcOnboarding(options);
-  if (applied !== true) return;
-  onboardingStep = 2;
-  renderOnboardingAISettings();
-  renderOnboarding();
-}
-
-async function applyFreshOnboarding(options = {}) {
-  const name = els.onboardingSpaceNameInput.value.trim();
-  if (!name) return false;
-  return withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) {
-      throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-    }
-    return applyFreshOnboardingFromCurrentState(name, options);
-  });
-}
-
-async function applyFreshOnboardingFromCurrentState(name, options = {}) {
-  const checkpoint = captureWorkspaceMemoryCheckpoint();
-  let targetSpace = currentSpace();
-  const canReuseDefault = state.spaces.length === 1 && targetSpace?.id === 'default';
-  try {
-    if (canReuseDefault) {
-      targetSpace.name = name;
-      targetSpace.icon = name.slice(0, 1).toUpperCase();
-    } else {
-      targetSpace = {
-        id: uniqueSpaceId(name),
-        name,
-        icon: name.slice(0, 1).toUpperCase(),
-        color: nextSpaceColor(),
-      };
-      state.spaces.push(targetSpace);
-    }
-    if (canReuseDefault) state.activeSpaceId = targetSpace.id;
-    state.onboarding = { version: 2, completed: false, stage: 'ai' };
-    activeView = 'space';
-    lastRenderedSpacesSignature = '';
-
-    if (canReuseDefault) {
-      const saved = await saveState({ windowBinding: options.windowBinding });
-      if (saved !== true || !isCurrentPanelWindowBinding(options.windowBinding)) {
-        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-      }
-    } else {
-      const switched = await switchSpace(targetSpace.id, {
-        rollbackCheckpoint: checkpoint,
-        windowBinding: options.windowBinding,
-      });
-      if (switched !== true) {
-        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-      }
-    }
-  } catch (error) {
-    restoreWorkspaceMemoryCheckpoint(checkpoint);
-    throw error;
-  }
-  const committedCheckpoint = captureWorkspaceMemoryCheckpoint();
-  try {
-    const refreshed = await refreshTabs({
-      adopt: true,
-      reloadDormant: true,
-      windowBinding: options.windowBinding,
-    });
-    if (refreshed === false || !isCurrentPanelWindowBinding(options.windowBinding)) {
-      throw new Error('The onboarding view moved before it could refresh.');
-    }
-  } catch (error) {
-    restoreWorkspaceMemoryCheckpoint(committedCheckpoint, { renderView: true });
-    onboardingResult = `${name} was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.`;
-    console.error(error);
-    return true;
-  }
-  onboardingResult = `${name} is ready.`;
-  return true;
-}
-
-async function previewOnboardingArcFile(selectedFile = null, options = {}) {
-  const selectionGeneration = ++onboardingArcSelectionGeneration;
-  pendingOnboardingArcPlan = null;
-  pendingOnboardingArcText = '';
-  els.onboardingArcSpaces.replaceChildren();
-  const file = selectedFile || els.onboardingArcInput.files?.[0];
-  if (!file) {
-    els.onboardingArcStatus.textContent = 'No Arc file selected.';
-    renderOnboarding();
-    return;
-  }
-  if (file.size > 20 * 1024 * 1024) {
-    els.onboardingArcInput.value = '';
-    els.onboardingArcStatus.textContent = 'This Arc file is too large to import safely.';
-    renderOnboarding();
-    return;
-  }
-
-  els.onboardingArcStatus.textContent = `Reading ${file.name || 'StorableSidebar.json'}...`;
-  renderOnboarding();
-
-  try {
-    const text = await file.text();
-    if (
-      !isCurrentPanelWindowBinding(options.windowBinding) ||
-      selectionGeneration !== onboardingArcSelectionGeneration ||
-      onboardingStep !== 1 || onboardingPath !== 'arc'
-    ) return;
-    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
-    pendingOnboardingArcText = text;
-    pendingOnboardingArcPlan = plan;
-    els.onboardingArcChooseButton.textContent = 'Choose another Arc file';
-    els.onboardingArcStatus.textContent = `${file.name || 'StorableSidebar.json'} · ${formatArcImportSummary(plan.summary, 'Preview')}${formatArcConflictSummary(plan)}`;
-    renderOnboardingArcSpaces(plan);
-  } catch (error) {
-    if (selectionGeneration !== onboardingArcSelectionGeneration) return;
-    clearOnboardingArcSelection();
-    els.onboardingArcStatus.textContent = `Cannot read Arc file: ${error.message || String(error)}`;
-    renderOnboarding();
-    return;
-  }
-  renderOnboarding();
-}
-
-function renderOnboardingArcSpaces(plan) {
-  const previewsBySpaceId = new Map((plan?.spacePreviews || []).map((preview) => [preview.spaceId, preview]));
-  const rows = (plan?.spaces || []).map((space) => {
-    const label = document.createElement('label');
-    label.className = 'onboarding-space-option';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = true;
-    checkbox.dataset.arcSpaceId = space.id;
-    const icon = document.createElement('span');
-    icon.className = 'onboarding-space-icon';
-    icon.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
-    const name = document.createElement('strong');
-    name.textContent = space.name;
-    const preview = previewsBySpaceId.get(space.id);
-    const count = document.createElement('small');
-    const conflictText = (preview?.conflicts || []).length
-      ? ` · ${preview.conflicts.map((conflict) => `${conflict.original} → ${conflict.resolved}`).join(', ')}`
-      : '';
-    count.textContent = `${preview?.folders ?? 0} folders · ${preview?.tabs ?? snapshotTabCount(plan.spaceSnapshots?.[space.id])} tabs${conflictText}`;
-    count.classList.toggle('conflict', Boolean(conflictText));
-    label.append(checkbox, icon, name, count);
-    return label;
-  });
-  els.onboardingArcSpaces.replaceChildren(...rows);
-}
-
-function selectedOnboardingArcSpaceIds() {
-  return [...els.onboardingArcSpaces.querySelectorAll('input[data-arc-space-id]:checked')]
-    .map((input) => input.dataset.arcSpaceId)
-    .filter(Boolean);
-}
-
-function selectedOnboardingArcPlan() {
-  return selectArcImportPlan(pendingOnboardingArcPlan, selectedOnboardingArcSpaceIds());
 }
 
 function arcPlanResolutionSignature(plan) {
@@ -3640,178 +3257,6 @@ function arcPlanResolutionSignature(plan) {
     preview.resolvedId,
     preview.resolvedName,
   ]));
-}
-
-async function applyArcOnboarding(options = {}) {
-  const windowBinding = options.windowBinding;
-  const previewPlan = selectedOnboardingArcPlan();
-  if (previewPlan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
-  const selectedSourceIds = new Set((previewPlan.spacePreviews || []).map((preview) => preview.sourceSpaceId));
-  let result;
-  let committed = false;
-  let postCommitWarning = '';
-  try {
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) throw new Error('This panel moved to another Chrome window before the import could begin.');
-      const latestPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
-      const latestResolvedIds = (latestPlan.spacePreviews || [])
-        .filter((preview) => selectedSourceIds.has(preview.sourceSpaceId))
-        .map((preview) => preview.spaceId);
-      const plan = selectArcImportPlan(latestPlan, latestResolvedIds);
-      if (arcPlanResolutionSignature(previewPlan) !== arcPlanResolutionSignature(plan)) {
-        throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
-      }
-      const beforeImport = captureWorkspaceMemoryCheckpoint();
-      const transaction = await runDurableCommitBoundary({
-        mutate: async () => {
-          result = appendArcImportPlan(state, plan);
-          rememberArcImport(result.importedSpaceIds);
-          state.onboarding = { version: 2, completed: false, stage: 'ai' };
-          assertCurrentStateFitsStorage();
-          lastRenderedSpacesSignature = '';
-          return {
-            result,
-            committedMemory: captureWorkspaceMemoryCheckpoint(),
-          };
-        },
-        commit: async () => {
-          if (!isCurrentPanelWindowBinding(windowBinding)) {
-            throw new Error('This panel moved to another Chrome window before the import could be saved.');
-          }
-          await saveState({ persistWindowState: false });
-        },
-        rollbackBeforeCommit: () => (
-          restoreWorkspaceMemoryCheckpoint(beforeImport, { renderView: true })
-        ),
-        afterCommit: async () => {
-          render();
-          renderSettings();
-        },
-        restoreCommittedMemory: ({ committedMemory }) => (
-          restoreWorkspaceMemoryCheckpoint(committedMemory)
-        ),
-      });
-      committed = transaction.committed;
-      result = transaction.value.result;
-      if (transaction.postCommitError) {
-        postCommitWarning = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. The import was saved, but this view could not refresh; reopen Space Tabs to continue.`;
-        if (transaction.recoveryError) console.error(transaction.recoveryError);
-      }
-    });
-    onboardingResult = postCommitWarning ||
-      `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
-  } catch (error) {
-    if (committed) {
-      onboardingResult = postCommitWarning || 'The Arc import was saved, but this view could not refresh. Reopen Space Tabs to continue onboarding.';
-      console.error(error);
-      return true;
-    }
-    els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
-    els.onboardingArcChooseButton.textContent = 'Choose Arc file';
-    throw error;
-  } finally {
-    // The imported snapshot is now in extension state. Do not retain the raw
-    // Arc sidebar export (which can be large and sensitive) in memory or input.
-    try {
-      clearOnboardingArcSelection({ preserveStatus: true });
-      renderOnboarding();
-    } catch (error) {
-      console.error(error);
-    }
-  }
-  return true;
-}
-
-async function finishOnboarding(openWorkbenchAfter, options = {}) {
-  const windowBinding = options.windowBinding;
-  const committed = await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding });
-    if (synchronized === false) return false;
-    const checkpoint = captureWorkspaceMemoryCheckpoint();
-    try {
-      if (options.clearAI) {
-        state.ai = normalizeAIProviderSettings({
-          ...state.ai,
-          provider: CUSTOM_AI_PROVIDER_ID,
-          baseUrl: '',
-          model: '',
-          apiKey: '',
-        });
-      }
-      state.onboarding = { version: 2, completed: true, stage: 'done' };
-      const saved = await commitWindowBoundWrite({
-        isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
-        write: () => (
-          options.clearAI
-            ? persistCurrentAIConfiguration()
-            : persistStorageStep({
-            key: STORAGE_KEY,
-            value: stateForStorage(),
-            get: storageGet,
-            set: storageSet,
-            remove: storageRemove,
-            })
-        ),
-      });
-      if (!saved) {
-        throw new Error('This Workbench moved to another Chrome window before onboarding could be finished.');
-      }
-    } catch (error) {
-      restoreWorkspaceMemoryCheckpoint(checkpoint);
-      throw error;
-    }
-    return true;
-  });
-  if (!committed) {
-    throw new Error('This Workbench moved to another Chrome window before onboarding could be finished.');
-  }
-  clearOnboardingArcSelection();
-  els.onboardingApiKeyInput.value = '';
-  if (els.onboardingDialog.open) els.onboardingDialog.close();
-  render();
-  if (openWorkbenchAfter) await openWorkbench({ windowBinding });
-}
-
-async function saveOnboardingAIAndFinish(options = {}) {
-  if (!onboardingAIControls().providerInput.value) {
-    await finishOnboarding(true, { ...options, clearAI: true });
-    return;
-  }
-  let aiSettings;
-  try {
-    aiSettings = currentAISettingsFromControls(onboardingAIControls());
-    if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-      throw new Error('Add an API key, or choose No provider.');
-    }
-  } catch (error) {
-    setAIControlsStatus(onboardingAIControls(), error.message || String(error));
-    return;
-  }
-
-  const committed = await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) return false;
-    const checkpoint = captureWorkspaceMemoryCheckpoint();
-    try {
-      state.ai = aiSettings;
-      state.onboarding = { version: 2, completed: true, stage: 'done' };
-      await persistCurrentAIConfiguration();
-    } catch (error) {
-      restoreWorkspaceMemoryCheckpoint(checkpoint);
-      throw error;
-    }
-    return true;
-  });
-  if (!committed) {
-    throw new Error('This Workbench moved to another Chrome window before the AI setup could be saved.');
-  }
-  clearOnboardingArcSelection();
-  els.onboardingApiKeyInput.value = '';
-  if (els.onboardingDialog.open) els.onboardingDialog.close();
-  renderSettings();
-  render();
-  await openWorkbench({ windowBinding: options.windowBinding });
 }
 
 async function addSpace(options = {}) {
@@ -9814,7 +9259,6 @@ async function testAI({ settings = currentAISettingsFromForm(), permissionReques
     setAIControlsStatus(controls, message);
   } finally {
     endAIRequest(requestId);
-    updateOnboardingAIActionState();
   }
 }
 
@@ -10979,54 +10423,6 @@ function settingsAIControls() {
   };
 }
 
-function onboardingAIControls() {
-  return {
-    providerInput: els.onboardingProviderInput,
-    baseUrlInput: els.onboardingBaseUrlInput,
-    modelInput: els.onboardingModelInput,
-    customModelLabel: els.onboardingCustomModelLabel,
-    customModelInput: els.onboardingCustomModelInput,
-    apiKeyInput: els.onboardingApiKeyInput,
-    thinkingLabel: els.onboardingThinkingLabel,
-    thinkingInput: els.onboardingThinkingInput,
-    thinkingHint: els.onboardingThinkingHint,
-    languageInput: els.onboardingLanguageInput,
-    testButton: els.onboardingTestAIButton,
-    statusTarget: els.onboardingAIStatus,
-  };
-}
-
-function renderOnboardingAISettings(options = {}) {
-  const controls = onboardingAIControls();
-  const configured = Boolean(String(state.ai?.baseUrl || '').trim() && String(state.ai?.model || '').trim());
-  renderProviderOptions(controls, { placeholder: true });
-  controls.languageInput.value = state.ai?.language || 'zh-CN';
-  controls.apiKeyInput.value = state.ai?.apiKey || '';
-  controls.thinkingInput.value = state.ai?.thinking || 'disabled';
-  if (configured && !options.selectNoProvider) {
-    renderAIProviderFields(normalizeAIProviderSettings(state.ai), controls);
-    controls.apiKeyInput.value = state.ai?.apiKey || '';
-    setAIControlsStatus(controls, 'Review the provider, test it, then Save.');
-  } else {
-    controls.providerInput.value = '';
-    controls.baseUrlInput.value = '';
-    controls.apiKeyInput.value = '';
-    controls.baseUrlInput.disabled = true;
-    controls.modelInput.replaceChildren();
-    controls.modelInput.disabled = true;
-    controls.apiKeyInput.disabled = true;
-    controls.thinkingInput.disabled = true;
-    controls.thinkingInput.value = 'disabled';
-    controls.thinkingHint.textContent = 'Choose a provider to see whether Thinking is supported.';
-    controls.thinkingHint.hidden = false;
-    controls.thinkingLabel.classList.add('thinking-unsupported');
-    controls.customModelLabel.hidden = true;
-    controls.customModelInput.required = false;
-    setAIControlsStatus(controls, 'Choose a provider, or Save without AI.');
-  }
-  updateOnboardingAIActionState();
-}
-
 function renderProviderOptions(controls = settingsAIControls(), config = {}) {
   const providerOptions = AI_PROVIDER_CATALOG.map((provider) => {
     const option = document.createElement('option');
@@ -11373,21 +10769,6 @@ function selectedModelFromControls(controls) {
   return controls.modelInput.value;
 }
 
-function updateOnboardingAIActionState() {
-  const controls = onboardingAIControls();
-  let valid = !controls.providerInput.value;
-  if (controls.providerInput.value) {
-    try {
-      const settings = currentAISettingsFromControls(controls);
-      valid = !providerRequiresApiKey(settings) || Boolean(settings.apiKey);
-    } catch {
-      valid = false;
-    }
-  }
-  els.onboardingOpenWorkbenchButton.disabled = !valid;
-  controls.testButton.disabled = !controls.providerInput.value || !valid || Boolean(activeAIRequestId);
-}
-
 function setAIControlsStatus(controls, message) {
   controls.statusTarget.textContent = message;
 }
@@ -11483,8 +10864,6 @@ async function abortActiveAIRequest() {
 function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
-  els.onboardingTestAIButton.textContent = busy ? 'Stop request' : 'Test AI';
-  updateOnboardingAIActionState();
 }
 
 async function storageGet() {
