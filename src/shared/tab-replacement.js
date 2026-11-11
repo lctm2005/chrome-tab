@@ -1,7 +1,3 @@
-import {
-  askSessionKeyAfterTabReplacement,
-  rebindAskSessionsForTabReplacement,
-} from './ask-session.js';
 import { replaceSelectionTabId } from './tab-selection.js';
 
 /**
@@ -43,10 +39,6 @@ export function migratePanelTabIdReplacement(model = {}, replacement = {}) {
     removedTabId,
     addedTabId,
   });
-  const askSessions = isRecord(source.askSessions)
-    ? rebindAskSessionsForTabReplacement(source.askSessions, removedTabId, addedTabId).sessions
-    : source.askSessions;
-
   return {
     ...source,
     replacementApplied: true,
@@ -57,18 +49,6 @@ export function migratePanelTabIdReplacement(model = {}, replacement = {}) {
       tabIdEquals(source.dragState.tabId, removedTabId),
     selectedTabIds: selection.selectedTabIds,
     selectionAnchorTabId: selection.anchorTabId,
-    askSessions,
-    activeAskSessionKey: askSessionKeyAfterTabReplacement(
-      source.activeAskSessionKey,
-      removedTabId,
-      addedTabId,
-    ),
-    lastActivatedAskPageTab: migrateRememberedTab(
-      source.lastActivatedAskPageTab,
-      removedTabId,
-      addedTabId,
-      replacementTab,
-    ),
     recentlyOpenedDormantTabs: migrateDormantTabs(
       source.recentlyOpenedDormantTabs,
       removedTabId,
@@ -78,12 +58,6 @@ export function migratePanelTabIdReplacement(model = {}, replacement = {}) {
       source.syntheticPlaceholderTabIds,
       removedTabId,
       addedTabId,
-    ),
-    activeAskStreams: migrateActiveAskStreams(
-      source.activeAskStreams,
-      removedTabId,
-      addedTabId,
-      replacementTab,
     ),
   };
 }
@@ -123,19 +97,6 @@ function migrateLiveTabCollection(tabs, removedTabId, addedTabId, replacementTab
   return { tabs: migratedTabs, changed: true };
 }
 
-function migrateRememberedTab(tab, removedTabId, addedTabId, replacementTab) {
-  if (
-    !isRecord(tab) ||
-    (!tabIdEquals(tab.id, removedTabId) && !tabIdEquals(tab.id, addedTabId))
-  ) return tab;
-  return {
-    ...tab,
-    ...replacementTab,
-    id: addedTabId,
-    active: false,
-  };
-}
-
 function migrateDormantTabs(tabs, removedTabId, addedTabId) {
   if (!Array.isArray(tabs)) return [];
   return tabs.map((tab) => (
@@ -147,54 +108,6 @@ function migrateSyntheticTabIds(tabIds, removedTabId, addedTabId) {
   const migrated = new Set(iterableValues(tabIds));
   if (migrated.delete(removedTabId)) migrated.add(addedTabId);
   return [...migrated];
-}
-
-function migrateActiveAskStreams(streams, removedTabId, addedTabId, replacementTab) {
-  if (!(streams instanceof Map)) return new Map();
-  return new Map([...streams].map(([requestId, stream]) => [
-    requestId,
-    migrateActiveAskStream(stream, removedTabId, addedTabId, replacementTab),
-  ]));
-}
-
-function migrateActiveAskStream(stream, removedTabId, addedTabId, replacementTab) {
-  if (!isRecord(stream)) return stream;
-  let messageRef = stream.messageRef;
-  if (isRecord(messageRef)) {
-    const previousSessionKey = String(messageRef.sessionKey || '');
-    const nextSessionKey = askSessionKeyAfterTabReplacement(
-      previousSessionKey,
-      removedTabId,
-      addedTabId,
-    );
-    const sourceTabChanged = tabIdEquals(messageRef.sourceTab?.id, removedTabId);
-    if (nextSessionKey !== previousSessionKey || sourceTabChanged) {
-      messageRef = {
-        ...messageRef,
-        ...(nextSessionKey !== previousSessionKey ? {
-          sessionKey: nextSessionKey,
-          tabReplacements: [
-            ...(Array.isArray(messageRef.tabReplacements) ? messageRef.tabReplacements : []),
-            { removedTabId, addedTabId },
-          ],
-        } : {}),
-        ...(sourceTabChanged ? {
-          sourceTab: {
-            ...messageRef.sourceTab,
-            ...replacementTab,
-            id: addedTabId,
-          },
-        } : {}),
-      };
-    }
-  }
-
-  const page = tabIdEquals(stream.page?.tabId, removedTabId)
-    ? { ...stream.page, tabId: addedTabId }
-    : stream.page;
-  return messageRef === stream.messageRef && page === stream.page
-    ? stream
-    : { ...stream, messageRef, page };
 }
 
 function iterableValues(value) {

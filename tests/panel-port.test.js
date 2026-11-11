@@ -257,7 +257,7 @@ test('disabled and unavailable controllers are safe, including closed Port races
   });
   assert.doesNotThrow(() => defaults.connect());
   assert.doesNotThrow(() => defaults.notifyVisibility(true));
-  assert.doesNotThrow(() => throwingPort.onMessage.emit({ type: 'shortcut:action', action: 'askPage' }));
+  assert.doesNotThrow(() => throwingPort.onMessage.emit({ type: 'shortcut:action', action: 'tidyNames' }));
   assert.doesNotThrow(() => throwingPort.onMessage.emit({ type: 'panel:close' }));
   defaults.dispose();
 });

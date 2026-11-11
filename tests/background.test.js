@@ -8,8 +8,6 @@ import {
   STORAGE_KEY,
   WINDOW_STATE_KEY,
 } from '../src/shared/state.js';
-import { createAskSession } from '../src/shared/ask-session.js';
-import { askSessionRevision, markAskStreamPending } from '../src/shared/ask-stream.js';
 import { chromeGroupTitle } from '../src/shared/group-title.js';
 
 const LIFECYCLE_EVENT_PREFIX = 'spaceTabsLifecycleEvent:';
@@ -540,29 +538,6 @@ function jsonResponse(payload, options = {}) {
   };
 }
 
-function sseResponse(chunks, options = {}) {
-  let index = 0;
-  let cancelCount = 0;
-  const encoder = new TextEncoder();
-  const reader = {
-    async read() {
-      if (index >= chunks.length) return { done: true, value: undefined };
-      return { done: false, value: encoder.encode(chunks[index++]) };
-    },
-    async cancel() {
-      cancelCount += 1;
-      if (options.cancelError) throw new Error('cancel failed');
-    },
-  };
-  return {
-    response: jsonResponse(null, {
-      contentType: 'text/event-stream; charset=utf-8',
-      body: { getReader: () => reader },
-    }),
-    get cancelCount() { return cancelCount; },
-  };
-}
-
 const LIFECYCLE_SESSION_ID = 'session-current';
 
 function lifecycleSnapshot() {
@@ -655,53 +630,6 @@ function lifecycleStorage(state = lifecycleWorkspace(), session = {}) {
   };
 }
 
-function askStreamStorage({ requestId = 'ask-request', text = 'Thinking...', status = 'pending' } = {}) {
-  const state = createDefaultState();
-  const session = createAskSession({
-    id: 7,
-    title: 'Ask source',
-    url: 'https://source.example/page',
-  }, 1);
-  session.messages = [
-    { id: 'question', role: 'user', text: 'What matters?', createdAt: 1 },
-    { id: 'answer', role: 'assistant', text, createdAt: 2 },
-  ];
-  markAskStreamPending(session.messages[1], requestId, Date.now());
-  if (status === 'streaming') {
-    session.messages[1].askStream.status = 'streaming';
-    session.messages[1].askStream.ownerId = 'previous-worker';
-  }
-  state.askSessions[session.key] = session;
-  return {
-    state,
-    sessionKey: session.key,
-    binding: { sessionKey: session.key, messageId: 'answer', requestId },
-    storage: { local: { [STORAGE_KEY]: state }, session: {} },
-  };
-}
-
-function askTurnStorage({ apiKey = 'secret-must-not-leak' } = {}) {
-  const state = createDefaultState();
-  state.ai = { ...state.ai, apiKey, maxTokens: 9999 };
-  const sourceTab = {
-    id: 7,
-    title: 'Ask source',
-    url: 'https://source.example/page',
-  };
-  const projectedSession = createAskSession(sourceTab, 1);
-  projectedSession.messages = [
-    { id: 'earlier', role: 'assistant', text: 'Earlier answer', createdAt: 2 },
-  ];
-  state.askSessions[projectedSession.key] = cloneValue(projectedSession);
-  return {
-    state,
-    sourceTab,
-    projectedSession,
-    preparedSessionRevision: askSessionRevision(projectedSession),
-    storage: { local: { [STORAGE_KEY]: state }, session: {} },
-  };
-}
-
 function lifecycleJournalKeys(background) {
   return Object.keys(background.storageSession)
     .filter((key) => key.startsWith(LIFECYCLE_EVENT_PREFIX));
@@ -791,10 +719,10 @@ test('service worker top-level boot drains a journal entry left by an earlier wo
     stored.spaceSnapshots.work.groups[0].tabs.find((tab) => tab.snapshotTabId === 'row-first').title,
     'Recovered during boot',
   );
-  assert.equal(webLock.calls.length, 2);
+  assert.equal(webLock.calls.length, 1);
   assert.ok(webLock.calls.every(([name, options]) => (
     name === SHARED_STATE_LOCK_NAME && options.mode === 'exclusive'
-  )), 'lifecycle replay and Ask recovery both use the shared exclusive state lock');
+  )), 'lifecycle replay uses the shared exclusive state lock');
 });
 
 test('registers extension lifecycle behavior and reports unknown messages through the public protocol', async () => {
@@ -885,11 +813,11 @@ test('routes panel visibility, close, focus, and shortcuts to the intended brows
 
   first.emit({ type: 'ignored', visible: true, windowId: 10 });
   first.emit({ type: 'panel:visibility', visible: true, windowId: 'invalid' });
-  assert.deepEqual(await background.send({ type: 'shortcut:action', action: 'askPage', windowId: 9 }), {
+  assert.deepEqual(await background.send({ type: 'shortcut:action', action: 'tidyNames', windowId: 9 }), {
     ok: true,
     forwarded: true,
   });
-  assert.deepEqual(first.posted.at(-1), { type: 'shortcut:action', action: 'askPage' });
+  assert.deepEqual(first.posted.at(-1), { type: 'shortcut:action', action: 'tidyNames' });
 
   first.emit({ type: 'panel:visibility', windowId: '10' });
   assert.deepEqual(await background.send({ type: 'shortcut:action', action: 'newTab', windowId: 9 }), {
@@ -2372,97 +2300,6 @@ test('relative tab moves recompute fresh indexes, enforce the target group, and 
   }), { ok: false, error: 'The source tab and target tab must be in the same Chrome window.' });
 });
 
-test('extracts readable http pages with deduplication, bounded options, fallback metadata, and per-page failures', async () => {
-  const tabs = [
-    makeTab(1, { title: 'One', url: 'https://one.test/' }),
-    makeTab(2, { title: 'Two', pendingUrl: 'http://two.test/loading', url: '' }),
-    makeTab(3, { title: 'Internal', url: 'chrome://settings' }),
-    makeTab(4, { title: 'Blocked', url: 'https://blocked.test/' }),
-  ];
-  const background = await loadBackground({
-    tabs,
-    behavior: {
-      'scripting.executeScript': async (details) => {
-        if (details.target.tabId === 1) {
-          assert.equal(details.args[0], 20000, 'per-page values are clamped to their maximum');
-          return [{ result: {
-            title: 'Article', url: 'https://one.test/', text: 'hello', charCount: 5,
-            originalCharCount: 100, truncated: true,
-          } }];
-        }
-        if (details.target.tabId === 2) return [{}];
-        throw new Error('Cannot access this page');
-      },
-    },
-  });
-  const response = await background.send({
-    type: 'pages:extract',
-    tabIds: [1, '1', 2, 3, 4, 'bad'],
-    options: { maxCharsPerPage: 999999, maxTotalChars: 999999 },
-  });
-  assert.equal(response.ok, true);
-  assert.deepEqual(response.pages.map((page) => page.tabId), [1, 2]);
-  assert.equal(response.pages[1].title, 'Two');
-  assert.equal(response.pages[1].url, 'http://two.test/loading');
-  assert.equal(response.pages[1].text, '');
-  assert.equal(response.totalChars, 5);
-  assert.equal(response.truncated, true);
-  assert.deepEqual(response.failures, [
-    { tabId: 3, reason: 'read-failed', error: 'Only an http(s) current page can be read by Ask Page.' },
-    { tabId: 4, reason: 'read-failed', error: 'Cannot access this page' },
-  ]);
-});
-
-test('stops page extraction at the overall content budget and caps requests at 24 unique ids', async () => {
-  const tabs = Array.from({ length: 30 }, (_, index) => makeTab(index + 1));
-  const background = await loadBackground({
-    tabs,
-    behavior: {
-      'scripting.executeScript': async (details) => [{ result: {
-        title: 'Large',
-        url: `https://example.test/${details.target.tabId}`,
-        text: 'x'.repeat(1000),
-        charCount: 1000,
-        originalCharCount: 1000,
-        truncated: false,
-      } }],
-    },
-  });
-  const response = await background.send({
-    type: 'pages:extract',
-    tabIds: tabs.map((tab) => tab.id),
-    options: { maxCharsPerPage: 1, maxTotalChars: 1 },
-  });
-  assert.equal(response.pages.length, 1);
-  assert.equal(response.failures.length, 23);
-  assert.ok(response.failures.every((failure) => failure.reason === 'content-limit'));
-  assert.equal(response.totalChars, 1000);
-  assert.equal(response.truncated, false);
-  assert.equal(background.calls.filter((call) => call[0] === 'scripting.executeScript').length, 1);
-});
-
-test('page extraction applies fallback limits and reports missing tabs cleanly', async () => {
-  const background = await loadBackground({ tabs: [makeTab(1)] });
-  const response = await background.send({
-    type: 'pages:extract', tabIds: [1, 999], options: { maxCharsPerPage: 'nope', maxTotalChars: 'nope' },
-  });
-  assert.equal(response.pages.length, 1);
-  assert.deepEqual(response.failures, [{ tabId: 999, reason: 'read-failed', error: 'No tab with id: 999' }]);
-  const execute = background.calls.find((call) => call[0] === 'scripting.executeScript');
-  assert.equal(execute[1].args[0], 12000);
-
-  assert.deepEqual(await background.send({ type: 'pages:extract', tabIds: null }), {
-    ok: true, pages: [], failures: [], totalChars: 0, truncated: false,
-  });
-
-  background.tabs.set(2, makeTab(2));
-  background.behavior['scripting.executeScript'] = async () => { throw 'script injection failed'; };
-  const rawFailure = await background.send({ type: 'pages:extract', tabIds: [2] });
-  assert.deepEqual(rawFailure.failures, [{
-    tabId: 2, reason: 'read-failed', error: 'script injection failed',
-  }]);
-});
-
 test('AI chat sends a bounded OpenAI-compatible request and returns text, usage, and finish reason', async () => {
   const fetchCalls = [];
   const background = await loadBackground({
@@ -2479,8 +2316,7 @@ test('AI chat sends a bounded OpenAI-compatible request and returns text, usage,
     settings: aiSettings,
     messages: [{ role: 'user', content: 'Question' }],
     requestId: 'normal-request',
-    stream: false,
-    purpose: 'ask-page',
+    purpose: 'test-ai',
   });
   assert.deepEqual(response, {
     ok: true,
@@ -2494,7 +2330,7 @@ test('AI chat sends a bounded OpenAI-compatible request and returns text, usage,
   assert.equal(fetchCalls[0][1].headers.Authorization, 'Bearer secret');
   const body = JSON.parse(fetchCalls[0][1].body);
   assert.equal(body.stream, false);
-  assert.equal(body.max_tokens, 32768);
+  assert.equal(body.max_tokens, 1024);
   assert.equal(body.temperature, 0.25);
   assert.deepEqual(body.messages, [{ role: 'user', content: 'Question' }]);
   assert.equal(fetchCalls[0][1].signal instanceof AbortSignal, true);
@@ -2644,719 +2480,6 @@ test('DeepSeek Disabled is serialized explicitly instead of enabling server defa
   assert.deepEqual(requestBody.thinking, { type: 'disabled' });
 });
 
-test('streaming AI emits cumulative text and returns stream usage and finish reason', async () => {
-  const stream = sseResponse([
-    ': heartbeat\n',
-    'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
-    'data: invalid-json\n\n',
-    'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"length"}],"usage":{"completion_tokens":2}}\n\n',
-    'data: [DONE]\n\n',
-  ]);
-  const background = await loadBackground({ fetch: async () => stream.response });
-  const response = await background.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'stream-1',
-    stream: true,
-    purpose: 'ask-page',
-  });
-  assert.deepEqual(response, {
-    ok: true,
-    text: 'Hello',
-    usage: { completion_tokens: 2 },
-    finishReason: 'length',
-  });
-  assert.deepEqual(background.calls.filter((call) => call[0] === 'runtime.sendMessage'), [
-    ['runtime.sendMessage', { type: 'ai:stream', requestId: 'stream-1', text: 'Hel' }],
-    ['runtime.sendMessage', { type: 'ai:stream', requestId: 'stream-1', text: 'Hello' }],
-  ]);
-  assert.equal(stream.cancelCount, 1);
-});
-
-test('Ask begin durably arms pending recovery before provider dispatch and survives a session rekey', async () => {
-  const fixture = askTurnStorage();
-  let releaseAlarm;
-  let fetchCount = 0;
-  const background = await loadBackground({
-    storage: fixture.storage,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [{ message: { content: 'Unexpected' } }] });
-    },
-    behavior: {
-      'alarms.create': async () => new Promise((resolve) => {
-        releaseAlarm = resolve;
-      }),
-    },
-  });
-  const beginning = background.send({
-    type: 'ask:begin',
-    askTurn: {
-      sessionKey: fixture.projectedSession.key,
-      prompt: 'What matters?',
-      sourceTab: fixture.sourceTab,
-      projectedSession: fixture.projectedSession,
-      preparedSessionRevision: fixture.preparedSessionRevision,
-      requestId: 'begin-before-provider',
-      pruneOptions: {
-        openTabIds: [fixture.sourceTab.id],
-        openSessionKeys: [fixture.projectedSession.key],
-        spaceIds: ['default'],
-        inFlightKeys: [],
-      },
-    },
-  });
-
-  await waitFor(() => typeof releaseAlarm === 'function');
-  const pendingWorkspace = background.storageLocal[STORAGE_KEY];
-  const pending = pendingWorkspace.askSessions[fixture.projectedSession.key].messages.at(-1);
-  assert.equal(pending.text, 'Thinking...');
-  assert.deepEqual(pending.askStream, {
-    requestId: 'begin-before-provider',
-    status: 'pending',
-    ownerId: '',
-    startedAt: pending.askStream.startedAt,
-    updatedAt: pending.askStream.updatedAt,
-  });
-  assert.equal(pendingWorkspace.ai.apiKey, '');
-  assert.equal(Object.hasOwn(pendingWorkspace.ai, 'maxTokens'), false);
-  assert.equal(fetchCount, 0);
-  const setIndex = background.calls.findIndex(([name]) => name === 'storage.local.set');
-  const alarmIndex = background.calls.findIndex(([name, alarmName]) => (
-    name === 'alarms.create' && alarmName.endsWith('begin-before-provider')
-  ));
-  assert.ok(setIndex >= 0 && alarmIndex > setIndex, 'the request alarm is created only after pending is durable');
-
-  releaseAlarm();
-  const started = await beginning;
-  assert.equal(started.ok, true);
-  assert.equal(started.sessionKey, fixture.projectedSession.key);
-  assert.equal(started.messageId, pending.id);
-  assert.equal(started.requestId, 'begin-before-provider');
-
-  const movedSessionKey = fixture.projectedSession.key.replace('tab:7:', 'tab:8:');
-  const movedSession = pendingWorkspace.askSessions[fixture.projectedSession.key];
-  delete pendingWorkspace.askSessions[fixture.projectedSession.key];
-  movedSession.key = movedSessionKey;
-  movedSession.tabId = 8;
-  pendingWorkspace.askSessions[movedSessionKey] = movedSession;
-
-  await background.emitAlarm('spaceTabsAskStreamRecovery:begin-before-provider');
-  const recovered = background.storageLocal[STORAGE_KEY]
-    .askSessions[movedSessionKey].messages.at(-1);
-  assert.equal(recovered.askStream, undefined);
-  assert.match(recovered.text, /Request interrupted before completion/);
-  assert.equal(fetchCount, 0, 'a panel disappearing before ai:chat never contacts the provider');
-});
-
-test('Ask begin rejects invalid or stale prepared turns and compensates an alarm creation failure', async () => {
-  const fixture = askTurnStorage();
-  let fetchCount = 0;
-  const background = await loadBackground({
-    storage: fixture.storage,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [] });
-    },
-  });
-  assert.match((await background.send({ type: 'ask:begin' })).error, /valid request id/);
-  assert.match((await background.send({
-    type: 'ask:begin',
-    askTurn: { requestId: 'x'.repeat(513) },
-  })).error, /valid request id/);
-  assert.match((await background.send({
-    type: 'ask:begin',
-    askTurn: {
-      sessionKey: 'tab:99:https://wrong.example/',
-      sourceTab: fixture.sourceTab,
-      projectedSession: fixture.projectedSession,
-      preparedSessionRevision: fixture.preparedSessionRevision,
-      requestId: 'wrong-session',
-    },
-  })).error, /no longer matches the current page/);
-  assert.match((await background.send({
-    type: 'ask:begin',
-    askTurn: {
-      sessionKey: fixture.projectedSession.key,
-      sourceTab: fixture.sourceTab,
-      projectedSession: fixture.projectedSession,
-      requestId: 'stale-preparation',
-    },
-  })).error, /conversation changed before it could be sent/);
-  assert.equal(fetchCount, 0);
-
-  const writeFixture = askTurnStorage({ apiKey: '' });
-  const writeFailure = await loadBackground({
-    storage: writeFixture.storage,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [] });
-    },
-    behavior: {
-      'storage.local.set': async () => { throw new Error('begin write failed'); },
-    },
-  });
-  assert.match((await writeFailure.send({
-    type: 'ask:begin',
-    askTurn: {
-      sessionKey: writeFixture.projectedSession.key,
-      prompt: 'Never send this',
-      sourceTab: writeFixture.sourceTab,
-      projectedSession: writeFixture.projectedSession,
-      preparedSessionRevision: writeFixture.preparedSessionRevision,
-      requestId: 'begin-write-failure',
-    },
-  })).error, /begin write failed/);
-  assert.equal(
-    writeFailure.storageLocal[STORAGE_KEY]
-      .askSessions[writeFixture.projectedSession.key].messages.length,
-    1,
-  );
-  assert.equal(writeFailure.alarms.has('spaceTabsAskStreamRecovery:begin-write-failure'), false);
-  assert.equal(fetchCount, 0);
-
-  const alarmFixture = askTurnStorage();
-  const alarmFailure = await loadBackground({
-    storage: alarmFixture.storage,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [] });
-    },
-    behavior: {
-      'alarms.create': async () => { throw new Error('alarm storage unavailable'); },
-    },
-  });
-  assert.match((await alarmFailure.send({
-    type: 'ask:begin',
-    askTurn: {
-      sessionKey: alarmFixture.projectedSession.key,
-      prompt: '',
-      sourceTab: alarmFixture.sourceTab,
-      projectedSession: alarmFixture.projectedSession,
-      preparedSessionRevision: alarmFixture.preparedSessionRevision,
-      requestId: 'alarm-failure',
-    },
-  })).error, /alarm storage unavailable/);
-  const compensated = alarmFailure.storageLocal[STORAGE_KEY]
-    .askSessions[alarmFixture.projectedSession.key].messages.at(-1);
-  assert.equal(compensated.askStream, undefined);
-  assert.match(compensated.text, /Request interrupted before completion/);
-  assert.equal(alarmFailure.alarms.has('spaceTabsAskStreamRecovery:alarm-failure'), false);
-  assert.equal(fetchCount, 0);
-});
-
-test('background owns Ask stream checkpoints and final persistence after the panel disappears', async () => {
-  const fixture = askStreamStorage({ requestId: 'durable-stream' });
-  const encoder = new TextEncoder();
-  let readCount = 0;
-  let releaseCompletion;
-  const response = {
-    ok: true,
-    status: 200,
-    headers: { get: () => 'text/event-stream' },
-    body: {
-      getReader() {
-        return {
-          async read() {
-            readCount += 1;
-            if (readCount === 1) {
-              return {
-                done: false,
-                value: encoder.encode([
-                  'data: {"choices":[{"delta":{"content":"H"}}]}',
-                  'data: {"choices":[{"delta":{"content":"e"}}]}',
-                  'data: {"choices":[{"delta":{"content":"l"},"finish_reason":"stop"}]}',
-                  '',
-                ].join('\n')),
-              };
-            }
-            if (readCount === 2) {
-              return new Promise((resolve) => {
-                releaseCompletion = () => resolve({
-                  done: false,
-                  value: encoder.encode('data: [DONE]\n\n'),
-                });
-              });
-            }
-            return { done: true, value: undefined };
-          },
-          async cancel() {},
-        };
-      },
-    },
-  };
-  const background = await loadBackground({
-    storage: fixture.storage,
-    fetch: async () => response,
-    behavior: {
-      'runtime.sendMessage': async () => { throw new Error('Panel reloaded'); },
-    },
-  });
-  const completion = background.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [{ role: 'user', content: 'PAGE_BODY_SENTINEL' }],
-    stream: true,
-    purpose: 'ask-page',
-    askStream: fixture.binding,
-  });
-
-  await waitFor(() => typeof releaseCompletion === 'function');
-  const partial = background.storageLocal[STORAGE_KEY]
-    .askSessions[fixture.sessionKey].messages.find((message) => message.id === 'answer');
-  assert.equal(partial.text, 'H', 'the first partial is durable without writing every token');
-  assert.equal(partial.askStream.status, 'streaming');
-  assert.notEqual(partial.askStream.ownerId, 'previous-worker');
-  assert.equal(
-    background.calls.filter(([name]) => name === 'storage.local.set').length,
-    2,
-    'claim plus one throttled partial checkpoint are durable before completion',
-  );
-
-  releaseCompletion();
-  const completed = await completion;
-  assert.equal(completed.askPersisted, true);
-  assert.equal(completed.askStatus, 'complete');
-  assert.equal(completed.text, 'Hel');
-  const stored = background.storageLocal[STORAGE_KEY];
-  const answer = stored.askSessions[fixture.sessionKey].messages
-    .find((message) => message.id === 'answer');
-  assert.equal(answer.askStream, undefined);
-  assert.match(answer.text, /^Hel/);
-  assert.match(answer.text, /### Sources/);
-  assert.match(answer.text, /https:\/\/source\.example\/page/);
-  const durableJSON = JSON.stringify(stored);
-  assert.equal(durableJSON.includes('PAGE_BODY_SENTINEL'), false);
-  assert.equal(durableJSON.includes(aiSettings.apiKey), false);
-  assert.equal(stored.ai.apiKey, '');
-  assert.equal(
-    background.calls.filter(([name]) => name === 'storage.local.set').length,
-    3,
-    'the final write replaces the stream marker exactly once',
-  );
-  assert.ok(background.calls.some(([name, alarmName]) => (
-    name === 'alarms.clear' && alarmName.endsWith('durable-stream')
-  )));
-});
-
-test('a finalized Ask response stays successful and idempotent when alarm cleanup fails', async () => {
-  const fixture = askStreamStorage({ requestId: 'clear-failure' });
-  const background = await loadBackground({
-    storage: fixture.storage,
-    fetch: async () => jsonResponse({ choices: [{ message: { content: 'Durable final' } }] }),
-    behavior: {
-      'alarms.clear': async () => { throw new Error('alarm cleanup unavailable'); },
-    },
-  });
-  const response = await background.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'clear-failure',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: fixture.binding,
-  });
-  assert.equal(response.ok, true);
-  assert.equal(response.askPersisted, true);
-  assert.equal(response.askStatus, 'complete');
-  const finalBeforeRetry = cloneValue(background.storageLocal[STORAGE_KEY]);
-  const writesBeforeRetry = background.calls.filter(([name]) => name === 'storage.local.set').length;
-  assert.equal(finalBeforeRetry.askSessions[fixture.sessionKey].messages.at(-1).askStream, undefined);
-  assert.match(finalBeforeRetry.askSessions[fixture.sessionKey].messages.at(-1).text, /^Durable final/);
-
-  await background.emitAlarm('spaceTabsAskStreamRecovery:clear-failure');
-  assert.deepEqual(background.storageLocal[STORAGE_KEY], finalBeforeRetry);
-  assert.equal(
-    background.calls.filter(([name]) => name === 'storage.local.set').length,
-    writesBeforeRetry,
-    'a stale uncleared alarm cannot rewrite a durably finalized answer',
-  );
-});
-
-test('background persists explicit failed and stopped Ask outcomes instead of permanent Thinking rows', async () => {
-  const failedFixture = askStreamStorage({ requestId: 'failed-stream' });
-  const failed = await loadBackground({
-    storage: failedFixture.storage,
-    fetch: async () => { throw new TypeError('Provider offline'); },
-  });
-  const failedResponse = await failed.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'failed-stream',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: failedFixture.binding,
-  });
-  assert.equal(failedResponse.askPersisted, true);
-  assert.equal(failedResponse.askStatus, 'failed');
-  assert.equal(failedResponse.askError, 'Provider offline');
-  const failedAnswer = failed.storageLocal[STORAGE_KEY]
-    .askSessions[failedFixture.sessionKey].messages.at(-1);
-  assert.equal(failedAnswer.askStream, undefined);
-  assert.match(failedAnswer.text, /^Provider offline/);
-  assert.match(failedAnswer.text, /### Sources/);
-
-  const stoppedFixture = askStreamStorage({ requestId: 'stopped-stream' });
-  const stopped = await loadBackground({
-    storage: stoppedFixture.storage,
-    fetch: async (_url, init) => new Promise((_resolve, reject) => {
-      init.signal.addEventListener('abort', () => {
-        const error = new Error('aborted');
-        error.name = 'AbortError';
-        reject(error);
-      }, { once: true });
-    }),
-  });
-  const stoppedCompletion = stopped.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'stopped-stream',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: stoppedFixture.binding,
-  });
-  await waitFor(() => stopped.calls.some(([name, alarmName]) => (
-    name === 'alarms.create' && alarmName.endsWith('stopped-stream')
-  )));
-  await stopped.startup();
-  assert.equal(
-    stopped.storageLocal[STORAGE_KEY]
-      .askSessions[stoppedFixture.sessionKey].messages.at(-1).askStream.status,
-    'streaming',
-    'worker-start recovery must preserve a request owned by this still-running worker',
-  );
-  await stopped.emitAlarm('unrelated-alarm');
-  await stopped.emitAlarm('spaceTabsAskStreamRecovery:');
-  await stopped.emitAlarm('spaceTabsAskStreamRecovery:stopped-stream');
-  assert.deepEqual(await stopped.send({ type: 'ai:abort', requestId: 'stopped-stream' }), {
-    ok: true,
-    aborted: true,
-  });
-  const stoppedResponse = await stoppedCompletion;
-  assert.equal(stoppedResponse.askPersisted, true);
-  assert.equal(stoppedResponse.askStatus, 'stopped');
-  const stoppedAnswer = stopped.storageLocal[STORAGE_KEY]
-    .askSessions[stoppedFixture.sessionKey].messages.at(-1);
-  assert.equal(stoppedAnswer.askStream, undefined);
-  assert.match(stoppedAnswer.text, /^Request stopped before completion/);
-  assert.ok(stopped.calls.filter(([name, alarmName]) => (
-    name === 'alarms.create' && alarmName.endsWith('stopped-stream')
-  )).length >= 2, 'an alarm firing while the request is active is rescheduled');
-});
-
-test('Ask Stop during durable stream claim never contacts the provider and persists a stopped answer', async () => {
-  if (!registeredBackgroundListeners) {
-    await loadBackground({
-      storage: { local: { [STORAGE_KEY]: createDefaultState() }, session: {} },
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  const fixture = askStreamStorage({ requestId: 'stop-before-claim' });
-  const webLock = createControllableWebLock();
-  let fetchCount = 0;
-  const background = await loadBackground({
-    storage: fixture.storage,
-    webLock,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [{ message: { content: 'Too late' } }] });
-    },
-  });
-  webLock.hold();
-  const completion = background.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'stop-before-claim',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: fixture.binding,
-  });
-
-  await waitFor(() => webLock.pendingCount === 1);
-  assert.deepEqual(await background.send({ type: 'ai:abort', requestId: 'stop-before-claim' }), {
-    ok: true,
-    aborted: true,
-  });
-  webLock.releaseAll();
-
-  const response = await completion;
-  assert.equal(response.askPersisted, true);
-  assert.equal(response.askStatus, 'stopped');
-  assert.equal(fetchCount, 0);
-  const answer = background.storageLocal[STORAGE_KEY]
-    .askSessions[fixture.sessionKey].messages.at(-1);
-  assert.equal(answer.askStream, undefined);
-  assert.match(answer.text, /^Request stopped before completion/);
-});
-
-test('Ask recovery alarms convert a worker-owned partial to an interrupted answer', async () => {
-  const fixture = askStreamStorage({
-    requestId: 'orphaned-stream',
-    text: 'Durable partial',
-    status: 'streaming',
-  });
-  const background = await loadBackground({ storage: fixture.storage });
-  await background.emitAlarm('spaceTabsAskStreamRecovery:orphaned-stream');
-  const answer = background.storageLocal[STORAGE_KEY]
-    .askSessions[fixture.sessionKey].messages.at(-1);
-  assert.equal(answer.askStream, undefined);
-  assert.match(answer.text, /^Durable partial/);
-  assert.match(answer.text, /Request interrupted before completion/);
-  assert.match(answer.text, /### Sources/);
-  assert.equal(background.alarms.has('spaceTabsAskStreamRecovery:orphaned-stream'), false);
-});
-
-test('worker-start recovery interrupts an older worker owner and contains storage failures', async () => {
-  const fixture = askStreamStorage({
-    requestId: 'previous-worker-stream',
-    text: 'Checkpoint from old worker',
-    status: 'streaming',
-  });
-  const background = await loadBackground({ storage: fixture.storage });
-  await background.startup();
-  const answer = background.storageLocal[STORAGE_KEY]
-    .askSessions[fixture.sessionKey].messages.at(-1);
-  assert.equal(answer.askStream, undefined);
-  assert.match(answer.text, /Checkpoint from old worker/);
-  assert.match(answer.text, /Request interrupted before completion/);
-
-  const unavailable = await loadBackground({
-    storage: fixture.storage,
-    behavior: {
-      'storage.local.get': async () => { throw new Error('startup storage unavailable'); },
-    },
-  });
-  await captureConsoleErrors(async (errors) => {
-    assert.deepEqual(await unavailable.startup(), []);
-    assert.match(String(errors.at(-1)?.[1]), /startup storage unavailable/);
-  });
-});
-
-test('Ask stream persistence rejects forged, mismatched, and missing durable bindings before fetch', async () => {
-  const fixture = askStreamStorage({ requestId: 'valid-stream' });
-  let fetchCount = 0;
-  const background = await loadBackground({
-    storage: fixture.storage,
-    fetch: async () => {
-      fetchCount += 1;
-      return jsonResponse({ choices: [] });
-    },
-  });
-  const base = {
-    type: 'ai:chat', settings: aiSettings, messages: [], stream: true, purpose: 'ask-page',
-  };
-  assert.match((await background.send({ ...base, askStream: {} })).error, /valid streaming Ask Page message/);
-  assert.match((await background.send({
-    ...base, stream: false, askStream: fixture.binding,
-  })).error, /valid streaming Ask Page message/);
-  assert.match((await background.send({
-    ...base, purpose: 'test-ai', askStream: fixture.binding,
-  })).error, /valid streaming Ask Page message/);
-  assert.match((await background.send({
-    ...base, requestId: 'different', askStream: fixture.binding,
-  })).error, /does not match this AI request/);
-  assert.match((await background.send({
-    ...base,
-    askStream: { ...fixture.binding, messageId: 'missing' },
-  })).error, /conversation changed before its provider response could be saved/);
-  assert.equal(fetchCount, 0);
-});
-
-test('Ask stream persistence retries terminal state after checkpoint or final storage failures', async () => {
-  const claimFixture = askStreamStorage({ requestId: 'claim-write-failure' });
-  let claimWriteCount = 0;
-  let claimBackground;
-  claimBackground = await loadBackground({
-    storage: claimFixture.storage,
-    fetch: async () => {
-      throw new Error('the provider must not run before the durable claim');
-    },
-    behavior: {
-      'storage.local.set': async (values) => {
-        claimWriteCount += 1;
-        if (claimWriteCount === 1) throw new Error('claim write failed');
-        Object.assign(claimBackground.storageLocal, cloneValue(values));
-      },
-    },
-  });
-  assert.match((await claimBackground.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'claim-write-failure',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: claimFixture.binding,
-  })).error, /claim write failed/);
-  assert.equal(claimBackground.alarms.has(
-    'spaceTabsAskStreamRecovery:claim-write-failure',
-  ), true, 'a failed first claim still schedules recovery when the panel is gone');
-  await claimBackground.emitAlarm('spaceTabsAskStreamRecovery:claim-write-failure');
-  const recoveredClaim = claimBackground.storageLocal[STORAGE_KEY]
-    .askSessions[claimFixture.sessionKey].messages.at(-1);
-  assert.equal(recoveredClaim.askStream, undefined);
-  assert.match(recoveredClaim.text, /Request interrupted before completion/);
-
-  const partialFixture = askStreamStorage({ requestId: 'partial-write-failure' });
-  let partialWriteCount = 0;
-  let partialBackground;
-  partialBackground = await loadBackground({
-    storage: partialFixture.storage,
-    fetch: async () => sseResponse([
-      'data: {"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\n',
-      'data: [DONE]\n\n',
-    ]).response,
-    behavior: {
-      'storage.local.set': async (values) => {
-        partialWriteCount += 1;
-        if (partialWriteCount === 2) throw new Error('checkpoint write failed');
-        Object.assign(partialBackground.storageLocal, cloneValue(values));
-      },
-    },
-  });
-  const partialResponse = await partialBackground.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'partial-write-failure',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: partialFixture.binding,
-  });
-  assert.equal(partialResponse.askStatus, 'complete');
-  assert.equal(partialWriteCount, 3);
-  assert.match(
-    partialBackground.storageLocal[STORAGE_KEY]
-      .askSessions[partialFixture.sessionKey].messages.at(-1).text,
-    /^Recovered/,
-  );
-
-  const finalFixture = askStreamStorage({ requestId: 'final-write-failure' });
-  let finalWriteCount = 0;
-  let finalBackground;
-  finalBackground = await loadBackground({
-    storage: finalFixture.storage,
-    fetch: async () => jsonResponse({ choices: [{ message: { content: 'Complete' } }] }),
-    behavior: {
-      'storage.local.set': async (values) => {
-        finalWriteCount += 1;
-        if (finalWriteCount === 2) throw new Error('final write failed');
-        Object.assign(finalBackground.storageLocal, cloneValue(values));
-      },
-    },
-  });
-  assert.deepEqual(await finalBackground.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'final-write-failure',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: finalFixture.binding,
-  }), { ok: false, error: 'final write failed' });
-  const stillRecoverable = finalBackground.storageLocal[STORAGE_KEY]
-    .askSessions[finalFixture.sessionKey].messages.at(-1);
-  assert.equal(stillRecoverable.askStream.status, 'streaming');
-  assert.ok(finalBackground.calls.filter(([name, alarmName]) => (
-    name === 'alarms.create' && alarmName.endsWith('final-write-failure')
-  )).length >= 2);
-});
-
-test('Ask failure normalization accepts thrown strings and recovery write errors reschedule alarms', async () => {
-  const stringFixture = askStreamStorage({ requestId: 'string-failure' });
-  const stringFailure = await loadBackground({
-    storage: stringFixture.storage,
-    fetch: async () => { throw 'provider string failure'; },
-  });
-  const stringResponse = await stringFailure.send({
-    type: 'ai:chat',
-    settings: aiSettings,
-    messages: [],
-    requestId: 'string-failure',
-    stream: true,
-    purpose: 'ask-page',
-    askStream: stringFixture.binding,
-  });
-  assert.equal(stringResponse.askError, 'provider string failure');
-
-  const recoveryFixture = askStreamStorage({
-    requestId: 'recovery-write-failure',
-    text: 'Keep partial',
-    status: 'streaming',
-  });
-  const recovery = await loadBackground({
-    storage: recoveryFixture.storage,
-    behavior: {
-      'storage.local.set': async () => { throw new Error('recovery storage unavailable'); },
-    },
-  });
-  await captureConsoleErrors(async (errors) => {
-    await recovery.emitAlarm('spaceTabsAskStreamRecovery:recovery-write-failure');
-    assert.match(String(errors.at(-1)?.[1]), /recovery storage unavailable/);
-  });
-  assert.ok(recovery.alarms.has('spaceTabsAskStreamRecovery:recovery-write-failure'));
-  await recovery.emitAlarm('spaceTabsAskStreamRecovery:unknown-stream');
-  await recovery.emitAlarm(undefined);
-});
-
-test('streaming AI parses a final unterminated event and ignores notification and reader-cancel failures', async () => {
-  const stream = sseResponse([
-    'data: {"choices":[{"delta":{"content":"Tail"},"finish_reason":"stop"}],"usage":{"total_tokens":4}}',
-  ], { cancelError: true });
-  const background = await loadBackground({
-    fetch: async () => stream.response,
-    behavior: {
-      'runtime.sendMessage': async () => { throw new Error('No side panel'); },
-    },
-  });
-  const response = await background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], stream: true, purpose: 'ask-page',
-  });
-  assert.equal(response.text, 'Tail');
-  assert.deepEqual(response.usage, { total_tokens: 4 });
-  assert.equal(response.finishReason, 'stop');
-  assert.equal(stream.cancelCount, 0, 'a naturally completed response does not need cancellation');
-
-  const doneStream = sseResponse(['data: [DONE]\n\n'], { cancelError: true });
-  globalThis.fetch = async () => doneStream.response;
-  const completed = await background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], stream: true, purpose: 'ask-page',
-  });
-  assert.equal(completed.text, '');
-  assert.equal(doneStream.cancelCount, 1);
-});
-
-test('stream requests gracefully fall back to JSON when the server does not provide an SSE body', async () => {
-  const responses = [
-    jsonResponse({ choices: [{ message: { content: 'JSON content type' } }] }),
-    jsonResponse({ choices: [{ message: { content: 'Missing body' } }] }, { contentType: 'text/event-stream' }),
-  ];
-  const background = await loadBackground({ fetch: async () => responses.shift() });
-  for (const expected of ['JSON content type', 'Missing body']) {
-    const response = await background.send({
-      type: 'ai:chat', settings: aiSettings, messages: [], stream: true, purpose: 'test-ai',
-    });
-    assert.equal(response.text, expected);
-  }
-
-  globalThis.fetch = async () => ({
-    ok: true,
-    status: 200,
-    headers: { get: () => null },
-    body: null,
-    async json() { return { choices: [{ message: { content: 'No content type' } }] }; },
-  });
-  const noContentType = await background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], stream: false, purpose: 'test-ai',
-  });
-  assert.equal(noContentType.text, 'No content type');
-});
-
 test('specific and global AI aborts stop active requests and do not claim unknown requests', async () => {
   const pendingFetch = async (_url, init) => new Promise((resolve, reject) => {
     init.signal.addEventListener('abort', () => {
@@ -3368,7 +2491,7 @@ test('specific and global AI aborts stop active requests and do not claim unknow
   const background = await loadBackground({ fetch: pendingFetch });
 
   const firstChat = background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'first', purpose: 'ask-page',
+    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'first', purpose: 'test-ai',
   });
   await Promise.resolve();
   assert.deepEqual(await background.send({ type: 'ai:abort', requestId: 'missing' }), {
@@ -3380,10 +2503,10 @@ test('specific and global AI aborts stop active requests and do not claim unknow
   assert.deepEqual(await firstChat, { ok: false, error: 'AI request was stopped.' });
 
   const secondChat = background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'second', purpose: 'ask-page',
+    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'second', purpose: 'test-ai',
   });
   const thirdChat = background.send({
-    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'third', purpose: 'ask-page',
+    type: 'ai:chat', settings: aiSettings, messages: [], requestId: 'third', purpose: 'test-ai',
   });
   await Promise.resolve();
   assert.deepEqual(await background.send({ type: 'ai:abort' }), { ok: true, aborted: true });
@@ -4635,7 +3758,7 @@ test('runtime startup drains a journal entry left by an earlier worker', async (
     ['row-first', 'row-other'],
   );
   assert.equal(stored.tabLifecycle[11], undefined);
-  assert.equal(webLock.calls.length, 2);
+  assert.equal(webLock.calls.length, 1);
   assert.ok(webLock.calls.every(([name, options]) => (
     name === SHARED_STATE_LOCK_NAME && options.mode === 'exclusive'
   )));

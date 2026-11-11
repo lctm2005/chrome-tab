@@ -1529,7 +1529,7 @@ function reportTerminalCoverageProgress(progress, summary) {
 async function main() {
   const progress = (step) => process.stderr.write(`[e2e] ${step}\n`);
   const arcSidebarFixturePath = join(repoRoot, 'tests/fixtures/arc-sidebar.json');
-  progress('starting local Ask Page fixtures and OpenAI-compatible SSE fixture');
+  progress('starting local fixture pages and OpenAI-compatible SSE fixture');
   const askFixtureServer = await startAskFixtureServer();
   progress('building an isolated extension fixture without local secrets');
   const extensionFixture = await createExtensionFixture({
@@ -1937,13 +1937,9 @@ async function main() {
       JSON.stringify(undoneArcSetup),
     );
     await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `(() => {
-      const button = document.querySelector('#askAIButton');
-      if (document.querySelector('#settingsDialog')?.open ||
-          document.querySelector('#askPageView')?.hidden || !button) return false;
-      const rect = button.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    })()`);
+    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
+      !document.querySelector('#groupsList')?.hidden &&
+      Boolean(document.querySelector('#activeSpaceName')?.textContent)`);
 
     const openedWorkbench = await waitFor(client, `(async () => {
       const tabs = await chrome.tabs.query({});
@@ -8763,7 +8759,6 @@ async function main() {
               }],
             },
           },
-          askSessions: {},
           collapsedSpaceGroups: {},
         };
         const file = new File(
@@ -9179,273 +9174,6 @@ async function main() {
     }
     progress('per-window Space state and panel shortcut routing passed');
 
-    await waitFor(client, `document.querySelector('.ask-page')`);
-    const reducedAIUI = await evaluate(client, `({
-      hasContext: Boolean(document.querySelector('#contextView, .context-space')),
-      hasSummary: Boolean(document.querySelector('#summarizePageButton')),
-      hasAsk: Boolean(document.querySelector('.ask-page')),
-    })`);
-    record('Context and Summary are removed while Ask remains', !reducedAIUI.hasContext && !reducedAIUI.hasSummary && reducedAIUI.hasAsk, JSON.stringify(reducedAIUI));
-
-    const askCloseFallbackUrl = `${askFixtureServer.sourceBetaUrl}?fixture=ask-close-fallback`;
-    const askCloseFallbackTab = await evaluate(client, `chrome.tabs.create({
-      url: ${JSON.stringify(askCloseFallbackUrl)},
-      active: true,
-      windowId: ${JSON.stringify(openedWorkbench.windowId)},
-    })`);
-    await waitFor(client, `(async () => {
-      const [tab, listed] = await Promise.all([
-        chrome.tabs.get(${JSON.stringify(askCloseFallbackTab.id)}),
-        chrome.runtime.sendMessage({
-          type: 'tabs:list',
-          windowId: ${JSON.stringify(openedWorkbench.windowId)},
-        }),
-      ]);
-      const chip = document.querySelector('#askSourceList .ask-source-chip');
-      return tab.status === 'complete' && tab.url === ${JSON.stringify(askCloseFallbackUrl)} &&
-        tab.windowId === ${JSON.stringify(openedWorkbench.windowId)} &&
-        (listed.tabs || []).some((item) => item.id === tab.id && item.url === tab.url) &&
-        chip?.title === tab.url &&
-        chip.querySelector('b')?.textContent === 'Ask Source Beta' &&
-        document.querySelector('#askSourceSummary')?.textContent === 'Current page';
-    })()`, 12000);
-    const restrictedAskTab = await evaluate(client, `(async () => {
-      const tab = await chrome.tabs.create({
-        url: 'chrome://newtab',
-        active: true,
-        windowId: ${JSON.stringify(openedWorkbench.windowId)},
-      });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-      return { id: tab.id, url: tab.url || tab.pendingUrl || '' };
-    })()`);
-    await waitFor(client, `document.querySelector('#askSourceSummary')?.textContent === 'No readable page'`, 12000);
-
-    await pressKeyWithCDP(client, 'k', 'KeyK', 4);
-    await waitFor(client, `document.querySelector('#commandPaletteDialog')?.open`);
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#commandPaletteInput');
-      input.value = '';
-      input.focus();
-    })()`);
-    await client.send('Input.insertText', { text: 'Ask Page' });
-    await waitFor(client, `(() => {
-      const results = [...document.querySelectorAll(
-        '#commandPaletteResults [data-command-index]',
-      )];
-      const selected = results.filter((item) => item.getAttribute('aria-selected') === 'true');
-      return document.activeElement === document.querySelector('#commandPaletteInput') &&
-        results.length === 1 && selected.length === 1 &&
-        selected[0].querySelector('strong')?.textContent === 'Ask this Page';
-    })()`);
-    await pressKeyWithCDP(client, 'Enter', 'Enter');
-    let askPageState;
-    try {
-      askPageState = await waitFor(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const sessionKey = stored.spaceTabsState?.activeAskSessionKey || '';
-        const session = stored.spaceTabsState?.askSessions?.[sessionKey];
-        if (document.querySelector('#askPageView')?.hidden ||
-            !session || session.tabId !== ${JSON.stringify(restrictedAskTab.id)}) return null;
-        return {
-          sessionKey,
-          tabId: session.tabId,
-          url: session.url,
-          scope: document.querySelector('#askScope')?.textContent || '',
-          placeholder: document.querySelector('#askPagePrompt')?.placeholder || '',
-          sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        };
-      })()`);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const [stored, activeTabs, listed] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.tabs.query({ active: true }),
-          chrome.runtime.sendMessage({ type: 'tabs:listAll' }),
-        ]);
-        const saved = stored.spaceTabsState || {};
-        return {
-          restrictedTabId: ${JSON.stringify(restrictedAskTab.id)},
-          activeSessionKey: saved.activeAskSessionKey || '',
-          sessions: Object.fromEntries(Object.entries(saved.askSessions || {}).map(([key, session]) => [
-            key,
-            { tabId: session?.tabId ?? null, url: session?.url || '', messages: session?.messages?.length || 0 },
-          ])),
-          activeTabs: activeTabs.map((tab) => ({ id: tab.id, url: tab.url || tab.pendingUrl || '' })),
-          listedTabs: (listed.tabs || []).map((tab) => ({
-            id: tab.id,
-            active: Boolean(tab.active),
-            url: tab.url || tab.pendingUrl || '',
-          })),
-          askViewHidden: Boolean(document.querySelector('#askPageView')?.hidden),
-          scope: document.querySelector('#askScope')?.textContent || '',
-          sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-          paletteOpen: Boolean(document.querySelector('#commandPaletteDialog')?.open),
-        };
-      })()`);
-      throw new Error(`Ask Page did not bind the selected restricted source: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-    record(
-      'Command Palette opens a tab-and-URL-scoped Ask Page conversation',
-      askPageState.sessionKey.startsWith(`tab:${restrictedAskTab.id}:chrome://newtab`) &&
-        askPageState.placeholder === 'Ask about the current page' &&
-        askPageState.sourceSummary === 'No readable page' &&
-        !askPageState.scope.includes('Context'),
-      JSON.stringify(askPageState),
-    );
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'Restricted pages must not be read';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelector('#askAIButton').click();
-    })()`);
-    const restrictedAskState = await waitFor(client, `(() => {
-      const message = 'Switch to an http or https page before using Ask Page.';
-      const status = document.querySelector('#syncStatus')?.textContent || '';
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      if (status !== message || toast !== message) return null;
-      return {
-        status,
-        toast,
-        reviewOpen: Boolean(document.querySelector('#actionDialog')?.open),
-        button: document.querySelector('#askAIButton')?.textContent || '',
-      };
-    })()`);
-    record(
-      'Ask Page rejects a restricted current page before reading or sending content',
-      !restrictedAskState.reviewOpen && restrictedAskState.button === 'Ask Page' && askFixtureServer.requests.length === 0,
-      JSON.stringify(restrictedAskState),
-    );
-    const askSessionsBeforeRestrictedClose = await evaluate(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return {
-        activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-      };
-    })()`);
-    await evaluate(client, `(async () => {
-      document.querySelector('#askPagePrompt').value = '';
-      await chrome.tabs.remove(${JSON.stringify(restrictedAskTab.id)});
-    })()`);
-    const inspectRestrictedAskRemoval = `(async () => {
-      const [closedTab, fallbackTab, stored, listed] = await Promise.all([
-        chrome.tabs.get(${JSON.stringify(restrictedAskTab.id)}).catch(() => null),
-        chrome.tabs.get(${JSON.stringify(askCloseFallbackTab.id)}).catch(() => null),
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.runtime.sendMessage({
-          type: 'tabs:list',
-          windowId: ${JSON.stringify(openedWorkbench.windowId)},
-        }),
-      ]);
-      const chip = document.querySelector('#askSourceList .ask-source-chip');
-      const scope = document.querySelector('#askScope')?.textContent || '';
-      const fallbackSessionPrefix =
-        'tab:${askCloseFallbackTab.id}:${askCloseFallbackUrl}';
-      const askSessions = structuredClone(stored.spaceTabsState?.askSessions || {});
-      const activeSessionKey = stored.spaceTabsState?.activeAskSessionKey || '';
-      const complete = !closedTab && fallbackTab?.id === ${JSON.stringify(askCloseFallbackTab.id)} &&
-        fallbackTab?.windowId === ${JSON.stringify(openedWorkbench.windowId)} &&
-        (listed.tabs || []).some((tab) =>
-          tab.id === ${JSON.stringify(askCloseFallbackTab.id)} &&
-          tab.url === ${JSON.stringify(askCloseFallbackUrl)}) &&
-        !(listed.tabs || []).some((tab) => tab.id === ${JSON.stringify(restrictedAskTab.id)}) &&
-        chip?.title === ${JSON.stringify(askCloseFallbackUrl)} &&
-        chip.querySelector('b')?.textContent === 'Ask Source Beta' &&
-        scope.includes('Ask Source Beta') && !scope.includes('New Tab') &&
-        document.querySelector('#askSourceSummary')?.textContent === 'Current page' &&
-        Boolean(activeSessionKey) && Object.hasOwn(askSessions, activeSessionKey) &&
-        !Object.keys(askSessions).some((key) => key.startsWith(fallbackSessionPrefix));
-      return {
-        complete,
-        closedTab,
-        fallbackTab: fallbackTab
-          ? {
-              id: fallbackTab.id,
-              windowId: fallbackTab.windowId,
-              url: fallbackTab.url,
-              title: fallbackTab.title,
-            }
-          : null,
-        listedTabIds: (listed.tabs || []).map((tab) => tab.id),
-        scope,
-        sourceChip: chip
-          ? { title: chip.querySelector('b')?.textContent || '', url: chip.title }
-          : null,
-        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        activeSessionKey,
-        askSessions,
-      };
-    })()`;
-    const waitForRestrictedAskRemoval = async (stage) => {
-      const condition = `(${inspectRestrictedAskRemoval}).then((snapshot) =>
-        snapshot.complete ? snapshot : null)`;
-      try {
-        return await waitFor(client, condition, 12000);
-      } catch (error) {
-        const diagnostic = await evaluate(client, inspectRestrictedAskRemoval);
-        throw new Error(
-          `Ask source close fallback did not converge (${stage}): ${JSON.stringify(diagnostic)}`,
-          { cause: error },
-        );
-      }
-    };
-    const restrictedAskRemovalImmediate = await waitForRestrictedAskRemoval('immediate');
-    const fallbackEligibleMessage =
-      'AI API key is missing. Add it in Settings before reading the current page.';
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'The fallback source must remain selected';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const restrictedAskFallbackEligibility = await waitFor(client, `(() => {
-      const status = document.querySelector('#syncStatus')?.textContent || '';
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      return status === ${JSON.stringify(fallbackEligibleMessage)} &&
-        toast === ${JSON.stringify(fallbackEligibleMessage)} &&
-        !document.querySelector('#actionDialog')?.open
-        ? { status, toast, prompt: document.querySelector('#askPagePrompt')?.value || '' }
-        : null;
-    })()`);
-    await evaluate(client, `(() => {
-      document.querySelector('#askPagePrompt').value = '';
-    })()`);
-    await new Promise((resolve) => setTimeout(resolve, sharedStateRefreshWaitMs));
-    const restrictedAskRemovalAfterRefresh = await waitForRestrictedAskRemoval('after shared refresh');
-    record(
-      'Closing the Ask source keeps prior history and does not create a fallback-page session',
-      JSON.stringify(restrictedAskRemovalImmediate.askSessions) ===
-          JSON.stringify(askSessionsBeforeRestrictedClose.askSessions) &&
-        JSON.stringify(restrictedAskRemovalAfterRefresh.askSessions) ===
-          JSON.stringify(askSessionsBeforeRestrictedClose.askSessions) &&
-        restrictedAskRemovalImmediate.activeSessionKey ===
-          askSessionsBeforeRestrictedClose.activeSessionKey &&
-        restrictedAskRemovalAfterRefresh.activeSessionKey ===
-          askSessionsBeforeRestrictedClose.activeSessionKey &&
-        restrictedAskFallbackEligibility.status === fallbackEligibleMessage &&
-        restrictedAskFallbackEligibility.prompt === 'The fallback source must remain selected' &&
-        restrictedAskRemovalAfterRefresh.fallbackTab.id === askCloseFallbackTab.id &&
-        restrictedAskRemovalAfterRefresh.sourceChip.url === askCloseFallbackUrl,
-      JSON.stringify({
-        askSessionsBeforeRestrictedClose,
-        restrictedAskRemovalImmediate,
-        restrictedAskFallbackEligibility,
-        restrictedAskRemovalAfterRefresh,
-      }),
-    );
-    await evaluate(client, `chrome.tabs.remove(${JSON.stringify(askCloseFallbackTab.id)})`);
-
-    const originalAskAIState = await evaluate(client, `(async () => {
-      const [stored, secret] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
-      ]);
-      return {
-        ai: stored.spaceTabsState?.ai || null,
-        secret: secret.spaceTabsSecrets || null,
-      };
-    })()`);
     const paletteSavedDuplicate = {
       groupTitle: 'Palette Saved Duplicate E2E',
       snapshotGroupId: 'palette-saved-group-e2e',
@@ -9945,47 +9673,6 @@ async function main() {
         return row && !row.classList.contains('dormant') &&
           row.querySelector('.tab-main-button[aria-pressed]');
       })`, 12000);
-    const askSelectionFixtureIds = await evaluate(client, `(() => {
-      const selectedIds = [...document.querySelectorAll('.tab-row.selected')]
-        .map((row) => row.dataset.tabId)
-        .filter(Boolean);
-      for (const tabId of selectedIds) {
-        document.querySelector('.tab-row[data-tab-id="' + tabId + '"] .tab-main-button')
-          ?.dispatchEvent(new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          ctrlKey: true,
-        }));
-      }
-      const fixtureIds = ${JSON.stringify([askSourceTabs.alpha.id, askSourceTabs.beta.id])};
-      for (const tabId of fixtureIds) {
-        document.querySelector('.tab-row[data-tab-id="' + tabId + '"] .tab-main-button')
-          ?.dispatchEvent(new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          ctrlKey: true,
-        }));
-      }
-      return fixtureIds;
-    })()`);
-    if (askSelectionFixtureIds.length < 2) {
-      throw new Error(`Ask Page selection fixture needs two visible live rows: ${JSON.stringify(askSelectionFixtureIds)}`);
-    }
-    await waitFor(client, `(() => {
-      const selected = [...document.querySelectorAll('.tab-row.selected')]
-        .map((row) => Number(row.dataset.tabId));
-      return ${JSON.stringify(askSelectionFixtureIds)}.every((tabId) => selected.includes(tabId));
-    })()`);
-    const askPageDisclosure = await waitFor(client, `(() => {
-      const chips = [...document.querySelectorAll('#askSourceList .ask-source-chip')];
-      if (document.querySelector('#askSourceSummary')?.textContent !== 'Current page' || chips.length !== 1) return null;
-      return {
-        summary: document.querySelector('#askSourceSummary')?.textContent || '',
-        hint: document.querySelector('#askSourceHint')?.textContent || '',
-        chips: chips.map((chip) => chip.textContent || ''),
-        selectedIds: [...document.querySelectorAll('.tab-row.selected')].map((row) => Number(row.dataset.tabId)),
-      };
-    })()`);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open`);
@@ -10021,24 +9708,10 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench Settings configures the local Custom OpenAI-compatible Ask endpoint',
+      'Workbench Settings configures the local OpenAI-compatible mock endpoint',
       configuredAskSettingsState.language === 'en' && configuredAskSettingsState.sessionKeyLength === 0,
       JSON.stringify(configuredAskSettingsState),
     );
-    record(
-      'Ask Page ignores selected rows and discloses only the previously active current page',
-      askPageDisclosure.hint === 'Ask Page sends the current page and recent conversation context directly to your configured provider.' &&
-        askPageDisclosure.chips.length === 1 &&
-        askPageDisclosure.chips[0].includes('Ask Source Alpha') &&
-        askSelectionFixtureIds.every((tabId) => askPageDisclosure.selectedIds.includes(tabId)),
-      JSON.stringify({ askSelectionFixtureIds, ...askPageDisclosure }),
-    );
-
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
-      !document.querySelector('#settingsDialog')?.open &&
-      document.querySelector('#askProvider')?.textContent ===
-        'Custom OpenAI-compatible · ask-e2e-model'`);
     const installAskE2ECapture = () => evaluate(client, `(() => {
       window.__askE2ECalls = { permissionRequests: 0, pageExtractions: 0, aiChats: [] };
       const requestPermission = chrome.permissions.request;
@@ -10061,45 +9734,24 @@ async function main() {
       };
     })()`);
     await installAskE2ECapture();
-    const missingKeyBefore = await evaluate(client, `(async () => ({
-      permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
-      messages: document.querySelectorAll('#askMessages .ask-message').length,
-      calls: { ...window.__askE2ECalls },
-    }))()`);
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'E2E missing key must not read sources';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const missingKeyAskState = await waitFor(client, `(async () => {
-      const message = 'AI API key is missing. Add it in Settings before reading the current page.';
-      const status = document.querySelector('#syncStatus')?.textContent || '';
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      if (status !== message || toast !== message) return null;
-      return {
-        status,
-        toast,
-        permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
-        messages: document.querySelectorAll('#askMessages .ask-message').length,
-        reviewOpen: Boolean(document.querySelector('#actionDialog')?.open),
-        button: document.querySelector('#askAIButton')?.textContent || '',
-        calls: { ...window.__askE2ECalls },
-      };
+    const missingKeyRequestsBefore = askFixtureServer.requests.length;
+    const missingKeyCallsBefore = await evaluate(client, `({ ...window.__askE2ECalls })`);
+    await clickElementWithCDP(client, '#testAIButton');
+    const missingKeyTestState = await waitFor(client, `(() => {
+      const status = document.querySelector('#settingsStatus')?.textContent || '';
+      return status === 'AI API key is missing. Add it in Settings.'
+        ? { status, testButton: document.querySelector('#testAIButton')?.textContent || '' }
+        : null;
     })()`);
     record(
-      'Ask Page rejects a missing API key before permission, extraction, or provider traffic',
-      missingKeyBefore.permission &&
-        missingKeyAskState.permission &&
-        missingKeyBefore.calls.permissionRequests === 0 &&
-        missingKeyBefore.calls.pageExtractions === 0 &&
-        missingKeyAskState.calls.permissionRequests === 0 &&
-        missingKeyAskState.calls.pageExtractions === 0 &&
-        missingKeyAskState.messages === missingKeyBefore.messages &&
-        !missingKeyAskState.reviewOpen &&
-        missingKeyAskState.button === 'Ask Page' &&
-        askFixtureServer.requests.length === 0,
-      JSON.stringify({ missingKeyBefore, missingKeyAskState, mockRequests: askFixtureServer.requests.length }),
+      'Test AI rejects a missing API key before permission or provider traffic',
+      missingKeyTestState.status === 'AI API key is missing. Add it in Settings.' &&
+        askFixtureServer.requests.length === missingKeyRequestsBefore &&
+        (await evaluate(client, `window.__askE2ECalls.permissionRequests`)) ===
+          missingKeyCallsBefore.permissionRequests &&
+        (await evaluate(client, `window.__askE2ECalls.aiChats.length`)) ===
+          missingKeyCallsBefore.aiChats.length,
+      JSON.stringify({ missingKeyTestState, mockRequests: askFixtureServer.requests.length }),
     );
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
@@ -10135,78 +9787,7 @@ async function main() {
     );
 
     await evaluate(client, `document.querySelector('#settingsDialog').close()`);
-    await waitFor(client, `(() => {
-      const button = document.querySelector('#askAIButton');
-      if (document.querySelector('#settingsDialog')?.open ||
-          document.querySelector('#askPageView')?.hidden || !button) return false;
-      const rect = button.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    })()`);
-    const deniedAskPermissionBefore = await evaluate(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return {
-        calls: structuredClone(window.__askE2ECalls),
-        messages: document.querySelectorAll('#askMessages .ask-message').length,
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-      };
-    })()`);
-    const deniedAskProviderRequestsBefore = askFixtureServer.requests.length;
-    await evaluate(client, `(() => {
-      window.__askE2EDeniedPermissionOriginal = chrome.permissions.request;
-      chrome.permissions.request = (...args) => {
-        window.__askE2ECalls.permissionRequests += 1;
-        window.__askE2EDeniedPermissionArgs = structuredClone(args);
-        return Promise.resolve(false);
-      };
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'E2E denied permission must not read or send';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const deniedAskPermissionState = await waitFor(client, `(async () => {
-      const message = 'Ask Page permission was not granted. No page content was read or sent.';
-      const status = document.querySelector('#syncStatus')?.textContent || '';
-      const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      if (status !== message || toast !== message) return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return {
-        status,
-        toast,
-        calls: structuredClone(window.__askE2ECalls),
-        permissionArgs: structuredClone(window.__askE2EDeniedPermissionArgs || []),
-        messages: document.querySelectorAll('#askMessages .ask-message').length,
-        askSessions: structuredClone(stored.spaceTabsState?.askSessions || {}),
-        reviewOpen: Boolean(document.querySelector('#actionDialog')?.open),
-        button: document.querySelector('#askAIButton')?.textContent || '',
-      };
-    })()`);
-    await evaluate(client, `(() => {
-      chrome.permissions.request = window.__askE2EDeniedPermissionOriginal;
-      delete window.__askE2EDeniedPermissionOriginal;
-      delete window.__askE2EDeniedPermissionArgs;
-      document.querySelector('#askPagePrompt').value = '';
-    })()`);
-    record(
-      'A simulated denied optional-host API response stops Ask before extraction, persistence, or provider traffic',
-      deniedAskPermissionState.calls.permissionRequests ===
-          deniedAskPermissionBefore.calls.permissionRequests + 1 &&
-        deniedAskPermissionState.calls.pageExtractions ===
-          deniedAskPermissionBefore.calls.pageExtractions &&
-        JSON.stringify(deniedAskPermissionState.calls.aiChats) ===
-          JSON.stringify(deniedAskPermissionBefore.calls.aiChats) &&
-        deniedAskPermissionState.permissionArgs.length === 1 &&
-        deniedAskPermissionState.permissionArgs[0]?.origins?.includes(
-          askFixtureServer.originPattern,
-        ) &&
-        deniedAskPermissionState.messages === deniedAskPermissionBefore.messages &&
-        JSON.stringify(deniedAskPermissionState.askSessions) ===
-          JSON.stringify(deniedAskPermissionBefore.askSessions) &&
-        !deniedAskPermissionState.reviewOpen &&
-        deniedAskPermissionState.button === 'Ask Page' &&
-        askFixtureServer.requests.length === deniedAskProviderRequestsBefore,
-      JSON.stringify({ deniedAskPermissionBefore, deniedAskPermissionState }),
-    );
-
+    await waitFor(client, `!document.querySelector('#settingsDialog')?.open`);
     const autoGroupCanonicalDuplicateTitle = 'Auto Group Canonical Duplicate E2E';
     const autoGroupCanonicalPhysicalTitle = chromeGroupTitle(autoGroupCanonicalDuplicateTitle);
     const autoGroupCanonicalFixture = await evaluate(client, `(async () => {
@@ -10406,7 +9987,6 @@ async function main() {
     await evaluate(client, `[...document.querySelectorAll('.space')]
       .find((button) => button.title === 'Default')?.click()`);
     await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
-      !document.querySelector('#askPageView')?.hidden &&
       [...document.querySelectorAll('.group-header h2')]
         .some((heading) => heading.textContent === 'Historical Tag E2E') &&
       [...document.querySelectorAll('.group-header h2')]
@@ -11223,7 +10803,6 @@ async function main() {
         toast: toastElement?.textContent || '',
         toastTone: toastElement?.dataset.tone || '',
         operationRecordHidden: Boolean(document.querySelector('#operationRecord')?.hidden),
-        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
       };
     })()`, 30000);
     const newOrphansAfterUndo = (undoneAutoGroupState.captured.orphanGroupSpaceIds || [])
@@ -11286,8 +10865,7 @@ async function main() {
         !Object.hasOwn(undoneAutoGroupState.captured.storage.groupSpaces, String(appliedAutoGroupId)) &&
         newOrphansAfterUndo.length === 0 &&
         undoneAutoGroupState.operationRecordHidden &&
-        undoneAutoGroupState.toast === `Undid: ${autoGroupExpectedOperationSummary}.` &&
-        undoneAutoGroupState.sourceSummary === 'Current page',
+        undoneAutoGroupState.toast === `Undid: ${autoGroupExpectedOperationSummary}.`,
       JSON.stringify({
         layoutRestored: autoGroupLayoutRestored,
         snapshotRestored: !autoGroupUndoSnapshotDifference,
@@ -13449,7 +13027,9 @@ async function main() {
       )}`);
     }
     await evaluate(client, `chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, { active: true })`);
-    await waitFor(client, `document.querySelector('#askSourceList')?.textContent?.includes('Ask Source Alpha')`, 10000);
+    await waitFor(client, `(async () =>
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
+        ${JSON.stringify(askSourceTabs.alpha.id)})()`, 10000);
     await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
     await waitFor(client, `(async () =>
       (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
@@ -13648,405 +13228,7 @@ async function main() {
       return operation?.status === 'undone';
     })()`, 12000);
 
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
-    await evaluate(client, `(async () => {
-      await chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, { active: true });
-      await chrome.tabs.update(${JSON.stringify(askSourceTabs.beta.id)}, { active: true });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-    })()`);
-    const askRapidActivationState = await waitFor(client, `(async () => {
-      const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
-      const chip = document.querySelector('#askSourceList .ask-source-chip');
-      return active.id === ${JSON.stringify(openedWorkbench.id)} &&
-        chip?.title === ${JSON.stringify(askFixtureServer.sourceBetaUrl)} &&
-        chip.querySelector('b')?.textContent === 'Ask Source Beta' &&
-        document.querySelector('#askSourceSummary')?.textContent === 'Current page'
-        ? {
-            activeTabId: active.id,
-            chipUrl: chip.title,
-            chipTitle: chip.querySelector('b')?.textContent || '',
-          }
-        : null;
-    })()`, 12000);
-    record(
-      'Rapid page activation keeps the newest real page when focus returns to Workbench',
-      askRapidActivationState.chipUrl === askFixtureServer.sourceBetaUrl &&
-        askRapidActivationState.chipTitle === 'Ask Source Beta',
-      JSON.stringify(askRapidActivationState),
-    );
-
-    const askLoadingActivationUrl =
-      `${askFixtureServer.sourceBetaUrl}?fixture=ask-loading-activation`;
-    const askLoadingActivationTab = await evaluate(client, `(async () => {
-      const tab = await chrome.tabs.create({
-        url: ${JSON.stringify(askLoadingActivationUrl)},
-        active: true,
-        windowId: ${JSON.stringify(openedWorkbench.windowId)},
-      });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-      return { id: tab.id };
-    })()`);
-    const askLoadingActivationState = await waitFor(client, `(async () => {
-      const [tab, active] = await Promise.all([
-        chrome.tabs.get(${JSON.stringify(askLoadingActivationTab.id)}).catch(() => null),
-        chrome.tabs.query({ active: true, currentWindow: true }).then((items) => items[0] || null),
-      ]);
-      const chip = document.querySelector('#askSourceList .ask-source-chip');
-      return tab?.status === 'complete' && active?.id === ${JSON.stringify(openedWorkbench.id)} &&
-        tab?.url === ${JSON.stringify(askLoadingActivationUrl)} &&
-        chip?.title === ${JSON.stringify(askLoadingActivationUrl)} &&
-        chip.querySelector('b')?.textContent === 'Ask Source Beta'
-        ? {
-            tab: { id: tab.id, url: tab.url, title: tab.title, status: tab.status },
-            activeTabId: active.id,
-            chipUrl: chip.title,
-          }
-        : null;
-    })()`, 12000);
-    record(
-      'A newly loading page remains the Ask source after immediately returning to Workbench',
-      askLoadingActivationState.tab.id === askLoadingActivationTab.id &&
-        askLoadingActivationState.tab.url === askLoadingActivationUrl &&
-        askLoadingActivationState.chipUrl === askLoadingActivationUrl,
-      JSON.stringify(askLoadingActivationState),
-    );
-    await evaluate(client, `(async () => {
-      await chrome.tabs.remove(${JSON.stringify(askLoadingActivationTab.id)}).catch(() => null);
-      await chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, { active: true });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-    })()`);
-    try {
-      await waitFor(client, `(async () => {
-        const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
-        const chip = document.querySelector('#askSourceList .ask-source-chip');
-        return active?.id === ${JSON.stringify(openedWorkbench.id)} &&
-          chip?.title === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)} &&
-          document.querySelector('#askSourceSummary')?.textContent === 'Current page';
-      })()`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const [alpha, active, listed] = await Promise.all([
-          chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}).catch(() => null),
-          chrome.tabs.query({ active: true, currentWindow: true }).then((items) => items[0] || null),
-          chrome.runtime.sendMessage({
-            type: 'tabs:list',
-            windowId: ${JSON.stringify(openedWorkbench.windowId)},
-          }),
-        ]);
-        const chip = document.querySelector('#askSourceList .ask-source-chip');
-        return {
-          alpha: alpha
-            ? { id: alpha.id, windowId: alpha.windowId, url: alpha.url, title: alpha.title }
-            : null,
-          active: active ? { id: active.id, windowId: active.windowId, url: active.url } : null,
-          listed: (listed.tabs || []).map((tab) => ({
-            id: tab.id,
-            active: Boolean(tab.active),
-            url: tab.url,
-            title: tab.title,
-          })),
-          sourceChip: chip
-            ? { title: chip.querySelector('b')?.textContent || '', url: chip.title }
-            : null,
-          scope: document.querySelector('#askScope')?.textContent || '',
-          sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        };
-      })()`);
-      throw new Error(`Ask source did not return to Alpha: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-
-    await evaluate(client, `window.__askE2ECalls = {
-      permissionRequests: 0,
-      pageExtractions: 0,
-      aiChats: [],
-    }`);
-
-    const askDirectCallsBefore = await evaluate(client, `({
-      permissionRequests: window.__askE2ECalls.permissionRequests,
-      pageExtractions: window.__askE2ECalls.pageExtractions,
-      aiChatCount: window.__askE2ECalls.aiChats.length,
-    })`);
-
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'E2E complete stream: summarize this page';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      if (window.__askStreamE2EListener) {
-        chrome.runtime.onMessage.removeListener(window.__askStreamE2EListener);
-      }
-      window.__askStreamE2EObserver?.disconnect();
-      window.__askStreamE2ETimeline = [];
-      const snapshot = (kind, extra = {}) => {
-        const answer = [...document.querySelectorAll('#askMessages .ask-message.assistant')].at(-1);
-        const record = {
-          kind,
-          at: Date.now(),
-          button: document.querySelector('#askAIButton')?.textContent || '',
-          finishedByButton: document.querySelector('#askAIButton')?.textContent === 'Ask Page',
-          domText: answer?.textContent || '',
-          links: [...(answer?.querySelectorAll('a') || [])].map((link) => link.href),
-          ...extra,
-        };
-        window.__askStreamE2ETimeline.push(record);
-        if (window.__askStreamE2ETimeline.length > 50) window.__askStreamE2ETimeline.shift();
-      };
-      window.__askStreamE2EListener = (message) => {
-        if (message?.type !== 'ai:stream') return;
-        snapshot('ai:stream', {
-          requestId: message.requestId || '',
-          streamText: String(message.text || ''),
-        });
-      };
-      chrome.runtime.onMessage.addListener(window.__askStreamE2EListener);
-      window.__askStreamE2EObserver = new MutationObserver(() => snapshot('dom:mutation'));
-      window.__askStreamE2EObserver.observe(document.querySelector('#askMessages'), {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    let askDirectSendState;
-    try {
-      askDirectSendState = await waitFor(client, `(async () => {
-        if (document.querySelector('#actionDialog')?.open ||
-            document.querySelector('#askAIButton')?.textContent !== 'Stop') return null;
-        const active = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
-        const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)});
-        const beta = await chrome.tabs.get(${JSON.stringify(askSourceTabs.beta.id)});
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        return {
-          activeTabId: active?.id,
-          sourceTabsActive: [Boolean(alpha.active), Boolean(beta.active)],
-          permission: await chrome.permissions.contains({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }),
-          provider: document.querySelector('#askProvider')?.textContent || '',
-          sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-          sessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-          storedSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-          calls: { ...window.__askE2ECalls },
-          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
-        };
-      })()`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const alpha = await chrome.tabs.get(${JSON.stringify(askSourceTabs.alpha.id)}).catch(() => null);
-        const chip = document.querySelector('#askSourceList .ask-source-chip');
-        return {
-          alpha,
-          sourceChip: chip
-            ? { title: chip.querySelector('b')?.textContent || '', url: chip.title }
-            : null,
-          prompt: document.querySelector('#askPagePrompt')?.value || '',
-          button: document.querySelector('#askAIButton')?.textContent || '',
-          status: document.querySelector('#syncStatus')?.textContent || '',
-          toast: document.querySelector('#workbenchToast')?.textContent || '',
-          dialogOpen: Boolean(document.querySelector('#actionDialog')?.open),
-          dialogTitle: document.querySelector('#actionDialogTitle')?.textContent || '',
-          activeSessionKey: stored.spaceTabsState?.activeAskSessionKey || '',
-          calls: { ...window.__askE2ECalls },
-        };
-      })()`);
-      throw new Error(`Ask Page did not send directly: ${JSON.stringify(diagnostic)}`, { cause: error });
-    }
-    record(
-      'Ask Page reads only the previously active page and sends directly without a confirmation dialog',
-      askDirectSendState.activeTabId === openedWorkbench.id &&
-        askDirectSendState.sourceTabsActive.every((active) => !active) &&
-        askDirectSendState.permission &&
-        askDirectSendState.calls.permissionRequests === askDirectCallsBefore.permissionRequests + 1 &&
-        askDirectSendState.calls.pageExtractions === askDirectCallsBefore.pageExtractions + 1 &&
-        askDirectSendState.calls.aiChats.length === askDirectCallsBefore.aiChatCount + 1 &&
-        askDirectSendState.provider === 'Custom OpenAI-compatible · ask-e2e-model' &&
-        askDirectSendState.sourceSummary === 'Current page' &&
-        !askDirectSendState.dialogOpen,
-      JSON.stringify({
-        askPageDisclosure,
-        askDirectCallsBefore,
-        askDirectSendState,
-        permissionFlow: 'trusted CDP pointer click with temporary unpacked-fixture host preauthorization',
-      }),
-    );
-
-    await waitFor(client, `document.querySelector('#askAIButton')?.textContent === 'Stop'`);
-    const expectedCompletedAskSessionKey =
-      `tab:${askSourceTabs.alpha.id}:${askFixtureServer.sourceAlphaUrl}`;
-    const completedAskSessionKey = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const storedKey = stored.spaceTabsState?.activeAskSessionKey || '';
-      const expected = ${JSON.stringify(
-        `tab:${askSourceTabs.alpha.id}:${askFixtureServer.sourceAlphaUrl}`,
-      )};
-      return storedKey === expected ? expected : null;
-    })()`);
-    const askExternalPanelSwitch = await evaluate(client, `(async () => {
-      return navigator.locks.request('space-tabs-shared-state', async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = structuredClone(stored.spaceTabsState || {});
-        const space = (saved.spaces || [])[0];
-        const externalKey = 'space:' + (space?.id || 'external-panel-e2e');
-        if (!saved.askSessions || typeof saved.askSessions !== 'object') saved.askSessions = {};
-        if (!saved.askSessions[externalKey]) {
-          saved.askSessions[externalKey] = {
-            key: externalKey,
-            spaceId: space?.id || '',
-            title: space?.name || 'External panel',
-            url: '',
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            messages: [],
-          };
-        }
-        const messagesBefore = structuredClone(saved.askSessions[externalKey].messages || []);
-        saved.activeAskSessionKey = externalKey;
-        await chrome.storage.local.set({ spaceTabsState: saved });
-        const written = await chrome.storage.local.get('spaceTabsState');
-        return {
-          externalKey,
-          originalKey: ${JSON.stringify(completedAskSessionKey)},
-          messagesBefore,
-          injectedStoredActiveKey: written.spaceTabsState?.activeAskSessionKey || '',
-        };
-      });
-    })()`);
-    const captureCompletedAskState = `async () => {
-      const messages = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
-      const answer = messages.at(-1);
-      const text = answer?.textContent || '';
-      const links = [...(answer?.querySelectorAll('a') || [])].map((link) => ({
-        href: link.href,
-        target: link.target,
-        text: link.textContent || '',
-      }));
-      const button = document.querySelector('#askAIButton')?.textContent || '';
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const storedActiveSessionKey = stored.spaceTabsState?.activeAskSessionKey || '';
-      const sessionKey = ${JSON.stringify(completedAskSessionKey)};
-      const session = stored.spaceTabsState?.askSessions?.[sessionKey] || null;
-      const externalMessages = structuredClone(
-        stored.spaceTabsState?.askSessions?.[${JSON.stringify(askExternalPanelSwitch.externalKey)}]?.messages || [],
-      );
-      const storedAssistant = [...(session?.messages || [])].reverse()
-        .find((message) => message?.role === 'assistant') || null;
-      const timeline = [...(window.__askStreamE2ETimeline || [])];
-      const lastStream = [...timeline].reverse().find((event) => event.kind === 'ai:stream') || null;
-      const finalDomObservedAt = Date.now();
-      const complete = text.includes('Alpha sets the Tuesday checkpoint') &&
-        text.includes('Sources') &&
-        links.some((link) => link.href === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)} &&
-          link.target === '_blank') &&
-        button === 'Ask Page';
-      return {
-        complete,
-        text,
-        links,
-        button,
-        sessionKey,
-        storedActiveSessionKey,
-        externalMessages,
-        storedAssistant: storedAssistant ? {
-          id: storedAssistant.id,
-          text: storedAssistant.text,
-          updatedAt: storedAssistant.updatedAt || 0,
-        } : null,
-        timeline,
-        finalDomObservedAt,
-        lastStreamToFinalDomMs: lastStream ? finalDomObservedAt - lastStream.at : null,
-        lastStreamFinishedByButton: lastStream?.finishedByButton ?? null,
-      };
-    }`;
-    let completedAskState;
-    try {
-      completedAskState = await waitFor(client, `(async () => {
-        const captured = await (${captureCompletedAskState})();
-        return captured.complete ? captured : null;
-      })()`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(${captureCompletedAskState})()`);
-      throw new Error(`Ask citation finalization regression: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-    const completedAskAt = Date.now();
-    const completedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'complete');
-    const completedAskChat = await evaluate(client, `window.__askE2ECalls.aiChats
-      .filter((request) => request.purpose === 'ask-page').at(-1)`);
-    record(
-      'Ask Page streams a cited result and renders one clickable Source',
-      completedAskState.complete &&
-        completedAskState.text.includes('Sources') &&
-        completedAskState.links.some((link) => link.href === askFixtureServer.sourceAlphaUrl && link.target === '_blank') &&
-        !completedAskState.links.some((link) => link.href === askFixtureServer.sourceBetaUrl) &&
-        completedAskState.button === 'Ask Page',
-      JSON.stringify(completedAskState),
-    );
-    record(
-      'An external panel changing the shared active Ask key cannot redirect an in-flight answer',
-      completedAskSessionKey === expectedCompletedAskSessionKey &&
-        askExternalPanelSwitch.externalKey !== askExternalPanelSwitch.originalKey &&
-        askExternalPanelSwitch.injectedStoredActiveKey === askExternalPanelSwitch.externalKey &&
-        completedAskState.sessionKey === askExternalPanelSwitch.originalKey &&
-        completedAskState.storedActiveSessionKey === askExternalPanelSwitch.externalKey &&
-        completedAskState.storedAssistant?.text.includes('Alpha sets the Tuesday checkpoint') &&
-        JSON.stringify(completedAskState.externalMessages) ===
-          JSON.stringify(askExternalPanelSwitch.messagesBefore) &&
-        completedAskState.text.includes('Alpha sets the Tuesday checkpoint'),
-      JSON.stringify({ askExternalPanelSwitch, completedAskState }),
-    );
-    await evaluate(client, `(() => {
-      if (window.__askStreamE2EListener) {
-        chrome.runtime.onMessage.removeListener(window.__askStreamE2EListener);
-      }
-      window.__askStreamE2EObserver?.disconnect();
-    })()`);
-    record(
-      'Ask Page sends only the current page to the OpenAI-compatible mock',
-      completedMockRequest?.body?.stream === true &&
-        completedMockRequest?.body?.max_tokens === 32_768 &&
-        completedMockRequest.sourceCount === 1 &&
-        completedMockRequest.includesAlpha &&
-        !completedMockRequest.includesBeta &&
-        completedAskChat?.purpose === 'ask-page' &&
-        completedAskChat?.itemCount === null,
-      JSON.stringify({
-        sourceCount: completedMockRequest?.sourceCount,
-        includesAlpha: completedMockRequest?.includesAlpha,
-        includesBeta: completedMockRequest?.includesBeta,
-        stream: completedMockRequest?.body?.stream,
-        maxTokens: completedMockRequest?.body?.max_tokens,
-        chat: completedAskChat,
-      }),
-    );
-    record(
-      'Ask Page finishes on SSE [DONE] without waiting for the held-open connection',
-      completedMockRequest?.doneSentAt > 0 &&
-        completedMockRequest.serverEndCalledAt === 0 &&
-        completedAskAt - completedMockRequest.doneSentAt < 2500,
-      JSON.stringify({
-        doneSentAt: completedMockRequest?.doneSentAt,
-        completedAskAt,
-        elapsedAfterDone: completedMockRequest ? completedAskAt - completedMockRequest.doneSentAt : null,
-        clientClosedAt: completedMockRequest?.clientClosedAt,
-        serverEndCalledAt: completedMockRequest?.serverEndCalledAt,
-      }),
-    );
-
-    await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = structuredClone(stored.spaceTabsState || {});
-      saved.activeAskSessionKey = ${JSON.stringify(completedAskSessionKey)};
-      await chrome.storage.local.set({ spaceTabsState: saved });
-    }))()`);
-    await new Promise((resolve) => setTimeout(resolve, 3200));
-    await waitFor(client, `(() => {
-      const answer = [...document.querySelectorAll('#askMessages .ask-message.assistant')].at(-1);
-      return answer?.textContent?.includes('Alpha sets the Tuesday checkpoint') &&
-        answer.querySelector('a[href=${JSON.stringify(askFixtureServer.sourceAlphaUrl)}]');
-    })()`, 10000);
-    const periodicRefreshIdentity = await evaluate(client, `(() => {
+    const periodicRefreshFixture = await evaluate(client, `(() => {
       window.__periodicRefreshOriginalSendMessage = chrome.runtime.sendMessage;
       window.__periodicRefreshListCount = 0;
       window.__periodicRefreshListReturnedCount = 0;
@@ -14073,14 +13255,13 @@ async function main() {
         }
         return result;
       };
-      const assistant = [...document.querySelectorAll('#askMessages .ask-message.assistant')].at(-1);
-      const sourceLink = assistant?.querySelector(
-        'a[href=${JSON.stringify(askFixtureServer.sourceAlphaUrl)}]',
-      );
+      const heading = [...document.querySelectorAll('#groupsList .group-card .group-header h2')]
+        .find((node) => (node.textContent || '').trim()) || null;
       const groupsNode = document.querySelector('#groupsList')?.firstElementChild || null;
       const spaceButton = document.querySelector('.space.active');
-      if (!assistant || !sourceLink || !groupsNode || !spaceButton) return null;
-      const walker = document.createTreeWalker(assistant, NodeFilter.SHOW_TEXT);
+      const focusNode = document.querySelector('#groupsList .tab-row .tab-main-button') || null;
+      if (!heading || !groupsNode || !spaceButton || !focusNode) return null;
+      const walker = document.createTreeWalker(heading, NodeFilter.SHOW_TEXT);
       let selectedNode = null;
       while (walker.nextNode()) {
         if (walker.currentNode.textContent?.trim()) {
@@ -14089,21 +13270,21 @@ async function main() {
         }
       }
       if (!selectedNode) return null;
-      sourceLink.focus({ preventScroll: true });
+      focusNode.focus({ preventScroll: true });
       const range = document.createRange();
       range.setStart(selectedNode, 0);
       range.setEnd(selectedNode, Math.min(12, selectedNode.textContent.length));
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      window.__periodicRefreshIdentity = { assistant, sourceLink, groupsNode, spaceButton };
+      window.__periodicRefreshIdentity = { heading, focusNode, groupsNode, spaceButton };
       return {
         selectedText: selection.toString(),
         activeTag: document.activeElement?.tagName || '',
-        sourceHref: sourceLink.href,
+        headingText: heading.textContent || '',
       };
     })()`);
-    if (!periodicRefreshIdentity) {
+    if (!periodicRefreshFixture) {
       throw new Error('Could not prepare the periodic refresh identity fixture.');
     }
     const periodicRefreshState = await waitFor(client, `(() => {
@@ -14114,19 +13295,18 @@ async function main() {
         listCount: window.__periodicRefreshListCount,
         listReturnedCount: window.__periodicRefreshListReturnedCount,
         completedCount: window.__periodicRefreshCompletedCount,
-        assistantSame: [...document.querySelectorAll('#askMessages .ask-message.assistant')].at(-1) ===
-          identity.assistant && identity.assistant.isConnected,
-        sourceLinkSame: [...document.querySelectorAll('#askMessages .ask-message.assistant')].at(-1)
-          ?.querySelector('a[href=${JSON.stringify(askFixtureServer.sourceAlphaUrl)}]') ===
-            identity.sourceLink && identity.sourceLink.isConnected,
+        headingSame: [...document.querySelectorAll('#groupsList .group-card .group-header h2')]
+          .includes(identity.heading) && identity.heading.isConnected,
+        focusNodeSame: document.querySelector('#groupsList .tab-row .tab-main-button') ===
+          identity.focusNode && identity.focusNode.isConnected,
         groupsNodeSame: document.querySelector('#groupsList')?.firstElementChild === identity.groupsNode &&
           identity.groupsNode.isConnected,
         spaceButtonSame: document.querySelector('.space.active') === identity.spaceButton &&
           identity.spaceButton.isConnected,
-        focusPreserved: document.activeElement === identity.sourceLink,
+        focusPreserved: document.activeElement === identity.focusNode,
         selectedText: selection.toString(),
-        selectionInsideAnswer: identity.assistant.contains(selection.anchorNode) &&
-          identity.assistant.contains(selection.focusNode),
+        selectionInsideHeading: identity.heading.contains(selection.anchorNode) &&
+          identity.heading.contains(selection.focusNode),
       };
     })()`, 7000);
     await evaluate(client, `(() => {
@@ -14136,180 +13316,17 @@ async function main() {
       delete window.__periodicRefreshOriginalStorageSet;
     })()`);
     record(
-      'A no-op shared-state poll preserves rendered nodes, keyboard focus, and Ask text selection',
+      'A no-op shared-state poll preserves rendered nodes, keyboard focus, and text selection',
       periodicRefreshState.completedCount > 0 &&
-        periodicRefreshState.assistantSame &&
-        periodicRefreshState.sourceLinkSame &&
+        periodicRefreshState.headingSame &&
+        periodicRefreshState.focusNodeSame &&
         periodicRefreshState.groupsNodeSame &&
         periodicRefreshState.spaceButtonSame &&
         periodicRefreshState.focusPreserved &&
-        periodicRefreshState.selectedText === periodicRefreshIdentity.selectedText &&
-        periodicRefreshState.selectionInsideAnswer,
-      JSON.stringify({ periodicRefreshIdentity, periodicRefreshState }),
+        periodicRefreshState.selectedText === periodicRefreshFixture.selectedText &&
+        periodicRefreshState.selectionInsideHeading,
+      JSON.stringify({ periodicRefreshFixture, periodicRefreshState }),
     );
-
-    const tabsBeforeSourceLink = await evaluate(client, `(async () =>
-      (await chrome.tabs.query({})).map((tab) => tab.id))()`);
-    await clickElementWithCDP(
-      client,
-      `.ask-message.assistant a[href="${askFixtureServer.sourceAlphaUrl}"]`,
-    );
-    const openedSourceLinkTab = await waitFor(client, `(async () => {
-      const previous = new Set(${JSON.stringify(tabsBeforeSourceLink)});
-      return (await chrome.tabs.query({})).find((tab) =>
-        !previous.has(tab.id) && tab.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)}) || null;
-    })()`);
-    record(
-      'Ask Page source links open the cited page in a real Chrome tab',
-      Number.isFinite(openedSourceLinkTab?.id),
-      JSON.stringify(openedSourceLinkTab),
-    );
-    await evaluate(client, `(async () => {
-      await chrome.tabs.remove(${JSON.stringify(openedSourceLinkTab.id)});
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-    })()`);
-    await waitFor(client, `(async () =>
-      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
-        ${JSON.stringify(openedWorkbench.id)})()`);
-
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = 'E2E stop stream: keep sending until stopped';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const streamingPartialState = await waitFor(client, `(() => {
-      const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
-      const answer = answers.at(-1)?.textContent || '';
-      return document.querySelector('#askAIButton')?.textContent === 'Stop' &&
-        answer.includes('Partial answer from Alpha')
-        ? { answer, button: 'Stop' }
-        : null;
-    })()`, 12000);
-    await clickElementWithCDP(client, '#askAIButton');
-    const stoppedAskState = await waitFor(client, `(() => {
-      const answers = [...document.querySelectorAll('#askMessages .ask-message.assistant')];
-      const answer = answers.at(-1);
-      const text = answer?.textContent || '';
-      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page' ||
-          !text.includes('Partial answer from Alpha') ||
-          !text.includes('Request stopped before completion.')) return null;
-      return {
-        text,
-        sourceLinks: [...answer.querySelectorAll('a')].map((link) => link.href),
-        status: document.querySelector('#syncStatus')?.textContent || '',
-      };
-    })()`, 12000);
-    const stoppedMockRequest = askFixtureServer.requests.find((request) => request.mode === 'stop');
-    record(
-      'Ask Page Stop preserves the streamed partial answer and cited Source',
-      streamingPartialState.button === 'Stop' &&
-        stoppedAskState.status === 'Ask stopped.' &&
-        stoppedAskState.sourceLinks.includes(askFixtureServer.sourceAlphaUrl) &&
-        !stoppedAskState.sourceLinks.includes(askFixtureServer.sourceBetaUrl) &&
-        stoppedMockRequest?.sourceCount === 1 &&
-        stoppedMockRequest.historyIncludesCompletedAnswer &&
-        stoppedMockRequest.historyIncludesPlainCitation &&
-        !stoppedMockRequest.historyIncludesGeneratedInlineCitationLink &&
-        !stoppedMockRequest.historyIncludesSourcesAppendix &&
-        JSON.stringify(stoppedMockRequest.historyUserMessages) ===
-          JSON.stringify(['E2E complete stream: summarize this page']) &&
-        stoppedMockRequest.clientClosedAt > 0 &&
-        stoppedMockRequest.doneSentAt === 0,
-      JSON.stringify({ streamingPartialState, stoppedAskState, stoppedMockRequest: {
-        sourceCount: stoppedMockRequest?.sourceCount,
-        historyIncludesCompletedAnswer: stoppedMockRequest?.historyIncludesCompletedAnswer,
-        historyIncludesPlainCitation: stoppedMockRequest?.historyIncludesPlainCitation,
-        historyIncludesGeneratedInlineCitationLink:
-          stoppedMockRequest?.historyIncludesGeneratedInlineCitationLink,
-        historyIncludesSourcesAppendix: stoppedMockRequest?.historyIncludesSourcesAppendix,
-        historyUserMessages: stoppedMockRequest?.historyUserMessages,
-        clientClosedAt: stoppedMockRequest?.clientClosedAt,
-        doneSentAt: stoppedMockRequest?.doneSentAt,
-      } }),
-    );
-
-    const askSelectionMarker = 'ALPHA_SELECTION_ONLY_MARKER';
-    const askPrivateBodyMarker = 'ALPHA_PRIVATE_BODY_MUST_NOT_LEAVE';
-    await evaluate(client, `chrome.tabs.update(${JSON.stringify(askSourceTabs.alpha.id)}, { active: true })`);
-    const askSelectionFixture = await evaluate(client, `(async () => {
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: ${JSON.stringify(askSourceTabs.alpha.id)} },
-        func: (selectedMarker, privateMarker) => {
-          const article = document.querySelector('article') || document.body;
-          article.textContent = privateMarker + ' before. ' + selectedMarker + ' after. ' + privateMarker;
-          const node = article.firstChild;
-          const start = node.textContent.indexOf(selectedMarker);
-          const range = document.createRange();
-          range.setStart(node, start);
-          range.setEnd(node, start + selectedMarker.length);
-          const selection = window.getSelection();
-          selection.removeAllRanges();
-          selection.addRange(range);
-          return {
-            selectedText: selection.toString(),
-            bodyText: document.body.innerText,
-          };
-        },
-        args: [${JSON.stringify('ALPHA_SELECTION_ONLY_MARKER')}, ${JSON.stringify('ALPHA_PRIVATE_BODY_MUST_NOT_LEAVE')}],
-      });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-      return result?.result || null;
-    })()`);
-    await waitFor(client, `(async () =>
-      (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ===
-        ${JSON.stringify(openedWorkbench.id)})()`);
-    const selectionProviderRequestsBefore = askFixtureServer.requests.length;
-    const askSelectionQuestion = 'E2E selection privacy: summarize exactly the selected text';
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = ${JSON.stringify('E2E selection privacy: summarize exactly the selected text')};
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const askSelectionCompleted = await waitFor(client, `(() => {
-      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
-      const messages = [...document.querySelectorAll('#askMessages .ask-message')];
-      const user = messages.findLast((message) => message.classList.contains('user'));
-      const assistant = messages.findLast((message) => message.classList.contains('assistant'));
-      return user?.textContent?.includes(${JSON.stringify('E2E selection privacy: summarize exactly the selected text')}) &&
-        assistant?.textContent?.includes('Alpha sets the Tuesday checkpoint')
-        ? { user: user.textContent || '', assistant: assistant.textContent || '' }
-        : null;
-    })()`, 12000);
-    const askSelectionMockRequest = askFixtureServer.requests
-      .slice(selectionProviderRequestsBefore)
-      .find((request) => request.mode === 'complete');
-    const askSelectionProviderPrompt = String(
-      askSelectionMockRequest?.body?.messages?.at(-1)?.content || '',
-    );
-    const askSelectionPrivacyOk =
-      askSelectionFixture?.selectedText === askSelectionMarker &&
-      askSelectionFixture?.bodyText.includes(askPrivateBodyMarker) &&
-      askSelectionMockRequest?.sourceCount === 1 &&
-      askSelectionProviderPrompt.includes(`Selected text:\n${askSelectionMarker}`) &&
-      !askSelectionProviderPrompt.includes('Page text:') &&
-      !askSelectionProviderPrompt.includes(askPrivateBodyMarker) &&
-      !(askSelectionMockRequest?.body?.messages || []).some((message) =>
-        String(message?.content || '').includes(askPrivateBodyMarker));
-    record(
-      'Ask Page sends only the real page selection and never the unselected body',
-      askSelectionPrivacyOk,
-      JSON.stringify({
-        askSelectionFixture,
-        askSelectionCompleted,
-        sourceCount: askSelectionMockRequest?.sourceCount,
-        providerPrompt: askSelectionProviderPrompt,
-        question: askSelectionQuestion,
-      }),
-    );
-    if (!askSelectionPrivacyOk) {
-      throw new Error(`Ask selection privacy regression: ${JSON.stringify({
-        askSelectionFixture,
-        sourceCount: askSelectionMockRequest?.sourceCount,
-        providerPrompt: askSelectionProviderPrompt,
-      })}`);
-    }
 
     await evaluate(client, `(async () => {
       await chrome.tabs.remove([
@@ -14318,12 +13335,10 @@ async function main() {
       ]).catch(() => null);
       await navigator.locks.request('space-tabs-shared-state', async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
-        stored.spaceTabsState.ai = ${JSON.stringify(originalAskAIState.ai)};
+        if (stored.spaceTabsState?.ai) delete stored.spaceTabsState.ai.maxTokens;
         await chrome.storage.local.set({ spaceTabsState: stored.spaceTabsState });
       });
-      const originalSecret = ${JSON.stringify(originalAskAIState.secret)};
-      if (originalSecret) await chrome.storage.session.set({ spaceTabsSecrets: originalSecret });
-      else await chrome.storage.session.remove('spaceTabsSecrets');
+      await chrome.storage.session.remove('spaceTabsSecrets');
       await chrome.permissions.remove({ origins: [${JSON.stringify(askFixtureServer.originPattern)}] }).catch(() => false);
       if (window.__askE2EOriginals) {
         chrome.permissions.request = window.__askE2EOriginals.requestPermission;
@@ -14331,11 +13346,7 @@ async function main() {
         delete window.__askE2EOriginals;
       }
     })()`);
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
-      !document.querySelector('#settingsDialog')?.open &&
-      document.querySelector('#askProvider')?.textContent !==
-        'Custom OpenAI-compatible · ask-e2e-model'`);
+    await waitForLifecycleJournalToSettle(client);
 
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
     await waitFor(client, `document.querySelector('#settingsDialog')?.open && document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')`);
@@ -14619,51 +13630,28 @@ async function main() {
       };
     })()`);
     record(
-      'Workbench backup export confirms that Ask history is included and API keys are excluded',
-      exportFeedbackState.status.includes('API keys were excluded') &&
-        exportFeedbackState.toast.includes('API keys were excluded') &&
-        exportFeedbackState.status.includes('Ask conversation') &&
-        exportFeedbackState.toast.includes('Ask conversation'),
+      'Workbench backup export confirms its summary and that API keys are excluded',
+      exportFeedbackState.status.startsWith('Exported ') &&
+        exportFeedbackState.status.includes('API keys were excluded') &&
+        exportFeedbackState.toast.includes('API keys were excluded'),
       JSON.stringify(exportFeedbackState),
     );
     progress('real backup download started');
     const downloadedBackup = await waitForJsonDownload(downloadDir);
-    const exportedAskConversations = Object.entries(downloadedBackup.parsed?.askSessions || {})
-      .map(([key, session]) => ({
-        key,
-        url: session?.url || '',
-        hasTabId: Object.hasOwn(session || {}, 'tabId'),
-        messages: (session?.messages || []).map((message) => ({
-          role: message.role,
-          text: message.text,
-        })),
-      }))
-      .filter((session) => session.messages.length > 0)
-      .sort((left, right) => left.key.localeCompare(right.key));
     const exportedBackupState = {
       filename: downloadedBackup.name,
       format: downloadedBackup.parsed?.format || '',
       spaces: (downloadedBackup.parsed?.spaces || []).map((space) => space.name),
       hasAIState: Object.hasOwn(downloadedBackup.parsed || {}, 'ai'),
       hasApiKeyText: downloadedBackup.text.includes('apiKey'),
-      askConversations: exportedAskConversations,
     };
     record(
-      'Workbench export downloads portable Ask history without stale tab ids or AI state',
+      'Workbench export downloads a portable backup without AI state or API keys',
       exportedBackupState.filename.startsWith('space-backup-') &&
         exportedBackupState.format === 'space-context-workspaces' &&
         exportedBackupState.spaces.includes('Setup E2E') &&
         !exportedBackupState.hasAIState &&
-        !exportedBackupState.hasApiKeyText &&
-        exportedBackupState.askConversations.length >= 1 &&
-        exportedBackupState.askConversations.every((session) =>
-          (session.key.startsWith('page:') || session.key.startsWith('space:')) && !session.hasTabId) &&
-        exportedBackupState.askConversations.some((session) =>
-          session.url === askFixtureServer.sourceAlphaUrl &&
-          session.messages.some((message) =>
-            message.role === 'user' && message.text.includes('E2E complete stream')) &&
-          session.messages.some((message) =>
-            message.role === 'assistant' && message.text.includes('Alpha sets the Tuesday checkpoint'))),
+        !exportedBackupState.hasApiKeyText,
       JSON.stringify(exportedBackupState),
     );
 
@@ -14735,7 +13723,6 @@ async function main() {
             }],
           },
         },
-        askSessions: {},
         collapsedSpaceGroups: {},
       };
       const file = new File([JSON.stringify(backup)], 'space-backup-e2e.json', { type: 'application/json' });
@@ -14952,575 +13939,20 @@ async function main() {
       const saved = stored.spaceTabsState || {};
       const names = (saved.spaces || []).map((space) => space.name);
       if (!names.includes('Setup E2E') || names.includes('Backup Restored')) return null;
-      const askConversations = Object.entries(saved.askSessions || {})
-        .map(([key, session]) => ({
-          key,
-          url: session?.url || '',
-          hasTabId: Object.hasOwn(session || {}, 'tabId'),
-          messages: (session?.messages || []).map((message) => ({
-            role: message.role,
-            text: message.text,
-          })),
-        }))
-        .filter((session) => session.messages.length > 0)
-        .sort((left, right) => left.key.localeCompare(right.key));
       return {
         activeSpaceId: saved.activeSpaceId,
         names,
         hasMaxTokens: Object.hasOwn(saved.ai || {}, 'maxTokens'),
         addSpaceShortcut: saved.shortcuts?.addSpace,
-        askConversations,
       };
     })()`, 12000);
     record(
-      'A real downloaded export restores Space data and exact Ask history end-to-end',
+      'A real downloaded export restores Space data end-to-end',
       !exportRoundTripState.hasMaxTokens &&
-        exportRoundTripState.addSpaceShortcut === 'Control+Alt+K' &&
-        JSON.stringify(exportRoundTripState.askConversations) ===
-          JSON.stringify(exportedBackupState.askConversations),
+        exportRoundTripState.addSpaceShortcut === 'Control+Alt+K',
       JSON.stringify(exportRoundTripState),
     );
     progress('real export-to-restore round trip passed');
-    await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
-      !document.querySelector('#askPageView')?.hidden &&
-      document.querySelector('#restoreSpaceDataButton')?.disabled`, 12000);
-
-    const restoredAlphaConversation = exportedBackupState.askConversations.find((session) =>
-      session.url === askFixtureServer.sourceAlphaUrl);
-    if (!restoredAlphaConversation) {
-      throw new Error('The exported Ask fixture did not contain the Alpha conversation.');
-    }
-    const restoredContinuationQuestion =
-      'E2E restored continuation: retain every restored message before this turn';
-    const restoredContinuationPreviousAI = await evaluate(client, `(async () => {
-      const [stored, previousSecret] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
-      ]);
-      return {
-        ai: structuredClone(stored.spaceTabsState?.ai || {}),
-        secrets: previousSecret.spaceTabsSecrets || null,
-        ui: {
-          askProvider: document.querySelector('#askProvider')?.textContent || '',
-          provider: document.querySelector('#providerInput')?.value || '',
-          baseUrl: document.querySelector('#baseUrlInput')?.value || '',
-          model: document.querySelector('#modelInput')?.value || '',
-          customModel: document.querySelector('#customModelInput')?.value || '',
-          language: document.querySelector('#languageInput')?.value || '',
-          apiKey: document.querySelector('#apiKeyInput')?.value || '',
-          apiKeyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
-        },
-      };
-    })()`);
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `document.querySelector('#settingsDialog')?.open`, 12000);
-    await evaluate(client, `(() => {
-      const provider = document.querySelector('#providerInput');
-      provider.value = 'openai-compatible';
-      provider.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#baseUrlInput').value = ${JSON.stringify(askFixtureServer.baseUrl)};
-      const model = document.querySelector('#modelInput');
-      model.value = '__custom__';
-      model.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#customModelInput').value = 'ask-e2e-model';
-      document.querySelector('#languageInput').value = 'en';
-      document.querySelector('#apiKeyInput').value = 'restored-continuation-e2e-key';
-    })()`);
-    await clickElementWithCDP(client, '#saveSettingsButton');
-    try {
-      await waitFor(client, `(async () => {
-        const [stored, secret] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
-        ]);
-        return stored.spaceTabsState?.ai?.provider === 'openai-compatible' &&
-          stored.spaceTabsState?.ai?.baseUrl === ${JSON.stringify(askFixtureServer.baseUrl)} &&
-          stored.spaceTabsState?.ai?.model === 'ask-e2e-model' &&
-          secret.spaceTabsSecrets?.ai?.apiKey === 'restored-continuation-e2e-key' &&
-          document.querySelector('#settingsStatus')?.textContent === 'Settings saved.';
-      })()`, 12000);
-    } catch (error) {
-      const diagnostic = await evaluate(client, `(async () => {
-        const [stored, secret] = await Promise.all([
-          chrome.storage.local.get('spaceTabsState'),
-          chrome.storage.session.get('spaceTabsSecrets'),
-        ]);
-        return {
-          ai: structuredClone(stored.spaceTabsState?.ai || null),
-          secretKeyLength: String(secret.spaceTabsSecrets?.ai?.apiKey || '').length,
-          settingsStatus: document.querySelector('#settingsStatus')?.textContent || '',
-          settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
-          provider: document.querySelector('#providerInput')?.value || '',
-          baseUrl: document.querySelector('#baseUrlInput')?.value || '',
-          model: document.querySelector('#modelInput')?.value || '',
-          customModel: document.querySelector('#customModelInput')?.value || '',
-          language: document.querySelector('#languageInput')?.value || '',
-          apiKeyLength: String(document.querySelector('#apiKeyInput')?.value || '').length,
-          apiKeyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
-          toast: document.querySelector('#workbenchToast')?.textContent || '',
-        };
-      })()`);
-      throw new Error(`Restored continuation provider setup failed: ${JSON.stringify(diagnostic)}`, {
-        cause: error,
-      });
-    }
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden &&
-      !document.querySelector('#settingsDialog')?.open &&
-      document.querySelector('#askProvider')?.textContent ===
-        'Custom OpenAI-compatible · ask-e2e-model'`, 12000);
-    const restoredAskSessionsBeforePortableRender = await evaluate(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      return structuredClone(stored.spaceTabsState?.askSessions || {});
-    })()`);
-    const restoredPortableMatches = Object.entries(restoredAskSessionsBeforePortableRender)
-      .filter(([key, session]) => key.startsWith('page:') &&
-        session?.url === askFixtureServer.sourceAlphaUrl);
-    if (restoredPortableMatches.length !== 1) {
-      throw new Error(`Expected one portable Alpha conversation before render: ${JSON.stringify(
-        restoredPortableMatches.map(([key, session]) => ({ key, url: session?.url || '' })),
-      )}`);
-    }
-    const [restoredPortableKey] = restoredPortableMatches[0];
-    const restoredSourceUrlPattern = askFixtureServer.sourceAlphaUrl
-      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const expectedRestoredHistoryText = (message) => {
-      let text = String(message?.text || '');
-      if (message?.role !== 'assistant') return text;
-      const sourcesMarker = '\n\n### Sources\n';
-      const sourcesAt = text.lastIndexOf(sourcesMarker);
-      if (sourcesAt >= 0) {
-        const generatedSourceLine = new RegExp(
-          `^- \\[\\[\\d+\\] [^\\]\\r\\n]+\\]\\(${restoredSourceUrlPattern}\\)$`,
-        );
-        const appendixLines = text.slice(sourcesAt + sourcesMarker.length)
-          .trimEnd()
-          .split(/\r?\n/);
-        if (appendixLines.length > 0 && appendixLines.every((line) =>
-          generatedSourceLine.test(line))) {
-          text = text.slice(0, sourcesAt);
-        }
-      }
-      return text.replace(
-        new RegExp(`\\[\\[(\\d+)\\]\\]\\(${restoredSourceUrlPattern}\\)`, 'g'),
-        '[$1]',
-      );
-    };
-    const restoredExpectedProviderHistory = restoredAlphaConversation.messages
-      .slice(-8)
-      .map((message) => ({
-        role: message.role === 'assistant' ? 'assistant' : 'user',
-        content: expectedRestoredHistoryText(message),
-      }))
-      .filter((message) => message.content.trim());
-    const restoredRecentRawAssistantText = restoredAlphaConversation.messages
-      .slice(-8)
-      .filter((message) => message.role === 'assistant')
-      .map((message) => String(message.text || ''));
-    if (restoredExpectedProviderHistory.length === 0 ||
-        !restoredRecentRawAssistantText.some((text) =>
-          text.includes(`[[1]](${askFixtureServer.sourceAlphaUrl})`)) ||
-        !restoredRecentRawAssistantText.some((text) => /### Sources/.test(text)) ||
-        !restoredExpectedProviderHistory.some((message) =>
-          message.role === 'assistant' && message.content.includes('[1]'))) {
-      throw new Error('The restored Alpha fixture must exercise generated citation and Sources cleanup.');
-    }
-    const restoredContinuationTab = await evaluate(client, `(async () => {
-      const created = await chrome.runtime.sendMessage({
-        type: 'tabs:create',
-        url: ${JSON.stringify(askFixtureServer.sourceAlphaUrl)},
-        active: true,
-        windowId: ${JSON.stringify(openedWorkbench.windowId)},
-      });
-      return created.tab;
-    })()`);
-    await waitFor(client, `(async () => {
-      const tab = await chrome.tabs.get(${JSON.stringify(restoredContinuationTab.id)}).catch(() => null);
-      return tab?.status === 'complete' && tab.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)};
-    })()`, 12000);
-    await evaluate(client, `chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true })`);
-    const restoredPortableRender = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      const { renderMarkdown } = await import(chrome.runtime.getURL('src/shared/markdown.js'));
-      const renderedText = (message) => {
-        if (message?.role !== 'assistant') return String(message?.text || '');
-        const element = document.createElement('div');
-        element.innerHTML = renderMarkdown(message?.text || '');
-        return element.textContent || '';
-      };
-      const liveKey = ${JSON.stringify(
-        `tab:${restoredContinuationTab.id}:${askFixtureServer.sourceAlphaUrl}`,
-      )};
-      const portable = Object.entries(saved.askSessions || {})
-        .filter(([key, session]) => key.startsWith('page:') &&
-          session?.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)})
-        .map(([key, session]) => ({
-          key,
-          hasTabId: Object.hasOwn(session || {}, 'tabId'),
-          messages: (session?.messages || []).map((message) => ({
-            role: message.role,
-            text: message.text,
-          })),
-        }));
-      const expectedDomMessages = ${JSON.stringify(restoredAlphaConversation.messages)}
-        .map((message) => ({ role: message.role, text: renderedText(message) }));
-      const domMessages = [...document.querySelectorAll('#askMessages .ask-message')]
-        .map((message) => ({
-          role: message.classList.contains('user')
-            ? 'user'
-            : message.classList.contains('assistant') ? 'assistant' : 'unknown',
-          text: message.textContent || '',
-        }));
-      const chip = document.querySelector('#askSourceList .ask-source-chip');
-      return chip?.title === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)} &&
-        domMessages.some((message) => message.text.includes('Alpha sets the Tuesday checkpoint'))
-        ? {
-          liveKeyPresent: Object.hasOwn(saved.askSessions || {}, liveKey),
-          portable,
-          domMessages,
-          expectedDomMessages,
-          askSessions: structuredClone(saved.askSessions || {}),
-          sourceUrl: chip.title,
-          provider: document.querySelector('#askProvider')?.textContent || '',
-        }
-        : null;
-    })()`, 15000);
-    const restoredPortableStorageDifference = firstDeepDifference(
-      restoredPortableRender.askSessions,
-      restoredAskSessionsBeforePortableRender,
-    );
-    const restoredPortableDomDifference = firstDeepDifference(
-      restoredPortableRender.domMessages,
-      restoredPortableRender.expectedDomMessages,
-    );
-    const restoredPortableRenderOk =
-      !restoredPortableRender.liveKeyPresent &&
-      restoredPortableRender.portable.length === 1 &&
-      !restoredPortableRender.portable[0].hasTabId &&
-      JSON.stringify(restoredPortableRender.portable[0].messages) ===
-        JSON.stringify(restoredAlphaConversation.messages) &&
-      !restoredPortableStorageDifference &&
-      !restoredPortableDomDifference &&
-      restoredPortableRender.provider === 'Custom OpenAI-compatible · ask-e2e-model';
-    record(
-      'A restored portable Ask conversation renders on the matching reopened page without mutating storage',
-      restoredPortableRenderOk,
-      JSON.stringify({
-        restoredAlphaConversation,
-        restoredPortableRender,
-        restoredPortableStorageDifference,
-        restoredPortableDomDifference,
-      }),
-    );
-    if (!restoredPortableRenderOk) {
-      throw new Error(`Portable Ask render regression: ${JSON.stringify({
-        restoredPortableRender,
-        restoredPortableStorageDifference,
-        restoredPortableDomDifference,
-      })}`);
-    }
-
-    const restoredContinuationRequestsBefore = askFixtureServer.requests.length;
-    await evaluate(client, `(() => {
-      const input = document.querySelector('#askPagePrompt');
-      input.value = ${JSON.stringify(restoredContinuationQuestion)};
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await clickElementWithCDP(client, '#askAIButton');
-    const restoredContinuationState = await waitFor(client, `(async () => {
-      if (document.querySelector('#askAIButton')?.textContent !== 'Ask Page') return null;
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      const { renderMarkdown } = await import(chrome.runtime.getURL('src/shared/markdown.js'));
-      const renderedText = (message) => {
-        if (message?.role !== 'assistant') return String(message?.text || '');
-        const element = document.createElement('div');
-        element.innerHTML = renderMarkdown(message?.text || '');
-        return element.textContent || '';
-      };
-      const liveKey = ${JSON.stringify(
-        `tab:${restoredContinuationTab.id}:${askFixtureServer.sourceAlphaUrl}`,
-      )};
-      const session = saved.askSessions?.[liveKey];
-      const messages = (session?.messages || []).map((message) => ({
-        role: message.role,
-        text: message.text,
-      }));
-      const portableKeys = Object.entries(saved.askSessions || {})
-        .filter(([key, item]) => key.startsWith('page:') &&
-          item?.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)})
-        .map(([key]) => key);
-      const latestAssistant = [...messages].reverse()
-        .find((message) => message.role === 'assistant')?.text || '';
-      const expectedDomMessages = (session?.messages || []).map((message) => ({
-        role: message.role,
-        text: renderedText(message),
-      }));
-      const domMessages = [...document.querySelectorAll('#askMessages .ask-message')]
-        .map((message) => ({
-          role: message.classList.contains('user')
-            ? 'user'
-            : message.classList.contains('assistant') ? 'assistant' : 'unknown',
-          text: message.textContent || '',
-        }));
-      return messages.some((message) =>
-        message.role === 'user' && message.text === ${JSON.stringify(restoredContinuationQuestion)}) &&
-        latestAssistant.includes('Alpha sets the Tuesday checkpoint')
-        ? {
-          liveKey,
-          activeKey: saved.activeAskSessionKey || '',
-          liveSession: structuredClone(session || null),
-          messages,
-          portableKeys,
-          domMessages,
-          expectedDomMessages,
-          askSessions: structuredClone(saved.askSessions || {}),
-        }
-        : null;
-    })()`, 15000);
-    const restoredContinuationRequest = askFixtureServer.requests
-      .slice(restoredContinuationRequestsBefore)
-      .find((request) => JSON.stringify(request.body || {}).includes(restoredContinuationQuestion));
-    const restoredPrefix = restoredContinuationState.messages.slice(
-      0,
-      restoredContinuationState.messages.length - 2,
-    );
-    const restoredActualProviderHistory = (restoredContinuationRequest?.body?.messages || [])
-      .slice(1, -1)
-      .map((message) => ({
-        role: message?.role || '',
-        content: String(message?.content || ''),
-      }));
-    const restoredProviderHistoryDifference = firstDeepDifference(
-      restoredActualProviderHistory,
-      restoredExpectedProviderHistory,
-    );
-    const restoredContinuationDomDifference = firstDeepDifference(
-      restoredContinuationState.domMessages,
-      restoredContinuationState.expectedDomMessages,
-    );
-    const sessionsWithoutKey = (sessions, omittedKey) => Object.fromEntries(
-      Object.entries(sessions || {}).filter(([key]) => key !== omittedKey),
-    );
-    const restoredUnrelatedSessionsDifference = firstDeepDifference(
-      sessionsWithoutKey(restoredContinuationState.askSessions, restoredContinuationState.liveKey),
-      sessionsWithoutKey(restoredAskSessionsBeforePortableRender, restoredPortableKey),
-    );
-    const restoredContinuationOk =
-      restoredContinuationState.activeKey === restoredContinuationState.liveKey &&
-      restoredContinuationState.liveSession?.key === restoredContinuationState.liveKey &&
-      restoredContinuationState.liveSession?.tabId === restoredContinuationTab.id &&
-      restoredContinuationState.liveSession?.url === askFixtureServer.sourceAlphaUrl &&
-      !Object.hasOwn(restoredContinuationState.liveSession || {}, 'spaceId') &&
-      restoredContinuationState.portableKeys.length === 0 &&
-      restoredContinuationState.messages.length === restoredAlphaConversation.messages.length + 2 &&
-      JSON.stringify(restoredPrefix) === JSON.stringify(restoredAlphaConversation.messages) &&
-      restoredContinuationState.messages.at(-2)?.role === 'user' &&
-      restoredContinuationState.messages.at(-2)?.text === restoredContinuationQuestion &&
-      restoredContinuationState.messages.at(-1)?.role === 'assistant' &&
-      restoredContinuationState.messages.at(-1)?.text.includes('Alpha sets the Tuesday checkpoint') &&
-      !restoredProviderHistoryDifference &&
-      restoredContinuationRequest?.historyIncludesPlainCitation === true &&
-      restoredContinuationRequest?.historyIncludesGeneratedInlineCitationLink === false &&
-      restoredContinuationRequest?.historyIncludesSourcesAppendix === false &&
-      !restoredContinuationDomDifference &&
-      !restoredUnrelatedSessionsDifference;
-    record(
-      'Sending after Restore adopts the restored history and appends one complete turn without splitting it',
-      restoredContinuationOk,
-      JSON.stringify({
-        restoredContinuationState,
-        restoredExpectedProviderHistory,
-        restoredActualProviderHistory,
-        restoredProviderHistoryDifference,
-        restoredContinuationDomDifference,
-        restoredUnrelatedSessionsDifference,
-      }),
-    );
-    if (!restoredContinuationOk) {
-      throw new Error(`Restored Ask continuation regression: ${JSON.stringify({
-        restoredContinuationState,
-        restoredExpectedProviderHistory,
-        restoredActualProviderHistory,
-        restoredProviderHistoryDifference,
-        restoredContinuationDomDifference,
-        restoredUnrelatedSessionsDifference,
-      })}`);
-    }
-
-    await checkpointWorkbenchBeforeNavigation();
-    await client.send('Page.reload', {}, activePipeSessionId);
-    await waitFor(client, `document.readyState === 'complete'`, 15000);
-    await evaluate(client, `(async () => {
-      await chrome.tabs.update(${JSON.stringify(restoredContinuationTab.id)}, { active: true });
-      await chrome.tabs.update(${JSON.stringify(openedWorkbench.id)}, { active: true });
-      if (document.querySelector('#askPageView')?.hidden) document.querySelector('.ask-page')?.click();
-    })()`);
-    const restoredContinuationAfterReload = await waitFor(client, `(async () => {
-      const stored = await chrome.storage.local.get('spaceTabsState');
-      const saved = stored.spaceTabsState || {};
-      const { renderMarkdown } = await import(chrome.runtime.getURL('src/shared/markdown.js'));
-      const renderedText = (message) => {
-        if (message?.role !== 'assistant') return String(message?.text || '');
-        const element = document.createElement('div');
-        element.innerHTML = renderMarkdown(message?.text || '');
-        return element.textContent || '';
-      };
-      const liveKey = ${JSON.stringify(
-        `tab:${restoredContinuationTab.id}:${askFixtureServer.sourceAlphaUrl}`,
-      )};
-      const session = saved.askSessions?.[liveKey];
-      const messages = (session?.messages || [])
-        .map((message) => ({ role: message.role, text: message.text }));
-      const expectedDomMessages = (session?.messages || []).map((message) => ({
-        role: message.role,
-        text: renderedText(message),
-      }));
-      const domMessages = [...document.querySelectorAll('#askMessages .ask-message')]
-        .map((message) => ({
-          role: message.classList.contains('user')
-            ? 'user'
-            : message.classList.contains('assistant') ? 'assistant' : 'unknown',
-          text: message.textContent || '',
-        }));
-      return !document.querySelector('#askPageView')?.hidden &&
-        document.querySelector('#askSourceList .ask-source-chip')?.title ===
-          ${JSON.stringify(askFixtureServer.sourceAlphaUrl)} &&
-        domMessages.some((message) =>
-          message.role === 'user' && message.text === ${JSON.stringify(restoredContinuationQuestion)}) &&
-        domMessages.some((message) =>
-          message.role === 'assistant' && message.text.includes('Alpha sets the Tuesday checkpoint'))
-        ? {
-          liveKey,
-          activeKey: saved.activeAskSessionKey || '',
-          messages,
-          domMessages,
-          expectedDomMessages,
-          askSessions: structuredClone(saved.askSessions || {}),
-          portableKeys: Object.entries(saved.askSessions || {})
-            .filter(([key, item]) => key.startsWith('page:') &&
-              item?.url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)})
-            .map(([key]) => key),
-        }
-        : null;
-    })()`, 15000);
-    const restoredReloadStorageDifference = firstDeepDifference(
-      restoredContinuationAfterReload.askSessions,
-      restoredContinuationState.askSessions,
-    );
-    const restoredReloadMessagesDifference = firstDeepDifference(
-      restoredContinuationAfterReload.messages,
-      restoredContinuationState.messages,
-    );
-    const restoredReloadDomDifference = firstDeepDifference(
-      restoredContinuationAfterReload.domMessages,
-      restoredContinuationAfterReload.expectedDomMessages,
-    );
-    const restoredContinuationAfterReloadOk =
-      restoredContinuationAfterReload.activeKey === '' &&
-      restoredContinuationAfterReload.portableKeys.length === 0 &&
-      !restoredReloadStorageDifference &&
-      !restoredReloadMessagesDifference &&
-      !restoredReloadDomDifference;
-    record(
-      'Reload keeps the exact Ask timeline while clearing the prior panel selection mirror',
-      restoredContinuationAfterReloadOk,
-      JSON.stringify({
-        restoredContinuationAfterReload,
-        restoredReloadStorageDifference,
-        restoredReloadMessagesDifference,
-        restoredReloadDomDifference,
-      }),
-    );
-    if (!restoredContinuationAfterReloadOk) {
-      throw new Error(`Restored Ask reload regression: ${JSON.stringify({
-        restoredContinuationAfterReload,
-        restoredReloadStorageDifference,
-        restoredReloadMessagesDifference,
-        restoredReloadDomDifference,
-      })}`);
-    }
-    await evaluate(client, `(async () => {
-      await navigator.locks.request('space-tabs-shared-state', async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = structuredClone(stored.spaceTabsState || {});
-        saved.ai = ${JSON.stringify(restoredContinuationPreviousAI.ai)};
-        await chrome.storage.local.set({ spaceTabsState: saved });
-      });
-      const previousSecrets = ${JSON.stringify(restoredContinuationPreviousAI.secrets)};
-      if (previousSecrets) await chrome.storage.session.set({ spaceTabsSecrets: previousSecrets });
-      else await chrome.storage.session.remove('spaceTabsSecrets');
-      await chrome.tabs.remove(${JSON.stringify(restoredContinuationTab.id)}).catch(() => null);
-    })()`);
-    await waitForLifecycleJournalToSettle(client);
-    await checkpointWorkbenchBeforeNavigation();
-    await client.send('Page.reload', {}, activePipeSessionId);
-    await waitFor(client, `document.readyState === 'complete'`, 15000);
-    const restoredContinuationCleanupState = await waitFor(client, `(async () => {
-      const [stored, secret, continuationTab] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.storage.session.get('spaceTabsSecrets'),
-        chrome.tabs.get(${JSON.stringify(restoredContinuationTab.id)}).catch(() => null),
-      ]);
-      const ui = {
-        askProvider: document.querySelector('#askProvider')?.textContent || '',
-        provider: document.querySelector('#providerInput')?.value || '',
-        baseUrl: document.querySelector('#baseUrlInput')?.value || '',
-        model: document.querySelector('#modelInput')?.value || '',
-        customModel: document.querySelector('#customModelInput')?.value || '',
-        language: document.querySelector('#languageInput')?.value || '',
-        apiKey: document.querySelector('#apiKeyInput')?.value || '',
-        apiKeyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
-      };
-      return !continuationTab && ui.askProvider
-        ? {
-          ai: structuredClone(stored.spaceTabsState?.ai || {}),
-          hasSecrets: Object.hasOwn(secret, 'spaceTabsSecrets'),
-          secrets: structuredClone(secret.spaceTabsSecrets || null),
-          ui,
-          continuationTabPresent: false,
-        }
-        : null;
-    })()`, 15000);
-    const restoredCleanupAIDifference = firstDeepDifference(
-      restoredContinuationCleanupState.ai,
-      restoredContinuationPreviousAI.ai,
-    );
-    const restoredCleanupSecretsDifference = firstDeepDifference(
-      restoredContinuationCleanupState.secrets,
-      restoredContinuationPreviousAI.secrets,
-    );
-    const restoredCleanupUIDifference = firstDeepDifference(
-      restoredContinuationCleanupState.ui,
-      restoredContinuationPreviousAI.ui,
-    );
-    const restoredContinuationCleanupOk =
-      restoredContinuationCleanupState.hasSecrets ===
-        Boolean(restoredContinuationPreviousAI.secrets) &&
-      !restoredContinuationCleanupState.continuationTabPresent &&
-      !restoredCleanupAIDifference &&
-      !restoredCleanupSecretsDifference &&
-      !restoredCleanupUIDifference;
-    record(
-      'Restore continuation cleanup reloads the original provider and session-only key',
-      restoredContinuationCleanupOk,
-      JSON.stringify({
-        restoredContinuationCleanupState,
-        restoredCleanupAIDifference,
-        restoredCleanupSecretsDifference,
-        restoredCleanupUIDifference,
-      }),
-    );
-    if (!restoredContinuationCleanupOk) {
-      throw new Error(`Restored Ask cleanup regression: ${JSON.stringify({
-        restoredContinuationCleanupState,
-        restoredCleanupAIDifference,
-        restoredCleanupSecretsDifference,
-        restoredCleanupUIDifference,
-      })}`);
-    }
-
     await waitFor(client, `!document.querySelector('#settingsDialog')?.open &&
       document.querySelector('#restoreSpaceDataButton')?.disabled`, 12000);
     await evaluate(client, `document.querySelector('#settingsButton').click()`);
@@ -15540,7 +13972,6 @@ async function main() {
         spaces: saved.spaces,
         spaceContexts: saved.spaceContexts,
         spaceSnapshots: saved.spaceSnapshots,
-        askSessions: saved.askSessions,
       };
       return {
         relevant: JSON.stringify(withoutVolatileTimestamps(relevant)),
@@ -15556,7 +13987,6 @@ async function main() {
         spaces: [{ id: 'oversized-e2e', name: 'Oversized E2E', icon: 'O', color: 'red' }],
         spaceContexts: { 'oversized-e2e': 'x'.repeat(8 * 1024 * 1024) },
         spaceSnapshots: {},
-        askSessions: {},
         collapsedSpaceGroups: {},
       };
       const transfer = new DataTransfer();
@@ -15600,7 +14030,6 @@ async function main() {
         spaces: saved.spaces,
         spaceContexts: saved.spaceContexts,
         spaceSnapshots: saved.spaceSnapshots,
-        askSessions: saved.askSessions,
       }));
       return {
         status,

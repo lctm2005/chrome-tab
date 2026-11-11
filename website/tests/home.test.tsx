@@ -28,8 +28,8 @@ describe("home page", () => {
     expect(screen.getByText(/Tidy Names uses your configured provider when available/)).toHaveTextContent("Auto Group requires configured AI");
 
     const screenshots = screen.getAllByRole("img");
-    expect(screenshots).toHaveLength(5);
-    expect(view.container.querySelectorAll("figure.product-screenshot figcaption")).toHaveLength(5);
+    expect(screenshots).toHaveLength(4);
+    expect(view.container.querySelectorAll("figure.product-screenshot figcaption")).toHaveLength(4);
     expect(screen.getByAltText(/Launch Space, nested groups/)).toHaveAttribute("data-priority", "true");
     expect(screen.getByAltText(/two-step Arc import preview/)).toHaveAttribute("data-priority", "false");
 

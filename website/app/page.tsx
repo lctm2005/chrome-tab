@@ -48,7 +48,7 @@ export default function Home() {
             <h1>Keep Chrome.<br />{" "}Bring your Arc workflow.<br />{" "}<em>Add private BYOK AI.</em></h1>
             <p className="hero-lede">
               Space Tabs: Arc-like Spaces &amp; BYOK AI turns Chrome into focused workspaces, imports selected
-              Arc Spaces in minutes, and lets you ask or organize with the AI provider you choose.
+              Arc Spaces in minutes, and tidies tabs with the AI provider you choose.
             </p>
             <div className="hero-actions">
               <a className="primary-action" href="https://github.com/lctm2005/chrome-tab#install-from-source" target="_blank" rel="noreferrer">Install from GitHub</a>
@@ -110,7 +110,7 @@ export default function Home() {
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
             <p>Tidy Names uses your configured provider when available and falls back to local naming rules without sending tab metadata when AI is unavailable. Auto Group requires configured AI. AI proposals send only the disclosed metadata and generate one final preview—there is no extra pre-generation screen. Review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied organization change.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>Ask Page reads only the current HTTP(S) page when you send and prioritizes selected text when present. Before anything goes to your provider, it shows the provider, exact page, whether selected text is included, the total extracted character count including that selection, and whether stored text from recent conversation messages will be included. Responses stream, can be stopped, and include a clickable link to the single source page.</span></div>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>When Tidy Names or Auto Group sends tab metadata to your provider, Space Tabs shows that metadata first: tab titles, simplified URLs without query strings or fragments, and domains; Auto Group additionally sends each tab&apos;s current Tag and live/saved status. Requests go directly to the endpoint you configured, and your API key stays in Chrome local extension storage on this device.</span></div>
           </div>
         </section>
 
@@ -122,11 +122,6 @@ export default function Home() {
           </div>
           <div className="screenshot-grid" id="product">
             <ProductScreenshot
-              src="/screenshots/05-ask-page-byok-ai.png"
-              alt="Current Space Tabs Ask Page view using the active page with a clickable source"
-              caption="Ask Page · current page, BYOK provider, single-source citation, streaming, and Stop"
-            />
-            <ProductScreenshot
               src="/screenshots/04-settings-arc-import-shortcuts.png"
               alt="Current Space Tabs Workbench Settings showing backup, restore, and Arc import controls"
               caption="Workbench Settings · export, restore, Arc import, and local BYOK configuration"
@@ -134,7 +129,7 @@ export default function Home() {
           </div>
           <div className="surface-grid">
             <article><span className="surface-kicker">SIDE PANEL</span><h3>Switch, find, drag</h3><p>Keep daily retrieval close to the page you are using. Open dormant tabs only when you need them.</p><b>Command palette included →</b></article>
-            <article><span className="surface-kicker">WORKBENCH</span><h3>Migrate, back up, ask</h3><p>Give Ask Page, AI organization, migration previews, recovery, and settings the space they deserve.</p><b>Full-page context →</b></article>
+            <article><span className="surface-kicker">WORKBENCH</span><h3>Migrate, back up, organize</h3><p>Give AI organization, migration previews, recovery, and settings the space they deserve.</p><b>Full-page context →</b></article>
           </div>
         </section>
 

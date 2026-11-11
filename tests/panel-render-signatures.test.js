@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  askMessagesRenderSignature,
   groupsRenderSignature,
   spacesRenderSignature,
 } from '../src/shared/panel-render-signatures.js';
@@ -260,39 +259,6 @@ test('groups signature rerenders for panel-level inputs that change Groups behav
   }
 });
 
-test('Ask message signature tracks rendered content and timestamp fallbacks', () => {
-  assert.equal(askMessagesRenderSignature(), '["",[]]');
-  assert.equal(askMessagesRenderSignature(null), '["",[]]');
-
-  const session = {
-    key: 'tab:11',
-    messages: [
-      { id: 'm1', role: 'user', createdAt: 10, text: 'Question' },
-      { id: 'm2', role: 'assistant', createdAt: 20, updatedAt: 30, text: 'Answer' },
-      { id: 'm3', role: 'assistant', text: 'No timestamp' },
-    ],
-  };
-  const baseline = askMessagesRenderSignature(session);
-  assert.deepEqual(JSON.parse(baseline), [
-    'tab:11',
-    [
-      ['m1', 'user', 10, 'Question'],
-      ['m2', 'assistant', 30, 'Answer'],
-      ['m3', 'assistant', 0, 'No timestamp'],
-    ],
-  ]);
-
-  const variants = [
-    { ...session, key: 'tab:12' },
-    { ...session, messages: [{ ...session.messages[0], id: 'changed' }, ...session.messages.slice(1)] },
-    { ...session, messages: [{ ...session.messages[0], role: 'assistant' }, ...session.messages.slice(1)] },
-    { ...session, messages: [{ ...session.messages[0], createdAt: 11 }, ...session.messages.slice(1)] },
-    { ...session, messages: [{ ...session.messages[0], text: 'Changed' }, ...session.messages.slice(1)] },
-    { ...session, messages: [...session.messages].reverse() },
-  ];
-  for (const variant of variants) assert.notEqual(askMessagesRenderSignature(variant), baseline);
-});
-
 test('Spaces signature tracks dock DOM and listener dependencies', () => {
   assert.deepEqual(JSON.parse(spacesRenderSignature()), ['', false, '', false, '', []]);
   const options = {
@@ -315,7 +281,7 @@ test('Spaces signature tracks dock DOM and listener dependencies', () => {
   const variants = [
     { ...options, layoutMode: 'workbench' },
     { ...options, workbenchMode: true },
-    { ...options, activeView: 'ask' },
+    { ...options, activeView: 'settings' },
     { ...options, onboardingCompleted: false },
     { ...options, activeSpaceId: 'space-b' },
     { ...options, spaces: [{ ...options.spaces[0], id: 'space-c' }, options.spaces[1]] },

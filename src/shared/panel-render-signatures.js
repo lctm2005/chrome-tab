@@ -27,18 +27,6 @@ export function groupsRenderSignature({
   });
 }
 
-export function askMessagesRenderSignature(session = {}) {
-  return JSON.stringify([
-    session?.key || '',
-    (session?.messages || []).map((message) => [
-      message.id,
-      message.role,
-      message.updatedAt || message.createdAt || 0,
-      message.text,
-    ]),
-  ]);
-}
-
 export function spacesRenderSignature({
   layoutMode = '',
   workbenchMode = false,

@@ -172,8 +172,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     collapsedSpaceGroups: { 'work:Docs': true },
     spaceContexts: { work: '# Keep this context' },
     spaceSnapshots: { work: { version: 1, groups: [{ title: 'Docs', tabs: [{ url: 'https://example.com' }] }] } },
-    askSessions: { 'space:work': { messages: [{ role: 'user', content: 'Keep this chat' }] } },
-    activeAskSessionKey: 'space:work',
     lastArcImport: { spaceIds: ['work'], importedAt: 123 },
     operationHistory: [tidyOperation, restoreOperation, autoGroupOperation, portableOperation],
     ai: { provider: 'openai-compatible', baseUrl: 'https://llm.example/v1', model: 'model', apiKey: 'secret' },
@@ -199,7 +197,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     'spaces',
     'spaceSnapshots',
     'spaceContexts',
-    'askSessions',
     'ai',
     'collapsedSpaceGroups',
     'lastArcImport',
@@ -207,7 +204,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     assert.strictEqual(reset[portableKey], state[portableKey]);
   }
   assert.equal(reset.activeSpaceId, 'work');
-  assert.equal(reset.activeAskSessionKey, 'space:work');
   assert.deepEqual(state.groupSpaces, { 7: 'work' }, 'the pure reset must not mutate its input');
   assert.equal(state.browserSessionId, 'old-session');
 });
@@ -319,14 +315,12 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.tabOrder, {});
   assert.deepEqual(state.collapsedGroups, {});
   assert.deepEqual(state.collapsedSpaceGroups, {});
-  assert.deepEqual(state.askSessions, {});
   assert.deepEqual(state.spaceContexts, {});
   assert.deepEqual(state.onboarding, { version: 2, completed: false, stage: 'choose' });
   assert.equal(state.lastArcImport, null);
   assert.deepEqual(state.operationHistory, []);
-  assert.equal(state.shortcuts.askSubmit, 'Primary+Enter');
-  assert.equal(state.shortcuts.askAbort, 'Escape');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
+  assert.equal(state.shortcuts.tidyNames, 'Control+Alt+T');
   assert.equal(state.ai.model, '');
   assert.equal(state.ai.baseUrl, '');
   assert.equal(state.ai.apiKey, '');
@@ -632,12 +626,10 @@ test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {
     version: 3,
     shortcuts: {
       togglePanel: 'Meta+S',
-      askSubmit: 'Control+Enter',
     },
   }, createDefaultState());
 
   assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
 test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () => {
@@ -645,40 +637,10 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
     version: 4,
     shortcuts: {
       togglePanel: 'Meta+S',
-      askSubmit: 'Control+Enter',
     },
   }, createDefaultState());
 
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
-});
-
-test('migrates the old Mac-only Ask default while preserving an explicit current binding', () => {
-  const migrated = mergeStoredState({
-    version: 8,
-    shortcuts: { askSubmit: 'Meta+Enter' },
-  }, createDefaultState());
-  assert.equal(migrated.shortcuts.askSubmit, 'Primary+Enter');
-
-  const current = mergeStoredState({
-    version: 9,
-    shortcuts: { askSubmit: 'Meta+Enter' },
-  }, createDefaultState());
-  assert.equal(current.shortcuts.askSubmit, 'Meta+Enter');
-});
-
-test('migrates the old Ctrl+C Ask abort default without breaking intentional current bindings', () => {
-  const migrated = mergeStoredState({
-    version: 9,
-    shortcuts: { askAbort: 'Control+C' },
-  }, createDefaultState());
-  assert.equal(migrated.shortcuts.askAbort, 'Escape');
-
-  const current = mergeStoredState({
-    version: 10,
-    shortcuts: { askAbort: 'Control+C' },
-  }, createDefaultState());
-  assert.equal(current.shortcuts.askAbort, 'Control+C');
 });
 
 test('migrates v4 Space ownership into v12 without resetting shortcuts', () => {
@@ -825,14 +787,14 @@ test('preserves empty current shortcuts as disabled actions', () => {
   const merged = mergeStoredState({
     version: 4,
     shortcuts: {
-      openAsk: '',
-      askSubmit: 'Control+Enter',
+      addSpace: '',
+      nextSpace: 'Control+Alt+J',
     },
   }, createDefaultState());
 
-  assert.equal(merged.shortcuts.openAsk, '');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
-  assert.equal(merged.shortcuts.askAbort, 'Escape');
+  assert.equal(merged.shortcuts.addSpace, '');
+  assert.equal(merged.shortcuts.nextSpace, 'Control+Alt+J');
+  assert.equal(merged.shortcuts.previousSpace, 'Control+Alt+ArrowLeft');
 });
 
 test('merges stored state without dropping new defaults', () => {
@@ -848,7 +810,7 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.ai.model, 'glm-5');
   assert.equal(merged.ai.provider, 'openai-compatible');
   assert.equal(merged.ai.language, 'zh-CN');
-  assert.equal(merged.shortcuts.askSubmit, 'Primary+Enter');
+  assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal(merged.collapsedSpaceGroups.custom, true);
 });

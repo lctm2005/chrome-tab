@@ -555,23 +555,15 @@ test('preview close keeps the prior active tab unless the active target was remo
   assert.deepEqual((await only('tabs:list')).tabs, []);
 });
 
-test('preview page extraction covers active, fallback, filtered, and empty page sets', async () => {
+test('preview page extraction covers active, fallback, and empty page sets', async () => {
   const send = createPreviewCommandHandler([
     { id: 1, title: '', url: '', active: false, groupId: -1 },
     { id: 2, title: 'Readable', url: 'https://example.com/readable', active: true, groupId: -1 },
-    { id: 3, title: 'Restricted', url: 'chrome://settings', active: false, groupId: -1 },
   ], []);
   const active = await send('page:extract');
-  const pages = await send('pages:extract', { tabIds: [2, 3, 999] });
 
   assert.equal(active.page.title, 'Readable');
   assert.equal(active.page.url, 'https://example.com/readable');
-  assert.equal(pages.pages.length, 1);
-  assert.equal(pages.pages[0].tabId, 2);
-  assert.equal(pages.totalChars, pages.pages[0].text.length);
-  assert.deepEqual(pages.failures, []);
-  assert.equal(pages.truncated, false);
-  assert.deepEqual((await send('pages:extract')).pages, []);
 
   const fallback = createPreviewCommandHandler([
     { id: 1, title: '', url: '', active: false, groupId: -1 },
@@ -728,7 +720,6 @@ test('preview command defaults remain safe when optional payload fields are omit
   assert.deepEqual(await send('tabs:groupExisting'), { groupId: null, missing: false });
   await send('tabs:move', { tabId: 1 });
   assert.equal((await send('tabs:list')).tabs.at(-1).id, 1);
-  assert.deepEqual((await send('pages:extract', { tabIds: [1] })).pages, []);
 
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', {

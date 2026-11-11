@@ -1,10 +1,4 @@
 import {
-  ASK_SESSION_LIMITS,
-  PORTABLE_ASK_SESSION_PREFIX,
-  clampAskSessionMessages,
-  normalizeSessionUrl,
-} from './ask-session.js';
-import {
   isUngroupedSnapshotGroup,
   sanitizeSpaceSnapshot,
   snapshotGroupShouldPersist,
@@ -241,7 +235,6 @@ export function createSpaceBackup(state = {}, now = Date.now()) {
     spaces,
     spaceContexts: normalizeSpaceContexts(state.spaceContexts, validSpaceIds),
     spaceSnapshots: normalizeSpaceSnapshots(state.spaceSnapshots, validSpaceIds),
-    askSessions: normalizePortableAskSessions(state.askSessions, validSpaceIds),
     collapsedSpaceGroups: normalizeSpaceFlags(state.collapsedSpaceGroups, validSpaceIds),
   };
 }
@@ -276,10 +269,6 @@ export function restoreSpaceBackup(state, input) {
   state.activeSpaceId = backup.activeSpaceId;
   state.spaceContexts = backup.spaceContexts;
   state.spaceSnapshots = backup.spaceSnapshots;
-  state.askSessions = backup.askSessions;
-  state.activeAskSessionKey = backup.askSessions[`space:${backup.activeSpaceId}`]
-    ? `space:${backup.activeSpaceId}`
-    : '';
   state.collapsedSpaceGroups = backup.collapsedSpaceGroups;
 
   state.groupSpaces = {};
@@ -298,7 +287,6 @@ export function restoreSpaceBackup(state, input) {
     spaces: backup.spaces.length,
     contexts: Object.values(backup.spaceContexts).filter(Boolean).length,
     savedTabs: countSnapshotTabs(backup.spaceSnapshots),
-    askConversations: countAskConversations(backup.askSessions),
   };
 }
 
@@ -307,7 +295,7 @@ export function restoreSpaceBackup(state, input) {
  *
  * Selection, collapse state, and timestamps are intentionally excluded: they
  * can change while someone merely views the restored Spaces and do not carry
- * user-authored Space, Tag, saved-page, context, or Ask content.
+ * user-authored Space, Tag, saved-page, or context content.
  */
 export function fingerprintPortableWorkspaceContent(state = {}) {
   const backup = createSpaceBackup(state, 0);
@@ -315,7 +303,6 @@ export function fingerprintPortableWorkspaceContent(state = {}) {
     spaces: backup.spaces,
     spaceContexts: backup.spaceContexts,
     spaceSnapshots: backup.spaceSnapshots,
-    askSessions: portableAskSessionsContent(backup.askSessions),
   });
 }
 
@@ -341,12 +328,10 @@ export function fingerprintPortableSpacesContent(state = {}, spaceIds = []) {
 function fingerprintPortableSpaceFromBackup(backup, spaceId) {
   const id = String(spaceId || '');
   const space = backup.spaces.find((candidate) => candidate.id === id) || null;
-  const askKey = `space:${id}`;
   return fingerprintPortableContent('space', {
     space,
     context: backup.spaceContexts[id] || '',
     snapshot: backup.spaceSnapshots[id] || null,
-    askSession: portableAskSessionContent(backup.askSessions[askKey]),
   });
 }
 
@@ -414,76 +399,31 @@ function portableSnapshot(snapshot) {
   };
 }
 
-function normalizePortableAskSessions(sessions, validSpaceIds) {
+function fingerprintPortableContent(scope, value) {
+  const canonical = stablePortableValue(value);
+  const serialized = JSON.stringify(canonical);
+  return `portable-${scope}-v${PORTABLE_CONTENT_FINGERPRINT_VERSION}-${fnv1a(serialized)}`;
+}
+
+function stablePortableValue(value) {
+  if (Array.isArray(value)) return value.map(stablePortableValue);
+  if (!value || typeof value !== 'object') return value;
+
   const normalized = {};
-  for (const spaceId of validSpaceIds) {
-    const key = `space:${spaceId}`;
-    const session = sessions?.[key];
-    if (!session) continue;
-    normalized[key] = {
-      key,
-      spaceId,
-      title: String(session.title || 'Space'),
-      url: '',
-      createdAt: finiteTimestamp(session.createdAt),
-      updatedAt: finiteTimestamp(session.updatedAt),
-      messages: normalizeAskMessages(session.messages),
-    };
-  }
-
-  // Runtime Ask Page conversations are scoped to a Chrome tab id and URL.
-  // Tab ids are ephemeral and must not leave the browser in a portable backup,
-  // so retain each conversation under a URL-backed page key instead. Separate
-  // conversations for duplicate tabs remain separate and can be adopted one at
-  // a time when those pages are reopened after restore.
-  const pageSessions = Object.entries(sessions || {})
-    .filter(([key]) => key.startsWith('tab:') || key.startsWith(PORTABLE_ASK_SESSION_PREFIX))
-    .map(([, session]) => {
-      const url = normalizeSessionUrl(session?.url);
-      return {
-        title: String(session?.title || 'Current page'),
-        url,
-        createdAt: finiteTimestamp(session?.createdAt),
-        updatedAt: finiteTimestamp(session?.updatedAt),
-        messages: normalizeAskMessages(session?.messages),
-      };
-    })
-    .filter((session) => isPortableAskPageUrl(session.url) && session.messages.length > 0)
-    .sort((left, right) => Number(right.updatedAt) - Number(left.updatedAt))
-    .slice(0, ASK_SESSION_LIMITS.maxSessions)
-    .sort((left, right) => portableAskSessionSortKey(left).localeCompare(portableAskSessionSortKey(right)));
-
-  const ordinals = new Map();
-  for (const session of pageSessions) {
-    const hash = fnv1a(session.url);
-    const ordinal = (ordinals.get(hash) || 0) + 1;
-    ordinals.set(hash, ordinal);
-    const key = `${PORTABLE_ASK_SESSION_PREFIX}${hash}:${ordinal}`;
-    normalized[key] = { key, ...session };
+  for (const key of Object.keys(value).sort()) {
+    if (['createdAt', 'updatedAt', 'exportedAt', 'collapsed'].includes(key)) continue;
+    normalized[key] = stablePortableValue(value[key]);
   }
   return normalized;
 }
 
-function normalizeAskMessages(messages) {
-  const normalized = (Array.isArray(messages) ? messages : [])
-    .slice(-ASK_SESSION_LIMITS.maxMessagesPerSession)
-    .map((message, index) => ({
-      id: String(message?.id || `${finiteTimestamp(message?.createdAt)}-${index}`),
-      role: message?.role === 'user' ? 'user' : 'assistant',
-      text: String(message?.text || '').slice(0, ASK_SESSION_LIMITS.maxMessageChars),
-      createdAt: finiteTimestamp(message?.createdAt),
-      ...(message?.updatedAt ? { updatedAt: finiteTimestamp(message.updatedAt) } : {}),
-    }))
-    .filter((message) => message.text);
-  return clampAskSessionMessages(normalized);
-}
-
-function portableAskSessionSortKey(session) {
-  return JSON.stringify({
-    url: session.url,
-    title: session.title,
-    messages: session.messages.map((message) => ({ role: message.role, text: message.text })),
-  });
+function fnv1a(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function normalizeSpaceFlags(flags, validSpaceIds) {
@@ -496,12 +436,6 @@ function countSnapshotTabs(snapshots) {
   return Object.values(snapshots).reduce((total, snapshot) => (
     total + snapshot.groups.reduce((sum, group) => sum + group.tabs.length, 0)
   ), 0);
-}
-
-function countAskConversations(sessions) {
-  return Object.values(sessions)
-    .filter((session) => session.messages.length > 0)
-    .length;
 }
 
 function finiteTimestamp(value) {
@@ -532,61 +466,4 @@ function isPortableTabUrl(value) {
   } catch {
     return false;
   }
-}
-
-function isPortableAskPageUrl(value) {
-  try {
-    return ['http:', 'https:'].includes(new URL(String(value)).protocol);
-  } catch {
-    return false;
-  }
-}
-
-function fingerprintPortableContent(scope, value) {
-  const canonical = stablePortableValue(value);
-  const serialized = JSON.stringify(canonical);
-  return `portable-${scope}-v${PORTABLE_CONTENT_FINGERPRINT_VERSION}-${fnv1a(serialized)}`;
-}
-
-function portableAskSessionsContent(sessions = {}) {
-  return Object.fromEntries(Object.entries(sessions)
-    .map(([key, session]) => [key, portableAskSessionContent(session)])
-    .filter(([, session]) => session));
-}
-
-function portableAskSessionContent(session) {
-  if (!session) return null;
-  const messages = session.messages.map((message) => ({
-    role: message.role === 'user' ? 'user' : 'assistant',
-    text: String(message.text),
-  }));
-  if (messages.length === 0) return null;
-  return {
-    key: String(session.key),
-    spaceId: session.spaceId ? String(session.spaceId) : '',
-    title: String(session.title),
-    url: String(session.url),
-    messages,
-  };
-}
-
-function stablePortableValue(value) {
-  if (Array.isArray(value)) return value.map(stablePortableValue);
-  if (!value || typeof value !== 'object') return value;
-
-  const normalized = {};
-  for (const key of Object.keys(value).sort()) {
-    if (['createdAt', 'updatedAt', 'exportedAt', 'collapsed'].includes(key)) continue;
-    normalized[key] = stablePortableValue(value[key]);
-  }
-  return normalized;
-}
-
-function fnv1a(value) {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
 }

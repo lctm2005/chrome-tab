@@ -44,8 +44,7 @@ test('creates shortcuts from keyboard events and matches configured actions', ()
   assert.equal(shortcutMatchesEvent('Control+Enter', event), false);
 });
 
-test('uses Escape to stop Ask and preserves native copy when text is selected', () => {
-  assert.equal(DEFAULT_SHORTCUTS.askAbort, 'Escape');
+test('preserves native copy when text is selected', () => {
   const ctrlCopy = keyEvent({
     key: 'c',
     code: 'KeyC',
@@ -61,19 +60,18 @@ test('uses Escape to stop Ask and preserves native copy when text is selected', 
   assert.equal(shouldPreserveNativeCopy(keyEvent({ key: 'x', code: 'KeyX', ctrlKey: true })), false);
 });
 
-test('the primary modifier submits Ask with either Ctrl or Cmd without double-modifier matches', () => {
+test('the primary modifier matches either Ctrl or Cmd without double-modifier matches', () => {
   const controlEnter = keyEvent({ key: 'Enter', ctrlKey: true });
   const metaEnter = keyEvent({ key: 'Enter', metaKey: true });
   const bothEnter = keyEvent({ key: 'Enter', ctrlKey: true, metaKey: true });
 
-  assert.equal(DEFAULT_SHORTCUTS.askSubmit, 'Primary+Enter');
   assert.equal(normalizeShortcut('mod + enter'), 'Primary+Enter');
   assert.equal(normalizeShortcut('Control+Primary+Meta+Enter'), 'Primary+Enter');
   assert.equal(shortcutMatchesEvent('Primary+Enter', controlEnter), true);
   assert.equal(shortcutMatchesEvent('Primary+Enter', metaEnter), true);
   assert.equal(shortcutMatchesEvent('Primary+Enter', bothEnter), false);
-  assert.equal(shortcutActionFromEvent(controlEnter, mergeShortcuts()), 'askSubmit');
-  assert.equal(shortcutActionFromEvent(metaEnter, mergeShortcuts()), 'askSubmit');
+  assert.equal(shortcutActionFromEvent(controlEnter, mergeShortcuts()), '');
+  assert.equal(shortcutActionFromEvent(metaEnter, mergeShortcuts()), '');
 });
 
 test('finds configured shortcut actions and supports exclusions', () => {
@@ -126,38 +124,38 @@ test('preserves Shift for configurable modified letter shortcuts', () => {
 
 test('merges stored shortcut overrides with defaults and drops unknown actions', () => {
   const shortcuts = mergeShortcuts({
-    askSubmit: 'Control+Enter',
+    tidyNames: 'Control+Enter',
     unknownAction: 'Control+Alt+X',
   });
 
-  assert.equal(shortcuts.askSubmit, 'Control+Enter');
-  assert.equal(shortcuts.askAbort, DEFAULT_SHORTCUTS.askAbort);
+  assert.equal(shortcuts.tidyNames, 'Control+Enter');
+  assert.equal(shortcuts.autoGroup, DEFAULT_SHORTCUTS.autoGroup);
   assert.equal(shortcuts.unknownAction, undefined);
 });
 
 test('preserves empty stored shortcuts as disabled actions', () => {
   const shortcuts = mergeShortcuts({
-    openAsk: '',
+    addSpace: '',
     nextSpace: 'Control+Alt+J',
   });
 
-  assert.equal(shortcuts.openAsk, '');
+  assert.equal(shortcuts.addSpace, '');
   assert.equal(shortcuts.nextSpace, 'Control+Alt+J');
-  assert.equal(shortcuts.askAbort, DEFAULT_SHORTCUTS.askAbort);
+  assert.equal(shortcuts.previousSpace, DEFAULT_SHORTCUTS.previousSpace);
 });
 
 test('detects duplicate shortcut assignments in settings', () => {
-  const shortcuts = mergeShortcuts({ askSubmit: 'Meta+Enter' });
+  const shortcuts = mergeShortcuts({ tidyNames: 'Meta+Enter' });
 
-  assert.equal(findShortcutConflict(shortcuts, 'askAbort', 'Meta+Enter'), 'askSubmit');
-  assert.equal(findShortcutConflict(shortcuts, 'askSubmit', 'Meta+Enter'), '');
+  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Meta+Enter'), 'tidyNames');
+  assert.equal(findShortcutConflict(shortcuts, 'tidyNames', 'Meta+Enter'), '');
 });
 
 test('detects concrete Ctrl or Cmd conflicts with a cross-platform primary shortcut', () => {
-  const shortcuts = mergeShortcuts();
+  const shortcuts = mergeShortcuts({ tidyNames: 'Primary+Enter' });
 
-  assert.equal(findShortcutConflict(shortcuts, 'openAsk', 'Control+Enter'), 'askSubmit');
-  assert.equal(findShortcutConflict(shortcuts, 'openAsk', 'Meta+Enter'), 'askSubmit');
+  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Control+Enter'), 'tidyNames');
+  assert.equal(findShortcutConflict(shortcuts, 'autoGroup', 'Meta+Enter'), 'tidyNames');
   assert.equal(findShortcutConflict({ first: 'Control+Enter' }, 'second', 'Primary+Enter'), 'first');
   assert.equal(findShortcutConflict({ first: 'Alt+Enter' }, 'second', 'Primary+Enter'), '');
 });

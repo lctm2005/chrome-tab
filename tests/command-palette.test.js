@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { buildCommandPaletteItems } from '../src/shared/command-palette.js';
 
-test('command palette exposes Space switching, tab search, and Ask', () => {
+test('command palette exposes Space switching and tab search', () => {
   const items = buildCommandPaletteItems({
     spaces: [{ id: 'research', name: 'Research', icon: 'R' }],
     spaceView: [{
@@ -21,7 +21,6 @@ test('command palette exposes Space switching, tab search, and Ask', () => {
     }],
   });
 
-  assert.ok(items.some((item) => item.action === 'ask'));
   assert.equal(items.find((item) => item.action === 'tidy')?.icon, '🧹');
   assert.ok(items.some((item) => item.kind === 'space' && item.spaceId === 'research'));
   assert.ok(items.some((item) => item.kind === 'tab' && item.tab.id === 7));
@@ -73,13 +72,13 @@ test('renamed tabs remain searchable by both the panel name and original page ti
 });
 
 test('command palette matches natural ordered title words without requiring filler words', () => {
-  const askMatches = buildCommandPaletteItems({ query: 'Ask Page' });
-  const missingMatches = buildCommandPaletteItems({ query: 'Ask Missing' });
+  const tidyMatches = buildCommandPaletteItems({ query: 'Tidy Names' });
+  const missingMatches = buildCommandPaletteItems({ query: 'Tidy Missing' });
 
-  assert.equal(askMatches.length, 1);
-  assert.equal(askMatches[0].action, 'ask');
+  assert.equal(tidyMatches.length, 1);
+  assert.equal(tidyMatches[0].action, 'tidy');
   assert.deepEqual(missingMatches, []);
-  assert.deepEqual(buildCommandPaletteItems({ query: 'Page Ask' }), []);
+  assert.deepEqual(buildCommandPaletteItems({ query: 'Names Tidy' }), []);
 });
 
 test('command palette prefers an already-open tab over same-title saved history', () => {
@@ -259,6 +258,6 @@ test('command palette exercises each ranking tier and enforces its visible resul
   }));
   assert.equal(buildCommandPaletteItems({ spaces: manySpaces }).length, 40);
   assert.equal(buildCommandPaletteItems({ spaces: manySpaces, query: 'space' }).length, 40);
-  assert.equal(buildCommandPaletteItems().length, 4);
-  assert.equal(buildCommandPaletteItems({ spaces: null, spaceView: null, query: null }).length, 4);
+  assert.equal(buildCommandPaletteItems().length, 3);
+  assert.equal(buildCommandPaletteItems({ spaces: null, spaceView: null, query: null }).length, 3);
 });

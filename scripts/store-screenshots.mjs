@@ -41,15 +41,6 @@ const shots = [
     notes: ['3-step setup with AI', 'Choose Spaces', 'Undo import'],
   },
   {
-    id: 'ask',
-    file: '05-ask-page-byok-ai.png',
-    title: 'Ask the current page with your own AI key.',
-    kicker: 'Ask Page',
-    description: 'Review the provider, exact page, and content size before anything is sent.',
-    activeSpaceId: 'launch',
-    notes: ['Current page only', 'Clickable citation', 'Stream + Stop'],
-  },
-  {
     id: 'auto-group',
     file: '03-tab-context-menu.png',
     title: 'AI organizes tabs. You approve every change.',
@@ -466,7 +457,7 @@ function storeShotHtml(shot) {
         ? '/sidepanel.html?layout=workbench&view=settings'
         : scenario.action === 'arc-import'
         ? '/sidepanel.html?layout=workbench&onboarding=1'
-        : scenario.action === 'auto-group' || scenario.action === 'ask'
+        : scenario.action === 'auto-group'
         ? '/sidepanel.html?layout=workbench'
         : '/sidepanel.html';
 
@@ -478,7 +469,6 @@ function storeShotHtml(shot) {
         if (scenario.action === 'arc-import') openArcImport(doc);
         if (scenario.action === 'auto-group') await openAutoGroup(doc);
         if (scenario.action === 'settings') openSettings(doc);
-        if (scenario.action === 'ask') await openAskPage(doc);
         await wait(240);
         win.dispatchEvent(new Event('resize'));
       }
@@ -549,28 +539,10 @@ function storeShotHtml(shot) {
         if (arcInput) arcInput.hidden = true;
         if (backupStatus) backupStatus.textContent = 'Ready to restore: 4 Spaces and 8 saved tabs.';
         if (restoreBackup) restoreBackup.disabled = false;
-        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome session storage.';
+        if (settingsStatus) settingsStatus.textContent = 'AI is optional. Your key stays in Chrome local extension storage.';
         if (dialog?.open && form) {
           const spaceData = doc.querySelector('.space-data-settings');
           form.scrollTop = Math.max(0, (spaceData?.offsetTop || 0) - 92);
-        }
-      }
-
-      async function openAskPage(doc) {
-        doc.querySelector('.ask-page')?.click();
-        await waitFor(() => !doc.querySelector('#askPageView')?.hidden, 8000, 'Ask Page view');
-        const input = doc.querySelector('#askPagePrompt');
-        input.value = 'What launch work is still missing from this brief?';
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        doc.querySelector('#askAIButton')?.click();
-        await waitFor(() => [...doc.querySelectorAll('.ask-message.assistant')]
-          .some((node) => /Preview AI response/i.test(node.textContent)), 5000, 'Ask Page preview response');
-        const assistant = [...doc.querySelectorAll('.ask-message.assistant')].at(-1);
-        if (assistant) {
-          assistant.innerHTML = '<p><strong>Three launch gaps remain</strong></p><p>Finish privacy review, package verification, and the final store checklist <a href="https://docs.example.com/launch-brief">[1]</a>.</p><p><strong>Source</strong><br><a href="https://docs.example.com/launch-brief">[1] Launch brief</a></p>';
-          const messages = doc.querySelector('#askMessages');
-          messages?.replaceChildren(assistant);
-          if (messages) messages.scrollTop = 0;
         }
       }
 
@@ -597,7 +569,7 @@ function scenarioFor(shot) {
   const runtime = baseRuntime();
   let secrets = null;
   if (shot.id === 'arc-import') state.onboarding = { version: 2, completed: false, stage: 'choose' };
-  if (shot.id === 'ask' || shot.id === 'auto-group') {
+  if (shot.id === 'auto-group') {
     secrets = {
       provider: state.ai.provider,
       baseUrl: state.ai.baseUrl,
@@ -675,8 +647,6 @@ function baseState(activeSpaceId) {
       'snapshot:3:Reading Queue': false,
     },
     collapsedSpaceGroups: {},
-    askSessions: {},
-    activeAskSessionKey: '',
     spaceContexts: {},
     spaceSnapshots: {
       research: {
@@ -725,9 +695,6 @@ function baseState(activeSpaceId) {
     onboarding: { version: 2, completed: true, stage: 'done' },
     shortcuts: {
       togglePanel: 'Alt+S',
-      askSubmit: 'Primary+Enter',
-      askAbort: 'Escape',
-      openAsk: 'Alt+A',
       tidyNames: 'Control+Alt+T',
       autoGroup: 'Control+Alt+G',
       addSpace: 'Control+Alt+N',

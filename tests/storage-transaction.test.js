@@ -229,12 +229,6 @@ function savedOnlyWorkspace() {
     activeSpaceId: 'saved',
     spaces: [{ id: 'saved', name: 'Saved', icon: 'S', color: 'blue' }],
     spaceContexts: { saved: '# Keep this user context' },
-    askSessions: {
-      'space:saved': {
-        key: 'space:saved',
-        messages: [{ id: 'question', role: 'user', text: 'Keep this conversation' }],
-      },
-    },
     spaceSnapshots: {
       saved: {
         version: 1,
@@ -300,7 +294,6 @@ test('saved-only tab checkpoint failure restores snapshot, Context, and identiti
   await persistStorageStep(storage.step);
   const saved = storage.data.spaceTabsState;
   assert.equal(saved.spaceContexts.saved, '# Keep this user context');
-  assert.deepEqual(saved.askSessions, before.askSessions);
   assert.deepEqual(saved.spaceSnapshots.saved.groups.map((group) => ({
     id: group.snapshotGroupId,
     tabs: group.tabs.map((tab) => tab.snapshotTabId),
@@ -330,7 +323,6 @@ test('saved-only group checkpoint failure preserves the whole group before an ex
   await persistStorageStep(storage.step);
   const saved = storage.data.spaceTabsState;
   assert.equal(saved.spaceContexts.saved, '# Keep this user context');
-  assert.deepEqual(saved.askSessions, before.askSessions);
   assert.deepEqual(saved.spaceSnapshots.saved.groups.map((group) => ({
     id: group.snapshotGroupId,
     tabs: group.tabs.map((tab) => tab.snapshotTabId),

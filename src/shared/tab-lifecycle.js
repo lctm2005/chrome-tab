@@ -1,9 +1,5 @@
 import { chromeGroupTitle } from './group-title.js';
 import {
-  askSessionKeyAfterTabReplacement,
-  rebindAskSessionsForTabReplacement,
-} from './ask-session.js';
-import {
   isRestorableSnapshotTab,
   sanitizeSpaceSnapshot,
 } from './space-snapshot.js';
@@ -575,22 +571,6 @@ function reduceReplaced(state, event, now) {
   next = transferRecordKey(next, 'tabGroups', removedTabId, addedTabId);
   next.ephemeralTabIds = replaceNumericId(next.ephemeralTabIds, removedTabId, addedTabId);
   next.tabOrder = replaceTabOrderId(next.tabOrder, removedTabId, addedTabId);
-  if (isRecord(state.askSessions)) {
-    const rebound = rebindAskSessionsForTabReplacement(
-      state.askSessions,
-      removedTabId,
-      addedTabId,
-    );
-    next.askSessions = rebound.sessions;
-    next.activeAskSessionKey = rebound.keyMap[state.activeAskSessionKey] ||
-      askSessionKeyAfterTabReplacement(state.activeAskSessionKey, removedTabId, addedTabId);
-  } else if (typeof state.activeAskSessionKey === 'string') {
-    next.activeAskSessionKey = askSessionKeyAfterTabReplacement(
-      state.activeAskSessionKey,
-      removedTabId,
-      addedTabId,
-    );
-  }
   if (Array.isArray(state.operationHistory)) {
     next.operationHistory = replaceOperationHistoryTabId(
       state.operationHistory,

@@ -22,27 +22,6 @@ import {
   scopedAIKey,
 } from './src/shared/ai-auth.js';
 import {
-  adoptPortableAskSession,
-  appendAskSessionMessage,
-  askSessionTabFromKey,
-  createAskSession,
-  materializeAskSessionForTurn,
-  normalizeSessionUrl,
-  projectAskSessionForTab,
-  pruneAskSessions,
-  replayAskSessionTabReplacements,
-  sessionKeyForTab,
-  updateAskSessionMessage,
-} from './src/shared/ask-session.js';
-import {
-  appendAskSourceLink,
-  askHistoryMessageText,
-} from './src/shared/ask-sources.js';
-import {
-  askSessionRevision,
-  markAskStreamPending,
-} from './src/shared/ask-stream.js';
-import {
   appendArcImportPlan,
   createArcImportPlan,
   selectArcImportPlan,
@@ -82,21 +61,16 @@ import {
   normalizeGroupTitle,
   resolveChromeGroupTitleMatch,
 } from './src/shared/group-title.js';
-import { renderMarkdown } from './src/shared/markdown.js';
 import { createPanelKeyboardController } from './src/shared/panel-keyboard.js';
 import { createPanelPortController } from './src/shared/panel-port.js';
 import {
   createPanelCommandMessage,
-  createEligibleTabActivationController,
   createPanelWindowBindingController,
   confirmPanelWindowBindingAfterInitialization,
-  mergeTabActivationCache,
   resolvePanelHostBinding,
   runPanelWindowRefreshTransaction,
-  selectEligibleTabSource,
 } from './src/shared/panel-routing.js';
 import {
-  askMessagesRenderSignature,
   groupsRenderSignature,
   spacesRenderSignature,
 } from './src/shared/panel-render-signatures.js';
@@ -325,8 +299,6 @@ const inFlightOrganizationPlanSpaceIds = new Set();
 const syntheticPlaceholderTabIds = new Set();
 let activeView = workbenchMode && pageParams.get('view') === 'settings'
   ? 'settings'
-  : workbenchMode
-  ? 'ask'
   : 'space';
 let dragState = null;
 let activeAIRequestId = '';
@@ -355,7 +327,6 @@ let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
 let lastRenderedGroupsSignature = '';
-let lastRenderedAskSignature = '';
 let lastRenderedSpacesSignature = '';
 let recentlyOpenedDormantTabs = [];
 const logicalChromeGroupTitles = new Map();
@@ -373,20 +344,6 @@ let activeTaskCount = 0;
 let taskQueue = Promise.resolve();
 let tabReplacementQueue = Promise.resolve();
 let sharedRefreshRunning = false;
-let lastActivatedAskPageTab = null;
-// The selected Ask conversation belongs to this panel. Shared storage can be
-// refreshed by another Chrome window while an answer is still streaming here.
-let activeAskSessionKey = '';
-const activeAskStreams = new Map();
-const askPageActivationController = createEligibleTabActivationController({
-  getTab: ({ tabId }) => chrome.tabs.get(Number(tabId)),
-  isEligible: isEligibleAskPageTab,
-  onObserve: (tab, _activeInfo, activation) => observeAskPageTab(tab, activation.activatedAt),
-  onActivate: (tab, _activeInfo, activation) => {
-    rememberAskPageTab(tab, activation.activatedAt);
-  },
-});
-
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
@@ -398,15 +355,6 @@ const els = {
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   autoGroupButton: document.querySelector('#autoGroupButton'),
   groupsList: document.querySelector('#groupsList'),
-  askPageView: document.querySelector('#askPageView'),
-  askScope: document.querySelector('#askScope'),
-  askProvider: document.querySelector('#askProvider'),
-  askSourceSummary: document.querySelector('#askSourceSummary'),
-  askSourceHint: document.querySelector('#askSourceHint'),
-  askSourceList: document.querySelector('#askSourceList'),
-  askMessages: document.querySelector('#askMessages'),
-  askPagePrompt: document.querySelector('#askPagePrompt'),
-  askAIButton: document.querySelector('#askAIButton'),
   testAIButton: document.querySelector('#testAIButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
   arcImportInput: document.querySelector('#arcImportInput'),
@@ -501,11 +449,9 @@ const panelPortController = createPanelPortController({
 const panelFocusController = createPanelFocusController({
   windowTarget: window,
   documentTarget: document,
-  getTarget: () => activeView === 'ask'
-    ? els.askPagePrompt
-    : activeView === 'space'
-      ? els.groupsList
-      : null,
+  getTarget: () => activeView === 'space'
+    ? els.groupsList
+    : null,
   requestBackgroundFocus: () => extensionRuntime && Number.isSafeInteger(panelWindowId)
     ? chrome.runtime.sendMessage({ type: 'panel:focus', windowId: panelWindowId })
     : null,
@@ -541,7 +487,6 @@ const panelKeyboardController = createPanelKeyboardController({
   getSelection: () => window.getSelection?.(),
   openCommandPalette: commandPaletteController.open,
   abortActiveAIRequest: () => void abortActiveAIRequest(),
-  submitAsk: startAskFromUserGesture,
   dispatchShortcutAction: (action) => {
     const organizationRequest = prepareOrganizationRequestForAction(action);
     void runTask((windowBinding) => runShortcutAction(action, organizationRequest, {
@@ -595,13 +540,6 @@ async function init() {
   } catch (error) {
     document.documentElement.dataset.initialized = 'failed';
     els.syncStatus.textContent = 'Failed to initialize';
-    if (activeView === 'ask') {
-      try {
-        await addAskMessage('assistant', formatAIError(error));
-      } catch (persistenceError) {
-        console.error(persistenceError);
-      }
-    }
     console.error(error);
   }
 }
@@ -733,9 +671,6 @@ async function syncStateFromStorage(options = {}) {
 
   if (tempTheme) nextState.tempTheme = tempTheme;
   state = nextState;
-  // This field remains a backwards-compatible storage mirror; it is never read
-  // back as the source of truth for the current panel.
-  state.activeAskSessionKey = activeAskSessionKey;
   applyTheme(state.tempTheme || state.theme);
   sanitizeStoredSpaceSnapshots();
   if (
@@ -801,11 +736,7 @@ async function saveState({ persistWindowState = true, windowBinding = null } = {
 
 function bindEvents() {
   bindPanelWindowEvents();
-  if (extensionRuntime && chrome.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener(handleRuntimeEvent);
-  }
-  if (extensionRuntime && chrome.tabs?.onActivated) {
-    chrome.tabs.onActivated.addListener(handleChromeTabActivated);
+  if (extensionRuntime && chrome.tabs?.onUpdated) {
     chrome.tabs.onUpdated.addListener(handleChromeTabUpdated);
     chrome.tabs.onRemoved.addListener(handleChromeTabRemoved);
     chrome.tabs.onDetached?.addListener(handleChromeTabDetached);
@@ -843,7 +774,7 @@ function bindEvents() {
   )));
   els.runOnboardingButton.addEventListener('click', () => {
     els.settingsDialog.close();
-    activeView = workbenchMode ? 'ask' : 'space';
+    activeView = 'space';
     render();
     openOnboarding({ restart: true });
   });
@@ -852,7 +783,6 @@ function bindEvents() {
   els.collapseGroupsButton.addEventListener('click', () => runTask((windowBinding) => (
     toggleSpaceGroups({ windowBinding })
   )));
-  els.askAIButton.addEventListener('click', startAskFromUserGesture);
   els.testAIButton.addEventListener('click', () => startTestAIFromUserGesture(settingsAIControls()));
   els.clearApiKeyButton.addEventListener('click', () => {
     const authTarget = structuredClone(settingsBaseline?.auth || null);
@@ -963,7 +893,7 @@ function bindEvents() {
       delete state.tempTheme;
     }
     if (workbenchMode && activeView === 'settings') {
-      activeView = 'ask';
+      activeView = 'space';
       const url = new URL(window.location.href);
       url.searchParams.delete('view');
       window.history.replaceState(null, '', url);
@@ -993,14 +923,6 @@ function bindPanelWindowEvents() {
   panelWindowEventsBound = true;
   chrome.tabs.onAttached?.addListener(handleChromeTabAttached);
   chrome.tabs.onMoved?.addListener(handleChromeHostTabMoved);
-}
-
-function handleRuntimeEvent(message) {
-  if (message?.type !== 'ai:stream' || !message.requestId) return;
-  const stream = activeAskStreams.get(message.requestId);
-  if (!stream || stream.finished) return;
-  stream.text = String(message.text || '');
-  void updateAskMessage(stream.messageRef, stream.text || 'Thinking...', { persist: false });
 }
 
 function hasBlockingDialogOpen() {
@@ -1040,8 +962,7 @@ async function runSelectedCommandPaletteItem(prepared = {}) {
     );
     return;
   }
-  if (item.action === 'ask') await openAskPage({ windowBinding });
-  else if (item.action === 'tidy') {
+  if (item.action === 'tidy') {
     await tidyTabNames({ ...(prepared.organizationRequest || {}), windowBinding });
   }
   else if (item.action === 'auto-group') {
@@ -1159,10 +1080,6 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
 
 async function runShortcutAction(action, organizationRequest = null, options = {}) {
   const windowBinding = options.windowBinding;
-  if (action === 'openAsk') {
-    await openAskPage({ windowBinding });
-    return;
-  }
   if (action === 'tidyNames') {
     await tidyTabNames({ ...(organizationRequest || {}), windowBinding });
     return;
@@ -1488,7 +1405,6 @@ async function loadDormantSpaceView(spaceId, options = {}) {
 }
 
 function render() {
-  if (workbenchMode && activeView === 'space') activeView = 'ask';
   const activeSpace = currentSpace();
   const liveSpaceView = buildSpaceView({
     activeSpaceId: state.activeSpaceId,
@@ -1513,18 +1429,14 @@ function render() {
   syncSelectedTabsToVisibleSpace();
 
   const isSpaceView = activeView === 'space';
-  const isAskView = activeView === 'ask';
   const isSettingsView = activeView === 'settings';
   const showSources = workbenchMode || isSpaceView;
   const groupsCollapsed = showSources && isSpaceGroupsCollapsed();
   els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
     ? panelActionStatus(activePanelAction)
-    : isAskView
-    ? activeAskPageStatus()
     : '';
   els.groupsList.hidden = !showSources;
-  els.askPageView.hidden = !isAskView;
   if (!showSources) hideGroupPreview();
   els.tidyNamesButton.hidden = !showSources;
   els.autoGroupButton.hidden = !showSources;
@@ -1544,7 +1456,6 @@ function render() {
   els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
-  if (isAskView) refreshAskPageTargetUI();
   renderSpaces();
   renderOperationRecord();
   updateAIRequestUI();
@@ -1896,7 +1807,7 @@ async function assertOperationUndoIsFresh(operation, options = {}) {
       throw new Error('This restore record does not contain the safety data required for Undo.');
     }
     if (fingerprintPortableWorkspaceContent(state) !== expectedFingerprint) {
-      throw new Error('Portable Space data changed after this backup was restored. Undo was stopped to preserve the newer Spaces, Tags, saved pages, context, or Ask history.');
+      throw new Error('Portable Space data changed after this backup was restored. Undo was stopped to preserve the newer Spaces, Tags, saved pages, or context.');
     }
     return;
   }
@@ -2129,7 +2040,6 @@ async function undoLastOperation(expectedOperationId = '', options = {}) {
         );
         dormantSpaceViewSpaceId = '';
         lastRenderedGroupsSignature = '';
-        lastRenderedAskSignature = '';
         lastRenderedSpacesSignature = '';
         operation.status = 'undone';
         operation.undoneAt = Date.now();
@@ -2207,67 +2117,22 @@ function operationUndoTargetMessage(status) {
   return 'That Undo record is no longer available. Nothing was changed.';
 }
 
-function currentAskPageTab() {
-  // onActivated can arrive before the next tabs:list refresh includes a newly
-  // created page. The remembered source stays authoritative until an explicit
-  // removal/update invalidates it, while Workbench pages are never selected as
-  // the user's Ask source.
-  return selectEligibleTabSource(tabs, lastActivatedAskPageTab, isEligibleAskPageTab);
-}
-
-async function handleChromeTabActivated(activeInfo = {}) {
-  if (Number.isFinite(panelWindowId) && Number(activeInfo.windowId) !== Number(panelWindowId)) return;
-  await askPageActivationController.handle(activeInfo);
-}
-
 function handleChromeTabUpdated(tabId, changeInfo, tab) {
   if (!changeInfo.url && !changeInfo.title && !changeInfo.status) return;
-  const wasCurrentSource = Number(tabId) === Number(currentAskPageTab()?.id);
   const tabIndex = tabs.findIndex((candidate) => Number(candidate.id) === Number(tabId));
   if (tabIndex >= 0) tabs[tabIndex] = { ...tabs[tabIndex], ...tab };
-  const isRememberedSource = Number(tabId) === Number(lastActivatedAskPageTab?.id);
-  const isEligible = isEligibleAskPageTab(tab);
-  if (changeInfo.url || !isEligible) askPageActivationController.invalidate(tabId);
-  if (!isRememberedSource) {
-    if (isEligible && tab.active) {
-      askPageActivationController.commitFresh(tab, {
-        tabId: Number(tabId),
-        windowId: Number(tab.windowId),
-      });
-      return;
-    }
-    if (wasCurrentSource) refreshAskPageTargetUI();
-    return;
-  }
-  if (!isEligible) {
-    lastActivatedAskPageTab = null;
-    tabs = tabs.filter((candidate) => Number(candidate.id) !== Number(tabId));
-    refreshAskPageTargetUI();
-    return;
-  }
-  rememberAskPageTab(tab);
 }
 
 function handleChromeTabRemoved(tabId, removeInfo = {}) {
   if (Number.isFinite(panelWindowId) && Number.isFinite(Number(removeInfo.windowId)) &&
       Number(removeInfo.windowId) !== Number(panelWindowId)) return;
-  const wasCurrentSource = Number(tabId) === Number(currentAskPageTab()?.id);
-  const wasRememberedSource = Number(tabId) === Number(lastActivatedAskPageTab?.id);
-  askPageActivationController.invalidate(tabId);
   tabs = tabs.filter((tab) => Number(tab.id) !== Number(tabId));
-  if (wasRememberedSource) lastActivatedAskPageTab = null;
-  if (wasCurrentSource || wasRememberedSource) refreshAskPageTargetUI();
 }
 
 function handleChromeTabDetached(tabId, detachInfo = {}) {
   if (Number.isFinite(panelWindowId) &&
       Number(detachInfo.oldWindowId) !== Number(panelWindowId)) return;
-  askPageActivationController.invalidate(tabId);
   tabs = tabs.filter((tab) => Number(tab.id) !== Number(tabId));
-  if (Number(tabId) === Number(lastActivatedAskPageTab?.id)) {
-    lastActivatedAskPageTab = null;
-  }
-  refreshAskPageTargetUI();
 }
 
 function handleChromeTabAttached(tabId, attachInfo = {}) {
@@ -2308,7 +2173,6 @@ function isCurrentPanelWindowRebind(transition) {
 }
 
 function handleChromeTabReplaced(addedTabId, removedTabId) {
-  askPageActivationController.invalidate(removedTabId);
   const immediateTab = { id: Number(addedTabId) };
   state = reduceTabLifecycleEvent({
     state,
@@ -2353,13 +2217,7 @@ async function reconcileChromeTabReplacement(addedTabId, removedTabId) {
       },
       now: Date.now(),
     });
-    // syncStateFromStorage can legitimately load the last durable "Thinking..."
-    // while a provider stream is already further ahead in this panel. Reapply
-    // every in-flight stream from its cumulative text before checkpointing so
-    // neither the worker journal nor this eager replacement save loses partial
-    // output. The final Ask save remains idempotent on the same message id.
     applyPanelTabIdReplacement(added, removed, replacementTab);
-    restoreInFlightAskMessages();
     // A replacement is global lifecycle metadata. Never let a host-window move
     // turn this eager checkpoint into a write to another window's Space map;
     // the background journal remains the authoritative retry if this epoch is
@@ -2367,21 +2225,6 @@ async function reconcileChromeTabReplacement(addedTabId, removedTabId) {
     await saveState({ persistWindowState: false, windowBinding });
   });
   if (!isCurrentPanelWindowBinding(windowBinding)) return;
-  refreshAskPageTargetUI();
-  if (activeView === 'ask') renderAskMessages();
-}
-
-function restoreInFlightAskMessages() {
-  for (const stream of activeAskStreams.values()) {
-    // A finished stream is formatting and durably saving its authoritative
-    // answer (Sources appendix, truncation notice, or failure/Stop note). Its
-    // raw provider text must never overwrite that final representation.
-    if (stream?.finished) continue;
-    const ref = stream?.messageRef;
-    if (!ref?.sessionKey || !ref.messageId) continue;
-    const session = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-    updateAskSessionMessage(session, ref.messageId, stream.text || 'Thinking...');
-  }
 }
 
 function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {}) {
@@ -2390,12 +2233,8 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
     foreignLiveTabs,
     selectedTabIds,
     selectionAnchorTabId,
-    askSessions: state.askSessions,
-    activeAskSessionKey,
-    lastActivatedAskPageTab,
     recentlyOpenedDormantTabs,
     syntheticPlaceholderTabIds,
-    activeAskStreams,
     dragState,
   }, { addedTabId, removedTabId, replacementTab });
   if (!migrated.replacementApplied) return;
@@ -2404,18 +2243,10 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
   foreignLiveTabs = migrated.foreignLiveTabs;
   selectedTabIds = new Set(migrated.selectedTabIds);
   selectionAnchorTabId = migrated.selectionAnchorTabId;
-  state.askSessions = migrated.askSessions;
-  activeAskSessionKey = migrated.activeAskSessionKey;
-  state.activeAskSessionKey = activeAskSessionKey;
-  lastActivatedAskPageTab = migrated.lastActivatedAskPageTab;
   recentlyOpenedDormantTabs = migrated.recentlyOpenedDormantTabs;
   syntheticPlaceholderTabIds.clear();
   for (const tabId of migrated.syntheticPlaceholderTabIds) {
     syntheticPlaceholderTabIds.add(tabId);
-  }
-  activeAskStreams.clear();
-  for (const [requestId, stream] of migrated.activeAskStreams) {
-    activeAskStreams.set(requestId, stream);
   }
 
   if (migrated.dragInvalidated) {
@@ -2423,95 +2254,7 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
     setStatus('The dragged tab changed in Chrome. Try the drag again.');
   }
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   if (migrated.visibleTabsChanged) render();
-}
-
-function cacheAskPageTab(tab = {}, fallbackLastAccessed = Date.now(), options = {}) {
-  const url = String(tab.pendingUrl || tab.url || '');
-  if (!isEligibleAskPageTab({ ...tab, url })) return;
-  const authoritative = options.authoritative === true;
-  const chromeLastAccessed = Number(tab.lastAccessed);
-  const observedLastAccessed = Number(fallbackLastAccessed);
-  const tabIndex = tabs.findIndex((candidate) => Number(candidate.id) === Number(tab.id));
-  const lastAccessed = Math.max(
-    0,
-    Number.isFinite(chromeLastAccessed) ? chromeLastAccessed : 0,
-    Number.isFinite(observedLastAccessed) ? observedLastAccessed : 0,
-    Number(tabs[tabIndex]?.lastAccessed) || 0,
-  );
-  const observed = decorateTabs([{ ...tab, url, active: Boolean(tab.active), lastAccessed }], state)[0];
-  const merged = mergeTabActivationCache(tabs, observed, { authoritative });
-  tabs = merged.tabs;
-  return merged.tab;
-}
-
-function observeAskPageTab(tab = {}, observedAt = Date.now()) {
-  const previousSource = currentAskPageTab();
-  const observed = cacheAskPageTab(tab, observedAt);
-  const nextSource = currentAskPageTab();
-  if (observed && (
-    (previousSource?.id ?? null) !== (nextSource?.id ?? null) ||
-    String(previousSource?.url || '') !== String(nextSource?.url || '')
-  )) refreshAskPageTargetUI();
-}
-
-function rememberAskPageTab(tab = {}, fallbackLastAccessed = Date.now()) {
-  const remembered = cacheAskPageTab(tab, fallbackLastAccessed, { authoritative: true });
-  if (!remembered) return;
-  lastActivatedAskPageTab = remembered;
-  refreshAskPageTargetUI();
-}
-
-function isEligibleAskPageTab(tab = {}) {
-  const url = String(tab.pendingUrl || tab.url || '');
-  const ownExtensionPrefix = extensionRuntime ? chrome.runtime.getURL('') : '';
-  if (!url || (ownExtensionPrefix && url.startsWith(ownExtensionPrefix))) return false;
-  if (!Number.isFinite(panelWindowId)) return true;
-  return Number.isFinite(Number(tab.windowId)) &&
-    Number(tab.windowId) === Number(panelWindowId);
-}
-
-function refreshAskPageTargetUI() {
-  if (activeView !== 'ask') return;
-  const sourceTab = currentAskPageTab();
-  els.askScope.textContent = sourceTab
-    ? `${sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page'} · sent when you ask`
-    : 'Current page · sent when you ask';
-  renderAskDisclosure();
-  renderAskMessages();
-}
-
-function readableAskPageTab() {
-  const tab = currentAskPageTab();
-  return tab && isPageShortcutCapableUrl(tab.url) ? tab : null;
-}
-
-function activeAskPageStatus() {
-  return readableAskPageTab() ? 'Current page' : 'Switch to http(s)';
-}
-
-function renderAskDisclosure() {
-  const tab = currentAskPageTab();
-  const readableTab = readableAskPageTab();
-  const provider = providerById(state.ai.provider);
-  els.askProvider.textContent = [provider.label, state.ai.model].filter(Boolean).join(' · ');
-  els.askSourceSummary.textContent = readableTab ? 'Current page' : 'No readable page';
-  els.askSourceHint.textContent = readableTab
-    ? 'Ask Page sends the current page and recent conversation context directly to your configured provider.'
-    : 'Switch to an http or https page before using Ask Page.';
-  const chips = tab ? [tab].map((sourceTab) => {
-    const chip = document.createElement('span');
-    chip.className = 'ask-source-chip';
-    chip.title = sourceTab.url;
-    const number = document.createElement('small');
-    number.textContent = '[1]';
-    const title = document.createElement('b');
-    title.textContent = sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page';
-    chip.append(number, title);
-    return chip;
-  }) : [];
-  els.askSourceList.replaceChildren(...chips);
 }
 
 function mergeDormantSpaceView(liveView, dormantView) {
@@ -3555,18 +3298,6 @@ function renderSpaces() {
     return button;
   });
 
-  const askButton = document.createElement('button');
-  askButton.className = `space ask-page${activeView === 'ask' ? ' active' : ''}`;
-  askButton.type = 'button';
-  askButton.title = 'Ask Page';
-  askButton.setAttribute('aria-label', 'Ask Page');
-  askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v14"/><path d="M12 12h6"/><path d="M12 12H6"/></svg>`;
-  askButton.querySelector('svg').classList.add('space-mark');
-  askButton.append(spaceButtonLabel('Ask Page'));
-  askButton.addEventListener('click', () => runTask((windowBinding) => (
-    openAskPage({ windowBinding })
-  )));
-
   const setupButton = document.createElement('button');
   setupButton.className = 'space setup-space';
   setupButton.type = 'button';
@@ -3600,7 +3331,7 @@ function renderSpaces() {
   const toolsGroup = document.createElement('div');
   toolsGroup.className = 'dock-group dock-tools';
   toolsGroup.setAttribute('aria-label', 'Space tools');
-  toolsGroup.replaceChildren(...(state.onboarding?.completed ? [] : [setupButton]), askButton);
+  toolsGroup.replaceChildren(...(state.onboarding?.completed ? [] : [setupButton]));
 
   els.spacesList.replaceChildren(spacesGroup, toolsGroup);
 }
@@ -3781,7 +3512,7 @@ async function applyFreshOnboardingFromCurrentState(name, options = {}) {
     }
     if (canReuseDefault) state.activeSpaceId = targetSpace.id;
     state.onboarding = { version: 2, completed: false, stage: 'ai' };
-    activeView = workbenchMode ? 'ask' : 'space';
+    activeView = 'space';
     lastRenderedSpacesSignature = '';
 
     if (canReuseDefault) {
@@ -10055,336 +9786,10 @@ function updatePanelActionUI() {
 }
 
 function focusPanelForShortcuts() {
-  const target = activeView === 'ask'
-    ? els.askPagePrompt
-    : els.groupsList;
+  const target = els.groupsList;
   if (!target || target.hidden) return;
   if (target === els.groupsList) target.tabIndex = -1;
   panelFocusController.request();
-}
-
-async function openAskPage(options = {}) {
-  await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) return;
-    activeView = 'ask';
-    ensureCurrentAskSession();
-    await saveState({
-      persistWindowState: false,
-      windowBinding: options.windowBinding,
-    });
-  });
-  render();
-  els.askPagePrompt.focus();
-}
-
-function startAskFromUserGesture() {
-  if (activeAIRequestId) {
-    void abortActiveAIRequest();
-    return;
-  }
-  const prompt = els.askPagePrompt.value.trim();
-  if (!prompt) return;
-  const currentTab = currentAskPageTab();
-  if (!currentTab || !isPageShortcutCapableUrl(currentTab.url)) {
-    reportAskStartError('Switch to an http or https page before using Ask Page.');
-    return;
-  }
-  const sourceTab = {
-    id: Number(currentTab.id),
-    title: currentTab.displayTitle || currentTab.title || currentTab.url || 'Current page',
-    url: currentTab.url,
-  };
-  const aiSettings = structuredClone(state.ai);
-  if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-    reportAskStartError('AI API key is missing. Add it in Settings before reading the current page.');
-    return;
-  }
-  let permissionRequest;
-  try {
-    permissionRequest = requestAskPermissionsFromUserGesture(sourceTab, aiSettings);
-  } catch (error) {
-    reportAskStartError(formatAIError(error));
-    return;
-  }
-  void runTask(() => askCustomPrompt({
-    prompt,
-    sourceTab,
-    aiSettings,
-    permissionRequest,
-  }));
-}
-
-function requestAskPermissionsFromUserGesture(sourceTab, aiSettings = state.ai) {
-  if (!extensionRuntime) return Promise.resolve(true);
-  if (!sourceTab || !isPageShortcutCapableUrl(sourceTab.url)) {
-    throw new Error('Switch to an http or https page before using Ask Page.');
-  }
-  const origins = [...new Set([
-    getOriginPattern(sourceTab.url),
-    getOriginPattern(aiSettings.baseUrl),
-  ])];
-  return chrome.permissions.request({ origins }).then((granted) => {
-    if (!granted) {
-      throw new Error('Ask Page permission was not granted. No page content was read or sent.');
-    }
-    return true;
-  });
-}
-
-function reportAskStartError(message) {
-  setStatus(message);
-  showStatusToast(message, 'error');
-}
-
-async function askCustomPrompt({
-  prompt,
-  sourceTab,
-  aiSettings,
-  permissionRequest,
-} = {}) {
-  activeView = 'ask';
-  render();
-  const sessionKey = sessionKeyForTab(sourceTab);
-  const session = projectAskSessionForTab(state.askSessions, sourceTab);
-  const preparedSessionRevision = askSessionRevision(session);
-  const history = recentAskHistory(session.messages);
-  const requestId = beginAIRequest();
-  let statusMessage = null;
-  try {
-    await permissionRequest;
-    assertAIRequestActive(requestId);
-    const extraction = await send('pages:extract', {
-      tabIds: [sourceTab.id],
-      options: { maxCharsPerPage: 12000, maxTotalChars: 12000 },
-    });
-    assertAIRequestActive(requestId);
-    const pages = extraction.pages || [];
-    const failures = extraction.failures || [];
-    if (pages.length + failures.length !== 1) {
-      throw new Error('Ask Page could not account for the current page. No content was sent.');
-    }
-    if (pages.length === 0) {
-      const detail = failures[0]?.error;
-      throw new Error(detail || 'The current page could not be read. Reload it and try again.');
-    }
-    const page = pages[0];
-    if (
-      Number(page.tabId) !== Number(sourceTab.id) ||
-      normalizeSessionUrl(page.url) !== normalizeSessionUrl(sourceTab.url)
-    ) {
-      throw new Error('The current page changed while Ask Page was preparing it. Nothing was sent; try again.');
-    }
-    // Permission and extraction are asynchronous. Revalidate the frozen source
-    // before creating the durable turn and dispatching it to the provider.
-    assertAIRequestActive(requestId);
-    await assertPreparedAskPageStillCurrent(page, sourceTab);
-    assertAIRequestActive(requestId);
-    statusMessage = await beginAskTurn(
-      sessionKey,
-      prompt,
-      sourceTab,
-      session,
-      preparedSessionRevision,
-      requestId,
-    );
-    activeAskStreams.set(requestId, { messageRef: statusMessage, page, text: '', finished: false });
-    assertAIRequestActive(requestId);
-    const { text, finishReason, askPersisted, askStatus } = await send('ai:chat', {
-      settings: aiSettings,
-      requestId,
-      stream: true,
-      purpose: 'ask-page',
-      askStream: { ...statusMessage, requestId },
-      messages: createPrompt('ask-page', {
-        question: prompt,
-        page,
-        history,
-        language: aiSettings.language,
-      }),
-    });
-    if (!askPersisted) assertAIRequestActive(requestId);
-    const completedStream = activeAskStreams.get(requestId);
-    if (completedStream) completedStream.finished = true;
-    const answerText = finishReason === 'length'
-      ? `${text || 'No AI text returned.'}\n\n_The provider stopped at the Ask Page output limit; the answer may be incomplete._`
-      : text || 'No AI text returned.';
-    const answer = appendAskSourceLink(answerText, page);
-    if (askPersisted) {
-      if (askStatus === 'complete') els.askPagePrompt.value = '';
-      await refreshPersistedAskMessage();
-    } else {
-      els.askPagePrompt.value = '';
-      await persistAskMessage(statusMessage, answer);
-    }
-  } catch (error) {
-    const message = formatAIError(error);
-    const stream = activeAskStreams.get(requestId);
-    if (stream) stream.finished = true;
-    const partial = stream?.text || '';
-    if (statusMessage) {
-      const stopped = Boolean(stream?.aborted) || /request was stopped|ask stopped/i.test(message);
-      const answer = partial
-        ? appendAskSourceLink(`${partial}\n\n_${stopped ? 'Request stopped before completion.' : `Request failed before completion: ${message}`}_`, stream?.page)
-        : message;
-      await persistAskMessage(statusMessage, answer);
-    }
-    else {
-      setStatus(message);
-      showStatusToast(message, 'error');
-    }
-  } finally {
-    activeAskStreams.delete(requestId);
-    endAIRequest(requestId);
-  }
-}
-
-async function assertPreparedAskPageStillCurrent(page, sourceTab) {
-  const response = await send('tabs:listAll');
-  const current = (response.tabs || []).find((tab) => Number(tab.id) === Number(sourceTab.id));
-  if (
-    !current ||
-    normalizeSessionUrl(current.pendingUrl || current.url) !== normalizeSessionUrl(page.url)
-  ) {
-    throw new Error('The current page changed before Ask Page could send it. Nothing was sent; try again.');
-  }
-}
-
-function recentAskHistory(messages = []) {
-  return (messages || []).slice(-8).map((message) => ({
-    role: message.role,
-    text: askHistoryMessageText(message),
-  })).filter((message) => message.text.trim());
-}
-
-async function beginAskTurn(
-  sessionKey,
-  prompt,
-  sourceTab,
-  projectedSession,
-  preparedSessionRevision,
-  requestId,
-) {
-  if (extensionRuntime) {
-    const started = await send('ask:begin', {
-      askTurn: {
-        sessionKey,
-        prompt,
-        sourceTab,
-        projectedSession,
-        preparedSessionRevision,
-        requestId,
-        pruneOptions: currentAskSessionPruneOptions(sessionKey),
-      },
-    });
-    setActiveAskSessionKey(started.sessionKey);
-    // Ask conversations are global to the workspace. Refresh only that slice:
-    // a Workbench host can move windows while the background begins the turn,
-    // and a late full-state read must not replace the newly rebound window UI.
-    await withSharedStateLock(() => syncAskSessionsFromStorage());
-    renderAskMessages();
-    return {
-      sessionKey: started.sessionKey,
-      messageId: started.messageId,
-      sourceTab,
-    };
-  }
-
-  let assistantRef;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    const latestSession = materializeAskSessionForTurn(
-      state.askSessions,
-      sourceTab,
-      projectedSession,
-    );
-    if (latestSession.key !== sessionKey) {
-      throw new Error('The prepared Ask conversation no longer matches the current page. Nothing was sent; try again.');
-    }
-    if (askSessionRevision(latestSession) !== preparedSessionRevision) {
-      throw new Error('The Ask conversation changed before it could be sent. Nothing was sent; try again.');
-    }
-    setActiveAskSessionKey(latestSession.key);
-    appendAskSessionMessage(latestSession, 'user', prompt);
-    const assistant = appendAskSessionMessage(latestSession, 'assistant', 'Thinking...');
-    markAskStreamPending(assistant, requestId);
-    assistantRef = { sessionKey: latestSession.key, messageId: assistant.id, sourceTab };
-    pruneCurrentAskSessions(latestSession.key);
-    await saveState({ persistWindowState: false });
-  });
-  renderAskMessages();
-  return assistantRef;
-}
-
-async function persistAskMessage(ref, text) {
-  if (!ref) return;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    replayAskMessageTabReplacements(ref);
-    const latestSession = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-    const updated = updateAskSessionMessage(latestSession, ref.messageId, text);
-    if (updated) delete updated.askStream;
-    if (!updated) appendAskSessionMessage(latestSession, 'assistant', text);
-    pruneCurrentAskSessions(activeAskSessionKey);
-    // This fallback is allowed to finish after the Workbench moved A → B.
-    // It owns global Ask data, not either window's active Space mapping.
-    await saveState({ persistWindowState: false });
-  });
-  if (ref.sessionKey === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-}
-
-async function refreshPersistedAskMessage() {
-  try {
-    await withSharedStateLock(() => syncAskSessionsFromStorage());
-    if (activeView === 'ask') renderAskMessages();
-    return true;
-  } catch (error) {
-    setStatus(`The provider response was saved, but this view could not refresh: ${formatAIError(error)}`);
-    return false;
-  }
-}
-
-async function syncAskSessionsFromStorage() {
-  const stored = await storageGet();
-  const workspace = mergeStoredState(stored[STORAGE_KEY], createDefaultState(localConfig));
-  state.askSessions = workspace.askSessions;
-  state.activeAskSessionKey = activeAskSessionKey;
-  return state.askSessions;
-}
-
-function replayAskMessageTabReplacements(ref) {
-  const replayed = replayAskSessionTabReplacements(
-    state.askSessions,
-    activeAskSessionKey,
-    ref?.tabReplacements,
-  );
-  state.askSessions = replayed.sessions;
-  activeAskSessionKey = replayed.activeKey;
-  state.activeAskSessionKey = activeAskSessionKey;
-}
-
-function assertAIRequestActive(requestId) {
-  if (activeAIRequestId !== requestId) throw new Error('AI request was stopped.');
-}
-
-function startTestAIFromUserGesture(controls = settingsAIControls()) {
-  if (activeAIRequestId) {
-    void abortActiveAIRequest();
-    return;
-  }
-  let settings;
-  let permissionRequest;
-  try {
-    settings = currentAISettingsFromControls(controls);
-    if (providerRequiresApiKey(settings) && !settings.apiKey) {
-      throw new Error('AI API key is missing. Add it in Settings.');
-    }
-    permissionRequest = requestAIHostPermissionFromUserGesture(settings);
-  } catch (error) {
-    setAIControlsStatus(controls, formatAIError(error));
-    return;
-  }
-  void runTask(() => testAI({ settings, permissionRequest, controls }));
 }
 
 async function testAI({ settings = currentAISettingsFromForm(), permissionRequest, controls = settingsAIControls() } = {}) {
@@ -10638,8 +10043,7 @@ async function restoreSpaceData(options = {}) {
     dormantSpaceView = [];
     dormantSpaceViewSpaceId = '';
     lastRenderedGroupsSignature = '';
-    lastRenderedAskSignature = '';
-    lastRenderedSpacesSignature = '';
+      lastRenderedSpacesSignature = '';
     pendingSpaceBackup = null;
     els.spaceBackupInput.value = '';
     els.restoreSpaceDataButton.disabled = true;
@@ -10692,19 +10096,13 @@ function formatSpaceBackupSummary(backup) {
   const savedTabs = Object.values(backup.spaceSnapshots || {}).reduce((total, snapshot) => (
     total + (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0)
   ), 0);
-  const askConversations = Object.values(backup.askSessions || {})
-    .filter((session) => (session?.messages || []).length > 0)
-    .length;
-  return `${formatCount(backup.spaces.length, 'Space')}${askConversations > 0 ? ',' : ' and'} ` +
-    `${formatCount(savedTabs, 'saved tab')}` +
-    `${askConversations > 0 ? `, and ${formatCount(askConversations, 'Ask conversation')}` : ''}.`;
+  return `${formatCount(backup.spaces.length, 'Space')} and ` +
+    `${formatCount(savedTabs, 'saved tab')}.`;
 }
 
 function formatRestoredSpaceDataSummary(summary = {}) {
-  const askConversations = Number(summary.askConversations || 0);
-  return `${formatCount(summary.spaces, 'Space')}${askConversations > 0 ? ',' : ' and'} ` +
-    `${formatCount(summary.savedTabs, 'saved tab')}` +
-    `${askConversations > 0 ? `, and ${formatCount(askConversations, 'Ask conversation')}` : ''}`;
+  return `${formatCount(summary.spaces, 'Space')} and ` +
+    `${formatCount(summary.savedTabs, 'saved tab')}`;
 }
 
 function formatCount(value, singular) {
@@ -10981,7 +10379,7 @@ async function undoLastArcImport(options = {}) {
         });
       }
       state.lastArcImport = null;
-      activeView = workbenchMode ? 'ask' : 'space';
+      activeView = 'space';
       dormantSpaceView = [];
       dormantSpaceViewSpaceId = '';
       lastRenderedGroupsSignature = '';
@@ -12077,17 +11475,13 @@ function endAIRequest(requestId) {
 async function abortActiveAIRequest() {
   if (!activeAIRequestId) return;
   const requestId = activeAIRequestId;
-  const stream = activeAskStreams.get(requestId);
-  if (stream) stream.aborted = true;
   activeAIRequestId = '';
   updateAIRequestUI();
   await send('ai:abort', { requestId }).catch(() => null);
-  if (activeView === 'ask') setStatus('Ask stopped.');
 }
 
 function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
-  els.askAIButton.textContent = busy ? 'Stop' : 'Ask Page';
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
   els.onboardingTestAIButton.textContent = busy ? 'Stop request' : 'Test AI';
   updateOnboardingAIActionState();
@@ -12242,7 +11636,6 @@ function stateForStorage() {
   return {
     ...state,
     activeSpaceId,
-    activeAskSessionKey,
     ai,
   };
 }
@@ -12275,7 +11668,6 @@ function restoreWorkspaceMemoryCheckpoint(checkpoint, { renderView = false } = {
     logicalChromeGroupTitles.set(groupId, title);
   }
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   lastRenderedSpacesSignature = '';
   if (renderView) {
     render();
@@ -12321,7 +11713,6 @@ function restoreFailedWorkspaceMutation(previousState, options = {}) {
   dormantSpaceView = [];
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   lastRenderedSpacesSignature = '';
   if (!isCurrentPanelWindowBinding(options.windowBinding)) return;
   render();
@@ -12468,69 +11859,6 @@ function groupMutationFingerprint(group = {}) {
 
 function currentSpace() {
   return state.spaces.find((space) => space.id === state.activeSpaceId) || state.spaces[0];
-}
-
-function ensureCurrentAskSession() {
-  const tab = currentAskPageTab() || {};
-  const key = sessionKeyForTab(tab);
-  if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
-  adoptPortableAskSession(state.askSessions, tab);
-  const session = ensureAskSessionByKey(key, tab);
-  setActiveAskSessionKey(key);
-  pruneCurrentAskSessions(key);
-  return session;
-}
-
-function pruneCurrentAskSessions(activeKey = activeAskSessionKey) {
-  state.askSessions = pruneAskSessions(
-    state.askSessions,
-    currentAskSessionPruneOptions(activeKey),
-  );
-  return state.askSessions;
-}
-
-function currentAskSessionPruneOptions(activeKey = activeAskSessionKey) {
-  const openTabs = [...tabs, ...foreignLiveTabs];
-  return {
-    activeKey,
-    inFlightKeys: [...activeAskStreams.values()]
-      .map((stream) => stream?.messageRef?.sessionKey)
-      .filter(Boolean),
-    openTabIds: openTabs.map((item) => item.id),
-    openSessionKeys: openTabs.map((item) => sessionKeyForTab(item)),
-    spaceIds: state.spaces.map((item) => item.id),
-  };
-}
-
-function currentAskSessionForRender() {
-  const tab = currentAskPageTab() || {};
-  // Chrome emits passive title/URL updates while the Ask view is open. A new
-  // route should render as a fresh conversation, but it must not become saved
-  // history until the user actually opens or sends to that conversation.
-  return projectAskSessionForTab(state.askSessions, tab);
-}
-
-function setActiveAskSessionKey(key) {
-  activeAskSessionKey = String(key || '');
-  state.activeAskSessionKey = activeAskSessionKey;
-}
-
-function ensureAskSessionByKey(key, tab = null) {
-  const currentTab = tab || currentAskPageTab() || {};
-  const currentKey = sessionKeyForTab(currentTab);
-  const requestedKey = String(key || '');
-  const safeKey = requestedKey.startsWith('tab:') ? requestedKey : currentKey;
-  const sessionTab = safeKey === currentKey ? currentTab : askSessionTabFromKey(safeKey, tabs);
-  if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
-  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createAskSession(sessionTab);
-  const session = state.askSessions[safeKey];
-  session.key = safeKey;
-  if (safeKey === currentKey) {
-    session.tabId = Number.isFinite(Number(currentTab.id)) ? Number(currentTab.id) : null;
-    session.title = currentTab.displayTitle || currentTab.title || session.title || 'Current page';
-    session.url = normalizeSessionUrl(currentTab.url);
-  }
-  return session;
 }
 
 function buildSpaceViewForSpace(spaceId, options = {}) {
@@ -13038,48 +12366,6 @@ function formatArcImportSummary(summary, prefix = 'Arc import') {
 function formatArcConflictSummary(plan) {
   const count = Array.isArray(plan?.conflicts) ? plan.conflicts.length : 0;
   return count ? ` ${count} naming ${count === 1 ? 'conflict was' : 'conflicts were'} resolved and shown below.` : '';
-}
-
-function renderAskMessages() {
-  const session = currentAskSessionForRender();
-  const signature = askMessagesRenderSignature(session);
-  if (signature === lastRenderedAskSignature) return;
-
-  const shouldStickToBottom = els.askMessages.scrollHeight - els.askMessages.scrollTop - els.askMessages.clientHeight < 24;
-  els.askMessages.replaceChildren(...(session.messages || []).map(createAskMessageElement));
-  if (shouldStickToBottom) els.askMessages.scrollTop = els.askMessages.scrollHeight;
-  lastRenderedAskSignature = signature;
-}
-
-function createAskMessageElement(message) {
-  const node = document.createElement('div');
-  node.className = `ask-message ${message.role === 'user' ? 'user' : 'assistant'}`;
-  if (message.role === 'assistant') node.innerHTML = renderMarkdown(message.text);
-  else node.textContent = message.text;
-  return node;
-}
-
-async function addAskMessage(role, text, sessionKey = activeAskSessionKey) {
-  if (!text) return;
-  let messageRef;
-  const sourceTab = currentAskPageTab() || askSessionTabFromKey(sessionKey, tabs);
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    const session = ensureAskSessionByKey(sessionKey, sourceTab);
-    const message = appendAskSessionMessage(session, role, text);
-    messageRef = { sessionKey: session.key, messageId: message.id, sourceTab };
-    await saveState({ persistWindowState: false });
-  });
-  if (messageRef.sessionKey === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  return messageRef;
-}
-
-async function updateAskMessage(ref, text, options = {}) {
-  if (!ref) return;
-  const session = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-  updateAskSessionMessage(session, ref.messageId, text);
-  if (session.key === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  if (options.persist !== false) await persistAskMessage(ref, text);
 }
 
 function setStatus(text) {

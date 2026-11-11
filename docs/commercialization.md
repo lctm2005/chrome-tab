@@ -35,9 +35,9 @@ Free release:
 - Portable local backup and restore.
 - Panel shortcuts.
 - Tidy Names applies names and duplicate Tag merges directly with Undo. Auto Group shows one final preview, requires Apply, and supports Undo.
-- BYOK Ask Page grounded in the current HTTP(S) page, with provider, page,
-  character-count, and conversation-context disclosure, plus streaming, Stop,
-  and a clickable single-source citation.
+- BYOK AI organization: Tidy Names and Auto Group disclose the tab metadata
+  they send, go directly to the user-configured provider, and change tabs or
+  Tags only after preview confirmation, with Undo.
 
 Future Pro tier:
 
@@ -46,10 +46,6 @@ Future Pro tier:
 - Advanced AI synthesis, planning, and workspace cleanup.
 - Shareable export packs for research sessions.
 - Team-shared Space templates and onboarding packs.
-
-Multi-page Ask Space remains deferred until its use case, source-selection
-model, and user experience are defined. It is not part of the free release or a
-committed Pro feature.
 
 ## Pricing Hypotheses
 

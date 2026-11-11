@@ -105,7 +105,7 @@ function createFixture(overrides = {}) {
   const focusQueue = [];
   const items = [
     { id: 'space:one', kind: 'space', title: 'One', icon: '1', meta: 'Switch Space' },
-    { id: 'command:ask', kind: 'command', action: 'ask', title: 'Ask' },
+    { id: 'command:settings', kind: 'command', action: 'settings', title: 'Open Settings' },
   ];
   const controller = createCommandPaletteController({
     dialog,
@@ -163,17 +163,17 @@ test('opens only when allowed, renders accessible options, and focuses after pre
   assert.equal(fixture.dialog.showCount, 1);
   assert.equal(beforeOpenCount, 1);
   assert.equal(fixture.results.children.length, 2);
-  const [spaceButton, askButton] = fixture.results.children;
+  const [spaceButton, settingsButton] = fixture.results.children;
   assert.equal(spaceButton.type, 'button');
   assert.equal(spaceButton.className, 'command-palette-item');
   assert.equal(spaceButton.classList.contains('active'), true);
   assert.equal(spaceButton.dataset.commandId, 'space:one');
   assert.equal(spaceButton.dataset.commandKind, 'space');
-  assert.equal(askButton.dataset.commandId, 'command:ask');
-  assert.equal(askButton.dataset.commandKind, 'command');
+  assert.equal(settingsButton.dataset.commandId, 'command:settings');
+  assert.equal(settingsButton.dataset.commandKind, 'command');
   assert.deepEqual(spaceButton.attributes, { role: 'option', 'aria-selected': 'true' });
   assert.deepEqual(spaceButton.children.map((child) => child.textContent), ['1', 'One', 'Switch Space']);
-  assert.deepEqual(askButton.children.map((child) => child.textContent), ['•', 'Ask', '']);
+  assert.deepEqual(settingsButton.children.map((child) => child.textContent), ['•', 'Open Settings', '']);
 
   fixture.focusQueue.shift()();
   assert.equal(fixture.input.focusCount, 1);
@@ -276,11 +276,11 @@ test('Escape always closes the palette explicitly instead of relying on native d
 test('clicking nested option content selects that exact item and ignores the result background', () => {
   const fixture = createFixture();
   fixture.controller.open();
-  const askTitle = fixture.results.children[1].children[1];
+  const settingsTitle = fixture.results.children[1].children[1];
 
-  assert.equal(fixture.controller.handleClick({ target: askTitle }), true);
+  assert.equal(fixture.controller.handleClick({ target: settingsTitle }), true);
   assert.equal(fixture.dialog.closeCount, 1);
-  assert.equal(fixture.selections[0].item.id, 'command:ask');
+  assert.equal(fixture.selections[0].item.id, 'command:settings');
   assert.equal(fixture.controller.getState().selectedIndex, 1);
 
   assert.equal(fixture.controller.handleClick({ target: fixture.results }), false);
@@ -313,7 +313,7 @@ test('sensible defaults build the pure command candidates and run without host c
 
   assert.equal(controller.open(), true);
   assert.equal(input.focusCount, 1);
-  assert.equal(controller.getState().items.length, 4);
+  assert.equal(controller.getState().items.length, 3);
   assert.equal(controller.handleKeydown(keyboardEvent('Enter', input)), true);
   assert.equal(dialog.closeCount, 1);
 });

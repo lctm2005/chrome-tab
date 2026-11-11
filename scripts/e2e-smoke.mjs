@@ -644,8 +644,6 @@ async function main() {
       tabOrder: {},
       collapsedGroups: {},
       collapsedSpaceGroups: {},
-      askSessions: {},
-      activeAskSessionKey: '',
       spaceSnapshots: {},
       shortcuts: {},
       ai: {
@@ -752,44 +750,6 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
 
-    await waitFor(client, `document.querySelector('.ask-page')`);
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
-    const askPageState = await waitFor(client, `(() => {
-      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-      const activeRow = document.querySelector('.tab-row.active');
-      const activeTab = {
-        id: Number(activeRow?.dataset.tabId),
-        title: activeRow?.querySelector('.tab-title')?.textContent || '',
-        url: 'https://example.com/spaces-guide',
-      };
-      if (activeTab.id !== 2 || activeTab.title !== 'Browser Spaces Guide') return null;
-      const expectedKey = 'tab:2:https://example.com/spaces-guide';
-      if (stored.activeAskSessionKey !== expectedKey) return null;
-      const session = stored.askSessions?.[expectedKey];
-      return {
-        key: stored.activeAskSessionKey,
-        expectedKey,
-        scope: document.querySelector('#askScope')?.textContent || '',
-        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        sourceCount: document.querySelectorAll('#askSourceList .ask-source-chip').length,
-        tabId: session?.tabId ?? null,
-        url: session?.url || '',
-        activeTab,
-      };
-    })()`);
-    record(
-      'Ask Page uses a tab-and-normalized-URL session for the active fixture page',
-      askPageState.key === askPageState.expectedKey &&
-        askPageState.key.startsWith(`tab:${askPageState.activeTab.id}:`) &&
-        askPageState.tabId === askPageState.activeTab.id &&
-        askPageState.url === askPageState.expectedKey.slice(`tab:${askPageState.activeTab.id}:`.length) &&
-        /^https?:\/\//.test(askPageState.activeTab.url) &&
-        askPageState.sourceSummary === 'Current page' &&
-        askPageState.sourceCount === 1 &&
-        !askPageState.scope.includes('Context'),
-      JSON.stringify(askPageState),
-    );
     await evaluate(client, `(() => {
       [...document.querySelectorAll('.space')].find((button) => button.title === 'Default')?.click();
       return true;
@@ -1413,7 +1373,6 @@ async function main() {
           }],
         },
       },
-      askSessions: {},
       collapsedSpaceGroups: {},
     };
     const transfer = new DataTransfer();
@@ -2159,20 +2118,6 @@ async function main() {
     state.activeSpaceId = spaceId;
     state.spaceContexts = state.spaceContexts || {};
     state.spaceContexts[spaceId] = '# Saved-only Context must survive failed deletion';
-    state.askSessions = state.askSessions || {};
-    state.askSessions['space:' + spaceId] = {
-      key: 'space:' + spaceId,
-      title: 'Saved-only conversation',
-      messages: [{
-        id: 'saved-delete-question',
-        role: 'user',
-        text: 'Keep this saved-only conversation',
-        createdAt: 1,
-        updatedAt: 1,
-      }],
-      createdAt: 1,
-      updatedAt: 1,
-    };
     state.spaceSnapshots = state.spaceSnapshots || {};
     state.spaceSnapshots[spaceId] = {
       version: 1,
@@ -2247,8 +2192,6 @@ async function main() {
         tabs: (group.tabs || []).map((tab) => tab.snapshotTabId || ''),
       })),
       context: stored.spaceContexts?.['saved-delete-demo'] || '',
-      askMessages: (stored.askSessions?.['space:saved-delete-demo']?.messages || [])
-        .map((message) => ({ id: message.id, text: message.text })),
       domRows: [...document.querySelectorAll('.tab-row')].map((row) => ({
         snapshotGroupId: row.dataset.snapshotGroupId || '',
         snapshotTabId: row.dataset.snapshotTabId || '',
@@ -2290,7 +2233,6 @@ async function main() {
     JSON.stringify(savedOnlyTabFailureState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
       JSON.stringify(savedOnlyTabFailureState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
       savedOnlyTabFailureState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabFailureState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyTabFailureState.status.includes('saved-only tab checkpoint failed after apply') &&
       !savedOnlyTabFailureState.status.includes('Removed saved tab') &&
       savedOnlyTabFailureState.runtimeTabs === 0 &&
@@ -2307,8 +2249,7 @@ async function main() {
     'saved-only tab remains durable after the failed deletion is reloaded',
     JSON.stringify(savedOnlyTabFailureReloadState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
       JSON.stringify(savedOnlyTabFailureReloadState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
-      savedOnlyTabFailureReloadState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabFailureReloadState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages),
+      savedOnlyTabFailureReloadState.context === savedOnlyDeletionBaseline.context,
     JSON.stringify(savedOnlyTabFailureReloadState),
   );
 
@@ -2344,7 +2285,6 @@ async function main() {
       savedOnlyTabRetryState.domRows.length === 2 &&
       savedOnlyTabRetryState.domRows.every((row) => row.dormant) &&
       savedOnlyTabRetryState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyTabRetryState.status === 'Removed saved tab.' &&
       savedOnlyTabRetryState.runtimeTabs === 0 &&
       savedOnlyTabRetryState.commands.length === 0,
@@ -2385,7 +2325,6 @@ async function main() {
     JSON.stringify(savedOnlyGroupFailureState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
       JSON.stringify(savedOnlyGroupFailureState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
       savedOnlyGroupFailureState.context === savedOnlyGroupBaseline.context &&
-      JSON.stringify(savedOnlyGroupFailureState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages) &&
       savedOnlyGroupFailureState.status.includes('saved-only group checkpoint failed after apply') &&
       !savedOnlyGroupFailureState.status.includes('Deleted saved group') &&
       savedOnlyGroupFailureState.runtimeTabs === 0 &&
@@ -2402,8 +2341,7 @@ async function main() {
     'saved-only group remains durable after the failed deletion is reloaded',
     JSON.stringify(savedOnlyGroupFailureReloadState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
       JSON.stringify(savedOnlyGroupFailureReloadState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
-      savedOnlyGroupFailureReloadState.context === savedOnlyGroupBaseline.context &&
-      JSON.stringify(savedOnlyGroupFailureReloadState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages),
+      savedOnlyGroupFailureReloadState.context === savedOnlyGroupBaseline.context,
     JSON.stringify(savedOnlyGroupFailureReloadState),
   );
 
@@ -2440,7 +2378,6 @@ async function main() {
         dormant: true,
       }]) &&
       savedOnlyGroupRetryState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyGroupRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyGroupRetryState.status === 'Deleted saved group "Saved Whole".' &&
       savedOnlyGroupRetryState.runtimeTabs === 0 &&
       savedOnlyGroupRetryState.commands.length === 0,

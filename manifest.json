@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Space Tabs: Arc-like Spaces & BYOK AI",
   "short_name": "Space Tabs",
-  "description": "Move your Arc workspace into Chrome. Organize Spaces, ask pages with your own AI key, and keep workspace data local.",
+  "description": "Move your Arc workspace into Chrome. Organize Spaces, tidy tabs with your own AI key, and keep workspace data local.",
   "version": "0.5.8",
   "minimum_chrome_version": "116",
   "incognito": "not_allowed",
@@ -38,9 +38,7 @@
     "default_path": "sidepanel.html"
   },
   "permissions": [
-    "alarms",
     "favicon",
-    "scripting",
     "sidePanel",
     "storage",
     "tabGroups",

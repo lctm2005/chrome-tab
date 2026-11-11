@@ -1688,18 +1688,7 @@ test('attached and detached events preserve Space identity across windows', () =
 });
 
 test('tab replacement transfers all live-id metadata while keeping snapshot identity', () => {
-  const askKey = 'tab:10:https://same.test/page';
   const state = lifecycleState({
-    askSessions: {
-      [askKey]: {
-        key: askKey,
-        tabId: 10,
-        title: 'First',
-        url: 'https://same.test/page',
-        messages: [{ id: 'm1', role: 'user', text: 'Keep this', createdAt: 1 }],
-      },
-    },
-    activeAskSessionKey: askKey,
     operationHistory: [
       {
         id: 'tidy',
@@ -1830,11 +1819,6 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
   assert.equal(replaced.renamedTabs[20], 'First panel');
   assert.equal(replaced.tabGroups[20], 'local-docs');
   assert.deepEqual(replaced.tabOrder.work['group:100'], [20, 11, 12]);
-  const reboundAskKey = 'tab:20:https://same.test/page';
-  assert.equal(replaced.askSessions[askKey], undefined);
-  assert.deepEqual(replaced.askSessions[reboundAskKey].messages,
-    state.askSessions[askKey].messages);
-  assert.equal(replaced.activeAskSessionKey, reboundAskKey);
   const [tidy, autoGroup, restore, unrelatedTidy, sparseRestore, portable, sparse] =
     replaced.operationHistory;
   assert.deepEqual(tidy.before.renamedTabs, { 11: 'Second panel', 20: null });
@@ -1929,22 +1913,6 @@ test('tab replacement transfers all live-id metadata while keeping snapshot iden
       .recentlyOpenedDormantTabs[0].tabId,
     30,
   );
-  assert.equal(replacedAgain.askSessions['tab:30:https://same.test/page'].tabId, 30);
-
-  const orphanActiveKey = 'tab:10:https://missing-session.test/';
-  const activeWithoutSession = reduceTabLifecycleEvent({
-    state: lifecycleState({ askSessions: {}, activeAskSessionKey: orphanActiveKey }),
-    event: { type: 'replaced', removedTabId: 10, addedTabId: 40 },
-  });
-  assert.equal(activeWithoutSession.activeAskSessionKey,
-    'tab:40:https://missing-session.test/');
-  const activeWithoutAskState = reduceTabLifecycleEvent({
-    state: lifecycleState({ activeAskSessionKey: orphanActiveKey }),
-    event: { type: 'replaced', removedTabId: 10, addedTabId: 41 },
-  });
-  assert.equal(activeWithoutAskState.activeAskSessionKey,
-    'tab:41:https://missing-session.test/');
-
   const ephemeralState = lifecycleState({ ephemeralTabIds: [10, 20] });
   const deduped = reduceTabLifecycleEvent({ state: ephemeralState, event: {
     type: 'replaced', removedTabId: 10, addedTabId: 20, tab: {},

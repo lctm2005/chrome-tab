@@ -40,9 +40,11 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Alt+S');
   assert.equal(manifest.commands._execute_action.description, 'Toggle Space Tabs panel');
   assert.equal(manifest.content_scripts, undefined);
-  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'favicon', 'alarms']) {
+  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'favicon']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
+  // The alarms permission only served Ask stream recovery and is gone with it.
+  assert.equal(manifest.permissions.includes('alarms'), false);
   assert.equal(manifest.permissions.includes('activeTab'), false);
   assert.equal(manifest.permissions.includes('bookmarks'), false);
   assert.equal(manifest.permissions.includes('downloads'), false);
@@ -78,106 +80,24 @@ test('settings expose provider and model selectors without prefilled free text m
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 
-test('sidepanel exposes single-page Ask Page and portable backup controls without Context or Summary UI', async () => {
+test('sidepanel exposes portable backup controls without Ask Page, Context, or Summary UI', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
 
-  for (const id of ['askScope', 'askProvider', 'askSourceSummary', 'askSourceList', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
+  for (const id of ['exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.match(html, /class="ask-scope" id="askScope" hidden/);
-  assert.match(html, /class="ask-disclosure" id="askDisclosure"[^>]* hidden/);
-  assert.match(source, /askButton\.className = `space ask-page/);
-  assert.match(html, />Ask Page</);
-  assert.match(html, /Ask Page sends the current page and recent conversation context directly to your configured provider\./);
-  assert.match(source, /createPrompt\('ask-page'/);
-  assert.match(source, /purpose: 'ask-page'/);
-  assert.match(source, /sessionKeyForTab\(sourceTab\)/);
-  assert.match(source, /normalizeSessionUrl\(page\.url\) !== normalizeSessionUrl\(sourceTab\.url\)/);
-  assert.match(source, /appendAskSourceLink\(answerText, page\)/);
-  assert.match(source, /chrome\.tabs\.onActivated\.addListener\(handleChromeTabActivated\)/);
-  assert.match(source, /lastActivatedAskPageTab/);
-  assert.match(source, /selectEligibleTabSource\(tabs, lastActivatedAskPageTab, isEligibleAskPageTab\)/);
-  assert.match(source, /function cacheAskPageTab[\s\S]*const authoritative = options\.authoritative === true[\s\S]*active: Boolean\(tab\.active\)[\s\S]*mergeTabActivationCache\(tabs, observed, \{ authoritative \}\)[\s\S]*tabs = merged\.tabs[\s\S]*return merged\.tab/);
-  assert.match(source, /function observeAskPageTab[\s\S]*const previousSource = currentAskPageTab\(\)[\s\S]*cacheAskPageTab\(tab, observedAt\)[\s\S]*const nextSource = currentAskPageTab\(\)[\s\S]*refreshAskPageTargetUI\(\)/);
-  assert.match(source, /function rememberAskPageTab[\s\S]*cacheAskPageTab\(tab, fallbackLastAccessed, \{ authoritative: true \}\)[\s\S]*lastActivatedAskPageTab = remembered/);
-  assert.match(source, /startAskFromUserGesture/);
-  assert.match(source, /requestAskPermissionsFromUserGesture/);
-  assert.match(source, /chrome\.permissions\.request\(\{ origins \}\)/);
-  assert.match(source, /send\('pages:extract', \{[\s\S]*tabIds: \[sourceTab\.id\]/);
-  const askCustomPrompt = source.slice(
-    source.indexOf('async function askCustomPrompt'),
-    source.indexOf('async function beginAskTurn'),
-  );
-  assert.match(askCustomPrompt, /const sessionKey = sessionKeyForTab\(sourceTab\);\s*const session = projectAskSessionForTab\(state\.askSessions, sourceTab\)/);
-  assert.match(askCustomPrompt, /const preparedSessionRevision = askSessionRevision\(session\)/);
-  assert.doesNotMatch(askCustomPrompt, /ensureAskSessionByKey\(|setActiveAskSessionKey\(/);
-  assert.doesNotMatch(askCustomPrompt, /showPlanPreview|Review Ask Page|Send to provider/);
-  assert.match(askCustomPrompt, /assertPreparedAskPageStillCurrent\(page, sourceTab\)[\s\S]*beginAskTurn\([\s\S]*sessionKey,[\s\S]*prompt,[\s\S]*sourceTab,[\s\S]*session,[\s\S]*preparedSessionRevision,[\s\S]*requestId/);
-  assert.ok(
-    askCustomPrompt.indexOf('statusMessage = await beginAskTurn') < askCustomPrompt.indexOf("send('ai:chat'"),
-    'the durable Ask begin contract completes before provider dispatch',
-  );
-  assert.match(source, /materializeAskSessionForTurn,[\s\S]{0,320}from '.\/src\/shared\/ask-session\.js'/);
-  assert.match(source, /async function beginAskTurn[\s\S]*if \(extensionRuntime\) \{[\s\S]*await send\('ask:begin', \{[\s\S]*projectedSession,[\s\S]*preparedSessionRevision,[\s\S]*requestId,[\s\S]*setActiveAskSessionKey\(started\.sessionKey\)[\s\S]*withSharedStateLock\(\(\) => syncAskSessionsFromStorage\(\)\)[\s\S]*return \{[\s\S]*messageId: started\.messageId/);
-  assert.match(source, /async function beginAskTurn[\s\S]*syncStateFromStorage\(\)[\s\S]*materializeAskSessionForTurn\([\s\S]*state\.askSessions,[\s\S]*sourceTab,[\s\S]*projectedSession,[\s\S]*askSessionRevision\(latestSession\) !== preparedSessionRevision[\s\S]*Nothing was sent; try again[\s\S]*setActiveAskSessionKey\(latestSession\.key\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*pruneCurrentAskSessions\(latestSession\.key\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  assert.match(background, /case 'ask:begin':[\s\S]*beginAskStreamTurn\(message\.askTurn\)/);
-  assert.match(background, /async function beginAskStreamTurn[\s\S]*withLifecycleStateLock[\s\S]*askSessionRevision\(latestSession\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*storage\.local\.set[\s\S]*scheduleAskStreamRecoveryAlarm\(binding\.requestId\)/);
-  assert.match(source, /async function assertPreparedAskPageStillCurrent[\s\S]*send\('tabs:listAll'\)[\s\S]*normalizeSessionUrl\(current\.pendingUrl \|\| current\.url\)[\s\S]*normalizeSessionUrl\(page\.url\)[\s\S]*Nothing was sent/);
-  assert.doesNotMatch(source, /title: 'Review Ask Page'/);
-  assert.match(source, /Switch to an http or https page before using Ask Page\./);
-  const recentHistorySource = source.slice(
-    source.indexOf('function recentAskHistory'),
-    source.indexOf('async function beginAskTurn'),
-  );
-  assert.match(recentHistorySource, /text: askHistoryMessageText\(message\)/);
-  assert.match(recentHistorySource, /filter\(\(message\) => message\.text\.trim\(\)\)/);
-  assert.doesNotMatch(recentHistorySource, /\.split\(/);
-  assert.match(source, /updateAskMessage\(stream\.messageRef, stream\.text \|\| 'Thinking\.\.\.', \{ persist: false \}\)/);
-  assert.match(source, /async function persistAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  const beginAskTurnSource = source.slice(
-    source.indexOf('async function beginAskTurn'),
-    source.indexOf('async function persistAskMessage'),
-  );
-  const persistAskMessageSource = source.slice(
-    source.indexOf('async function persistAskMessage'),
-    source.indexOf('async function refreshPersistedAskMessage'),
-  );
-  const refreshPersistedAskMessageSource = source.slice(
-    source.indexOf('async function refreshPersistedAskMessage'),
-    source.indexOf('async function syncAskSessionsFromStorage'),
-  );
-  const syncAskSessionsSource = source.slice(
-    source.indexOf('async function syncAskSessionsFromStorage'),
-    source.indexOf('function replayAskMessageTabReplacements'),
-  );
-  const addAskMessageSource = source.slice(
-    source.indexOf('async function addAskMessage'),
-    source.indexOf('async function updateAskMessage'),
-  );
-  for (const askWriter of [beginAskTurnSource, persistAskMessageSource, addAskMessageSource]) {
-    assert.doesNotMatch(askWriter, /saveState\(\)/, 'Ask-only writes must never persist a window Space mapping');
-    assert.match(askWriter, /saveState\(\{ persistWindowState: false \}\)/);
-  }
-  assert.match(refreshPersistedAskMessageSource, /syncAskSessionsFromStorage\(\)/);
-  assert.doesNotMatch(refreshPersistedAskMessageSource, /syncStateFromStorage|saveState|windowState/);
-  assert.match(syncAskSessionsSource, /storageGet\(\)[\s\S]*state\.askSessions = workspace\.askSessions/);
-  assert.doesNotMatch(syncAskSessionsSource, /windowState|panelWindowId|saveState|state\s*=\s*workspace/);
-  assert.match(background, /case 'pages:extract'/);
-  assert.doesNotMatch(background, /case 'page:(?:extract|outline)'/);
-  assert.match(background, /reason: 'content-limit'/);
-  assert.match(background, /if \(event\.done\)[\s\S]*reader\.cancel/);
-  assert.match(background, /beginAskStreamPersistence\(binding\)/);
-  assert.match(background, /checkpointAskStream\(sessions, binding, latestText, now\)/);
-  assert.match(background, /finalizeAskStream\(sessions, binding, outcome\)/);
-  assert.match(background, /handleAskStreamRecoveryAlarm/);
   assert.match(source, /createSpaceBackup\(state\)/);
   assert.match(source, /restoreSpaceBackup\(state, confirmedBackup\)/);
-  assert.doesNotMatch(source, /createPrompt\('ask-space'|purpose: 'ask-space'|selectAskSpaceSources|appendAskSourceLinks|12-page limit/);
-  assert.doesNotMatch(html, /Ask Space/);
-  assert.doesNotMatch(html, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"/);
-  assert.doesNotMatch(source, /currentSpaceContextForAI|summarizeCurrentPage/);
+
+  // The Ask Page surface was removed: no scope selectors, disclosure buttons,
+  // per-page prompt construction, stream recovery, or page extraction remain.
+  assert.doesNotMatch(html, /Ask Page|Ask Space|id="askScope"|id="askDisclosure"|id="askSourceList"/);
+  assert.doesNotMatch(source, /ask-page|ask-scope|askCustomPrompt|beginAskTurn|askSessions|activeAskSessionKey|lastActivatedAskPageTab|pages:extract|ask:begin|createPrompt\('ask-page'\)|purpose: 'ask-page'/);
+  assert.doesNotMatch(background, /ask:begin|pages:extract|askSessions|AskStream|scheduleAskStreamRecoveryAlarm|handleAskStreamRecoveryAlarm/);
+  assert.doesNotMatch(background, /case 'page:(?:extract|outline)'/);
+  assert.doesNotMatch(source, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"|currentSpaceContextForAI|summarizeCurrentPage/);
 });
 
 test('sidepanel exposes focused onboarding and full-page Workbench Settings', async () => {
@@ -319,7 +239,7 @@ test('Workbench setup preserves its surface while Space switching keeps target T
   const materializeSource = functionSource(source, 'materializeSpaceSwitchTarget');
   const closeSource = functionSource(source, 'closeSpaceSwitchSourceTabs');
 
-  assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
+  assert.match(source, /runOnboardingButton[\s\S]*activeView = 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
   assert.match(source, /async function activateSpace\(spaceId, options = \{\}\)[\s\S]*return switchSpace\(spaceId, \{ \.\.\.options, windowBinding \}\)/);
   assert.match(source, /if \(spaceId === state\.activeSpaceId\) \{[\s\S]*activeView = 'space';[\s\S]*render\(\);[\s\S]*return true;[\s\S]*\}\s*return switchSpace/);
   assert.match(switchSource, /options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)[\s\S]*withCreatedTabCheckpointRollback\(createdTabIds[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*planSpaceSwitch\(/);
@@ -655,45 +575,6 @@ test('in-flight Workbench tab creation is bound to the user gesture epoch and fu
   assert.match(ephemeralCleanupSource, /result\.closedTabIds\.length > 0[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
 });
 
-test('Ask session selection and pruning are safe across Chrome windows', async () => {
-  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-
-  assert.match(sidepanel, /let activeAskSessionKey = ''/);
-  assert.match(sidepanel, /state = nextState;[\s\S]*state\.activeAskSessionKey = activeAskSessionKey/);
-  assert.match(sidepanel, /function stateForStorage\(\)[\s\S]*activeAskSessionKey,[\s\S]*ai,/);
-  assert.match(sidepanel, /function ensureCurrentAskSession\(\)[\s\S]*pruneCurrentAskSessions\(key\)/);
-  assert.match(sidepanel, /function pruneCurrentAskSessions[\s\S]*inFlightKeys:\s*\[\.\.\.activeAskStreams\.values\(\)\]/);
-  assert.match(sidepanel, /function currentAskSessionForRender\(\)[\s\S]*return projectAskSessionForTab\(state\.askSessions, tab\)/);
-  assert.doesNotMatch(sidepanel.slice(
-    sidepanel.indexOf('function currentAskSessionForRender()'),
-    sidepanel.indexOf('function setActiveAskSessionKey'),
-  ), /adoptPortableAskSession|ensureAskSessionByKey/);
-  assert.match(sidepanel, /function renderAskMessages\(\) \{\s*const session = currentAskSessionForRender\(\)/);
-  const passiveRefresh = sidepanel.slice(
-    sidepanel.indexOf('function refreshAskPageTargetUI()'),
-    sidepanel.indexOf('function readableAskPageTab()'),
-  );
-  assert.doesNotMatch(passiveRefresh, /ensureCurrentAskSession\(\)/);
-  assert.match(sidepanel, /const openTabs = \[\.\.\.tabs, \.\.\.foreignLiveTabs\]/);
-  assert.match(sidepanel, /openTabIds:\s*openTabs\.map\(\(item\) => item\.id\)/);
-  assert.match(sidepanel, /openSessionKeys:\s*openTabs\.map\(\(item\) => sessionKeyForTab\(item\)\)/);
-  assert.match(sidepanel, /askSessionTabFromKey,[\s\S]{0,260}from '\.\/src\/shared\/ask-session\.js'/);
-  assert.match(sidepanel, /askSessionTabFromKey\(safeKey, tabs\)/);
-  assert.match(sidepanel, /currentAskPageTab\(\) \|\| askSessionTabFromKey\(sessionKey, tabs\)/);
-  assert.doesNotMatch(sidepanel, /function askSessionTabFromKey\(/);
-  assert.match(sidepanel, /if \(ref\.sessionKey === activeAskSessionKey && activeView === 'ask'\) renderAskMessages\(\)/);
-  assert.doesNotMatch(sidepanel, /ref\.sessionKey === state\.activeAskSessionKey/);
-  assert.match(sidepanel, /chrome\.tabs\.onDetached\?\.addListener\(handleChromeTabDetached\)/);
-  assert.match(sidepanel, /function currentAskPageTab\(\)[\s\S]*selectEligibleTabSource\(tabs, lastActivatedAskPageTab, isEligibleAskPageTab\)/);
-  assert.match(sidepanel, /createEligibleTabActivationController\(\{[\s\S]*getTab:[\s\S]*isEligible: isEligibleAskPageTab,[\s\S]*onObserve:[^\n]*observeAskPageTab[\s\S]*onActivate:/);
-  assert.doesNotMatch(sidepanel, /createEligibleTabActivationController\(\{[\s\S]{0,300}getCachedTab:/);
-  assert.match(sidepanel, /async function handleChromeTabActivated[\s\S]*askPageActivationController\.handle\(activeInfo\)/);
-  assert.match(sidepanel, /function handleChromeTabRemoved[\s\S]*const wasCurrentSource[\s\S]*askPageActivationController\.invalidate\(tabId\)[\s\S]*tabs = tabs\.filter[\s\S]*if \(wasRememberedSource\) lastActivatedAskPageTab = null;[\s\S]*if \(wasCurrentSource \|\| wasRememberedSource\) refreshAskPageTargetUI\(\)/);
-  assert.match(sidepanel, /function handleChromeTabUpdated[\s\S]*const wasCurrentSource[\s\S]*const isEligible = isEligibleAskPageTab\(tab\)[\s\S]*if \(changeInfo\.url \|\| !isEligible\) askPageActivationController\.invalidate\(tabId\)[\s\S]*if \(isEligible && tab\.active\)[\s\S]*askPageActivationController\.commitFresh\(tab,[\s\S]*if \(wasCurrentSource\) refreshAskPageTargetUI\(\)[\s\S]*lastActivatedAskPageTab = null/);
-  assert.match(sidepanel, /function handleChromeTabDetached[\s\S]*detachInfo\.oldWindowId[\s\S]*askPageActivationController\.invalidate\(tabId\)[\s\S]*tabs = tabs\.filter[\s\S]*lastActivatedAskPageTab = null[\s\S]*refreshAskPageTargetUI\(\)/);
-  assert.match(sidepanel, /function handleChromeTabReplaced[\s\S]*askPageActivationController\.invalidate\(removedTabId\)/);
-});
-
 test('a new Chrome session drops recycled entity ids and restores portable snapshot metadata', async () => {
   const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
@@ -752,7 +633,8 @@ test('deleting a Space previews and closes its tabs across every Chrome window',
   assert.doesNotMatch(sidepanel, /async function deleteSpaceFromCurrentState\(space, options = \{\}\)[\s\S]{0,160}loadTabs\(\{ adopt: true \}\)/);
   assert.match(sidepanel, /async function liveSpaceDeletionInventory[\s\S]*tabs:listAll[\s\S]*response\.allChromeTabs \|\| response\.tabs[\s\S]*allBrowserTabs[\s\S]*planSpaceTabDeletion\(allTabs, state, spaceId\)/);
   assert.match(sidepanel, /fingerprint: spaceDeletionIntentFingerprint\(\{[\s\S]*deletingSpaceId: spaceId,[\s\S]*plan/);
-  assert.match(deletionProjection, /export function spaceDeletionIntentFingerprint[\s\S]*savedOnlySnapshot[\s\S]*context:[\s\S]*askSession:/);
+  assert.match(deletionProjection, /export function spaceDeletionIntentFingerprint[\s\S]*savedOnlySnapshot[\s\S]*context:/);
+  assert.doesNotMatch(deletionProjection, /askSession/);
   assert.match(sidepanel, /planSpaceDeletionWindowKeepalives\(\s*checkpointInventory\.allChromeTabs/);
   assert.match(closeAcrossWindowsSource, /tabIds: \(\) => transactionClosingTabs\.map[\s\S]*checkpointInventory = await liveSpaceDeletionInventory\(spaceId, \{ windowBinding \}\)[\s\S]*assertFreshSpaceDeletionPlan\(checkpointInventory\.plan[\s\S]*planSpaceDeletionWindowKeepalives\([\s\S]*sourceTabs: checkpointInventory\.allTabs[\s\S]*sourceGroups: checkpointInventory\.response\.groups/);
   assert.match(sidepanel, /beforeClose: async \(tabId, \{ closedTabIds \}\)[\s\S]*expectedRemainingTabs[\s\S]*for \(const expectedTab of expectedRemainingTabs\)[\s\S]*spaceDeletionCloseCandidateMismatch/);
@@ -818,7 +700,7 @@ test('shortcut focus retries stop as soon as the panel succeeds or the user move
   );
 
   assert.match(source, /import \{[\s\S]*createDisclosureFocusGuard,[\s\S]*createPanelFocusController,[\s\S]*\} from '\.\/src\/shared\/panel-focus\.js'/);
-  assert.match(source, /const panelFocusController = createPanelFocusController\(\{[\s\S]*getTarget: \(\) => activeView === 'ask'[\s\S]*requestBackgroundFocus:[\s\S]*Number\.isSafeInteger\(panelWindowId\)[\s\S]*type: 'panel:focus', windowId: panelWindowId/);
+  assert.match(source, /const panelFocusController = createPanelFocusController\(\{[\s\S]*getTarget: \(\) => activeView === 'space'[\s\S]*requestBackgroundFocus:[\s\S]*Number\.isSafeInteger\(panelWindowId\)[\s\S]*type: 'panel:focus', windowId: panelWindowId/);
   assert.match(source, /const disclosureFocusGuard = createDisclosureFocusGuard\(\)/);
   assert.match(source, /addEventListener\('focusin', panelFocusController\.handleFocusIn, \{ capture: true \}\)/);
   assert.match(source, /addEventListener\('pointerdown', panelFocusController\.handleUserIntent, \{ capture: true \}\)/);
@@ -839,17 +721,6 @@ test('shortcut focus retries stop as soon as the panel succeeds or the user move
   assert.match(controller, /handleUserIntent[\s\S]*cancel\('user-intent'\)/);
   assert.match(controller, /documentOwnsTargetFocus\(documentTarget, target\)[\s\S]*cancel\('focused'\)/);
   assert.match(controller, /function restore\(token, focus\)[\s\S]*token\.generation !== generation[\s\S]*generation \+= 1[\s\S]*focus\(\)/);
-});
-
-test('Ask streaming cannot overwrite the final cited answer with a late partial event', async () => {
-  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
-
-  assert.match(background, /return chrome\.runtime\.sendMessage\(\{ type: 'ai:stream', requestId, text \}\)\.catch/);
-  assert.match(background, /if \(event\.text\)[\s\S]*await onStream\(text\)/);
-  assert.match(sidepanel, /if \(!stream \|\| stream\.finished\) return/);
-  assert.match(sidepanel, /completedStream[\s\S]*completedStream\.finished = true[\s\S]*appendAskSourceLink\(answerText, page\)/);
-  assert.match(sidepanel, /const stream = activeAskStreams\.get\(requestId\);[\s\S]*if \(stream\) stream\.finished = true;[\s\S]*appendAskSourceLink/);
 });
 
 test('sidepanel refresh adopts orphan groups without overwriting newer Workbench state', async () => {
@@ -895,9 +766,6 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /function refreshTabLifecycleIdentityDecorations\(\)[\s\S]*tabs = tabsWithLifecycleIdentity\(tabs\);[\s\S]*foreignLiveTabs = tabsWithLifecycleIdentity\(foreignLiveTabs\)/);
   assert.match(source, /function organizationForCurrentSpaceState\(spaceId, options = \{\}\)[\s\S]*sourceTabs: tabsWithLifecycleIdentity\(tabs\)/);
   assert.match(source, /function tabsWithLifecycleIdentity\(rawTabs = \[\]\)[\s\S]*delete undecorated\.snapshotGroupId[\s\S]*lifecycleBindingMatchesPhysicalGroup/);
-  assert.match(source, /async function addAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*await saveState/);
-  assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
-  assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
   assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was running/);
   assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
@@ -1268,7 +1136,7 @@ test('destructive Settings and Undo actions bind the reviewed record and merge c
   assert.match(source, /runTask\(\(windowBinding\) => undoLastOperation\(operationId, \{ windowBinding \}\)\)/);
   assert.match(source, /resolveOperationUndoTarget\(state\.operationHistory, expectedOperationId\)/);
   assert.doesNotMatch(
-    source.slice(source.indexOf('async function undoLastOperation'), source.indexOf('function currentAskPageTab')),
+    source.slice(source.indexOf('async function undoLastOperation'), source.indexOf('function operationUndoTargetMessage')),
     /latestAppliedOperation\(/,
   );
   assert.match(source, /token: createArcImportToken\(\)/);
@@ -1334,24 +1202,6 @@ test('backup restore discloses and immediately adopts currently open browser tab
   assert.match(source, /sanitizeSnapshotWithLifecycleIds\(\s*storedSnapshot,\s*createSnapshotLifecycleId/);
 });
 
-test('non-Ask task failures never become persisted Ask conversation messages', async () => {
-  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const runTaskSource = source.slice(
-    source.indexOf('function runTask(task)'),
-    source.indexOf('async function withSharedStateLock'),
-  );
-  const askSource = source.slice(
-    source.indexOf('async function askCustomPrompt'),
-    source.indexOf('function recentAskHistory'),
-  );
-
-  assert.doesNotMatch(runTaskSource, /addAskMessage/);
-  assert.match(runTaskSource, /setStatus\(message\)/);
-  assert.match(runTaskSource, /else if \(workbenchMode\) showStatusToast\(message, 'error'\)/);
-  assert.match(askSource, /if \(statusMessage\)[\s\S]*persistAskMessage\(statusMessage, answer\)/);
-  assert.match(askSource, /else \{[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'error'\)/);
-});
-
 test('Settings keeps Chrome global shortcut handling out of the compact shortcut surface', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
@@ -1374,7 +1224,7 @@ test('Settings keeps Chrome global shortcut handling out of the compact shortcut
   assert.match(source, /const panelKeyboardController = createPanelKeyboardController\(\{[\s\S]*getShortcuts: \(\) => mergeShortcuts\(state\.shortcuts\)[\s\S]*hasBlockingDialogOpen,[\s\S]*dispatchShortcutAction: \(action\) => \{[\s\S]*prepareOrganizationRequestForAction\(action\)[\s\S]*runTask\(\(windowBinding\) => runShortcutAction\(action, organizationRequest, \{[\s\S]*windowBinding,[\s\S]*\}\)\)/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
   assert.match(keyboardSource, /export function createPanelKeyboardController[\s\S]*if \(event\.key === 'Escape'\)[\s\S]*hasBlockingDialogOpen\(\)[\s\S]*shortcutMatchesEvent\(commandPaletteShortcut, event\)/);
-  assert.match(keyboardSource, /shouldPreserveNativeCopy\(event, options\.getSelection\(\)\)[\s\S]*exclude: \['togglePanel', 'askSubmit', 'askAbort'\]/);
+  assert.match(keyboardSource, /shouldPreserveNativeCopy\(event, options\.getSelection\(\)\)[\s\S]*exclude: \['togglePanel'\]/);
   assert.match(keyboardSource, /export function captureShortcutInput[\s\S]*event\.key === 'Tab'[\s\S]*event\.key === 'Backspace' \|\| event\.key === 'Delete'[\s\S]*shortcutFromEvent\(event\)/);
   assert.doesNotMatch(keyboardSource, /shortcuts\.togglePanel/);
   assert.doesNotMatch(keyboardSource, /runTask|runShortcutAction|prepareOrganizationRequestForAction/);
@@ -1556,13 +1406,12 @@ test('shared render signatures cover panel dependencies without invalidating eve
     'utf8',
   );
 
-  assert.match(source, /import \{[\s\S]{0,180}askMessagesRenderSignature,[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
+  assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
   assert.match(source, /const tree = createFolderTree\(tabGroups, \{ activeSpaceId: state\.activeSpaceId \}\);[\s\S]{0,800}groupsRenderSignature\(\{[\s\S]{0,800}collapsedGroups: state\.collapsedGroups,[\s\S]{0,800}selectedTabIds,[\s\S]{0,800}folderTree: tree/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
-  assert.match(source, /askMessagesRenderSignature\(session\)/);
-  assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature|askMessagesSignature)\(/);
+  assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];
-  assert.doesNotMatch(syncState, /lastRendered(?:Groups|Ask|Spaces)Signature\s*=\s*''/);
+  assert.doesNotMatch(syncState, /lastRendered(?:Groups|Spaces)Signature\s*=\s*''/);
   assert.match(signatures, /import \{ tabRowPresentation \} from '\.\/tab-utils\.js'/);
   assert.match(signatures, /visibleCollapsedKeys[\s\S]*addVisibleFolderKeys\(folderTree[\s\S]*collapsedGroups\[key\]/);
   assert.match(signatures, /const presentation = tabRowPresentation\(tab\)[\s\S]*selected: !tab\.dormant && !presentation\.foreign/);
@@ -1602,20 +1451,16 @@ test('tab replacement preserves durable identity without retaining obsolete auto
     new URL('../src/shared/tab-replacement.js', import.meta.url),
     'utf8',
   );
-  const persistAskSource = functionSource(source, 'persistAskMessage');
 
   assert.doesNotMatch(source, /function (?:discardInactiveTabsInSpace|discardRestoredTabs|canAutoCloseTab)\b/);
   assert.match(source, /chrome\.tabs\.onReplaced\?\.addListener\(handleChromeTabReplaced\)/);
   assert.match(source, /function handleChromeTabReplaced[\s\S]*state = reduceTabLifecycleEvent\([\s\S]*type: 'replaced'[\s\S]*applyPanelTabIdReplacement\(addedTabId, removedTabId, immediateTab\)/);
-  assert.match(source, /async function reconcileChromeTabReplacement[\s\S]*capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*type: 'replaced'[\s\S]*restoreInFlightAskMessages\(\)[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
-  assert.match(source, /function restoreInFlightAskMessages[\s\S]*activeAskStreams\.values\(\)[\s\S]*if \(stream\?\.finished\) continue;[\s\S]*updateAskSessionMessage\(session, ref\.messageId, stream\.text \|\| 'Thinking\.\.\.'\)/);
-  assert.match(persistAskSource, /syncStateFromStorage\(\)[\s\S]*replayAskMessageTabReplacements\(ref\)[\s\S]*updateAskSessionMessage\(latestSession, ref\.messageId, text\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  assert.match(source, /function replayAskMessageTabReplacements[\s\S]*replayAskSessionTabReplacements\([\s\S]*ref\?\.tabReplacements[\s\S]*state\.activeAskSessionKey = activeAskSessionKey/);
+  assert.match(source, /async function reconcileChromeTabReplacement[\s\S]*capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*type: 'replaced'[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
   assert.match(source, /import \{ migratePanelTabIdReplacement \} from '\.\/src\/shared\/tab-replacement\.js'/);
-  assert.match(source, /function applyPanelTabIdReplacement[\s\S]*migratePanelTabIdReplacement\([\s\S]*state\.askSessions = migrated\.askSessions[\s\S]*activeAskStreams\.clear\(\)[\s\S]*if \(migrated\.dragInvalidated\)[\s\S]*clearDragState\(\)[\s\S]*setStatus\(/);
+  assert.match(source, /function applyPanelTabIdReplacement[\s\S]*migratePanelTabIdReplacement\([\s\S]*recentlyOpenedDormantTabs[\s\S]*syntheticPlaceholderTabIds[\s\S]*if \(migrated\.dragInvalidated\)[\s\S]*clearDragState\(\)[\s\S]*setStatus\(/);
   assert.match(source, /function applyPanelTabIdReplacement[\s\S]*tabs = migrated\.tabs[\s\S]*foreignLiveTabs = migrated\.foreignLiveTabs[\s\S]*if \(migrated\.visibleTabsChanged\) render\(\)/);
-  assert.match(replacementHelper, /export function migratePanelTabIdReplacement[\s\S]*replaceSelectionTabId[\s\S]*rebindAskSessionsForTabReplacement/);
-  assert.match(replacementHelper, /dragInvalidated:[\s\S]*migrateActiveAskStreams/);
+  assert.match(replacementHelper, /export function migratePanelTabIdReplacement[\s\S]*replaceSelectionTabId/);
+  assert.match(replacementHelper, /dragInvalidated:[\s\S]*source\.dragState\?\.type === 'tab'/);
 });
 
 test('Chrome group mutations and Auto Group Undo rollback browser side effects before reporting failure', async () => {
@@ -1689,7 +1534,7 @@ test('durable tab lifecycle identity is wired through sidepanel snapshots and ba
   for (const eventName of ['onCreated', 'onRemoved', 'onUpdated', 'onMoved']) {
     assert.match(background, new RegExp(`chrome\\.tabGroups\\.${eventName}\\?\\.addListener`));
   }
-  assert.match(background, /chrome\.runtime\.onStartup\?\.addListener\(\(\) => \{[\s\S]*scheduleLifecycleDrain\(\);[\s\S]*recoverAskStreamsAtWorkerStart\(\)/);
+  assert.match(background, /chrome\.runtime\.onStartup\?\.addListener\(\(\) => \{[\s\S]*scheduleLifecycleDrain\(\)/);
   assert.match(background, /reduceTabLifecycleEvent\(/);
   assert.match(background, /async function captureUpdatedLifecycleEvent[\s\S]*return captureReservedLifecycleEvent\(reserved, \(\) => withLifecycleStateLock\(async \(\) => \{[\s\S]*chrome\.storage\.session\.get\(WINDOW_STATE_KEY\)[\s\S]*chrome\.storage\.local\.get\(STORAGE_KEY\)[\s\S]*persistLifecycleJournalEntry\(/);
 });

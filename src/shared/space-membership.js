@@ -660,9 +660,6 @@ export function removeSpaceReferences(state, spaceId) {
   delete state.spaceSnapshots?.[spaceId];
   delete state.spaceContexts?.[spaceId];
   delete state.collapsedSpaceGroups?.[spaceId];
-  const askSessionKey = `space:${spaceId}`;
-  delete state.askSessions?.[askSessionKey];
-  if (state.activeAskSessionKey === askSessionKey) state.activeAskSessionKey = '';
   for (const [groupKey, group] of Object.entries(state.virtualGroups || {})) {
     if (group?.spaceId !== spaceId) continue;
     removedCollapsedGroupKeys.add(groupKey);

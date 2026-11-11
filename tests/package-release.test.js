@@ -26,7 +26,6 @@ test('release allowlist contains only explicit runtime files and the generated e
   assert.ok(RELEASE_FILES.includes('src/shared/command-palette-controller.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/command-palette-selection.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/dormant-snapshot.js'));
-  assert.ok(RELEASE_FILES.includes('src/shared/ask-stream.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/panel-keyboard.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/panel-focus.js'));
   assert.ok(RELEASE_FILES.includes('src/shared/panel-render-signatures.js'));

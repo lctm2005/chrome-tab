@@ -47,21 +47,6 @@
 
       <main class="space-view" id="groupsList"></main>
 
-      <main class="ask-view" id="askPageView" hidden>
-        <div class="ask-scope" id="askScope" hidden></div>
-        <section class="ask-disclosure" id="askDisclosure" aria-label="Ask Page data disclosure" hidden>
-          <div><span>Provider</span><strong id="askProvider"></strong></div>
-          <div><span>Page</span><strong id="askSourceSummary"></strong></div>
-          <p id="askSourceHint">Ask Page sends the current page and recent conversation context directly to your configured provider.</p>
-          <div class="ask-source-list" id="askSourceList"></div>
-        </section>
-        <div class="ask-messages" id="askMessages"></div>
-        <textarea id="askPagePrompt" rows="4" placeholder="Ask about the current page"></textarea>
-        <div class="ai-actions">
-          <button id="askAIButton">Ask Page</button>
-        </div>
-      </main>
-
       <nav class="space-dock" id="spacesList" aria-label="Spaces"></nav>
       <div class="context-menu" id="contextMenu" role="menu" aria-label="Context actions" tabindex="-1" hidden></div>
       <div class="workbench-toast" id="workbenchToast" role="status" aria-live="polite" hidden></div>
@@ -308,7 +293,7 @@
 
     <dialog id="commandPaletteDialog" class="command-palette-dialog" aria-labelledby="commandPaletteTitle">
       <form method="dialog" class="command-palette-shell">
-        <label id="commandPaletteTitle" for="commandPaletteInput">Switch Spaces, find tabs, or ask</label>
+        <label id="commandPaletteTitle" for="commandPaletteInput">Switch Spaces and find tabs</label>
         <input id="commandPaletteInput" type="search" autocomplete="off" spellcheck="false" placeholder="Type a Space, tab, or command…">
         <div id="commandPaletteResults" class="command-palette-results" role="listbox"></div>
         <p class="command-palette-help">↑↓ navigate · Enter open · Esc close</p>

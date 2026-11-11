@@ -3,24 +3,8 @@ import {
   extractAssistantText,
   extractFinishReason,
   outputTokenBudgetForPurpose,
-  parseChatStreamEvent,
 } from './src/shared/ai.js';
 import { providerRequiresApiKey } from './src/shared/ai-providers.js';
-import {
-  appendAskSessionMessage,
-  materializeAskSessionForTurn,
-  pruneAskSessions,
-} from './src/shared/ask-session.js';
-import {
-  askSessionRevision,
-  checkpointAskStream,
-  claimAskStream,
-  finalizeAskStream,
-  interruptOrphanedAskStreams,
-  markAskStreamPending,
-  normalizeAskStreamBinding,
-} from './src/shared/ask-stream.js';
-import { extractCurrentPage } from './src/shared/page-extraction.js';
 import { chromeGroupTitle } from './src/shared/group-title.js';
 import { normalizePanelWindowId, shouldRouteToPanel } from './src/shared/panel-routing.js';
 import {
@@ -42,11 +26,6 @@ import { moveIndexAfterTabs, moveIndexBeforeTab } from './src/shared/tab-move.js
 import { tabCloseGuardMismatch } from './src/shared/tab-close-transaction.js';
 
 const activeAIRequests = new Map();
-const ASK_STREAM_CHECKPOINT_INTERVAL_MS = 750;
-const ASK_STREAM_RECOVERY_ALARM_PREFIX = 'spaceTabsAskStreamRecovery:';
-const ASK_STREAM_RECOVERY_DELAY_MINUTES = 1;
-const ASK_STREAM_PENDING_RECOVERY_GRACE_MS = 60 * 1000;
-const ASK_STREAM_WORKER_ID = crypto.randomUUID();
 const sidePanelPorts = new Map();
 const LIFECYCLE_EVENT_PREFIX = 'spaceTabsLifecycleEvent:';
 const LIFECYCLE_SUPPRESSION_PREFIX = 'spaceTabsLifecycleSuppression:';
@@ -78,12 +57,6 @@ chrome.runtime.onStartup?.addListener(() => {
   // fresh while an extension reload keeps the previous one.
   void chrome.storage.local.remove(BROWSER_SESSION_CARRYOVER_STORAGE_KEY).catch(() => undefined);
   scheduleLifecycleDrain();
-  return recoverAskStreamsAtWorkerStart();
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  return handleAskStreamRecoveryAlarm(alarm)
-    .catch((error) => console.error('Space Tabs Ask stream recovery failed:', error));
 });
 
 chrome.tabs.onRemoved?.addListener((tabId, removeInfo) => {
@@ -146,7 +119,6 @@ chrome.windows.onRemoved?.addListener((windowId) => {
 });
 
 scheduleLifecycleDrain();
-void recoverAskStreamsAtWorkerStart();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -231,19 +203,13 @@ async function handleMessage(message, sender = {}) {
       return updateGroup(message.groupId, message.update);
     case 'groups:move':
       return moveGroup(message.groupId, message.index);
-    case 'pages:extract':
-      return extractPages(message.tabIds, message.options);
-    case 'ask:begin':
-      return beginAskStreamTurn(message.askTurn);
     case 'ai:chat':
       return runChatCompletion(
         message.settings,
         message.messages,
         message.requestId,
-        message.stream,
         message.purpose,
         message.itemCount,
-        message.askStream,
       );
     case 'ai:abort':
       return abortChatCompletion(message.requestId);
@@ -1661,153 +1627,34 @@ function isTabMoveTemporarilyBlocked(error) {
   );
 }
 
-async function extractPages(tabIds = [], options = {}) {
-  const ids = [...new Set((tabIds || []).map(Number).filter(Number.isFinite))].slice(0, 24);
-  const maxCharsPerPage = clampInteger(options?.maxCharsPerPage, 1000, 20000, 12000);
-  const maxTotalChars = clampInteger(options?.maxTotalChars, maxCharsPerPage, 120000, 60000);
-  const pages = [];
-  const failures = [];
-  let remainingChars = maxTotalChars;
-
-  for (const tabId of ids) {
-    if (remainingChars <= 0) {
-      failures.push({
-        tabId,
-        reason: 'content-limit',
-        error: 'Not sent because the Ask Page content limit was reached.',
-      });
-      continue;
-    }
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      if (!/^https?:/.test(tabUrl(tab))) throw new Error('Only an http(s) current page can be read by Ask Page.');
-      const limit = Math.min(maxCharsPerPage, remainingChars);
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId },
-        args: [limit],
-        func: extractCurrentPage,
-      });
-      const page = result?.result || {
-        title: tab.title,
-        url: tabUrl(tab),
-        text: '',
-        charCount: 0,
-        originalCharCount: 0,
-        truncated: false,
-      };
-      pages.push({ ...page, tabId });
-      remainingChars -= Number(page.charCount) || String(page.text || '').length;
-    } catch (error) {
-      failures.push({ tabId, reason: 'read-failed', error: error?.message || String(error) });
-    }
-  }
-
-  return {
-    pages,
-    failures,
-    totalChars: pages.reduce((sum, page) => sum + (Number(page.charCount) || String(page.text || '').length), 0),
-    truncated: pages.some((page) => page.truncated) || pages.length < ids.length - failures.length,
-  };
-}
-
-function clampInteger(value, minimum, maximum, fallback) {
-  const number = Math.floor(Number(value));
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(minimum, Math.min(maximum, number));
-}
-
 async function runChatCompletion(
   settings,
   messages,
   requestId = '',
-  stream = false,
   purpose = '',
   itemCount,
-  askStream,
 ) {
   outputTokenBudgetForPurpose(purpose, itemCount);
   if (providerRequiresApiKey(settings) && !settings?.apiKey) {
     throw new Error('AI API key is missing. Add it in Settings.');
   }
-  const hasAskStream = askStream !== undefined && askStream !== null;
-  const binding = hasAskStream ? normalizeAskStreamBinding(askStream) : null;
-  if (hasAskStream && (!binding || purpose !== 'ask-page' || stream !== true)) {
-    throw new Error('Ask stream persistence requires a valid streaming Ask Page message.');
-  }
-  const safeRequestId = requestId || binding?.requestId || crypto.randomUUID();
-  if (binding && binding.requestId !== safeRequestId) {
-    throw new Error('Ask stream persistence does not match this AI request.');
-  }
+  const safeRequestId = requestId || crypto.randomUUID();
   const controller = new AbortController();
   activeAIRequests.set(safeRequestId, controller);
-  let persistence = null;
-  let terminalPersisted = false;
+  let payload;
   try {
-    persistence = binding ? await beginAskStreamPersistence(binding) : null;
-    let payload;
-    try {
-      if (controller.signal.aborted) {
-        const stopped = new Error('AI request was stopped.');
-        stopped.name = 'AbortError';
-        throw stopped;
-      }
-      payload = await fetchChatCompletion(settings, messages, purpose, itemCount, controller.signal, stream
-        ? async (text) => {
-          await notifyAIStream(safeRequestId, text);
-          await persistence?.checkpoint(text);
-        }
-        : null);
-    } catch (error) {
-      const stopped = error?.name === 'AbortError';
-      if (!persistence) {
-        throw stopped ? new Error('AI request was stopped.') : error;
-      }
-      const errorMessage = stopped
-        ? 'AI request was stopped.'
-        : String(error?.message || error);
-      await persistence.finalize({
-        status: stopped ? 'stopped' : 'failed',
-        text: persistence.text,
-        error: errorMessage,
-      });
-      terminalPersisted = true;
-      return {
-        text: persistence.text,
-        usage: null,
-        finishReason: null,
-        askPersisted: true,
-        askStatus: stopped ? 'stopped' : 'failed',
-        askError: errorMessage,
-      };
-    }
-
-    const response = {
-      text: extractAssistantText(payload),
-      usage: payload.usage || null,
-      finishReason: extractFinishReason(payload),
-    };
-    if (persistence) {
-      await persistence.finalize({
-        status: 'complete',
-        text: response.text,
-        finishReason: response.finishReason,
-      });
-      terminalPersisted = true;
-      response.askPersisted = true;
-      response.askStatus = 'complete';
-    }
-    return response;
-  } finally {
+    payload = await fetchChatCompletion(settings, messages, purpose, itemCount, controller.signal);
+  } catch (error) {
     activeAIRequests.delete(safeRequestId);
-    if (binding) {
-      if (terminalPersisted) await clearAskStreamRecoveryAlarm(binding.requestId);
-      else scheduleAskStreamRecoveryAlarm(binding.requestId);
-    }
+    if (error?.name === 'AbortError') throw new Error('AI request was stopped.');
+    throw error;
   }
-}
-
-function notifyAIStream(requestId, text) {
-  return chrome.runtime.sendMessage({ type: 'ai:stream', requestId, text }).catch(() => null);
+  activeAIRequests.delete(safeRequestId);
+  return {
+    text: extractAssistantText(payload),
+    usage: payload.usage || null,
+    finishReason: extractFinishReason(payload),
+  };
 }
 
 async function abortChatCompletion(requestId = '') {
@@ -1821,179 +1668,8 @@ async function abortChatCompletion(requestId = '') {
   return { aborted: true };
 }
 
-async function beginAskStreamPersistence(binding) {
-  await persistAskStreamMutation(binding, (sessions) => (
-    claimAskStream(sessions, binding, ASK_STREAM_WORKER_ID)
-  ));
-  scheduleAskStreamRecoveryAlarm(binding.requestId);
-  let latestText = '';
-  let lastCheckpointAt = null;
-
-  return {
-    get text() {
-      return latestText;
-    },
-    async checkpoint(text) {
-      latestText = String(text);
-      const now = Date.now();
-      if (
-        lastCheckpointAt !== null &&
-        now - lastCheckpointAt < ASK_STREAM_CHECKPOINT_INTERVAL_MS
-      ) return;
-      lastCheckpointAt = now;
-      await persistAskStreamMutation(binding, (sessions) => (
-        checkpointAskStream(sessions, binding, latestText, now)
-      )).catch(() => null);
-    },
-    finalize(outcome) {
-      return persistAskStreamMutation(binding, (sessions) => (
-        finalizeAskStream(sessions, binding, outcome)
-      ));
-    },
-  };
-}
-
-async function beginAskStreamTurn(value = {}) {
-  const sessionKey = String(value.sessionKey || '');
-  const requestId = String(value.requestId || '').trim();
-  if (!requestId || requestId.length > 512) {
-    throw new Error('Ask stream persistence requires a valid request id.');
-  }
-
-  const binding = await withLifecycleStateLock(async () => {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    const workspace = mergeStoredState(stored[STORAGE_KEY], createDefaultState());
-    const latestSession = materializeAskSessionForTurn(
-      workspace.askSessions,
-      value.sourceTab,
-      value.projectedSession,
-    );
-    if (latestSession.key !== sessionKey) {
-      throw new Error('The prepared Ask conversation no longer matches the current page. Nothing was sent; try again.');
-    }
-    if (askSessionRevision(latestSession) !== String(value.preparedSessionRevision || '')) {
-      throw new Error('The Ask conversation changed before it could be sent. Nothing was sent; try again.');
-    }
-
-    appendAskSessionMessage(latestSession, 'user', String(value.prompt || ''));
-    const assistant = appendAskSessionMessage(latestSession, 'assistant', 'Thinking...');
-    markAskStreamPending(assistant, requestId);
-    const durableBinding = {
-      sessionKey: latestSession.key,
-      messageId: assistant.id,
-      requestId,
-    };
-    const pruneOptions = value.pruneOptions || {};
-    workspace.askSessions = pruneAskSessions(workspace.askSessions, {
-      ...pruneOptions,
-      activeKey: latestSession.key,
-      inFlightKeys: [latestSession.key, ...(pruneOptions.inFlightKeys || [])],
-    });
-    workspace.activeAskSessionKey = latestSession.key;
-    workspace.ai = { ...workspace.ai, apiKey: '' };
-    delete workspace.ai.maxTokens;
-    await chrome.storage.local.set({ [STORAGE_KEY]: workspace });
-    return durableBinding;
-  });
-
-  try {
-    await scheduleAskStreamRecoveryAlarm(binding.requestId);
-  } catch (error) {
-    await persistAskStreamMutation(binding, (sessions) => (
-      finalizeAskStream(sessions, binding, { status: 'interrupted', text: '' })
-    ));
-    await clearAskStreamRecoveryAlarm(binding.requestId);
-    throw error;
-  }
-  return binding;
-}
-
-async function persistAskStreamMutation(binding, mutate) {
-  return withLifecycleStateLock(async () => {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    const workspace = mergeStoredState(stored[STORAGE_KEY], createDefaultState());
-    const target = mutate(workspace.askSessions);
-    if (!target) {
-      throw new Error('The Ask conversation changed before its provider response could be saved.');
-    }
-    workspace.ai = { ...workspace.ai, apiKey: '' };
-    delete workspace.ai.maxTokens;
-    await chrome.storage.local.set({ [STORAGE_KEY]: workspace });
-    return target;
-  });
-}
-
-function askStreamRecoveryAlarmName(requestId) {
-  return `${ASK_STREAM_RECOVERY_ALARM_PREFIX}${requestId}`;
-}
-
-function scheduleAskStreamRecoveryAlarm(requestId) {
-  return chrome.alarms.create(askStreamRecoveryAlarmName(requestId), {
-    delayInMinutes: ASK_STREAM_RECOVERY_DELAY_MINUTES,
-  });
-}
-
-async function clearAskStreamRecoveryAlarm(requestId) {
-  try {
-    return await chrome.alarms.clear(askStreamRecoveryAlarmName(requestId));
-  } catch {
-    return false;
-  }
-}
-
-async function handleAskStreamRecoveryAlarm(alarm) {
-  const name = String(alarm.name);
-  if (!name.startsWith(ASK_STREAM_RECOVERY_ALARM_PREFIX)) return;
-  const requestId = name.slice(ASK_STREAM_RECOVERY_ALARM_PREFIX.length);
-  if (!requestId) return;
-  if (activeAIRequests.has(requestId)) {
-    scheduleAskStreamRecoveryAlarm(requestId);
-    return;
-  }
-  try {
-    await recoverInterruptedAskStreams(requestId, {
-      ownerId: '',
-      pendingBefore: Number.POSITIVE_INFINITY,
-    });
-  } catch (error) {
-    scheduleAskStreamRecoveryAlarm(requestId);
-    throw error;
-  }
-  await clearAskStreamRecoveryAlarm(requestId);
-}
-
-async function recoverAskStreamsAtWorkerStart() {
-  try {
-    return await recoverInterruptedAskStreams('', {
-      ownerId: ASK_STREAM_WORKER_ID,
-      pendingBefore: Date.now() - ASK_STREAM_PENDING_RECOVERY_GRACE_MS,
-    });
-  } catch (error) {
-    console.error('Space Tabs could not recover interrupted Ask streams:', error);
-    return [];
-  }
-}
-
-async function recoverInterruptedAskStreams(requestId, options = {}) {
-  return withLifecycleStateLock(async () => {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    const workspace = mergeStoredState(stored[STORAGE_KEY], createDefaultState());
-    const interrupted = interruptOrphanedAskStreams(workspace.askSessions, {
-      ownerId: options.ownerId,
-      requestId,
-      pendingBefore: options.pendingBefore,
-    });
-    if (interrupted.length === 0) return interrupted;
-    workspace.ai = { ...workspace.ai, apiKey: '' };
-    delete workspace.ai.maxTokens;
-    await chrome.storage.local.set({ [STORAGE_KEY]: workspace });
-    return interrupted;
-  });
-}
-
-async function fetchChatCompletion(settings, messages, purpose, itemCount, signal, onStream = null) {
+async function fetchChatCompletion(settings, messages, purpose, itemCount, signal) {
   const request = buildChatCompletionRequest(settings, messages, purpose, itemCount);
-  if (onStream) request.body.stream = true;
   const response = await fetch(request.url, {
     method: request.method,
     headers: request.headers,
@@ -2021,52 +1697,5 @@ async function fetchChatCompletion(settings, messages, purpose, itemCount, signa
     );
   }
 
-  const contentType = response.headers.get('content-type') || '';
-  if (!onStream || !contentType.includes('text/event-stream') || !response.body) {
-    return response.json();
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let text = '';
-  let usage = null;
-  let finishReason = null;
-  let streamDone = false;
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const event = parseChatStreamEvent(line);
-      if (!event) continue;
-      if (event.done) {
-        streamDone = true;
-        break;
-      }
-      if (event.usage) usage = event.usage;
-      if (event.finishReason) finishReason = event.finishReason;
-      if (event.text) {
-        text += event.text;
-        await onStream(text);
-      }
-    }
-    if (streamDone) {
-      await reader.cancel().catch(() => null);
-      break;
-    }
-    if (done) break;
-  }
-  const finalEvent = streamDone ? null : parseChatStreamEvent(buffer);
-  if (finalEvent?.text) {
-    text += finalEvent.text;
-    await onStream(text);
-  }
-  if (finalEvent?.usage) usage = finalEvent.usage;
-  if (finalEvent?.finishReason) finishReason = finalEvent.finishReason;
-  return {
-    choices: [{ message: { content: text }, finish_reason: finishReason }],
-    usage,
-  };
+  return response.json();
 }

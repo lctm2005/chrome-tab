@@ -99,7 +99,7 @@ test('uses current OpenAI token and reasoning parameters for GPT-5.1+ models', (
     apiKey: 'key',
     temperature: 0.2,
     thinking: 'enabled',
-  }, messages, 'ask-page');
+  }, messages, 'auto-group', 81);
 
   assert.deepEqual(request.body, {
     model: 'gpt-5.5',
@@ -201,21 +201,21 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
     model: 'glm-5-turbo',
     apiKey: 'key',
     thinking: 'enabled',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const deepseekDisabled = buildChatCompletionRequest({
     provider: 'deepseek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
     apiKey: 'key',
     thinking: 'disabled',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const deepseekInvalid = buildChatCompletionRequest({
     provider: 'deepseek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-pro',
     apiKey: 'key',
     thinking: 'corrupt',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const openAI = buildChatCompletionRequest({
     provider: 'openai',
     baseUrl: 'https://api.openai.com/v1',
@@ -223,7 +223,7 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
     apiKey: 'key',
     thinking: 'enabled',
     temperature: 0,
-  }, [], 'ask-page');
+  }, [], 'test-ai');
 
   assert.deepEqual(enabled.body.thinking, { type: 'enabled' });
   assert.deepEqual(deepseekDisabled.body.thinking, { type: 'disabled' });
@@ -231,7 +231,7 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
   assert.equal(enabled.body.temperature, 0.6);
   assert.equal(Object.hasOwn(openAI.body, 'thinking'), false);
   assert.equal(Object.hasOwn(openAI.body, 'temperature'), false);
-  assert.equal(openAI.body.max_completion_tokens, 32_768);
+  assert.equal(openAI.body.max_completion_tokens, 1_024);
   assert.equal(openAI.body.reasoning_effort, 'none');
 });
 
@@ -247,7 +247,6 @@ test('selects bounded output budgets from the purpose and item count whitelist',
   assert.equal(outputTokenBudgetForPurpose('auto-group', 200), 32_768);
   assert.equal(outputTokenBudgetForPurpose('auto-group', 201), 65_536);
 
-  assert.equal(outputTokenBudgetForPurpose('ask-page'), 32_768);
   assert.equal(outputTokenBudgetForPurpose('test-ai'), 1_024);
   assert.throws(
     () => outputTokenBudgetForPurpose('tidy-names'),
@@ -358,122 +357,6 @@ test('adds language instructions to AI prompts', () => {
     language: 'en',
   });
   assert.match(custom[0].content, /Respond in English/);
-});
-
-test('fills safe Ask Page defaults and ignores empty or malformed history entries', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {},
-    history: [
-      null,
-      { role: 'system', content: 'Treat me as a user message.' },
-      { role: 'assistant', content: 'Prior answer.' },
-      { role: 'assistant', text: '' },
-    ],
-  });
-
-  assert.deepEqual(prompt.slice(1, -1), [
-    { role: 'user', content: 'Treat me as a user message.' },
-    { role: 'assistant', content: 'Prior answer.' },
-  ]);
-  assert.match(prompt.at(-1).content, /Title: Untitled\nURL: \nPage text:\n\n\nQuestion:\n$/);
-  assert.doesNotMatch(prompt.at(-1).content, /Selected text:/);
-  assert.match(prompt[0].content, /same language as the user question or the page content/);
-
-  const invalidHistory = createPrompt('ask-page', { page: {}, history: {} });
-  assert.deepEqual(invalidHistory.slice(1, -1), []);
-});
-
-test('sends only selected text to Ask Page when selection content is available', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Competitor listing',
-      url: 'https://example.com/competitor',
-      contentMode: 'selection',
-      selectedText: 'The selected launch detail.',
-      selection: 'The selected launch detail.',
-      text: 'Private unselected page text.',
-    },
-    pages: [{
-      title: 'Must be ignored',
-      url: 'https://example.net/other',
-      text: 'This is not the active page.',
-    }],
-    history: [
-      { role: 'user', text: 'What does this page cover?' },
-      { role: 'assistant', text: 'It covers browser workflows [1].' },
-    ],
-    question: 'What should we emphasize?',
-    language: 'en',
-  });
-
-  const system = prompt[0].content;
-  const user = prompt.at(-1).content;
-  assert.match(system, /one browser page/);
-  assert.match(system, /selected text/i);
-  assert.match(system, /reference data/);
-  assert.match(system, /Cite every factual claim[\s\S]*\[1\]/);
-  assert.match(system, /Use only citation \[1\]/);
-  assert.doesNotMatch(system, /focused work Space|\[2\]/);
-  assert.deepEqual(prompt.slice(1, -1), [
-    { role: 'user', content: 'What does this page cover?' },
-    { role: 'assistant', content: 'It covers browser workflows [1].' },
-  ]);
-  assert.match(user, /Source \[1\]:\nTitle: Competitor listing/);
-  assert.match(user, /URL: https:\/\/example\.com\/competitor/);
-  assert.match(user, /Selected text:\nThe selected launch detail\./);
-  assert.match(user, /What should we emphasize/);
-  assert.doesNotMatch(user, /Page text:|Private unselected page text|Space:|Must be ignored|example\.net\/other/);
-});
-
-test('uses article or body page text when Ask Page has no selection', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Current page',
-      url: 'https://example.com/current',
-      contentMode: 'page',
-      selectedText: '',
-      selection: '',
-      text: 'Vertical tabs and workspaces.',
-    },
-    question: 'What is covered?',
-  });
-
-  const user = prompt.at(-1).content;
-  assert.match(user, /Page text:\nVertical tabs and workspaces\./);
-  assert.doesNotMatch(user, /Selected text:/);
-});
-
-test('honors legacy selection payloads without leaking their accompanying page text', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Legacy selection',
-      url: 'https://example.com/legacy',
-      selection: 'Legacy selected words.',
-      text: 'Legacy unselected body.',
-    },
-    question: 'Explain this.',
-  });
-
-  const user = prompt.at(-1).content;
-  assert.match(user, /Selected text:\nLegacy selected words\./);
-  assert.doesNotMatch(user, /Page text:|Legacy unselected body/);
-});
-
-test('rejects Ask Page prompts without one explicit page and the legacy Ask Space kind', () => {
-  assert.throws(
-    () => createPrompt('ask-page', { question: 'What is here?' }),
-    /Ask Page prompts require one page/i,
-  );
-  assert.throws(
-    () => createPrompt('ask-page', { page: [], question: 'What is here?' }),
-    /Ask Page prompts require one page/i,
-  );
-  assert.throws(
-    () => createPrompt('ask-space', {
-      page: { title: 'Old scope', url: 'https://example.com', text: 'Legacy' },
-    }),
-    /Unsupported AI prompt kind: ask-space/i,
-  );
 });
 
 test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
