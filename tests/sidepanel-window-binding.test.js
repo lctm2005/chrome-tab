@@ -197,7 +197,7 @@ test('new and saved tab creation stop compensation at the durable commit boundar
   assert.match(cleanupSource, /result\.closedTabIds\.length > 0[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
 });
 
-test('Command Palette tools and group close buttons keep their gesture-time binding', () => {
+test('Command Palette tools and group header buttons keep their gesture-time binding', () => {
   const palette = functions.get('runSelectedCommandPaletteItem');
   assert.ok(palette);
   const paletteSource = source.slice(palette.start, palette.end);
@@ -212,13 +212,18 @@ test('Command Palette tools and group close buttons keep their gesture-time bind
     const fnSource = source.slice(fn.start, fn.end);
     assert.match(
       fnSource,
-      /actionButton\('↓', 'Close group', \(windowBinding\) => closeGroupToSaved\(group, \{ windowBinding \}\)/,
+      /actionButton\('✎', 'Rename group', \(windowBinding\) => renameGroup\(group, \{ windowBinding \}\)/,
       `${name} must forward actionButton's gesture-time binding`,
     );
     assert.match(
       fnSource,
-      /actionButton\('↗', 'Open group', \(windowBinding\) => openDormantGroup\(group, \{ windowBinding \}\)/,
-      `${name} must preserve the binding when opening a saved group`,
+      /actionButton\('×', 'Delete group', \(windowBinding\) => deleteGroup\(group, \{ windowBinding \}\)/,
+      `${name} must preserve the binding when deleting a group`,
+    );
+    assert.match(
+      fnSource,
+      /header\.addEventListener\('click', \(event\) => \{[\s\S]*handleGroupHeaderClick\(event, group\)/,
+      `${name} must keep collapse/expand wired to close/open at gesture time`,
     );
   }
 });

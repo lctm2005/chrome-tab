@@ -433,6 +433,17 @@ h1 {
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* Chrome-style color band: a Tag tints its card with its own color. */
+.group-card {
+  background: color-mix(in srgb, var(--group-color, var(--accent)) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--group-color, var(--accent)) 30%, var(--glass-border));
+}
+
+.group-card.collapsed {
+  background: color-mix(in srgb, var(--group-color, var(--accent)) 18%, var(--surface));
+  border-color: color-mix(in srgb, var(--group-color, var(--accent)) 45%, var(--glass-border));
+}
+
 .group-card:hover,
 .folder-direct-group:hover,
 .folder-section:hover {
@@ -508,7 +519,7 @@ h1 {
 }
 
 .group-header {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   margin: 0;
 }
 
@@ -790,6 +801,25 @@ h1 {
 .ungrouped-list {
   flex: 1;
   padding-left: 0;
+}
+
+
+.group-chevron {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+
+.group-chevron svg {
+  transform: rotate(0deg);
+}
+
+.group-card.collapsed .group-chevron svg,
+.folder-direct-group.collapsed .group-chevron svg {
+  transform: rotate(-90deg);
 }
 
 /* --- TAB ROW --- */

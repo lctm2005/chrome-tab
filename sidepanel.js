@@ -2473,6 +2473,8 @@ function createGroupCard(group) {
   const card = document.createElement('section');
   card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
   card.dataset.groupKey = group.key;
+  // Chrome-style color band: the Tag's color tints the whole card.
+  card.style.setProperty('--group-color', groupColor(group.color));
   if (canDragGroup) {
     card.addEventListener('dragover', (event) => acceptGroupOrTabDrop(event, group));
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
@@ -2489,18 +2491,20 @@ function createGroupCard(group) {
     header.addEventListener('dragend', clearDragState);
   }
   const toggle = createGroupToggle(group, group.displayTitle || group.title);
+  const chevron = document.createElement('span');
+  chevron.className = 'group-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
   const actions = document.createElement('div');
   actions.className = 'group-actions';
-  const groupAction = group.dormant
-    ? actionButton('↗', 'Open group', (windowBinding) => openDormantGroup(group, { windowBinding }))
-    : actionButton('↓', 'Close group', (windowBinding) => closeGroupToSaved(group, { windowBinding }));
-  if (hasForeignLiveTabs) {
-    groupAction.disabled = true;
-    groupAction.title = 'Open this Space in the other window to change this group.';
-    groupAction.setAttribute('aria-label', groupAction.title);
-  }
-  actions.append(groupAction);
-  header.append(toggle, actions);
+  const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
+  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
+  actions.append(renameButton, deleteButton);
+  header.append(toggle, chevron, actions);
+  header.addEventListener('click', (event) => {
+    if (event.target.closest('.group-actions')) return;
+    handleGroupHeaderClick(event, group);
+  });
   bindGroupPreview(header, group);
 
   const list = document.createElement('div');
@@ -2539,18 +2543,20 @@ function createFolderTabs(group) {
     header.addEventListener('dragend', clearDragState);
   }
   const toggle = createGroupToggle(group, group.displayTitle || 'Tabs');
+  const chevron = document.createElement('span');
+  chevron.className = 'group-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
   const actions = document.createElement('div');
   actions.className = 'group-actions';
-  const groupAction = group.dormant
-    ? actionButton('↗', 'Open group', (windowBinding) => openDormantGroup(group, { windowBinding }))
-    : actionButton('↓', 'Close group', (windowBinding) => closeGroupToSaved(group, { windowBinding }));
-  if (hasForeignLiveTabs) {
-    groupAction.disabled = true;
-    groupAction.title = 'Open this Space in the other window to change this group.';
-    groupAction.setAttribute('aria-label', groupAction.title);
-  }
-  actions.append(groupAction);
-  header.append(toggle, actions);
+  const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
+  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
+  actions.append(renameButton, deleteButton);
+  header.append(toggle, chevron, actions);
+  header.addEventListener('click', (event) => {
+    if (event.target.closest('.group-actions')) return;
+    handleGroupHeaderClick(event, group);
+  });
   bindGroupPreview(header, group);
 
   const list = document.createElement('div');
@@ -2575,7 +2581,6 @@ function createGroupToggle(group, title) {
     ${groupFolderIcon(group.color, group.collapsed)}
     <h2>${escapeHtml(title || 'Group')}</h2>
   `;
-  toggle.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
   toggle.addEventListener('keydown', (event) => {
     if (!isContextMenuKey(event)) return;
     showGroupContextMenu(event, group);
@@ -6863,6 +6868,18 @@ function handleFolderHeaderClick(event, folder) {
 
 function handleGroupHeaderClick(event, group) {
   if (shouldSuppressHeaderClickAfterDrag(event)) return;
+  // Collapse-on-live saves and closes the group's tabs (closeGroupToSaved);
+  // expand-on-dormant restores them (openDormantGroup). A folded live group
+  // and an expanded dormant group toggle the plain disclosure state.
+  const currentlyExpanded = !group.collapsed;
+  if (group.dormant && !currentlyExpanded) {
+    runTask((windowBinding) => openDormantGroup(group, { windowBinding }));
+    return;
+  }
+  if (!group.dormant && currentlyExpanded) {
+    runTask((windowBinding) => closeGroupToSaved(group, { windowBinding }));
+    return;
+  }
   const focusRestoreToken = disclosureFocusGuard.capture(
     document.activeElement === event.currentTarget,
   );

@@ -4422,7 +4422,7 @@ async function main() {
       document.querySelector('#settingsCloseButton')?.click();
       const card = [...document.querySelectorAll('#groupsList .group-card')]
         .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
-      card?.querySelector('button[aria-label="Close group"]')?.click();
+      card?.querySelector('.group-header')?.click();
       return Boolean(card);
     })()`);
     const closedTag = await waitFor(client, `(() => {
@@ -4440,25 +4440,25 @@ async function main() {
         runtimeIds: (runtime.tabs || []).map((tab) => tab.id),
       };
       if (!saved || saved.tabs?.length !== 2 ||
-          !card?.querySelector('button[aria-label="Open group"]') ||
+          !card?.classList.contains('collapsed') ||
           (runtime.tabs || []).some((tab) => [201, 202].includes(Number(tab.id)))) return null;
       return {
         savedRows: saved.tabs.length,
-        openButton: Boolean(card.querySelector('button[aria-label="Open group"]')),
+        dormantCollapsed: card.classList.contains('collapsed'),
         status,
       };
     })()`, 7000);
     record(
       'Close group preserves the Tag and both pages as dormant rows',
       closedTag.savedRows === 2 &&
-        closedTag.openButton && closedTag.status.includes('Tag remains saved'),
+        closedTag.dormantCollapsed && closedTag.status.includes('Tag remains saved'),
       JSON.stringify(closedTag),
     );
 
     await evaluate(client, `(() => {
       const card = [...document.querySelectorAll('#groupsList .group-card')]
         .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
-      card?.querySelector('button[aria-label="Open group"]')?.click();
+      card?.querySelector('.group-header')?.click();
     })()`);
     const reopenedTag = await waitFor(client, `(() => {
       const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
@@ -4468,7 +4468,7 @@ async function main() {
       const groupTabs = (runtime.tabs || []).filter((tab) => (
         ['https://example.com/move-alpha', 'https://example.com/move-beta'].includes(tab.url)
       ));
-      if (groupTabs.length !== 2 || !card?.querySelector('button[aria-label="Close group"]')) return null;
+      if (groupTabs.length !== 2 || card?.classList.contains('collapsed')) return null;
       return {
         liveRows: groupTabs.length,
         grouped: groupTabs.every((tab) => Number(tab.groupId) >= 0),
