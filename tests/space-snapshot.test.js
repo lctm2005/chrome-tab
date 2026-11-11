@@ -578,6 +578,82 @@ test('stable group identity keeps same-title same-color groups separate during r
   ]);
 });
 
+test('a saved Tag whose only row moved into a reserved live Tag is dropped', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        snapshotGroupId: 'old-tag', title: 'Old', color: 'blue', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-old', title: 'Moved', url: 'https://moved.test/page' }],
+      },
+      {
+        snapshotGroupId: 'live-a', title: 'Keeper', color: 'red', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-keep', title: 'Kept', url: 'https://kept.test/page' }],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-a', title: 'Keeper', color: 'red', collapsed: false,
+      tabs: [
+        { snapshotTabId: 'row-old', title: 'Moved', url: 'https://moved.test/page' },
+        { snapshotTabId: 'row-keep', title: 'Kept', url: 'https://kept.test/page' },
+      ],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(merged.groups.map((group) => group.snapshotGroupId), ['live-a']);
+  assert.deepEqual(new Set(merged.groups[0].tabs.map((tab) => tab.snapshotTabId)), new Set(['row-old', 'row-keep']));
+});
+
+test('empty saved Tags survive only as duplicate merge candidates without preserveGroups', () => {
+  const duplicatesSnapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+      { snapshotGroupId: 'dup-b', title: 'docs', color: 'pink', collapsed: true, tabs: [] },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(duplicatesSnapshot, duplicatesSnapshot.groups[0]), true);
+  assert.equal(snapshotGroupShouldPersist(duplicatesSnapshot, duplicatesSnapshot.groups[1]), true);
+  assert.equal(snapshotHasPersistentContent(duplicatesSnapshot), true);
+
+  const uniqueSnapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'solo', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(uniqueSnapshot, uniqueSnapshot.groups[0]), false);
+  assert.equal(snapshotHasPersistentContent(uniqueSnapshot), false);
+  assert.equal(snapshotHasPersistentContent(null), false);
+  assert.equal(snapshotHasPersistentContent(undefined), false);
+
+  const duplicatesWithRows = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+      {
+        snapshotGroupId: 'dup-b', title: 'Docs', color: 'pink', collapsed: true,
+        tabs: [{ title: 'Saved', url: 'https://example.test/saved' }],
+      },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(duplicatesWithRows, duplicatesWithRows.groups[0]), true);
+});
+
 test('same-title saved and live Tags with different stable identities remain visible to Tidy', () => {
   const stored = {
     version: 1,

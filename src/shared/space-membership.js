@@ -205,7 +205,7 @@ export function restoreLiveSpaceOwnership(
   return { restoredTabs, restoredGroups, restoredLifecycle };
 }
 
-export function restoreSnapshotOwnership(state, tabs = [], groups = []) {
+export function restoreSnapshotOwnership(state, tabs = [], groups = [], options = {}) {
   const metadata = {
     groupTitles: {},
     renamedTabs: {},
@@ -213,13 +213,26 @@ export function restoreSnapshotOwnership(state, tabs = [], groups = []) {
   const snapshots = state?.spaceSnapshots || {};
   if (!snapshots || Object.keys(snapshots).length === 0) return metadata;
 
+  // Chrome group ids that a concurrent delete transaction is removing must not
+  // be re-bound here: re-binding them before the delete commit would make the
+  // commit believe another Space owns the group and skip its cleanup.
+  const skipGroupIds = new Set((Array.isArray(options.skipGroupIds)
+    ? options.skipGroupIds
+    : []).map(Number).filter(Number.isSafeInteger));
+
   if (!state.groupSpaces || typeof state.groupSpaces !== 'object') state.groupSpaces = {};
   if (!state.tabSpaces || typeof state.tabSpaces !== 'object') state.tabSpaces = {};
   if (!state.renamedTabs || typeof state.renamedTabs !== 'object') state.renamedTabs = {};
 
   const tabsByGroupId = groupedTabsByGroupId(tabs);
   const snapshotGroups = snapshotGroupCandidates(snapshots);
-  restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups, metadata);
+  restoreGroupedOwnership(
+    state,
+    (groups || []).filter((group) => !skipGroupIds.has(Number(group?.id))),
+    tabsByGroupId,
+    snapshotGroups,
+    metadata,
+  );
   restoreUngroupedOwnership(state, tabs, snapshotTabCandidates(snapshots), metadata);
   return metadata;
 }
@@ -701,7 +714,8 @@ export function removeSpaceReferences(state, spaceId) {
 }
 
 function restoreGroupedOwnership(state, groups, tabsByGroupId, snapshotGroups, metadata) {
-  for (const group of groups || []) {
+  // The only caller pre-filters the group list, so it is always an array.
+  for (const group of groups) {
     const groupTabs = tabsByGroupId.get(Number(group.id)) || [];
     if (!groupTabs.some((tab) => tab?.url)) continue;
 

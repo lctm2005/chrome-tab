@@ -1392,6 +1392,32 @@ test('cleans stale virtual mappings from grouped live tabs', () => {
   assert.deepEqual(state.virtualGroups, {});
 });
 
+test('restore can skip the Chrome group ids a concurrent delete is removing', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    groupOrder: {},
+    spaceSnapshots: {
+      work: {
+        groups: [{
+          title: 'Docs',
+          color: 'blue',
+          tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+        }],
+      },
+    },
+  };
+  const docsGroup = { id: 9, title: 'Docs', color: 'blue' };
+  const otherGroup = { id: 10, title: 'Missing Snapshot', color: 'red' };
+
+  restoreSnapshotOwnership(state, [
+    { id: 41, groupId: 9, url: 'https://example.com/spec' },
+  ], [docsGroup, otherGroup], { skipGroupIds: [9] });
+
+  assert.deepEqual(state.groupSpaces, {});
+  assert.equal(state.groupOrder.work, undefined);
+});
+
 test('treats missing snapshots as a no-op and repairs damaged ownership maps before restore', () => {
   assert.deepEqual(restoreSnapshotOwnership(null), {
     groupTitles: {},

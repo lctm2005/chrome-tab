@@ -60,14 +60,32 @@ export function uniqueSnapshotGroupForTabId(groups = [], snapshotTabId = '') {
 export function snapshotGroupShouldPersist(snapshot = {}, group = {}) {
   return (group.tabs || []).length > 0 || Boolean(
     snapshot?.preserveGroups && !isUngroupedSnapshotGroup(group)
-  );
+  ) || snapshotEmptyTagIsMergeCandidate(snapshot, group);
 }
 
 export function snapshotHasPersistentContent(snapshot = {}) {
   return snapshotTabCount(snapshot) > 0 || Boolean(
     snapshot?.preserveGroups &&
     (snapshot.groups || []).some((group) => !isUngroupedSnapshotGroup(group))
-  );
+  ) || (snapshot?.groups || []).some((group) => snapshotEmptyTagIsMergeCandidate(snapshot, group));
+}
+
+/**
+ * An emptied saved Tag has nothing to restore, so it only earns persistence
+ * while its title still collides with another Tag: those rows are exactly the
+ * duplicates the local Tidy merge can clean up. A uniquely named empty Tag is
+ * unremovable residue, which is what makes stale preserveGroups flags noisy.
+ */
+export function snapshotEmptyTagIsMergeCandidate(snapshot, group = {}) {
+  if ((group.tabs || []).length > 0) return false;
+  if (isUngroupedSnapshotGroup(group)) return false;
+  const title = groupTitleKey(group?.title);
+  if (!title) return false;
+  const groups = snapshot?.groups || [];
+  return groups.filter((candidate) => (
+    !isUngroupedSnapshotGroup(candidate) &&
+    groupTitleKey(candidate?.title) === title
+  )).length > 1;
 }
 
 /**
@@ -549,7 +567,7 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
     if (group.tabs.length > 0) mergedGroups.push(group);
   }
 
-  return {
+  const mergedSnapshot = {
     // A snapshot is a portable record and may contain metadata written by a
     // newer version or an importer. Refreshing its live rows must not silently
     // strip those top-level extension fields during a Space round trip.
@@ -561,9 +579,11 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
       ? { identityVersion: liveSnapshot.identityVersion || storedSnapshot.identityVersion }
       : {}),
     ...(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups ? { preserveGroups: true } : {}),
-    groups: mergedGroups.filter((group) => snapshotGroupShouldPersist({
-      preserveGroups: Boolean(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups),
-    }, group)),
+    groups: mergedGroups,
+  };
+  return {
+    ...mergedSnapshot,
+    groups: mergedGroups.filter((group) => snapshotGroupShouldPersist(mergedSnapshot, group)),
   };
 }
 
