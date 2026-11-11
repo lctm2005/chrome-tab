@@ -91,6 +91,12 @@ import {
   resolveSnapshotTabRemovalMatch,
 } from './src/shared/dormant-snapshot.js';
 import {
+  normalizeTidyRuleSettings,
+  tidyRuleEnabled,
+  tidyRulePrompt,
+  TIDY_RULES,
+} from './src/shared/tidy-rules.js';
+import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
   organizationCandidateIdsOpenInOtherWindows,
@@ -4925,6 +4931,11 @@ async function closeGroupToSaved(group, options = {}) {
   const skipped = result.skippedTabs.length;
   setStatus(`Closed ${formatCount(closed, 'tab')} in "${group.displayTitle || group.title}"; the Tag remains saved.` +
     (skipped > 0 ? ` Skipped ${formatCount(skipped, 'changed tab')}.` : ''));
+  // The card is now a folded dormant Tag under a new key; keep keyboard focus
+  // on its header so collapse-bound close remains reachable from the keyboard.
+  [...document.querySelectorAll('.group-card .group-toggle')]
+    .find((item) => item.querySelector('h2')?.textContent === (group.displayTitle || group.title))
+    ?.focus();
 }
 
 async function openDormantGroup(group, options = {}) {
@@ -4937,6 +4948,11 @@ async function openDormantGroup(group, options = {}) {
     opened += 1;
   }
   setStatus(`Opened ${formatCount(opened, 'tab')} in "${group.displayTitle || group.title}".`);
+  // The restored Tag is an expanded live card; keep keyboard focus on its
+  // header so collapse-bound close stays reachable.
+  [...document.querySelectorAll('.group-card .group-toggle')]
+    .find((item) => item.querySelector('h2')?.textContent === (group.displayTitle || group.title))
+    ?.focus();
 }
 
 async function deleteGroup(group, options = {}) {
@@ -8588,6 +8604,8 @@ async function applyTidyNamingPhase(plan = {}, options = {}) {
     committed = true;
     if (!isCurrentPanelWindowBinding(windowBinding)) {
       options.onWarning('Tidy was saved, but this panel moved before its view could refresh.');
+    } else {
+      render();
     }
   });
   if (!committed) {
