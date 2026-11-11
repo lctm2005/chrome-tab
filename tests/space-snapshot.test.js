@@ -19,6 +19,7 @@ import {
   retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
+  snapshotEmptyTagIsMergeCandidate,
   snapshotHasPersistentContent,
   snapshotGroupShouldPersist,
   snapshotTabIdentitiesConflict,
@@ -638,6 +639,28 @@ test('empty saved Tags survive only as duplicate merge candidates without preser
   assert.equal(snapshotHasPersistentContent(uniqueSnapshot), false);
   assert.equal(snapshotHasPersistentContent(null), false);
   assert.equal(snapshotHasPersistentContent(undefined), false);
+
+  // Direct branch coverage: the merge-candidate rule must not depend on
+  // reducer timing elsewhere for every branch to stay exercised.
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'tabbed', title: 'Docs', color: 'blue', tabs: [{ title: 'T', url: 'https://t.test' }],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'empty-grouped', title: 'Ungrouped', color: 'grey', tabs: [],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'untitled', title: '   ', color: 'blue', tabs: [],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(null, {
+    snapshotGroupId: 'orphan', title: 'Docs', color: 'blue', tabs: [],
+  }), false);
+  assert.equal(snapshotHasPersistentContent({
+    version: 1,
+    groups: [{
+      snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false,
+      tabs: [{ title: 'T', url: 'https://t.test' }],
+    }],
+  }), true);
 
   const duplicatesWithRows = {
     version: 1,
