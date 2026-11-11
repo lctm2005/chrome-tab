@@ -297,16 +297,14 @@ async function closeTarget(client, targetId) {
   await client.send('Target.closeTarget', { targetId }).catch(() => null);
 }
 
-async function expandSavedOnlyGroup(client, sessionId) {
+// Expanding a dormant Tag now restores its tabs (collapse-bound close/open),
+// so the lab verifies the saved Tag through its collapsed card and storage
+// instead of expanding it.
+async function waitForSavedOnlyCollapsedCard(client, sessionId) {
   await waitFor(client, sessionId, `(() => {
-    const card = [...document.querySelectorAll('.group-card')].find((candidate) =>
+    const card = [...document.querySelectorAll('.group-card.collapsed')].find((candidate) =>
       candidate.querySelector('.group-header h2')?.textContent === 'Saved Only');
-    if (!card) return false;
-    if (card.classList.contains('collapsed')) {
-      card.querySelector('.group-toggle')?.click();
-      return false;
-    }
-    return true;
+    return Boolean(card);
   })()`, 10000);
 }
 
@@ -563,9 +561,9 @@ function assertPanelState({ state, fixture, urls, expectedPortable, previousIds 
   assert(Object.keys(state.liveMaps.renamedTabs).length === 1,
     'A panel-only rename was guessed for a duplicate URL tab', state.liveMaps.renamedTabs);
 
-  assert(state.rows.length === 5, 'DOM contains duplicate or missing stable rows', state.rows);
+  assert(state.rows.length === 4, 'DOM contains duplicate or missing stable rows', state.rows);
   const rowIdentityCounts = Object.fromEntries(Object.values(SNAPSHOT_IDS)
-    .filter((id) => id.startsWith('tab:'))
+    .filter((id) => id.startsWith('tab:') && id !== SNAPSHOT_IDS.saved)
     .map((id) => [id, state.rows.filter((row) => row.snapshotTabId === id).length]));
   assert(Object.values(rowIdentityCounts).every((count) => count === 1),
     'A stable row identity did not render exactly once', rowIdentityCounts);
@@ -575,7 +573,6 @@ function assertPanelState({ state, fixture, urls, expectedPortable, previousIds 
     SNAPSHOT_IDS.duplicateB,
   ].includes(row.snapshotTabId));
   const ungroupedRow = state.rows.find((row) => row.snapshotTabId === SNAPSHOT_IDS.ungrouped);
-  const savedRow = state.rows.find((row) => row.snapshotTabId === SNAPSHOT_IDS.saved);
   assert(uniqueRow && !uniqueRow.dormant && uniqueRow.title === PANEL_ALIAS &&
     uniqueRow.groupTitle === GROUP_LOGICAL_TITLE,
   'Logical group title or panel alias was not rendered exactly', uniqueRow);
@@ -583,8 +580,12 @@ function assertPanelState({ state, fixture, urls, expectedPortable, previousIds 
     'Duplicate URL stable rows did not remain two live rows', duplicateRows);
   assert(ungroupedRow && !ungroupedRow.dormant && ungroupedRow.groupTitle === 'Ungrouped',
     'Persistent Ungrouped row was not restored live', ungroupedRow);
-  assert(savedRow && savedRow.dormant && savedRow.title === 'Saved-only exact alias',
-    'Saved-only stable identity did not remain one dormant row', savedRow);
+  const savedSnapshotGroup = (state.portable.snapshot || [])
+    .find((group) => group.title === 'Saved Only');
+  const savedSnapshotRow = (savedSnapshotGroup?.tabs || [])
+    .find((tab) => tab.snapshotTabId === SNAPSHOT_IDS.saved);
+  assert(savedSnapshotRow && savedSnapshotRow.panelTitle === 'Saved-only exact alias',
+    'Saved-only stable identity lost its durable row or panel alias', state.portable.snapshot);
 
   if (previousIds) {
     assert(state.browserSessionId && state.browserSessionId === state.sessionBrowserId &&
@@ -793,7 +794,7 @@ async function main() {
     })()`);
 
     workbench = await attachPage(client, workbenchUrl);
-    await expandSavedOnlyGroup(client, workbench.sessionId);
+    await waitForSavedOnlyCollapsedCard(client, workbench.sessionId);
     const baseline = await waitFor(
       client,
       workbench.sessionId,
@@ -865,7 +866,7 @@ async function main() {
     'Chrome did not restore the expected live fixture set', prePanelRestart.fixtureUrls);
 
     workbench = await attachPage(client, workbenchUrl);
-    await expandSavedOnlyGroup(client, workbench.sessionId);
+    await waitForSavedOnlyCollapsedCard(client, workbench.sessionId);
     const restarted = await waitFor(
       client,
       workbench.sessionId,
@@ -889,7 +890,7 @@ async function main() {
 
     await client.send('Page.reload', {}, workbench.sessionId);
     await waitFor(client, workbench.sessionId, `document.readyState === 'complete'`, 10000);
-    await expandSavedOnlyGroup(client, workbench.sessionId);
+    await waitForSavedOnlyCollapsedCard(client, workbench.sessionId);
     const reloaded = await waitFor(
       client,
       workbench.sessionId,
