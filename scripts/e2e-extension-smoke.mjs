@@ -5257,6 +5257,17 @@ async function main() {
     );
     progress('Command Palette Space switch passed');
 
+    // Dormant Tags render collapsed by default, so the saved row only exists
+    // after expanding its group card (fallback restored from the original
+    // scenario, which lost it in a later smoke refactor).
+    await evaluate(client, `(() => {
+      const collapsedCard = [...document.querySelectorAll('.group-card.collapsed')]
+        .find((card) => card.querySelector('.group-header')?.textContent?.includes('Remote Saved'));
+      if (collapsedCard) collapsedCard.querySelector('.group-toggle')?.click();
+      return Boolean(collapsedCard);
+    })()`);
+    await waitFor(client, `document.querySelector('.tab-row.dormant')`, 12000);
+
     const restoredRemoteState = await waitFor(client, `(async () => {
       const stored = await chrome.storage.local.get('spaceTabsState');
       const visibleText = document.querySelector('#groupsList')?.textContent || '';
