@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildChatCompletionRequest,
+  buildListModelsRequest,
   createPrompt,
   extractAssistantText,
   extractFinishReason,
@@ -11,6 +12,7 @@ import {
   languageInstruction,
   normalizeBaseUrl,
   outputTokenBudgetForPurpose,
+  parseModelsResponse,
   parseTidyGroups,
   parseTidyNames,
   parseChatStreamEvent,
@@ -509,4 +511,38 @@ test('normalizes tidy names, aliases, duplicates, and malformed responses', () =
   assert.deepEqual(parseTidyNames('{"items":[{"id":5,"title":"From prose"}]}'), { 5: 'From prose' });
   assert.deepEqual(parseTidyNames('not json'), {});
   assert.deepEqual(parseTidyNames('[]', {}), {});
+});
+
+test('buildListModelsRequest targets the provider models endpoint with bearer auth', () => {
+  const request = buildListModelsRequest({
+    provider: 'z-ai',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
+    apiKey: ' key-123 ',
+  });
+  assert.equal(request.url, 'https://open.bigmodel.cn/api/paas/v4/models');
+  assert.equal(request.method, 'GET');
+  assert.equal(request.headers.Authorization, 'Bearer key-123');
+});
+
+test('buildListModelsRequest omits bearer auth when no key is configured', () => {
+  const request = buildListModelsRequest({
+    provider: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:8000/v1',
+  });
+  assert.equal(request.url, 'http://127.0.0.1:8000/v1/models');
+  assert.equal(request.headers.Authorization, undefined);
+  assert.throws(() => buildListModelsRequest({
+    provider: 'openai-compatible',
+    baseUrl: 'ftp://bad.example',
+    apiKey: 'key',
+  }), /HTTPS/i);
+});
+
+test('parseModelsResponse extracts sorted unique model ids and tolerates junk', () => {
+  assert.deepEqual(parseModelsResponse({
+    data: [{ id: 'glm-5.2' }, { id: 'glm-4.7' }, { id: 'glm-5.2' }, {}, null, { id: '  ' }],
+  }), ['glm-4.7', 'glm-5.2']);
+  assert.deepEqual(parseModelsResponse([]), []);
+  assert.deepEqual(parseModelsResponse(null), []);
+  assert.deepEqual(parseModelsResponse({ data: 'junk' }), []);
 });

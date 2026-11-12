@@ -1,8 +1,10 @@
 import {
   buildChatCompletionRequest,
+  buildListModelsRequest,
   extractAssistantText,
   extractFinishReason,
   outputTokenBudgetForPurpose,
+  parseModelsResponse,
 } from './src/shared/ai.js';
 import { providerRequiresApiKey } from './src/shared/ai-providers.js';
 import { chromeGroupTitle } from './src/shared/group-title.js';
@@ -211,6 +213,8 @@ async function handleMessage(message, sender = {}) {
         message.purpose,
         message.itemCount,
       );
+    case 'ai:listModels':
+      return listProviderModels(message.settings);
     case 'ai:abort':
       return abortChatCompletion(message.requestId);
     default:
@@ -1655,6 +1659,34 @@ async function runChatCompletion(
     usage: payload.usage || null,
     finishReason: extractFinishReason(payload),
   };
+}
+
+async function listProviderModels(settings) {
+  if (providerRequiresApiKey(settings) && !settings?.apiKey) {
+    throw new Error('AI API key is missing. Add it in Settings.');
+  }
+  const request = buildListModelsRequest(settings);
+  const response = await fetch(request.url, {
+    method: request.method,
+    headers: request.headers,
+  });
+  if (!response.ok) {
+    const rawBody = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      payload = { error: { message: rawBody } };
+    }
+    const providerError = payload?.error;
+    const message = (typeof providerError === 'string' ? providerError : providerError?.message) ||
+      payload?.message || rawBody || response.statusText || 'Request failed';
+    throw new Error(
+      `AI provider rejected the models request (HTTP ${response.status}): ${String(message).trim()}`,
+    );
+  }
+  const payload = await response.json();
+  return { models: parseModelsResponse(payload) };
 }
 
 async function abortChatCompletion(requestId = '') {

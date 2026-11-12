@@ -200,6 +200,27 @@ export function createPrompt(kind, context = {}) {
   throw new Error(`Unsupported AI prompt kind: ${String(kind || 'missing')}.`);
 }
 
+export function buildListModelsRequest(settings) {
+  assertSafeAIAuthTransport(settings);
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  const apiKey = String(settings.apiKey || '').trim();
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  return {
+    url: `${normalizeBaseUrl(settings.baseUrl)}/models`,
+    method: 'GET',
+    headers,
+  };
+}
+
+export function parseModelsResponse(payload) {
+  const entries = Array.isArray(payload?.data) ? payload.data : [];
+  return [...new Set(entries
+    .map((item) => String(item?.id || '').trim())
+    .filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
 export function parseTidyGroups(text) {
   try {
     const parsed = parseJsonArray(text);

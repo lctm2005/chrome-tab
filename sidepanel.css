@@ -1028,6 +1028,36 @@ h1 {
   flex-shrink: 0;
 }
 
+.space {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  box-shadow: var(--shadow-sm);
+}
+
+.space-mark {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+}
+
+.space-label {
+  display: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .space:hover,
 .space:focus-visible {
   background: var(--surface-hover);
@@ -1365,6 +1395,7 @@ dialog::backdrop {
   padding: 18px;
 }
 
+/* --- SETTINGS VIEW (in-panel) --- */
 .settings-view {
   position: absolute;
   inset: 0;
@@ -1373,6 +1404,7 @@ dialog::backdrop {
   flex-direction: column;
   background: var(--bg-elevated);
   overflow: hidden;
+  animation: fadeIn 0.2s ease;
 }
 
 .settings-view[hidden] {
@@ -1383,53 +1415,65 @@ dialog::backdrop {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid var(--line);
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .settings-head h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .settings-nav {
   display: flex;
   gap: 6px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--glass-border);
   overflow-x: auto;
   scrollbar-width: none;
 }
 
+.settings-nav::-webkit-scrollbar {
+  display: none;
+}
+
 .settings-nav-item {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-soft);
   font-size: 12px;
   font-weight: 700;
-  padding: 5px 12px;
+  padding: 6px 13px;
+  white-space: nowrap;
   cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.settings-nav-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .settings-nav-item.active {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  border-color: transparent;
   color: white;
+  box-shadow: 0 4px 12px rgba(109, 121, 255, 0.3);
 }
 
 .settings-panels {
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: 18px 16px 22px;
 }
 
 .settings-panel {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 560px;
 }
 
 .settings-panel[hidden] {
@@ -1440,6 +1484,82 @@ dialog::backdrop {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-view label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-view input,
+.settings-view select,
+.settings-view textarea {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.settings-view input:focus,
+.settings-view select:focus,
+.settings-view textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(109, 121, 255, 0.18);
+}
+
+.settings-view select option {
+  color: #100f18;
+}
+
+.settings-view input:disabled,
+.settings-view select:disabled {
+  opacity: 0.55;
+}
+
+.settings-view textarea {
+  resize: vertical;
+  min-height: 76px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.settings-view .secondary-button,
+.settings-view #testAIButton,
+.settings-view #saveSettingsButton {
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  border: 1px solid var(--glass-border);
+  font-size: 12px;
+  font-weight: 700;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.settings-view .secondary-button:hover,
+.settings-view #testAIButton:hover,
+.settings-view #saveSettingsButton:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  transform: translateY(-0.5px);
+  box-shadow: var(--shadow-md);
+}
+
+.settings-view #saveSettingsButton {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: white;
+  border: 0;
+  box-shadow: 0 4px 12px rgba(109, 121, 255, 0.3);
 }
 
 .settings-footer {
@@ -1447,7 +1567,14 @@ dialog::backdrop {
   justify-content: flex-end;
   gap: 10px;
   padding: 12px 16px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.tidy-rules-settings {
+  display: grid;
+  gap: 12px;
   border-top: 1px solid var(--line);
+  padding-top: 12px;
 }
 
 .tidy-rules-list {
@@ -1460,33 +1587,32 @@ dialog::backdrop {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
   font-size: 13px;
+  cursor: pointer;
+}
+
+.tidy-rule-row:hover {
+  background: var(--surface-hover);
 }
 
 .tidy-rule-row input[type="checkbox"] {
   width: 15px;
   height: 15px;
+  accent-color: var(--accent);
 }
 
 .tidy-rule-label {
   min-width: 0;
 }
 
-.settings-view label,
-.settings-view .settings-panel {
-  color: var(--text);
+.settings-view .settings-status {
+  margin-top: 2px;
 }
 
-.settings-view textarea {
-  resize: vertical;
-  min-height: 64px;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
 
 .dialog-title {
   display: flex;

@@ -274,6 +274,8 @@ const workbenchMode = layoutMode === 'workbench';
 document.documentElement.dataset.layout = layoutMode;
 const previewSend = createPreviewCommandHandler();
 const CUSTOM_MODEL_VALUE = '__custom__';
+// Model ids returned by the provider's /models endpoint during this session.
+let detectedModelIds = [];
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const OPERATION_UNDO_VISIBLE_MS = 10_000;
@@ -348,6 +350,7 @@ const els = {
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   groupsList: document.querySelector('#groupsList'),
   testAIButton: document.querySelector('#testAIButton'),
+  detectModelsButton: document.querySelector('#detectModelsButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
   arcImportInput: document.querySelector('#arcImportInput'),
   arcImportChooseButton: document.querySelector('#arcImportChooseButton'),
@@ -741,6 +744,7 @@ function bindEvents() {
     toggleSpaceGroups({ windowBinding })
   )));
   els.testAIButton.addEventListener('click', () => startTestAIFromUserGesture(settingsAIControls()));
+  els.detectModelsButton.addEventListener('click', () => runTask((windowBinding) => detectProviderModels(settingsAIControls(), { windowBinding })));
   els.clearApiKeyButton.addEventListener('click', () => {
     const authTarget = structuredClone(settingsBaseline?.auth || null);
     runTask((windowBinding) => clearApiKey(authTarget, { windowBinding }));
@@ -2506,7 +2510,7 @@ function createGroupCard(group) {
   const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
   const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
   actions.append(renameButton, deleteButton);
-  header.append(toggle, chevron, actions);
+  header.append(toggle, actions, chevron);
   header.addEventListener('click', (event) => {
     if (event.target.closest('.group-actions')) return;
     handleGroupHeaderClick(event, group);
@@ -2558,7 +2562,7 @@ function createFolderTabs(group) {
   const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
   const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
   actions.append(renameButton, deleteButton);
-  header.append(toggle, chevron, actions);
+  header.append(toggle, actions, chevron);
   header.addEventListener('click', (event) => {
     if (event.target.closest('.group-actions')) return;
     handleGroupHeaderClick(event, group);
@@ -9225,6 +9229,44 @@ function focusPanelForShortcuts() {
   if (!target || target.hidden) return;
   if (target === els.groupsList) target.tabIndex = -1;
   panelFocusController.request();
+}
+
+async function detectProviderModels(controls = settingsAIControls(), options = {}) {
+  const settings = currentAISettingsFromControls(controls);
+  if (!String(settings.baseUrl || '').trim()) {
+    setAIControlsStatus(controls, 'Enter a Base URL before detecting models.');
+    return;
+  }
+  setStatus('Detecting models from the provider...');
+  try {
+    await ensureAIHostPermission(settings);
+    const { models } = await send('ai:listModels', { settings }, {
+      windowBinding: options.windowBinding,
+    });
+    detectedModelIds = Array.isArray(models) ? models : [];
+    renderSettingsAISection();
+    const select = controls.modelInput;
+    for (const modelId of detectedModelIds) {
+      const option = document.createElement('option');
+      option.value = modelId;
+      option.textContent = modelId;
+      select.appendChild(option);
+    }
+    const current = currentAISettingsFromControls(controls).model;
+    if (detectedModelIds.includes(current)) {
+      select.value = current;
+      controls.customModelInput.value = '';
+    } else {
+      select.value = CUSTOM_MODEL_VALUE;
+      controls.customModelInput.value = detectedModelIds[0] || '';
+    }
+    updateCustomModelVisibility(controls);
+    setAIControlsStatus(controls, `Detected ${formatCount(detectedModelIds.length, 'model')} from ${providerById(state.ai.provider).label}. Pick one and Save.`);
+  } catch (error) {
+    detectedModelIds = [];
+    renderModelOptions(providerById(state.ai.provider), '', controls);
+    setAIControlsStatus(controls, `${formatAIError(error)} Enter the model manually.`);
+  }
 }
 
 function startTestAIFromUserGesture(controls = settingsAIControls()) {

@@ -2300,6 +2300,136 @@ test('relative tab moves recompute fresh indexes, enforce the target group, and 
   }), { ok: false, error: 'The source tab and target tab must be in the same Chrome window.' });
 });
 
+test('ai:listModels fetches the provider models endpoint and returns sorted unique ids', async () => {
+  const fetchCalls = [];
+  const background = await loadBackground({
+    fetch: async (url, init) => {
+      fetchCalls.push([url, init]);
+      return jsonResponse({ data: [{ id: 'glm-5.2' }, { id: 'glm-4.7' }, null, { id: 'glm-5.2' }] });
+    },
+  });
+
+  const response = await background.send({
+    type: 'ai:listModels',
+    settings: aiSettings,
+  });
+  assert.deepEqual(response, { ok: true, models: ['glm-4.7', 'glm-5.2'] });
+  assert.equal(fetchCalls.length, 1);
+  const [url, init] = fetchCalls[0];
+  assert.equal(url, 'https://ai.example/v1/models');
+  assert.equal(init.method, 'GET');
+  assert.equal(init.headers.Authorization, 'Bearer secret');
+});
+
+test('ai:listModels surfaces provider rejections without partial results', async () => {
+  const background = await loadBackground({
+    fetch: async () => jsonResponse({ error: { message: 'bad key' } }, { ok: false, status: 401 }),
+  });
+
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 401): bad key' },
+  );
+});
+
+test('ai:listModels preserves a non-JSON provider error body', async () => {
+  const background = await loadBackground({
+    fetch: async () => jsonResponse({ ignored: true }, { ok: false, status: 500, rawBody: 'server boom', contentType: 'text/plain' }),
+  });
+
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 500): server boom' },
+  );
+});
+
+test('ai:listModels prefers payload.message and statusText over an empty body', async () => {
+  const responses = [
+    {
+      ok: false,
+      status: 503,
+      statusText: 'upstream gone',
+      headers: { get: () => 'application/json' },
+      async json() { return { message: 'try later' }; },
+      async text() { return JSON.stringify({ message: 'try later' }); },
+    },
+    {
+      ok: false,
+      status: 502,
+      statusText: 'bad upstream',
+      headers: { get: () => 'application/json' },
+      async text() { return '"just text"'; },
+    },
+    {
+      ok: false,
+      status: 500,
+      headers: { get: () => 'application/json' },
+      async json() { return {}; },
+      async text() { return ''; },
+    },
+  ];
+  const background = await loadBackground({
+    fetch: async () => responses.shift(),
+  });
+
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 503): try later' },
+  );
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 502): "just text"' },
+  );
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 500): Request failed' },
+  );
+});
+
+test('ai:listModels reads string provider errors and payload messages', async () => {
+  const responses = [
+    {
+      ok: false,
+      status: 429,
+      statusText: 'too fast',
+      headers: { get: () => 'application/json' },
+      async json() { return { error: 'slow down' }; },
+      async text() { return JSON.stringify({ error: 'slow down' }); },
+    },
+    {
+      ok: false,
+      status: 500,
+      statusText: 'boom',
+      headers: { get: () => 'application/json' },
+      async json() { return { message: 'scheduled maintenance' }; },
+      async text() { return JSON.stringify({ message: 'scheduled maintenance' }); },
+    },
+  ];
+  const background = await loadBackground({
+    fetch: async () => responses.shift(),
+  });
+
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 429): slow down' },
+  );
+  assert.deepEqual(
+    await background.send({ type: 'ai:listModels', settings: aiSettings }),
+    { ok: false, error: 'AI provider rejected the models request (HTTP 500): scheduled maintenance' },
+  );
+});
+
+test('ai:listModels requires an API key for providers that need one', async () => {
+  const background = await loadBackground({});
+  assert.deepEqual(
+    await background.send({
+      type: 'ai:listModels',
+      settings: { ...aiSettings, apiKey: '' },
+    }),
+    { ok: false, error: 'AI API key is missing. Add it in Settings.' },
+  );
+});
+
 test('AI chat sends a bounded OpenAI-compatible request and returns text, usage, and finish reason', async () => {
   const fetchCalls = [];
   const background = await loadBackground({
