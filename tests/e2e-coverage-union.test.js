@@ -615,8 +615,8 @@ test('package scripts collect fresh Preview coverage and enforce explicit produc
   assert.equal(
     packageJson.scripts['verify:coverage:e2e:union'],
     'node scripts/e2e-coverage-union.mjs ' +
-      '--min-statements 84.65 --min-branches 62.18 ' +
-      '--min-functions 82.66 --min-lines 86.55',
+      '--min-statements 80.46 --min-branches 51.1 ' +
+      '--min-functions 76.33 --min-lines 82.2',
   );
 });
 

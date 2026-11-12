@@ -202,10 +202,19 @@ function createPipeClient(pipeWrite, pipeRead, child) {
       const message = { id: requestId, method, params };
       if (sessionId) message.sessionId = sessionId;
       return new Promise((resolve, reject) => {
+        // Runtime.evaluate awaits in-page promises such as shared-state lock
+        // acquisitions. Coverage profiling slows the panel's transaction
+        // chains, so give those evaluates a larger budget than transport
+        // methods before declaring the pipe call stuck.
+        const timeoutMs = method === 'Runtime.evaluate' ? 120000 : 45000;
         const timeout = setTimeout(() => {
           pending.delete(requestId);
+          if (method === 'Runtime.evaluate') {
+            console.error(`[cdp-evaluate-timeout] session=${sessionId || 'default'} ` +
+              `expr=${String(params.expression || '').slice(0, 400).replace(/\s+/g, ' ')}`);
+          }
           reject(new Error(`Timed out waiting for Chrome CDP method: ${method}`));
-        }, 45000);
+        }, timeoutMs);
         pending.set(requestId, { resolve, reject, timeout });
         pipeWrite.write(`${JSON.stringify(message)}\0`);
       });
@@ -12539,7 +12548,48 @@ async function main() {
 
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = structuredClone(stored.spaceTabsState || {});
-        const snapshot = saved.spaceSnapshots?.default;
+        // The removed Ask scenarios used to leave saved rows for the two base
+        // fixture URLs in the Default snapshot. This deletion scenario now
+        // owns that fixture: seed any missing row before resolving snapshot
+        // identities instead of relying on residue from earlier scenarios.
+        saved.spaceSnapshots = saved.spaceSnapshots || {};
+        saved.spaceSnapshots.default = saved.spaceSnapshots.default || {
+          version: 1,
+          identityVersion: 1,
+          updatedAt: Date.now(),
+          groups: [],
+        };
+        const snapshot = saved.spaceSnapshots.default;
+        const deletedSourceSnapshotGroupId = 'post-move-deleted-source-e2e';
+        const deletedSourceGroup = (snapshot.groups || []).find((group) =>
+          group.snapshotGroupId === deletedSourceSnapshotGroupId);
+        const missingSourceUrls = [
+          ${JSON.stringify(askFixtureServer.sourceAlphaUrl)},
+          ${JSON.stringify(askFixtureServer.sourceBetaUrl)},
+        ].filter((url) => !deletedSourceGroup?.tabs?.some((tab) => tab.url === url) &&
+          !(snapshot.groups || []).some((group) => group !== deletedSourceGroup &&
+            (group.tabs || []).some((tab) => tab.url === url)));
+        if (missingSourceUrls.length > 0) {
+          const target = deletedSourceGroup || {
+            snapshotGroupId: deletedSourceSnapshotGroupId,
+            title: 'Deleted Source',
+            color: 'blue',
+            collapsed: false,
+            tabs: [],
+          };
+          for (const url of missingSourceUrls) {
+            target.tabs = target.tabs || [];
+            target.tabs.push({
+              snapshotTabId: 'post-move-deleted-source-' + target.tabs.length + '-e2e',
+              title: url === ${JSON.stringify(askFixtureServer.sourceAlphaUrl)}
+                ? 'Ask Source Alpha'
+                : 'Ask Source Beta',
+              url,
+            });
+          }
+          if (!deletedSourceGroup) snapshot.groups = [...(snapshot.groups || []), target];
+          snapshot.updatedAt = Date.now();
+        }
         const descriptors = urls.map((url) => {
           for (const group of snapshot?.groups || []) {
             const row = (group.tabs || []).find((tab) => tab.url === url);
@@ -13294,8 +13344,14 @@ async function main() {
     await evaluate(client, `location.reload()`);
     await waitFor(client, `document.readyState === 'complete' &&
       Boolean(document.querySelector('#activeSpaceName')?.textContent)`, 15000);
-    await evaluate(client, `document.querySelector('#settingsButton').click()`);
-    await waitFor(client, `!document.querySelector('#settingsView')?.hidden`, 15000);
+    // The click toggles the view; retry until it actually opens (the reload
+    // can race the panel's init task queue while coverage profiling runs).
+    await waitFor(client, `(async () => {
+      if (!document.querySelector('#settingsView')?.hidden &&
+          document.querySelector('.shortcut-input[data-shortcut-action="addSpace"]')) return true;
+      document.querySelector('#settingsButton')?.click();
+      return false;
+    })()`, 20000);
     await evaluate(client, `(() => {
       const provider = document.querySelector('#providerInput');
       provider.value = 'openai';
@@ -14493,11 +14549,11 @@ ${error.message}`);
           binding?.trackingMode !== 'saved-target' ||
           row?.url !== ${JSON.stringify(savedTargetFixture.url)}) return null;
       return { liveTab: { id: liveTab.id, url: liveTab.url, title: liveTab.title }, binding, row };
-    })()`, 15000);
+    })()`, 60000);
     await waitFor(client, `(() => {
       const row = document.querySelector('.tab-row[data-tab-id="${openedSavedTarget.tabId}"]');
       return row?.querySelector('.tab-domain')?.textContent === 'chrome';
-    })()`);
+    })()`, 60000);
     await evaluate(client, `(() => {
       const toast = document.querySelector('#workbenchToast');
       if (toast) {
@@ -19538,7 +19594,7 @@ ${error.message}`);
       return Boolean(card);
     })()`);
     await waitFor(client, `[...document.querySelectorAll('.tab-row:not(.dormant)')].some((row) =>
-      row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 12000);
+      row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 20000);
     const captureLegacyTemporaryState = `async () => {
       if (document.querySelector('#activeSpaceName')?.textContent !==
           ${JSON.stringify(legacyTemporarySpace.name)}) return null;
@@ -19634,10 +19690,12 @@ ${error.message}`);
         ? captured
         : null;
     }`;
+    // Precise coverage profiling slows the restore-plus-purge pipeline; give
+    // the combined first-open checkpoint enough headroom to settle.
     const legacyTemporaryFirstOpen = await waitFor(
       client,
       `(${captureExactLegacyTemporaryState})()`,
-      12000,
+      30000,
     );
     const legacyTemporaryStateIsCorrect = (captured) => {
       if (!captured) return false;
@@ -19686,11 +19744,11 @@ ${error.message}`);
       document.querySelector('#activeSpaceName')?.textContent ===
         ${JSON.stringify(legacyTemporarySpace.name)} &&
       [...document.querySelectorAll('.tab-row:not(.dormant)')].some((row) =>
-        row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 15000);
+        row.querySelector('.tab-title')?.textContent === 'Kept panel title E2E')`, 25000);
     const legacyTemporaryAfterReload = await waitFor(
       client,
       `(${captureExactLegacyTemporaryState})()`,
-      12000,
+      30000,
     );
     const legacyProjectionBeforeReload = {
       groupTitles: legacyTemporaryFirstOpen?.groupTitles,
