@@ -70,12 +70,29 @@ export function decorateTabs(tabs = [], state = {}) {
     const decorated = {
       ...tabWithoutPanelTitle,
       domain,
-      displayTitle: renamedTitle || (isPlaceholderTabTitle(title) ? domain : title),
+      displayTitle: renamedTitle ||
+        (liveTitleIsPending(tab, title)
+          ? (rememberedLifecycleTitle(state, tab) || domain)
+          : title),
     };
     if (renamedTitle) decorated.panelTitle = renamedTitle;
     else delete decorated.panelTitle;
     return decorated;
   });
+}
+
+// A freshly opened or navigating tab reports its pending URL (or a spinner
+// placeholder) as the Chrome title. Those uninformative titles are bridged
+// with the last remembered page title so rows keep their name while loading.
+function liveTitleIsPending(tab = {}, cleanedTitle = '') {
+  return isPlaceholderTabTitle(cleanedTitle) ||
+    cleanedTitle === cleanTitle(tab.url);
+}
+
+function rememberedLifecycleTitle(state = {}, tab = {}) {
+  const remembered = cleanTitle(state.tabLifecycle?.[tab.id]?.title);
+  if (!remembered || liveTitleIsPending(tab, remembered)) return '';
+  return remembered;
 }
 
 export function isPlaceholderTabTitle(value) {

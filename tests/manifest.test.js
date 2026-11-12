@@ -1142,7 +1142,7 @@ test('destructive Settings and Undo actions bind the reviewed record and merge c
 
 test('Arc import and backup restore separate pre-commit rollback from post-commit UI warnings', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const restoreSource = functionSource(source, 'restoreSpaceData');
+  const restoreSource = functionSource(source, 'runRestoreSpaceData');
   const restorePreflightSource = restoreSource.slice(
     restoreSource.indexOf('const selectedBackup = pendingSpaceBackup'),
     restoreSource.indexOf('const ok = await askConfirm'),
@@ -1166,6 +1166,12 @@ test('Arc import and backup restore separate pre-commit rollback from post-commi
   assert.match(restoreSource, /Space data changed while confirmation was open\. Nothing was restored; review the selected backup and confirm again\./);
   assert.match(restoreSource, /backup restore was saved, but this view could not finish refreshing/i);
   assert.doesNotMatch(restoreSource, /restoreFailedWorkspaceMutation/);
+  // Queued Restore Backup gestures must not run a second review once the
+  // automatic review from the file selection resolves (transition counting).
+  assert.match(source, /let restoreSpaceDataReviewTransitions = 0/);
+  assert.match(source, /restoreSpaceDataReviewTransitions \+= 1;[\s\S]*await runRestoreSpaceData\(windowBinding\);[\s\S]*finally[\s\S]*restoreSpaceDataReviewTransitions \+= 1/);
+  assert.match(source, /const enqueueRestoreSpaceDataReview = \(\) => \{[\s\S]*restoreSpaceDataReviewTransitions !== seenTransitions\) return;[\s\S]*await restoreSpaceData\(\{ windowBinding \}\)/);
+  assert.match(source, /restoreSpaceDataButton\.addEventListener\('click'[\s\S]*enqueueRestoreSpaceDataReview\(\)/);
   assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 1);
   assert.equal((arcSource.match(/runDurableCommitBoundary\(\{/g) || []).length, 1);
   assert.equal((arcSource.match(/restoreWorkspaceMemoryCheckpoint\(beforeImport, \{ renderView: true \}\)/g) || []).length, 1);
@@ -1175,7 +1181,7 @@ test('Arc import and backup restore separate pre-commit rollback from post-commi
 
 test('backup restore discloses and immediately adopts currently open browser tabs', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const restoreSource = functionSource(source, 'restoreSpaceData');
+  const restoreSource = functionSource(source, 'runRestoreSpaceData');
   const adoptOpenTabsSource = functionSource(source, 'adoptAllOpenTabsIntoRestoredActiveSpace');
 
   assert.match(restoreSource, /Current browser tabs will stay open and join the restored active Space\./);

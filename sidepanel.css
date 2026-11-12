@@ -1948,7 +1948,44 @@ dialog::backdrop {
   margin-top: 6px;
 }
 
-.action-buttons .danger {
+.action-buttons button {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.action-buttons button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  transform: translateY(-0.5px);
+  box-shadow: var(--shadow-md);
+}
+
+.action-buttons button:active {
+  transform: translateY(0);
+}
+
+.action-buttons button + button {
+  border: 0;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: white;
+}
+
+.action-buttons button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.action-buttons .danger,
+.action-buttons .danger:hover {
   background: var(--danger);
   color: white;
   border: 0;

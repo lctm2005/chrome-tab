@@ -317,6 +317,12 @@ let pendingArcImportText = '';
 let pendingArcImportPlan = null;
 let arcImportSelectionGeneration = 0;
 let pendingSpaceBackup = null;
+// Counts restore-review lifecycles (one increment at entry and one at exit of
+// each restoreSpaceData run). Queued restore gestures compare this counter to
+// detect that another review already started or finished since their enqueue,
+// so a queued duplicate never re-opens a fresh confirmation after the first
+// review resolves (including a stale rejection).
+let restoreSpaceDataReviewTransitions = 0;
 let renderedGroupContexts = new Map();
 let renderedGroupDragContexts = new Map();
 let lastGroupDragEndedAt = 0;
@@ -771,17 +777,32 @@ function bindEvents() {
   els.exportSpaceDataButton.addEventListener('click', () => runTask((windowBinding) => (
     exportSpaceData({ windowBinding })
   )));
+  // Selecting a backup automatically opens its restore confirmation, so a
+  // Restore Backup click can race that review through the serialized task
+  // queue. Each enqueue records the review transition counter and a queued
+  // call is dropped when another review started or finished since; otherwise
+  // the queued duplicate would re-open a fresh confirmation dialog after the
+  // first review resolved (including a stale rejection).
+  const enqueueRestoreSpaceDataReview = () => {
+    const seenTransitions = restoreSpaceDataReviewTransitions;
+    return runTask(async (windowBinding) => {
+      if (restoreSpaceDataReviewTransitions !== seenTransitions) return;
+      await restoreSpaceData({ windowBinding });
+    });
+  };
   els.spaceBackupInput.addEventListener('change', () => runTask(async (windowBinding) => {
     await previewSpaceBackupFile({ windowBinding });
     if (pendingSpaceBackup) await restoreSpaceData({ windowBinding });
   }));
-  els.restoreSpaceDataButton.addEventListener('click', () => runTask(async (windowBinding) => {
+  els.restoreSpaceDataButton.addEventListener('click', () => {
     if (!pendingSpaceBackup) {
-      els.spaceBackupInput.click();
+      runTask(async () => {
+        els.spaceBackupInput.click();
+      });
       return;
     }
-    await restoreSpaceData({ windowBinding });
-  }));
+    enqueueRestoreSpaceDataReview();
+  });
   els.saveSettingsButton.addEventListener('click', (event) => {
     event.preventDefault();
     runTask((windowBinding) => saveSettings({ windowBinding }));
@@ -5510,7 +5531,10 @@ async function openDormantTab(tab, groupKey, options = {}) {
         snapshotGroupId: tab.snapshotGroupId || dormantGroup?.snapshotGroupId,
         spaceId: state.activeSpaceId,
         url: String(created.tab?.url || url),
-        title: String(created.tab?.title || tab.title || url),
+        // A freshly created tab reports its pending URL as the Chrome title.
+        // Seed the binding with the saved page title so the panel can bridge
+        // the loading window instead of flashing the URL on every open.
+        title: String(tab.title || created.tab?.title || url),
         panelTitle: cleanPanelName(tab.panelTitle),
         windowId: Number.isFinite(Number(created.tab?.windowId))
           ? Number(created.tab.windowId)
@@ -9338,6 +9362,15 @@ async function previewSpaceBackupFile(options = {}) {
 
 async function restoreSpaceData(options = {}) {
   const windowBinding = options.windowBinding;
+  restoreSpaceDataReviewTransitions += 1;
+  try {
+    await runRestoreSpaceData(windowBinding);
+  } finally {
+    restoreSpaceDataReviewTransitions += 1;
+  }
+}
+
+async function runRestoreSpaceData(windowBinding) {
   if (!pendingSpaceBackup) {
     setSpaceBackupStatus('Choose a Space backup first.');
     return;

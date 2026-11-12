@@ -191,6 +191,43 @@ test('decorates tabs by ignoring transient placeholder titles', () => {
   assert.equal(tabs[2].panelTitle, 'Renamed page');
 });
 
+test('bridges pending live titles with the remembered lifecycle title', () => {
+  const tabs = decorateTabs([
+    // A freshly opened saved tab reports the pending URL as its Chrome title.
+    { id: 1, title: 'https://github.com/a/b/pull/7', url: 'https://github.com/a/b/pull/7' },
+    // Spinner placeholder titles bridge the same way.
+    { id: 2, title: '...', url: 'https://bytedance.larkoffice.com/docx/123' },
+    // Remembered titles that are themselves placeholders or URL-like stay
+    // unusable, so those rows still fall back to the domain.
+    { id: 3, title: 'https://example.com/other', url: 'https://example.com/other' },
+    { id: 4, title: '...', url: 'https://example.com/placeholder-binding' },
+  ], {
+    tabLifecycle: {
+      1: { tabId: 1, title: 'GitHub Pull Request #7' },
+      2: { tabId: 2, title: 'Lark Document' },
+      3: { tabId: 3, title: 'https://example.com/other' },
+      4: { tabId: 4, title: '...' },
+    },
+  });
+
+  assert.equal(tabs[0].displayTitle, 'GitHub Pull Request #7');
+  assert.equal(tabs[1].displayTitle, 'Lark Document');
+  assert.equal(tabs[2].displayTitle, 'example.com');
+  assert.equal(tabs[3].displayTitle, 'example.com');
+});
+
+test('live titles override the remembered bridge once the page reports one', () => {
+  const tabs = decorateTabs([
+    { id: 1, title: 'GitHub Pull Request #7 (edited)', url: 'https://github.com/a/b/pull/7' },
+  ], {
+    tabLifecycle: {
+      1: { tabId: 1, title: 'GitHub Pull Request #7' },
+    },
+  });
+
+  assert.equal(tabs[0].displayTitle, 'GitHub Pull Request #7 (edited)');
+});
+
 test('plans tidy groups from tab domains and titles', () => {
   const groups = planTidyGroups([
     { id: 1, title: 'GitHub issue', url: 'https://github.com/a/b/issues/1' },

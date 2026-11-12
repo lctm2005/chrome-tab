@@ -13271,7 +13271,7 @@ async function main() {
         storedHasMaxTokens: Object.hasOwn(stored.spaceTabsState?.ai || {}, 'maxTokens'),
         keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
         providerOptions: document.querySelector('#providerInput')?.options.length || 0,
-        modelOptions: document.querySelector('#modelInput')?.options.length || 0,
+        modelOptions: document.querySelector('#modelOptions')?.options.length || 0,
       };
     })()`);
     record(
@@ -13294,15 +13294,13 @@ async function main() {
         provider.value = providerId;
         provider.dispatchEvent(new Event('change', { bubbles: true }));
         if (customModelId) {
-          model.value = '__custom__';
-          model.dispatchEvent(new Event('change', { bubbles: true }));
-          customModel.value = customModelId;
-          customModel.dispatchEvent(new Event('input', { bubbles: true }));
+          model.value = customModelId;
+          model.dispatchEvent(new Event('input', { bubbles: true }));
         }
         return {
           provider: provider.value,
           baseUrl: baseUrl.value,
-          model: model.value === '__custom__' ? customModel.value : model.value,
+          model: model.value,
           disabled: thinking.disabled,
           value: thinking.value,
           hint: hint.textContent || '',
