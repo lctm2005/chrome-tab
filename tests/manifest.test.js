@@ -1705,3 +1705,24 @@ test('tab rows expose valid multi-select semantics and keyboard behavior', async
   assert.match(source, /async function reorderTab[\s\S]*const ungrouped = await send\('tabs:ungroup'[\s\S]*if \(ungrouped\.missing\)[\s\S]*No order change was saved/);
   assert.match(source, /requestedContextTabIds[\s\S]*excludedPinnedCount[\s\S]*pinned tab[^`]*left out/);
 });
+
+test('settings AI controls expose every property the panel reads at runtime', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const factoryStart = source.indexOf('function settingsAIControls()');
+  const factoryEnd = source.indexOf('function renderProviderOptions', factoryStart);
+  assert.ok(factoryStart >= 0 && factoryEnd > factoryStart, 'settingsAIControls factory is missing');
+  const factory = source.slice(factoryStart, factoryEnd);
+  const keys = [...factory.matchAll(/(\w+): els\./g)].map((match) => match[1]);
+  assert.ok(keys.length >= 8, 'settingsAIControls should expose the full AI control set');
+
+  // Every controls.<key> property read anywhere in the panel must be
+  // provided by the factory — a missing key only explodes at runtime
+  // (this exact gap shipped once as controls.modelOptions).
+  const reads = new Set([...source.matchAll(/controls\.(\w+)/g)].map((match) => match[1]));
+  for (const key of reads) {
+    assert.ok(
+      keys.includes(key),
+      `settingsAIControls is missing "${key}", read at runtime as controls.${key}`,
+    );
+  }
+});

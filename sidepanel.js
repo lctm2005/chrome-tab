@@ -10486,6 +10486,7 @@ function settingsAIControls() {
     providerInput: els.providerInput,
     baseUrlInput: els.baseUrlInput,
     modelInput: els.modelInput,
+    modelOptions: els.modelOptions,
     apiKeyInput: els.apiKeyInput,
     thinkingLabel: els.thinkingLabel,
     thinkingInput: els.thinkingInput,

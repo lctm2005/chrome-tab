@@ -429,7 +429,7 @@ h1 {
   border-radius: var(--radius-md);
   background: var(--surface);
   border: 1px solid var(--glass-border);
-  padding: 3px;
+  padding: 2px;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -505,12 +505,12 @@ h1 {
 .folder-header,
 .group-header {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
-  min-height: 32px;
+  min-height: 26px;
   margin-left: 0;
-  padding: 6px 8px;
+  padding: 3px 8px;
   background: transparent;
   color: var(--text-soft);
   text-align: left;
@@ -666,8 +666,8 @@ h1 {
 .group-actions button,
 .row-actions button {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   place-items: center;
   border-radius: var(--radius-sm);
   background: var(--surface-strong);
@@ -708,8 +708,8 @@ h1 {
   display: flex;
   min-height: 4px;
   flex-direction: column;
-  gap: 2px;
-  padding: 2px 2px 4px 18px;
+  gap: 1px;
+  padding: 1px 2px 3px 14px;
 }
 
 .folder-children .tab-list {
@@ -828,12 +828,12 @@ h1 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 6px 8px;
+  min-height: 30px;
+  padding: 4px 8px;
   color: var(--text-soft);
   border: 1px solid transparent;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.15s ease;
   margin: 1px 2px;
 }
 
