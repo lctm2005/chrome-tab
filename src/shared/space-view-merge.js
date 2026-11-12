@@ -76,6 +76,8 @@ export function mergeLiveAndDormantGroups({
       continue;
     }
 
+    if (dormantEntryAbsorbedByMixedLiveEntry(entry, liveMatchByDormantTab)) continue;
+
     dormantGroup.tabs = dormantGroup.tabs.filter((tab) => !liveMatchByDormantTab.has(tab));
     snapshotOrderedOutput.push(dormantGroup);
   }
@@ -191,6 +193,27 @@ function groupsShareStableRows(dormantEntry, liveEntry, liveMatchByDormantTab) {
     if (match && match.entry === liveEntry) return true;
   }
   return false;
+}
+
+// One chrome Tag can physically hold rows saved under several snapshot
+// identities: opening a duplicate same-named saved Tag used to join its rows
+// into the same-titled live group while keeping the second saved identity, and
+// a group with two identities can never match any saved Tag again. Saved
+// copies whose every row is stably matched inside such a mixed live group are
+// absorbed into that live card instead of rendering as empty duplicate pills.
+function dormantEntryAbsorbedByMixedLiveEntry(dormantEntry, liveMatchByDormantTab) {
+  const dormantTabs = dormantEntry.group.tabs;
+  if (dormantTabs.length === 0) return false;
+  let absorber = null;
+  for (const dormantTab of dormantTabs) {
+    const match = liveMatchByDormantTab.get(dormantTab);
+    if (!match || match.entry.ungrouped || !match.entry.identity.ambiguous) return false;
+    const dormantSnapshotTabId = cleanIdentity(dormantTab.snapshotTabId);
+    if (!dormantSnapshotTabId || match.snapshotTabId !== dormantSnapshotTabId) return false;
+    if (!absorber) absorber = match.entry;
+    else if (absorber !== match.entry) return false;
+  }
+  return true;
 }
 
 function indexesByStableIdentity(entries) {

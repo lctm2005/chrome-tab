@@ -4876,11 +4876,25 @@ async function closeGroupToSaved(group, options = {}) {
             { windowBinding },
           );
           snapshotOpenSpace(targetSpaceId);
-          const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
-          const savedGroups = liveTabs.map((tab) => {
-            const snapshotTabId = state.tabLifecycle?.[tab.id]?.snapshotTabId;
-            return uniqueSnapshotGroupForTabId(snapshotGroups, snapshotTabId);
-          });
+          const mapTabsToSavedGroups = () => {
+            const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+            return liveTabs.map((tab) => {
+              const snapshotTabId = state.tabLifecycle?.[tab.id]?.snapshotTabId;
+              return uniqueSnapshotGroupForTabId(snapshotGroups, snapshotTabId);
+            });
+          };
+          let savedGroups = mapTabsToSavedGroups();
+          if (
+            !savedGroups[0] || isUngroupedSnapshotGroup(savedGroups[0]) ||
+            savedGroups.some((savedGroup) => savedGroup !== savedGroups[0])
+          ) {
+            // A mixed Tag can hold rows saved under duplicate same-name Tags
+            // (an older activation joined them into one chrome group). Fold
+            // the saved duplicates into one identity — the same merge a Tidy
+            // dedupe performs — and retry before refusing to close.
+            convergeDuplicateSavedTags();
+            savedGroups = mapTabsToSavedGroups();
+          }
           if (
             !savedGroups[0] || isUngroupedSnapshotGroup(savedGroups[0]) ||
             savedGroups.some((savedGroup) => savedGroup !== savedGroups[0])
@@ -5495,15 +5509,15 @@ async function openDormantTab(tab, groupKey, options = {}) {
 
       const dormantGroup = dormantGroupForTabReference(tab, groupKey);
       let chromeGroupId = -1;
+      let dormantTarget = null;
       if (!dormantGroup || isUngroupedSnapshotGroup(dormantGroup)) {
         state.tabSpaces[tabId] = state.activeSpaceId;
       } else {
-        const existing = chromeGroupForSnapshotIdentity(dormantGroup, state.activeSpaceId) ||
-          await chromeGroupForTitle(dormantGroup.title, state.activeSpaceId, { windowBinding });
+        dormantTarget = await resolveDormantChromeGroupTarget(dormantGroup, tab, { windowBinding });
         if (!isCurrentPanelWindowBinding(windowBinding)) throw new Error(staleMessage);
-        if (existing) {
+        if (dormantTarget) {
           chromeGroupId = await addTabsToChromeGroup(
-            existing.id,
+            dormantTarget.group.id,
             [tabId],
             state.activeSpaceId,
             { windowBinding },
@@ -5528,7 +5542,8 @@ async function openDormantTab(tab, groupKey, options = {}) {
       state.tabLifecycle[tabId] = {
         tabId,
         snapshotTabId: tab.snapshotTabId,
-        snapshotGroupId: tab.snapshotGroupId || dormantGroup?.snapshotGroupId,
+        snapshotGroupId: dormantTarget?.snapshotGroupId ||
+          tab.snapshotGroupId || dormantGroup?.snapshotGroupId,
         spaceId: state.activeSpaceId,
         url: String(created.tab?.url || url),
         // A freshly created tab reports its pending URL as the Chrome title.
@@ -11754,6 +11769,78 @@ function chromeGroupForSnapshotIdentity(
     logicalTitle === '' ? '' : normalizeGroupTitle(logicalTitle),
   );
   return group;
+}
+
+// Opening a saved row under a same-titled live Tag used to join the chrome
+// group while keeping the saved row's second identity. A group carrying two
+// snapshot identities can never match a saved Tag again — the view split off
+// an extra empty pill per duplicate and collapse refused to save the Tag — so
+// a title match first folds duplicate saved Tags into one saved identity and
+// re-points the reused group's rows at it before the new row joins.
+async function resolveDormantChromeGroupTarget(dormantGroup, tab, options = {}) {
+  const identityMatch = chromeGroupForSnapshotIdentity(dormantGroup, state.activeSpaceId);
+  if (identityMatch) {
+    return {
+      group: identityMatch,
+      snapshotGroupId: String(dormantGroup.snapshotGroupId || tab?.snapshotGroupId || '').trim(),
+    };
+  }
+  const titledMatch = await chromeGroupForTitle(
+    dormantGroup.title,
+    state.activeSpaceId,
+    { windowBinding: options.windowBinding },
+  );
+  if (!titledMatch) return null;
+  const mergedPlan = convergeDuplicateSavedTags();
+  const rowSnapshotGroupId = String(
+    dormantGroup.snapshotGroupId || tab?.snapshotGroupId || '',
+  ).trim();
+  const snapshotGroupId = String(
+    mergedPlan.snapshotGroupIdReplacements[rowSnapshotGroupId] ||
+    canonicalSameTitleSavedGroupId(dormantGroup.title) ||
+    rowSnapshotGroupId,
+  ).trim();
+  const liveSavedGroupId = coherentSavedGroupIdForChromeGroup(titledMatch.id);
+  if (liveSavedGroupId && snapshotGroupId && liveSavedGroupId !== snapshotGroupId) {
+    // The reused group's rows were saved under an identity the duplicate merge
+    // could not collapse (no stored copy of its own). Point them at the
+    // surviving saved Tag so the chrome group keeps exactly one identity.
+    remapMergedSnapshotGroupReferences({ [liveSavedGroupId]: snapshotGroupId });
+  }
+  return { group: titledMatch, snapshotGroupId };
+}
+
+function convergeDuplicateSavedTags() {
+  const mergedPlan = mergeDuplicateSnapshotTags(
+    state.spaceSnapshots?.[state.activeSpaceId] || null,
+  );
+  if (mergedPlan.mergedCount > 0) {
+    replaceActiveSpaceSnapshotGroups(mergedPlan.snapshot.groups, mergedPlan.snapshot);
+    remapMergedSnapshotGroupReferences(mergedPlan.snapshotGroupIdReplacements);
+  }
+  return mergedPlan;
+}
+
+function canonicalSameTitleSavedGroupId(title) {
+  const titleKey = groupTitleKey(title);
+  if (!titleKey) return '';
+  const matches = (state.spaceSnapshots?.[state.activeSpaceId]?.groups || []).filter((group) => (
+    !isUngroupedSnapshotGroup(group) &&
+    groupTitleKey(group.title) === titleKey &&
+    String(group.snapshotGroupId || '').trim()
+  ));
+  return matches.length === 1 ? String(matches[0].snapshotGroupId) : '';
+}
+
+function coherentSavedGroupIdForChromeGroup(chromeGroupId) {
+  const savedIds = new Set();
+  for (const liveTab of tabs) {
+    if (Number(liveTab.groupId) !== Number(chromeGroupId)) continue;
+    const binding = currentLifecycleBinding(liveTab.id);
+    const savedId = String(binding?.snapshotGroupId || liveTab.snapshotGroupId || '').trim();
+    if (savedId) savedIds.add(savedId);
+  }
+  return savedIds.size === 1 ? [...savedIds][0] : '';
 }
 
 function logicalGroupTitlesForSpace(spaceId = state.activeSpaceId) {

@@ -1008,6 +1008,12 @@ test('sidepanel delegates stable-identity Space view merging to the shared modul
   // pair together (a regenerated live copy of the same saved Tag).
   assert.match(sharedSource, /liveIdentity && dormantIdentity &&\s*\n\s*!groupsShareStableRows\(/);
   assert.match(sharedSource, /function groupsShareStableRows\(/);
+  // A mixed-identity live Tag (rows saved under duplicate same-name Tags) must
+  // absorb its fully-matched saved copies instead of rendering empty pills.
+  assert.match(sharedSource, /if \(dormantEntryAbsorbedByMixedLiveEntry\(entry, liveMatchByDormantTab\)\) continue;/);
+  assert.match(sharedSource, /function dormantEntryAbsorbedByMixedLiveEntry\([\s\S]*match\.entry\.ungrouped \|\| !match\.entry\.identity\.ambiguous[\s\S]*match\.snapshotTabId !== dormantSnapshotTabId[\s\S]*absorber !== match\.entry/);
+  assert.match(source, /convergeDuplicateSavedTags\(\);\s*\n\s*savedGroups = mapTabsToSavedGroups\(\);/);
+  assert.match(source, /function mapTabsToSavedGroups|const mapTabsToSavedGroups = \(\) =>/);
   assert.match(sharedSource, /function groupMetadataKey[\s\S]*chromeGroupTitleKey\(group\.title\)[\s\S]*normalizeColor\(group\.color\)/);
   assert.doesNotMatch(mergeSource, /liveGroupsByTitle|groupTitleKeyCounts/);
 });
@@ -1022,7 +1028,14 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /const requestedTitle = Object\.hasOwn\(options, 'title'\)[\s\S]*const logicalTitle = requestedTitle === '' \? '' : normalizeGroupTitle\(requestedTitle, 'Tabs'\)[\s\S]*const physicalTitle = logicalTitle === '' \? '' : chromeGroupTitle\(logicalTitle, 'Tabs'\)/);
   assert.match(source, /title: physicalTitle/);
   assert.match(source, /const existing = await chromeGroupForTitle\(group\.title, spaceId, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /const existing = chromeGroupForSnapshotIdentity\(dormantGroup, state\.activeSpaceId\) \|\|\s*await chromeGroupForTitle\(dormantGroup\.title, state\.activeSpaceId, \{ windowBinding \}\)/);
+  // A dormant row joining a same-titled live Tag must converge the duplicate
+  // saved identity first; two identities in one chrome group can never match a
+  // saved Tag again and left permanently-stuck duplicate pills behind.
+  assert.match(source, /async function resolveDormantChromeGroupTarget\([\s\S]*chromeGroupForSnapshotIdentity\(dormantGroup, state\.activeSpaceId\)[\s\S]*await chromeGroupForTitle\(\s*dormantGroup\.title,\s*state\.activeSpaceId,\s*\{ windowBinding: options\.windowBinding \},\s*\)[\s\S]*convergeDuplicateSavedTags\(\)[\s\S]*remapMergedSnapshotGroupReferences\(\{ \[liveSavedGroupId\]: snapshotGroupId \}\)/);
+  assert.match(source, /function convergeDuplicateSavedTags\(\)[\s\S]*mergeDuplicateSnapshotTags\(\s*state\.spaceSnapshots\?\.\[state\.activeSpaceId\] \|\| null,\s*\)[\s\S]*replaceActiveSpaceSnapshotGroups\(mergedPlan\.snapshot\.groups, mergedPlan\.snapshot\)[\s\S]*remapMergedSnapshotGroupReferences\(mergedPlan\.snapshotGroupIdReplacements\)/);
+  assert.match(source, /function canonicalSameTitleSavedGroupId\(title\)[\s\S]*groupTitleKey\(group\.title\) === titleKey/);
+  assert.match(source, /function coherentSavedGroupIdForChromeGroup\(chromeGroupId\)[\s\S]*savedIds\.size === 1/);
+  assert.match(source, /snapshotGroupId: dormantTarget\?\.\s*snapshotGroupId \|\|\s*tab\.snapshotGroupId \|\| dormantGroup\?\.snapshotGroupId,/);
   assert.match(source, /function chromeGroupForSnapshotIdentity[\s\S]*binding\?\.snapshotGroupId \|\| tab\.snapshotGroupId[\s\S]*bindChromeGroup\(groupId, spaceId\)[\s\S]*logicalChromeGroupTitles\.set/);
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);

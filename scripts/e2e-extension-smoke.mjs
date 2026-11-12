@@ -4673,6 +4673,7 @@ async function main() {
       if (current.dialogOpen || current.activeSpaceName !== 'Workbench E2E' ||
           current.activeSpaceId !== 'workbench-e2e' || current.storedMatches !== 1 ||
           current.railMatches !== 1 || current.candidateWrites < 3 ||
+          current.targetOwnedTabs.length !== 1 ||
           !current.spaces.some((space) => space.name === 'Remote Current')) return null;
       return current;
     })()`, 15000);

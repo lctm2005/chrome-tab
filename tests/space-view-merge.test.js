@@ -656,6 +656,318 @@ test('stable row evidence unifies a regenerated live copy with its saved Tag', (
   assert.equal(merged[0].tabs.every((item) => !item.dormant), true);
 });
 
+test('a mixed-identity live Tag absorbs its fully matched saved duplicates', () => {
+  // Opening duplicate same-named saved Tags used to join every row into one
+  // chrome Tag while keeping two saved identities. That live Tag can never
+  // match one identity again, so its fully matched saved copies must be
+  // absorbed into the live card instead of rendering as empty duplicate pills.
+  const live = [group({
+    key: 'group:1',
+    title: 'AI 记忆与 Agent 研究',
+    displayTitle: 'AI 记忆与 Agent 研究',
+    color: 'green',
+    tabs: [
+      tab('https://memory.test/in-context', { id: 1, snapshotTabId: 'row-x', snapshotGroupId: 'group-live-x' }),
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y' }),
+      tab('https://memory.test/agent', { id: 3, snapshotTabId: 'row-y2', snapshotGroupId: 'group-saved-y' }),
+    ],
+  })];
+  const dormant = [
+    group({
+      key: 'snapshot:0',
+      title: 'AI 记忆与 Agent 研究',
+      color: 'green',
+      snapshotGroupId: 'group-live-x',
+      collapsed: true,
+      tabs: [tab('https://memory.test/in-context', {
+        snapshotTabId: 'row-x', snapshotGroupId: 'group-live-x', dormant: true,
+      })],
+    }),
+    group({
+      key: 'snapshot:1',
+      title: 'AI 记忆与 Agent 研究',
+      color: 'green',
+      snapshotGroupId: 'group-saved-y',
+      collapsed: true,
+      tabs: [
+        tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y', dormant: true }),
+        tab('https://memory.test/agent', { snapshotTabId: 'row-y2', snapshotGroupId: 'group-saved-y', dormant: true }),
+      ],
+    }),
+  ];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].key, 'group:1');
+  assert.deepEqual(urls(merged[0]), [
+    'https://memory.test/in-context',
+    'https://memory.test/share',
+    'https://memory.test/agent',
+  ]);
+});
+
+test('a saved copy holding an extra row unifies and keeps the extra row', () => {
+  // With a single coherent identity the pair unifies through stable row
+  // evidence; the saved row that is not open still renders inside the Tag.
+  const live = [group({
+    key: 'group:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    snapshotGroupId: 'group-saved-y',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y', dormant: true }),
+      tab('https://memory.test/unique', { snapshotTabId: 'row-y3', snapshotGroupId: 'group-saved-y', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 1);
+  assert.deepEqual(urls(merged[0]), [
+    'https://memory.test/share',
+    'https://memory.test/unique',
+  ]);
+  assert.equal(merged[0].tabs.filter((item) => item.dormant).length, 1);
+});
+
+test('a saved row absent from the mixed live Tag keeps its saved copy rendered', () => {
+  const live = [group({
+    key: 'group:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1', snapshotGroupId: 'group-a' }),
+      tab('https://memory.test/other', { id: 4, snapshotTabId: 'row-z', snapshotGroupId: 'group-b' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    snapshotGroupId: 'group-saved-y',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y', dormant: true }),
+      tab('https://memory.test/unique', { snapshotTabId: 'row-y3', snapshotGroupId: 'group-saved-y', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  const savedCopy = merged.filter((entry) => entry.key === 'snapshot:1');
+  assert.equal(savedCopy.length, 1);
+  assert.deepEqual(urls(savedCopy[0]), ['https://memory.test/unique']);
+});
+
+test('saved rows matched into legacy live Tabs without mixed identities keep their copy', () => {
+  // A legacy live Tag (no stable identity of its own) that already renders the
+  // same rows is unified through other paths; absorption is for mixed
+  // identities only, so the saved copy stays visible to Tidy.
+  const live = [group({
+    key: 'group:1',
+    title: 'Legacy Tag',
+    color: 'blue',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Research',
+    color: 'blue',
+    snapshotGroupId: 'group-research',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-research', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.filter((entry) => entry.title === 'Research').length, 1);
+});
+
+test('rows split across two mixed live Tags never absorb the saved copy', () => {
+  const live = [
+    group({
+      key: 'group:1',
+      title: 'Mixed One',
+      color: 'green',
+      tabs: [
+        tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1', snapshotGroupId: 'group-a' }),
+        tab('https://memory.test/spare', { id: 5, snapshotTabId: 'row-y5', snapshotGroupId: 'group-c' }),
+      ],
+    }),
+    group({
+      key: 'group:2',
+      title: 'Mixed Two',
+      color: 'green',
+      tabs: [
+        tab('https://memory.test/agent', { id: 3, snapshotTabId: 'row-y2', snapshotGroupId: 'group-b' }),
+        tab('https://memory.test/reserve', { id: 6, snapshotTabId: 'row-y6', snapshotGroupId: 'group-d' }),
+      ],
+    }),
+  ];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Mixed One',
+    color: 'green',
+    snapshotGroupId: 'group-saved-y',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-saved-y', dormant: true }),
+      tab('https://memory.test/agent', { snapshotTabId: 'row-y2', snapshotGroupId: 'group-saved-y', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  const savedCopy = merged.filter((entry) => entry.key === 'snapshot:1');
+  assert.equal(savedCopy.length, 1);
+  assert.equal(savedCopy[0].tabs.length, 0);
+});
+
+test('a saved row without a stable id is never absorbed by URL alone', () => {
+  const live = [group({
+    key: 'group:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-live-1', snapshotGroupId: 'group-a' }),
+      tab('https://memory.test/agent', { id: 3, snapshotTabId: 'row-live-2', snapshotGroupId: 'group-b' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    snapshotGroupId: 'group-saved',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotGroupId: 'group-saved', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.filter((entry) => entry.key === 'snapshot:1').length, 1);
+});
+
+test('an emptied saved copy without matches renders without absorption', () => {
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Empty Saved Tag',
+    color: 'blue',
+    snapshotGroupId: 'group-empty',
+    collapsed: true,
+    tabs: [],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: [],
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 1);
+});
+
+test('URL-only matches never absorb a saved copy into a mixed live Tag', () => {
+  const live = [group({
+    key: 'group:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-live-1', snapshotGroupId: 'group-a' }),
+      tab('https://memory.test/agent', { id: 3, snapshotTabId: 'row-live-2', snapshotGroupId: 'group-b' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Mixed Tag',
+    color: 'green',
+    snapshotGroupId: 'group-saved',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-saved-1', snapshotGroupId: 'group-saved', dormant: true }),
+      tab('https://memory.test/agent', { snapshotTabId: 'row-saved-2', snapshotGroupId: 'group-saved', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 2);
+});
+
+test('a mixed ungrouped pool never absorbs saved Tags', () => {
+  const live = [group({
+    key: 'ungrouped',
+    title: 'Ungrouped',
+    color: 'grey',
+    tabs: [
+      tab('https://memory.test/share', { id: 2, snapshotTabId: 'row-y1', snapshotGroupId: 'group-a' }),
+      tab('https://memory.test/agent', { id: 3, snapshotTabId: 'row-y2', snapshotGroupId: 'group-b' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Research',
+    color: 'blue',
+    snapshotGroupId: 'group-research',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-y1', snapshotGroupId: 'group-research', dormant: true }),
+      tab('https://memory.test/agent', { snapshotTabId: 'row-y2', snapshotGroupId: 'group-research', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.filter((entry) => entry.title === 'Research').length, 1);
+});
+
 test('same-title Tags sharing only a URL keep distinct identities for Tidy', () => {
   // The saved copy and a live copy share a page URL but carry different
   // stable row and group identities: they are distinct Tags that Tidy's
