@@ -829,6 +829,21 @@ test('Tidy runs one consolidated preview and applies grouping then naming phases
   assert.match(tidySlice, /const mergedDuplicateTitleKeys = new Set/);
   assert.match(tidySlice, /title: 'Rename tabs'/);
   assert.doesNotMatch(tidySlice, /title: 'Merge empty duplicates'|title: 'Remain untouched'/);
+  // The preview renders a per-tab diff: movers carry from → to, tabs that
+  // already sit in their target Tag are flagged unchanged, and renames carry
+  // the before → after pair. The domain-rule re-resolution must refresh the
+  // same preview set so the diff always describes the final plan.
+  assert.match(tidySlice, /let previewGroups = resolvedPlan\.previewGroups/);
+  assert.match(tidySlice, /let unchangedPlannedIds = new Set\(resolvedPlan\.unchangedCandidateIds\)/);
+  assert.match(tidySlice, /previewGroups = domainResolved\.previewGroups/);
+  assert.match(tidySlice, /unchangedPlannedIds = new Set\(domainResolved\.unchangedCandidateIds\)/);
+  assert.match(tidySlice, /diff: \{ from: fromTitle, to: group\.title \}/);
+  assert.match(tidySlice, /unchanged: true,\n(\s*)source: fromTitle/);
+  assert.match(tidySlice, /rename: \{ from: item\.title, to: item\.result \}/);
+  assert.doesNotMatch(tidySlice, /`From \$\{item\.source\}`|· renamed to/);
+  assert.match(source, /action-preview-diff\b[\s\S]*action-preview-diff-from[\s\S]*action-preview-diff-to/);
+  assert.match(source, /item\.unchanged\) \{[\s\S]*is-unchanged[\s\S]*`Already in \$\{item\.source/);
+  assert.doesNotMatch(source, /group-plan-source/);
   assert.match(tidySlice, /const confirmed = await showPlanPreview\(\{[\s\S]*title: 'Tidy Preview',[\s\S]*confirmText: 'Apply tidy',[\s\S]*variant: 'groups',/);
   assert.doesNotMatch(source, /title: 'Auto Group Preview'/);
   assert.match(tidySlice, /message: previewSummary\.join\(' · '\)/);
@@ -966,6 +981,12 @@ test('organization previews have one bounded scroll area and fixed actions', asy
   assert.match(styles, /\.action-preview\s*\{[\s\S]*?flex: 1 1 auto;[\s\S]*?overflow-y: auto;/);
   assert.match(styles, /\.action-preview\.group-plan-preview\s*\{[\s\S]*?max-height: none;/);
   assert.match(styles, /\.action-buttons\s*\{[\s\S]*?flex: 0 0 auto;/);
+  // Tidy preview diff rows: movers and renames read as before → after, and
+  // unchanged tabs render dimmed with an explicit "already there" note.
+  assert.match(styles, /\.action-preview-item\.is-unchanged\s*\{[^}]*opacity:\s*0\.55/);
+  assert.match(styles, /\.action-preview-diff\s*\{[\s\S]*?\.action-preview-diff-from/);
+  assert.match(styles, /\.action-preview-diff-to/);
+  assert.match(styles, /\.action-preview-stays\s*\{/);
 });
 
 test('sidepanel delegates stable-identity Space view merging to the shared module', async () => {
@@ -983,7 +1004,10 @@ test('sidepanel delegates stable-identity Space view merging to the shared modul
   assert.match(mergeSource, /pruneRecentlyOpenedDormantTabs\(\)/);
   assert.match(mergeSource, /mergeLiveAndDormantGroups\(\{[\s\S]*liveGroups: liveView,[\s\S]*dormantGroups: dormantView,[\s\S]*collapsedGroups: state\.collapsedGroups,[\s\S]*recentlyOpenedTabs: recentlyOpenedDormantTabs/);
   assert.match(sharedSource, /const liveStableIndexes = indexesByStableIdentity\(liveEntries\)/);
-  assert.match(sharedSource, /if \(liveIdentity && dormantIdentity\) continue/);
+  // Divergent group ids stay separate unless stable ROW evidence ties the
+  // pair together (a regenerated live copy of the same saved Tag).
+  assert.match(sharedSource, /liveIdentity && dormantIdentity &&\s*\n\s*!groupsShareStableRows\(/);
+  assert.match(sharedSource, /function groupsShareStableRows\(/);
   assert.match(sharedSource, /function groupMetadataKey[\s\S]*chromeGroupTitleKey\(group\.title\)[\s\S]*normalizeColor\(group\.color\)/);
   assert.doesNotMatch(mergeSource, /liveGroupsByTitle|groupTitleKeyCounts/);
 });

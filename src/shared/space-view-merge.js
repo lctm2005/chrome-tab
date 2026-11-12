@@ -32,7 +32,11 @@ export function mergeLiveAndDormantGroups({
     liveEntries,
     recentlyOpenedTabs,
   );
-  const liveGroupMatches = matchDormantGroupsToLiveGroups(liveEntries, dormantEntries);
+  const liveGroupMatches = matchDormantGroupsToLiveGroups(
+    liveEntries,
+    dormantEntries,
+    liveMatchByDormantTab,
+  );
   const ungroupedIndex = liveEntries.findIndex((entry) => entry.group.key === 'ungrouped');
   let ungrouped = ungroupedIndex >= 0 ? liveEntries[ungroupedIndex].group : null;
   const matchedLiveIndexes = new Set(liveGroupMatches.values());
@@ -114,7 +118,11 @@ function stableGroupIdentity(group) {
   };
 }
 
-function matchDormantGroupsToLiveGroups(liveEntries, dormantEntries) {
+function matchDormantGroupsToLiveGroups(
+  liveEntries,
+  dormantEntries,
+  liveMatchByDormantTab = new Map(),
+) {
   const matches = new Map();
   const consumedLiveIndexes = new Set();
   const liveStableIndexes = indexesByStableIdentity(liveEntries);
@@ -154,11 +162,35 @@ function matchDormantGroupsToLiveGroups(liveEntries, dormantEntries) {
     const liveIndex = liveIndexes[0];
     const liveIdentity = liveEntries[liveIndex].identity.id;
     const dormantIdentity = dormantEntries[dormantIndex].identity.id;
-    if (liveIdentity && dormantIdentity) continue;
+    // Divergent group identities normally mean two distinct Tags, but stable
+    // ROW evidence outranks them: when the live group holds rows whose
+    // snapshotTabIds belong to the saved Tag, the group id was regenerated
+    // (for example after Tidy re-applied a plan onto a saved Tag) and the
+    // pair is one Tag. Without this, the saved copy collapses into an empty
+    // merge-candidate pill next to its own live copy.
+    if (
+      liveIdentity && dormantIdentity &&
+      !groupsShareStableRows(
+        dormantEntries[dormantIndex],
+        liveEntries[liveIndex],
+        liveMatchByDormantTab,
+      )
+    ) continue;
     matches.set(dormantIndex, liveIndex);
   }
 
   return matches;
+}
+
+function groupsShareStableRows(dormantEntry, liveEntry, liveMatchByDormantTab) {
+  // Only stable-mode matches can exist between two identity-carrying groups
+  // (URL fallback modes are gated off by the group identity conflict), so a
+  // match into this live entry IS exact row evidence.
+  for (const dormantTab of dormantEntry.group.tabs) {
+    const match = liveMatchByDormantTab.get(dormantTab);
+    if (match && match.entry === liveEntry) return true;
+  }
+  return false;
 }
 
 function indexesByStableIdentity(entries) {

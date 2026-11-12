@@ -3832,7 +3832,7 @@ async function main() {
         sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
           .map((heading) => heading.textContent || ''),
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        diffLabels: document.querySelectorAll('#actionDialogPreview .action-preview-diff').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
         disclosure: document.querySelector('#tidyNamesButton')?.getAttribute('aria-label') || '',
@@ -3860,7 +3860,7 @@ async function main() {
         !autoGroupPreview.titles.includes('Generate Auto Group preview?') &&
         !autoGroupPreview.sectionTitles.includes('Remain untouched') &&
         autoGroupPreview.items > 0 &&
-        autoGroupPreview.sourceLabels > 0 &&
+        autoGroupPreview.diffLabels > 0 &&
         autoGroupPreview.groupCards > 0 &&
         autoGroupPreview.confirmText === 'Apply tidy' &&
         autoGroupPreview.disclosure.includes('disclosed tab titles, simplified URLs, and domains') &&
@@ -3894,7 +3894,7 @@ async function main() {
       if (document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
       return {
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        diffLabels: document.querySelectorAll('#actionDialogPreview .action-preview-diff').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => [
@@ -3904,7 +3904,7 @@ async function main() {
     })()`);
     record(
       'Tidy previews regrouping before Chrome mutations',
-      groupPreview.items > 0 && groupPreview.sourceLabels > 0 && groupPreview.groupCards > 0 && groupPreview.mutations.length === 0,
+      groupPreview.items > 0 && groupPreview.diffLabels > 0 && groupPreview.groupCards > 0 && groupPreview.mutations.length === 0,
       JSON.stringify(groupPreview)
     );
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);

@@ -8050,8 +8050,13 @@ async function runTidy(options = {}) {
       candidates,
       existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
     });
-    const previewGroups = resolvedPlan.previewGroups;
+    // The preview renders a per-tab diff: tabs the resolution marked unchanged
+    // already sit in their target Tag and must read as "already there", not as
+    // moves. The domain rule may re-resolve the plan below, so both stay
+    // mutable and refresh with the final plan.
+    let previewGroups = resolvedPlan.previewGroups;
     plannedGroups = resolvedPlan.plannedGroups;
+    let unchangedPlannedIds = new Set(resolvedPlan.unchangedCandidateIds);
 
     // The local domain rule only buckets tabs the topic plan left untouched.
     const topicPlannedIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
@@ -8078,6 +8083,8 @@ async function runTidy(options = {}) {
           existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
         });
         plannedGroups = domainResolved.plannedGroups;
+        previewGroups = domainResolved.previewGroups;
+        unchangedPlannedIds = new Set(domainResolved.unchangedCandidateIds);
       }
     }
 
@@ -8127,11 +8134,21 @@ async function runTidy(options = {}) {
       kind: 'group',
       items: group.tabIds.map((tabId) => {
         const tab = tabsById.get(Number(tabId));
+        const fromTitle = tab?.currentGroup?.title || 'Ungrouped';
+        if (unchangedPlannedIds.has(Number(tabId))) {
+          return {
+            title: tab?.displayTitle || tab?.title || 'Untitled',
+            meta: domainFromUrl(tab?.url || ''),
+            badge: tab?.dormant ? 'Saved' : 'Live',
+            unchanged: true,
+            source: fromTitle,
+          };
+        }
         return {
           title: tab?.displayTitle || tab?.title || 'Untitled',
           meta: domainFromUrl(tab?.url || ''),
-          source: tab?.currentGroup?.title || 'Current group',
           badge: tab?.dormant ? 'Saved' : 'Live',
+          diff: { from: fromTitle, to: group.title },
         };
       }),
     })));
@@ -8195,8 +8212,8 @@ async function runTidy(options = {}) {
         countLabel: `${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
         items: renameItems.map((item) => ({
           title: item.title,
-          meta: `${item.meta || 'no domain'} · renamed to`,
-          badge: item.result,
+          meta: item.meta || 'no domain',
+          rename: { from: item.title, to: item.result },
         })),
       });
     }
@@ -10385,11 +10402,41 @@ function renderActionDialogPreview(sections = [], variant = 'changes') {
         badge.textContent = item.badge;
         before.append(badge);
       }
-      if (item.source) {
-        const source = document.createElement('div');
-        source.className = 'group-plan-source';
-        source.textContent = `From ${item.source}`;
-        before.append(source);
+      // Diff lines make the proposal readable as before → after: movers show
+      // the source and target Tag, renames show the arrow to the new panel
+      // name, and tabs that already sit in their target Tag render dimmed
+      // instead of pretending to move.
+      if (item.rename) {
+        const renameDiff = document.createElement('div');
+        renameDiff.className = 'action-preview-diff action-preview-diff-rename';
+        const renameArrow = document.createElement('span');
+        renameArrow.className = 'action-preview-arrow';
+        renameArrow.textContent = '\u2192';
+        const renameTo = document.createElement('span');
+        renameTo.className = 'action-preview-diff-to';
+        renameTo.textContent = item.rename.to || '';
+        renameDiff.append(renameArrow, renameTo);
+        before.append(renameDiff);
+      } else if (item.diff) {
+        const diff = document.createElement('div');
+        diff.className = 'action-preview-diff';
+        const from = document.createElement('span');
+        from.className = 'action-preview-diff-from';
+        from.textContent = item.diff.from || 'Ungrouped';
+        const arrow = document.createElement('span');
+        arrow.className = 'action-preview-arrow';
+        arrow.textContent = '\u2192';
+        const to = document.createElement('span');
+        to.className = 'action-preview-diff-to';
+        to.textContent = item.diff.to || '';
+        diff.append(from, arrow, to);
+        before.append(diff);
+      } else if (item.unchanged) {
+        row.classList.add('is-unchanged');
+        const stays = document.createElement('div');
+        stays.className = 'action-preview-stays';
+        stays.textContent = `Already in ${item.source || 'this Tag'}`;
+        before.append(stays);
       }
 
       if (variant === 'groups') {

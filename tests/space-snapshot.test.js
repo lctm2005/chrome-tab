@@ -709,6 +709,35 @@ test('same-title saved and live Tags with different stable identities remain vis
   })), [{ id: 'saved-tag', rows: ['saved-row', 'live-row'] }]);
 });
 
+test('same-title saved and live Tags sharing only a URL stay separate for Tidy', () => {
+  // Shared page content is not shared identity: these Tags keep distinct
+  // stable rows and group ids so Tidy keeps seeing a duplicate to merge.
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    preserveGroups: true,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'saved-tag', title: 'Remote Current', color: 'cyan',
+      tabs: [{ snapshotTabId: 'saved-row', title: 'Saved', url: 'https://example.net/remote-saved' }],
+    }],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-tag', title: 'Remote Current', color: 'cyan',
+      tabs: [{ snapshotTabId: 'live-row', title: 'Live', url: 'https://example.net/remote-saved' }],
+    }],
+  };
+
+  const refreshed = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(refreshed.groups.map((group) => group.snapshotGroupId), [
+    'saved-tag', 'live-tag',
+  ]);
+});
+
 test('duplicate live claims for one stable group preserve every row instead of overwriting a group', () => {
   const live = {
     version: 1,

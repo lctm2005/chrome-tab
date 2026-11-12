@@ -10050,7 +10050,11 @@ async function main() {
           title: section.querySelector('h3 span')?.textContent || '',
           rows: [...section.querySelectorAll('.action-preview-item')].map((row) => ({
             title: row.querySelector('.action-preview-title')?.textContent || '',
-            source: row.querySelector('.group-plan-source')?.textContent || '',
+            diffFrom: row.querySelector('.action-preview-diff-from')?.textContent || '',
+            diffTo: row.querySelector('.action-preview-diff-to')?.textContent || '',
+            hasDiffArrow: Boolean(row.querySelector('.action-preview-diff .action-preview-arrow')),
+            stays: row.querySelector('.action-preview-stays')?.textContent || '',
+            unchangedRow: row.classList.contains('is-unchanged'),
             badge: row.querySelector('.action-preview-badge')?.textContent || '',
           })),
         }));
@@ -10096,10 +10100,14 @@ async function main() {
           row.title === 'Ask Source Alpha' && row.badge === 'Live') &&
         mixedNoOpAutoGroupPreview.target.rows.some((row) =>
           row.title === 'Saved Historical Auto Group E2E' && row.badge === 'Saved') &&
-        mixedPreviewLiveRow?.source ===
-          `From ${askFixtureServer.autoGroupTargetTitle}` &&
+        mixedPreviewLiveRow?.unchangedRow &&
+        mixedPreviewLiveRow?.stays ===
+          `Already in ${askFixtureServer.autoGroupTargetTitle}` &&
         mixedPreviewLiveRow?.badge === 'Live' &&
-        mixedPreviewSavedRow?.source === 'From Historical Tag E2E' &&
+        mixedPreviewSavedRow?.diffFrom === 'Historical Tag E2E' &&
+        mixedPreviewSavedRow?.diffTo ===
+          `${askFixtureServer.autoGroupTargetTitle}` &&
+        mixedPreviewSavedRow?.hasDiffArrow &&
         mixedPreviewSavedRow?.badge === 'Saved' &&
         JSON.stringify(mixedAutoGroupCancelled.chrome) === JSON.stringify(mixedAutoGroupBefore.chrome) &&
         JSON.stringify(mixedAutoGroupCancelled.storage) === JSON.stringify(mixedAutoGroupBefore.storage),
@@ -10171,7 +10179,10 @@ async function main() {
               title: row.querySelector('.action-preview-title')?.textContent || '',
               meta: row.querySelector('.action-preview-meta')?.textContent || '',
               badge: row.querySelector('.action-preview-badge')?.textContent || '',
-              source: row.querySelector('.group-plan-source')?.textContent || '',
+              diffFrom: row.querySelector('.action-preview-diff-from')?.textContent || '',
+              diffTo: row.querySelector('.action-preview-diff-to')?.textContent || '',
+              hasDiffArrow: Boolean(row.querySelector('.action-preview-diff .action-preview-arrow')),
+              stays: row.querySelector('.action-preview-stays')?.textContent || '',
             })),
           }));
         const proposal = sections.find((section) =>
@@ -10259,9 +10270,15 @@ async function main() {
         autoGroupMixedPreview.confirmText === 'Apply tidy' &&
         autoGroupMixedPreview.proposal.rows.length === 2 &&
         previewSavedRow?.badge === 'Saved' &&
-        previewSavedRow?.source === 'From Historical Tag E2E' &&
+        previewSavedRow?.diffFrom === 'Historical Tag E2E' &&
+        previewSavedRow?.diffTo ===
+          `${askFixtureServer.autoGroupTargetTitle}` &&
+        previewSavedRow?.hasDiffArrow &&
         previewLiveRow?.badge === 'Live' &&
-        previewLiveRow?.source === 'From Ungrouped' &&
+        previewLiveRow?.diffFrom === 'Ungrouped' &&
+        previewLiveRow?.diffTo ===
+          `${askFixtureServer.autoGroupTargetTitle}` &&
+        previewLiveRow?.hasDiffArrow &&
         previewNotSentSection?.rows?.some((row) => row.meta.includes('restricted URL')) &&
         autoGroupPreviewRequest?.body?.stream === false &&
         autoGroupPreviewRequest?.body?.max_tokens === 16_384 &&
@@ -13271,7 +13288,14 @@ async function main() {
         storedHasMaxTokens: Object.hasOwn(stored.spaceTabsState?.ai || {}, 'maxTokens'),
         keyStatus: document.querySelector('#apiKeyStatus')?.textContent || '',
         providerOptions: document.querySelector('#providerInput')?.options.length || 0,
-        modelOptions: document.querySelector('#modelOptions')?.options.length || 0,
+        // The Model input stays a datalist-backed text field. Suggestions are
+        // only non-empty for providers with builtin models — the fixture ends
+        // on the custom OpenAI-compatible provider with no key, so assert the
+        // wiring (input bound to the datalist) rather than a suggestion count.
+        modelInputBoundToDatalist:
+          document.querySelector('#modelInput')?.list === document.querySelector('#modelOptions'),
+        modelInputEditable: document.querySelector('#modelInput') instanceof HTMLInputElement &&
+          document.querySelector('#modelInput').type === 'text',
       };
     })()`);
     record(
@@ -13281,7 +13305,8 @@ async function main() {
         !defaultAISettings.storedHasMaxTokens &&
         defaultAISettings.keyStatus === 'No API key configured.' &&
         defaultAISettings.providerOptions > 1 &&
-        defaultAISettings.modelOptions > 0,
+        defaultAISettings.modelInputBoundToDatalist &&
+        defaultAISettings.modelInputEditable,
       JSON.stringify(defaultAISettings),
     );
     const settingsThinkingMatrix = await evaluate(client, `(() => {

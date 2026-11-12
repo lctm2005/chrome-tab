@@ -610,6 +610,117 @@ test('multiple legacy Ungrouped snapshots merge without duplicating a matched li
   ]);
 });
 
+test('stable row evidence unifies a regenerated live copy with its saved Tag', () => {
+  // Tidy applied a plan onto an existing saved Tag while the materialized
+  // live group carried a regenerated group identity. The rows are the same
+  // stable rows (shared snapshotTabIds), so the pair must render as one Tag
+  // instead of an empty merge-candidate pill plus a live copy.
+  const live = [group({
+    key: 'group:1',
+    title: 'AI 记忆与 Agent 研究',
+    displayTitle: 'AI 记忆与 Agent 研究',
+    color: 'green',
+    snapshotGroupId: 'group-regenerated',
+    tabs: [
+      tab('https://memory.test/share', { id: 1, snapshotTabId: 'row-a', snapshotGroupId: 'group-regenerated' }),
+      tab('https://my.feishu.cn/page/x', { id: 2, snapshotTabId: 'row-b', snapshotGroupId: 'group-regenerated' }),
+      tab('https://anthropic.test/agent', { id: 3, snapshotTabId: 'row-c', snapshotGroupId: 'group-regenerated' }),
+    ],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'AI 记忆与 Agent 研究',
+    color: 'green',
+    snapshotGroupId: 'group-saved',
+    collapsed: true,
+    tabs: [
+      tab('https://memory.test/share', { snapshotTabId: 'row-a', snapshotGroupId: 'group-saved', dormant: true }),
+      tab('https://my.feishu.cn/page/x', { snapshotTabId: 'row-b', snapshotGroupId: 'group-saved', dormant: true }),
+      tab('https://anthropic.test/agent', { snapshotTabId: 'row-c', snapshotGroupId: 'group-saved', dormant: true }),
+    ],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].title, 'AI 记忆与 Agent 研究');
+  assert.deepEqual(urls(merged[0]), [
+    'https://memory.test/share',
+    'https://my.feishu.cn/page/x',
+    'https://anthropic.test/agent',
+  ]);
+  assert.equal(merged[0].tabs.every((item) => !item.dormant), true);
+});
+
+test('same-title Tags sharing only a URL keep distinct identities for Tidy', () => {
+  // The saved copy and a live copy share a page URL but carry different
+  // stable row and group identities: they are distinct Tags that Tidy's
+  // duplicate merge must keep seeing, not one Tag with a regenerated id.
+  const live = [group({
+    key: 'group:1',
+    title: 'Remote Current',
+    color: 'cyan',
+    snapshotGroupId: 'group-live',
+    tabs: [tab('https://example.net/remote-saved', { id: 1, snapshotTabId: 'row-live', snapshotGroupId: 'group-live' })],
+  })];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Remote Current',
+    color: 'cyan',
+    snapshotGroupId: 'group-saved',
+    tabs: [tab('https://example.net/remote-saved', { snapshotTabId: 'row-saved', snapshotGroupId: 'group-saved', dormant: true })],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  assert.equal(merged.length, 2);
+});
+
+test('a stable row matched into another live Tag does not pair same-titled groups', () => {
+  // The saved row belongs to a different live Tag ('Other'); the same-titled
+  // live group without it must not absorb the saved Tag's identity.
+  const live = [
+    group({
+      key: 'group:1',
+      title: 'Remote Current',
+      color: 'cyan',
+      snapshotGroupId: 'group-same-title',
+      tabs: [],
+    }),
+    group({
+      key: 'group:2',
+      title: 'Other',
+      color: 'grey',
+      snapshotGroupId: 'group-other',
+      tabs: [tab('https://example.net/remote-saved', { id: 2, snapshotTabId: 'row-saved', snapshotGroupId: 'group-other' })],
+    }),
+  ];
+  const dormant = [group({
+    key: 'snapshot:1',
+    title: 'Remote Current',
+    color: 'cyan',
+    snapshotGroupId: 'group-saved',
+    tabs: [tab('https://example.net/remote-saved', { snapshotTabId: 'row-saved', snapshotGroupId: 'group-saved', dormant: true })],
+  })];
+
+  const merged = mergeLiveAndDormantGroups({
+    liveGroups: deepFreeze(live),
+    dormantGroups: deepFreeze(dormant),
+    collapsedGroups: {},
+  });
+
+  const sameTitle = merged.filter((entry) => entry.title === 'Remote Current');
+  assert.equal(sameTitle.length, 2);
+});
+
 test('ambiguous and duplicated stable group identities never fall back to metadata', () => {
   const internallyAmbiguous = mergeLiveAndDormantGroups({
     liveGroups: [group({
