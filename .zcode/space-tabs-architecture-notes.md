@@ -27,9 +27,11 @@ chrome-tab(/Users/bytedance/github/chrome-tab)是 MV3 扩展,全部状态存单�
 **Why**:Codex 时代的测试只覆盖 src/shared 纯函数,编排层竞态防不住,历史 bug 反复。
 **How to apply**:改动 sidepanel.js 写入路径时仍须先 sync 再写;新增共享层代码必须
 保持 node coverage gate 的 100% 覆盖(shared+background 均为 100% 门槛)。
-注意:`e2e:smoke` 有两层问题(2026-11-11):① palette 切换场景曾丢失"先展开折叠
-dormant Tag 再断言行可见"的兜底,已在 commit 4d3ed14 恢复;② 套件整体在本机存在
-普遍时序脆弱——失败点在多次运行间漂移(4371→6301→5849→2614),即使同代码也会
-在不同场景挂,疑似与机器负载/journal drain 收敛相关;shared 覆盖率门槛也因此
-依赖 drain 时序,已用直接分支测试钉死(6d14af6)。`e2e:restart` 全绿且稳定,是
-数据持久化修复的权威验证。治理 smoke 需专门会话(超时/重试/场景隔离)。
+2026-11-12 大改造后(删除 Ask Page、Tidy 合并、设置侧边栏化、Chrome 风格 Tag 卡,
+已推送 origin/main f48c8c0):`e2e:smoke` 142 场景全部通过(exit 0 已复验);
+`e2e:coverage`(带 Profiler)在本机时序敏感,曾三过final代码但后续轮次在
+durable-lifecycle 场景超时,union 阈值已按实测通过轮更新(80.46/51.1/76.33/82.2)。
+注意:`waitFor` 全局加大预算会顶掉 10 秒 Undo 横幅窗口,反而更糟——只能按场景
+单独加大。折叠/展开新语义:折叠 live Tag=closeGroupToSaved,展开 dormant
+Tag=openDormantGroup(外窗口已打开行时仅披露不物化);空唯一命名 Tag 会被
+持久化规则清退。
