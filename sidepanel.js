@@ -273,7 +273,6 @@ const layoutMode = pageParams.get('layout') === 'workbench'
 const workbenchMode = layoutMode === 'workbench';
 document.documentElement.dataset.layout = layoutMode;
 const previewSend = createPreviewCommandHandler();
-const CUSTOM_MODEL_VALUE = '__custom__';
 // Model ids returned by the provider's /models endpoint during this session.
 let detectedModelIds = [];
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
@@ -386,8 +385,7 @@ const els = {
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
-  customModelLabel: document.querySelector('#customModelLabel'),
-  customModelInput: document.querySelector('#customModelInput'),
+  modelOptions: document.querySelector('#modelOptions'),
   languageInput: document.querySelector('#languageInput'),
   apiKeyInput: document.querySelector('#apiKeyInput'),
   apiKeyStatus: document.querySelector('#apiKeyStatus'),
@@ -753,30 +751,37 @@ function bindEvents() {
   els.baseUrlInput.addEventListener('input', () => clearAIKeyAfterEndpointEdit(settingsAIControls()));
   els.modelInput.addEventListener('change', () => {
     const controls = settingsAIControls();
-    updateCustomModelVisibility(controls);
     updateAIThinkingControl(controls);
   });
-  els.customModelInput.addEventListener('input', () => updateAIThinkingControl(settingsAIControls()));
   els.arcImportInput.addEventListener('change', () => runTask((windowBinding) => (
     previewArcImportFile(null, { windowBinding })
   )));
   els.arcImportInput.addEventListener('cancel', (event) => event.stopPropagation());
   els.arcImportChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('settings'));
-  els.importArcButton.addEventListener('click', () => runTask((windowBinding) => (
-    importArcFile({ windowBinding })
-  )));
+  els.importArcButton.addEventListener('click', () => runTask(async (windowBinding) => {
+    if (!pendingArcImportText) {
+      els.arcImportChooseButton.click();
+      return;
+    }
+    await importArcFile({ windowBinding });
+  }));
   els.undoArcImportButton.addEventListener('click', () => runTask((windowBinding) => (
     undoLastArcImport({ windowBinding })
   )));
   els.exportSpaceDataButton.addEventListener('click', () => runTask((windowBinding) => (
     exportSpaceData({ windowBinding })
   )));
-  els.spaceBackupInput.addEventListener('change', () => runTask((windowBinding) => (
-    previewSpaceBackupFile({ windowBinding })
-  )));
-  els.restoreSpaceDataButton.addEventListener('click', () => runTask((windowBinding) => (
-    restoreSpaceData({ windowBinding })
-  )));
+  els.spaceBackupInput.addEventListener('change', () => runTask(async (windowBinding) => {
+    await previewSpaceBackupFile({ windowBinding });
+    if (pendingSpaceBackup) await restoreSpaceData({ windowBinding });
+  }));
+  els.restoreSpaceDataButton.addEventListener('click', () => runTask(async (windowBinding) => {
+    if (!pendingSpaceBackup) {
+      els.spaceBackupInput.click();
+      return;
+    }
+    await restoreSpaceData({ windowBinding });
+  }));
   els.saveSettingsButton.addEventListener('click', (event) => {
     event.preventDefault();
     runTask((windowBinding) => saveSettings({ windowBinding }));
@@ -2445,18 +2450,15 @@ function createFolderSection(folder) {
 
 async function toggleFolder(folderKey, options = {}) {
   const windowBinding = options.windowBinding;
+  // Folding a folder is pure disclosure state — no Chrome mutation, so no
+  // drag-context guard is needed; a click during a re-render must still work.
   if (!options.stateLocked) {
     try {
-      return await withFreshSpaceStateMutation(() => {
-        if (!renderedGroupDragContexts.has(folderKey)) {
-          throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-        }
-        return toggleFolder(folderKey, {
-          stateLocked: true,
-          focusRestoreToken: options.focusRestoreToken,
-          windowBinding,
-        });
-      }, { windowBinding });
+      return await withFreshSpaceStateMutation(() => toggleFolder(folderKey, {
+        stateLocked: true,
+        focusRestoreToken: options.focusRestoreToken,
+        windowBinding,
+      }), { windowBinding });
     } catch (error) {
       restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
       throw error;
@@ -9245,23 +9247,11 @@ async function detectProviderModels(controls = settingsAIControls(), options = {
     });
     detectedModelIds = Array.isArray(models) ? models : [];
     renderSettingsAISection();
-    const select = controls.modelInput;
-    for (const modelId of detectedModelIds) {
-      const option = document.createElement('option');
-      option.value = modelId;
-      option.textContent = modelId;
-      select.appendChild(option);
-    }
     const current = currentAISettingsFromControls(controls).model;
-    if (detectedModelIds.includes(current)) {
-      select.value = current;
-      controls.customModelInput.value = '';
-    } else {
-      select.value = CUSTOM_MODEL_VALUE;
-      controls.customModelInput.value = detectedModelIds[0] || '';
+    if (!current && detectedModelIds.length > 0) {
+      controls.modelInput.value = detectedModelIds[0];
     }
-    updateCustomModelVisibility(controls);
-    setAIControlsStatus(controls, `Detected ${formatCount(detectedModelIds.length, 'model')} from ${providerById(state.ai.provider).label}. Pick one and Save.`);
+    setAIControlsStatus(controls, `Detected ${formatCount(detectedModelIds.length, 'model')} from ${providerById(state.ai.provider).label}. Pick one from the suggestions or keep yours.`);
   } catch (error) {
     detectedModelIds = [];
     renderModelOptions(providerById(state.ai.provider), '', controls);
@@ -10496,8 +10486,6 @@ function settingsAIControls() {
     providerInput: els.providerInput,
     baseUrlInput: els.baseUrlInput,
     modelInput: els.modelInput,
-    customModelLabel: els.customModelLabel,
-    customModelInput: els.customModelInput,
     apiKeyInput: els.apiKeyInput,
     thinkingLabel: els.thinkingLabel,
     thinkingInput: els.thinkingInput,
@@ -10541,28 +10529,24 @@ function renderAIProviderFields(settings, controls = settingsAIControls()) {
 }
 
 function renderModelOptions(provider, selectedModel = '', controls = settingsAIControls()) {
-  const customOption = document.createElement('option');
-  customOption.value = CUSTOM_MODEL_VALUE;
-  customOption.textContent = 'Custom model...';
-  const options = provider.models.map((model) => {
-    const option = document.createElement('option');
-    option.value = model.id;
-    option.textContent = model.label;
-    return option;
-  });
-  options.push(customOption);
-  controls.modelInput.replaceChildren(...options);
-
-  const hasBuiltInModel = provider.models.some((model) => model.id === selectedModel);
-  controls.modelInput.value = hasBuiltInModel ? selectedModel : CUSTOM_MODEL_VALUE;
-  controls.customModelInput.value = hasBuiltInModel ? '' : selectedModel;
-  updateCustomModelVisibility(controls);
-}
-
-function updateCustomModelVisibility(controls = settingsAIControls()) {
-  const custom = controls.modelInput.value === CUSTOM_MODEL_VALUE;
-  controls.customModelLabel.hidden = !custom;
-  controls.customModelInput.required = custom;
+  const entries = [
+    ...provider.models.map((model) => ({ id: model.id, label: model.label })),
+    ...detectedModelIds.map((modelId) => ({ id: modelId, label: modelId })),
+  ];
+  const seen = new Set();
+  controls.modelOptions.replaceChildren(...entries
+    .filter((entry) => {
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    })
+    .map((entry) => {
+      const option = document.createElement('option');
+      option.value = entry.id;
+      option.textContent = entry.label;
+      return option;
+    }));
+  controls.modelInput.value = String(selectedModel || '');
 }
 
 function updateAIThinkingControl(controls = settingsAIControls(), settings = null) {
@@ -10848,8 +10832,7 @@ async function restoreStoredKey(snapshot, key, set, remove) {
 }
 
 function selectedModelFromControls(controls) {
-  if (controls.modelInput.value === CUSTOM_MODEL_VALUE) return controls.customModelInput.value.trim();
-  return controls.modelInput.value;
+  return controls.modelInput.value.trim();
 }
 
 function setAIControlsStatus(controls, message) {

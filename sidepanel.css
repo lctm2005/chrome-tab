@@ -1647,6 +1647,7 @@ dialog::backdrop {
   opacity: 0.58;
 }
 
+.io-settings,
 .space-data-settings,
 .arc-import-settings,
 .shortcut-settings {
@@ -1691,9 +1692,6 @@ dialog::backdrop {
   margin-bottom: 2px;
 }
 
-.file-picker input {
-  padding: 8px;
-}
 
 .shortcuts-list {
   display: grid;

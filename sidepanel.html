@@ -50,8 +50,7 @@
         <button type="button" class="settings-nav-item active" data-settings-panel="ai">AI</button>
         <button type="button" class="settings-nav-item" data-settings-panel="tidy">Tidy Rules</button>
         <button type="button" class="settings-nav-item" data-settings-panel="shortcuts">Shortcuts</button>
-        <button type="button" class="settings-nav-item" data-settings-panel="arc">Import from Arc</button>
-        <button type="button" class="settings-nav-item" data-settings-panel="backup">Backup</button>
+        <button type="button" class="settings-nav-item" data-settings-panel="io">Import & Export</button>
       </nav>
       <div class="settings-panels">
         <section class="settings-panel" data-settings-panel-body="ai">
@@ -76,11 +75,8 @@
           </label>
           <label>
             Model
-            <select id="modelInput"></select>
-          </label>
-          <label id="customModelLabel" hidden>
-            Custom Model
-            <input id="customModelInput" type="text" spellcheck="false">
+            <input id="modelInput" type="text" list="modelOptions" spellcheck="false" autocomplete="off" placeholder="Pick a model or type one">
+            <datalist id="modelOptions"></datalist>
           </label>
           <button type="button" id="detectModelsButton" class="secondary-button">Detect models</button>
           <label>
@@ -128,26 +124,19 @@
             <div id="shortcutsList" class="shortcuts-list"></div>
           </section>
         </section>
-        <section class="settings-panel" data-settings-panel-body="arc" hidden>
-          <section class="arc-import-settings">
+        <section class="settings-panel" data-settings-panel-body="io" hidden>
+          <section class="io-settings">
             <h3>Import from Arc</h3>
-            <p>Choose Arc's <code>StorableSidebar.json</code>. Space Tabs reads the selected copy locally and never modifies it.</p>
             <input id="arcImportInput" type="file" accept=".json,application/json" hidden>
-            <button type="button" id="arcImportChooseButton" class="secondary-button">Choose Arc file</button>
-            <button type="button" id="importArcButton" class="secondary-button" disabled>Append Import</button>
+            <button type="button" id="arcImportChooseButton" class="secondary-button" hidden>Choose Arc file</button>
+            <button type="button" id="importArcButton" class="secondary-button">Import from Arc</button>
             <button type="button" id="undoArcImportButton" class="secondary-button" disabled>Undo Last Import</button>
-            <div id="arcImportStatus" class="settings-status">No Arc file selected.</div>
-          </section>
-        </section>
-        <section class="settings-panel" data-settings-panel-body="backup" hidden>
-          <section class="space-data-settings">
-            <h3>Space Data</h3>
+            <div id="arcImportStatus" class="settings-status"></div>
+            <h3>Backup</h3>
             <button type="button" id="exportSpaceDataButton" class="secondary-button">Export Backup</button>
-            <label class="file-picker">
-              <input id="spaceBackupInput" type="file" accept=".json,application/json">
-            </label>
+            <input id="spaceBackupInput" type="file" accept=".json,application/json" hidden>
             <button type="button" id="restoreSpaceDataButton" class="secondary-button" disabled>Restore Backup</button>
-            <div id="spaceBackupStatus" class="settings-status">No backup selected.</div>
+            <div id="spaceBackupStatus" class="settings-status"></div>
           </section>
         </section>
       </div>

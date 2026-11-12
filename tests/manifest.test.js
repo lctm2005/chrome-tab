@@ -73,8 +73,12 @@ test('settings expose provider and model selectors without prefilled free text m
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(html, /<select id="providerInput"/);
-  assert.match(html, /<select id="modelInput"/);
-  assert.match(html, /id="customModelInput"/);
+  // One free-text model field backed by a suggestion datalist (provider
+  // catalog + provider-detected models) replaced the old select/custom pair.
+  assert.match(html, /<input id="modelInput" type="text" list="modelOptions"/);
+  assert.match(html, /<datalist id="modelOptions">/);
+  assert.doesNotMatch(html, /id="customModelInput"|id="customModelLabel"/);
+  assert.doesNotMatch(source, /CUSTOM_MODEL_VALUE|updateCustomModelVisibility/);
   assert.match(source, /AI_PROVIDER_CATALOG/);
   assert.match(source, /selectedModelFromControls\(/);
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
@@ -127,7 +131,7 @@ test('sidepanel exposes Workbench, Arc import, and portable backup controls', as
   assert.match(styles, /html\[data-layout="workbench"\] \.settings-view/);
   assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
   assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
-  assert.match(html, /class="arc-import-settings"/);
+  assert.match(html, /class="io-settings"/);
   assert.doesNotMatch(html, /Arc import is not available/i);
   assert.match(html, /id="arcImportInput" type="file"/);
   assert.match(source, /function startArcFileSelectionFromUserGesture\(\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);

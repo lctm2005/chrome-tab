@@ -9537,9 +9537,8 @@ async function main() {
       provider.dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#baseUrlInput').value = ${JSON.stringify(askFixtureServer.baseUrl)};
       const model = document.querySelector('#modelInput');
-      model.value = '__custom__';
-      model.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#customModelInput').value = 'ask-e2e-model';
+      model.value = 'ask-e2e-model';
+      model.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#languageInput').value = 'en';
       document.querySelector('#apiKeyInput').value = '';
       document.querySelector('#saveSettingsButton').click();
@@ -13289,7 +13288,6 @@ async function main() {
       const provider = document.querySelector('#providerInput');
       const baseUrl = document.querySelector('#baseUrlInput');
       const model = document.querySelector('#modelInput');
-      const customModel = document.querySelector('#customModelInput');
       const thinking = document.querySelector('#thinkingInput');
       const hint = document.querySelector('#thinkingHint');
       const inspect = (providerId, customModelId = '') => {
@@ -13560,7 +13558,7 @@ async function main() {
     // The backup controls live in their Settings sub-panel; switch to it before
     // the pointer-level click.
     await evaluate(client, `(() => {
-      document.querySelector('[data-settings-panel="backup"]')?.click();
+      document.querySelector('[data-settings-panel="io"]')?.click();
     })()`);
     await waitFor(client, `!document.querySelector('[data-settings-panel-body="backup"]')?.hidden`);
     await clickElementWithCDP(client, '#restoreSpaceDataButton');
