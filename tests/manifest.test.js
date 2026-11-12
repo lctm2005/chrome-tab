@@ -110,7 +110,6 @@ test('sidepanel exposes Workbench, Arc import, and portable backup controls', as
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
   for (const id of [
-    'openWorkbenchButton',
     'arcImportChooseButton',
     'undoArcImportButton',
   ]) {
@@ -119,12 +118,13 @@ test('sidepanel exposes Workbench, Arc import, and portable backup controls', as
   for (const id of ['onboardingDialog', 'onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
     assert.doesNotMatch(html, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(html, /id="openWorkbenchButton"/);
+  assert.doesNotMatch(source, /openWorkbenchButton|function openWorkbench\(/);
+  assert.match(styles, /#syncStatus \{[\s\S]{0,120}display: none;/);
   assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
   assert.match(source, /function updateAIThinkingControl[\s\S]*providerSupportsThinking\(candidate\)[\s\S]*thinkingInput\.disabled = !supported[\s\S]*does not support Space Tabs’ Thinking control/);
   assert.match(source, /rememberArcImport\(/);
-  assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
-  assert.match(source, /send\('tabs:openUnique'/);
   assert.match(source, /state\.onboarding\?\.completed === true/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
   assert.match(html, /id="workbenchToast"/);
@@ -1039,6 +1039,15 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /function chromeGroupForSnapshotIdentity[\s\S]*binding\?\.snapshotGroupId \|\| tab\.snapshotGroupId[\s\S]*bindChromeGroup\(groupId, spaceId\)[\s\S]*logicalChromeGroupTitles\.set/);
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
+  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(group, \{ windowBinding \}\)\)/);
+  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(folderContext, \{ windowBinding \}\)\)/);
+  assert.match(source, /function createEmptySubgroup\(reference, options = \{\}\)[\s\S]*renderedGroupDragContexts\.get\(reference\.key\)/);
+  assert.ok(source.includes(".replace(/\\//g, ' ').trim()"));
+  assert.match(source, /setStoredFolderPathsForSpace\(spaceId, \[\.\.\.paths, nextPathId\]\)/);
+  assert.match(source, /function renameStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*oldPrefix[\s\S]*rekeyCollapsedFolderKeys\(spaceId, paths, nextPaths\)/);
+  assert.match(source, /function deleteStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*keptPaths[\s\S]*setStoredFolderPathsForSpace\(spaceId, keptPaths\)/);
+  assert.match(source, /function canDropGroupContext\(targetContext\) \{[\s\S]*targetContext\?\.type === 'folder' &&[\s\S]*!targetContext\.groupKeys\?\.length/);
+  assert.match(source, /const canAcceptFolderDrops = canDragFolder \|\| \([\s\S]*\(dragContext\.groupKeys \|\| \[\]\)\.length === 0/);
   assert.match(source, /groups\.push\(\{[\s\S]*title: physicalTitle/);
   assert.match(source, /\.\.\.logicalChromeGroupTitleOverride\(group\)/);
   assert.match(source, /\.\.\.snapshotLogicalChromeGroupTitleOverride\(group, identityTabs, spaceId\)/);
@@ -1435,7 +1444,7 @@ test('shared render signatures cover panel dependencies without invalidating eve
   );
 
   assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
-  assert.match(source, /const tree = createFolderTree\(tabGroups, \{ activeSpaceId: state\.activeSpaceId \}\);[\s\S]{0,800}groupsRenderSignature\(\{[\s\S]{0,800}collapsedGroups: state\.collapsedGroups,[\s\S]{0,800}selectedTabIds,[\s\S]{0,800}folderTree: tree/);
+  assert.match(source, /const tree = createFolderTree\(tabGroups, \{\s*\n\s*activeSpaceId: state\.activeSpaceId,\s*\n\s*extraFolderPaths: storedFolderPathsForSpace\(state\.activeSpaceId\),\s*\n\s*\}\);[\s\S]{0,800}groupsRenderSignature\(\{[\s\S]{0,800}collapsedGroups: state\.collapsedGroups,[\s\S]{0,800}selectedTabIds,[\s\S]{0,800}folderTree: tree/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
   assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];

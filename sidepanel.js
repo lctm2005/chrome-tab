@@ -350,7 +350,6 @@ const els = {
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
   commandPaletteButton: document.querySelector('#commandPaletteButton'),
-  openWorkbenchButton: document.querySelector('#openWorkbenchButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   groupsList: document.querySelector('#groupsList'),
@@ -735,9 +734,6 @@ function bindEvents() {
     activeView = 'settings';
     render();
   }));
-  els.openWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    openWorkbench({ windowBinding })
-  )));
   els.commandPaletteButton.addEventListener('click', commandPaletteController.open);
   els.undoOrganizationButton.addEventListener('click', () => {
     const operationId = els.undoOrganizationButton.dataset.operationId || '';
@@ -1370,7 +1366,6 @@ function render() {
   if (!showSources) hideGroupPreview();
   els.tidyNamesButton.hidden = !showSources;
   els.collapseGroupsButton.hidden = !showSources;
-  els.openWorkbenchButton.hidden = workbenchMode;
   els.settingsButton.classList.toggle('active', isSettingsView);
   els.settingsView.hidden = !isSettingsView;
   els.collapseGroupsButton.innerHTML = groupsCollapsed
@@ -2274,7 +2269,10 @@ function renderGroups() {
   const tabGroups = isSpaceGroupsCollapsed()
     ? []
     : spaceView.filter((group) => group.key !== 'ungrouped');
-  const tree = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId });
+  const tree = createFolderTree(tabGroups, {
+    activeSpaceId: state.activeSpaceId,
+    extraFolderPaths: storedFolderPathsForSpace(state.activeSpaceId),
+  });
   const signature = groupsRenderSignature({
     activeSpaceId: state.activeSpaceId,
     fileSchemeAccessAllowed,
@@ -2440,6 +2438,14 @@ function createFolderSection(folder) {
   if (canDragFolder) {
     header.addEventListener('dragstart', (event) => startFolderDrag(event, folder));
     header.addEventListener('dragend', clearDragState);
+  }
+  // Empty folders have no member keys to drag, but they must still accept
+  // dropped groups so a freshly created subgroup can be filled. Foreign
+  // folders keep refusing drops (their members render only in that window).
+  const canAcceptFolderDrops = canDragFolder || (
+    dragContext?.type === 'folder' && (dragContext.groupKeys || []).length === 0
+  );
+  if (canAcceptFolderDrops) {
     header.addEventListener('dragover', (event) => acceptFolderDrop(event, folder));
     header.addEventListener('dragleave', () => header.classList.remove('drag-over'));
     header.addEventListener('drop', (event) => dropFolder(event, folder));
@@ -3246,26 +3252,6 @@ function spaceButtonLabel(text) {
   label.className = 'space-label';
   label.textContent = text;
   return label;
-}
-
-async function openWorkbench(options = {}) {
-  if (workbenchMode) return;
-
-  const url = extensionRuntime
-    ? new URL(chrome.runtime.getURL('sidepanel.html'))
-    : new URL(window.location.href);
-  url.searchParams.set('layout', 'workbench');
-  if (options.view) url.searchParams.set('view', options.view);
-  else url.searchParams.delete('view');
-
-  if (extensionRuntime) {
-    await send('tabs:openUnique', {
-      url: url.toString(),
-      matchUrl: `${chrome.runtime.getURL('sidepanel.html')}?layout=workbench`,
-      }, { windowBinding: options.windowBinding });
-  } else {
-    window.open(url.toString(), 'space-workbench');
-  }
 }
 
 function startArcFileSelectionFromUserGesture() {
@@ -4214,7 +4200,9 @@ async function renameGroup(group, options = {}) {
 async function renameFolderGroup(folderContext, options = {}) {
   const windowBinding = options.windowBinding;
   const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
+  if (groups.length === 0) {
+    return renameStoredEmptyFolder(folderContext, { windowBinding });
+  }
 
   const sourcePath = folderContext.path || [];
   const currentName = sourcePath.at(-1) || 'Group';
@@ -5048,7 +5036,9 @@ async function deleteFolderGroup(folderContext, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     const groups = groupsForFolderContext(folderContext);
-    if (groups.length === 0) return;
+    if (groups.length === 0) {
+      return deleteStoredEmptyFolder(folderContext, { windowBinding });
+    }
     assertGroupActionsAreLocal(groups);
     const confirmed = await confirmGroupDeletion(
       groups,
@@ -5068,7 +5058,9 @@ async function deleteFolderGroup(folderContext, options = {}) {
     }, { windowBinding });
   }
   const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
+  if (groups.length === 0) {
+    return deleteStoredEmptyFolder(folderContext, { windowBinding });
+  }
   assertGroupActionsAreLocal(groups);
   const deletion = await deleteGroupsAndTabs(groups, { windowBinding });
   await refreshTabs({ reloadDormant: true, windowBinding });
@@ -7095,7 +7087,16 @@ function groupDropIntent(event) {
 }
 
 function canDropGroupContext(targetContext) {
-  if (dragState?.type !== 'group' || !targetContext?.groupKeys?.length) return false;
+  if (dragState?.type !== 'group') return false;
+  // An explicitly created empty folder has no member keys yet, but it must
+  // still accept dropped groups so users can fill a fresh subgroup.
+  if (
+    targetContext?.type === 'folder' &&
+    Array.isArray(targetContext.path) &&
+    targetContext.path.length > 0 &&
+    !targetContext.groupKeys?.length
+  ) return true;
+  if (!targetContext?.groupKeys?.length) return false;
   const sourceKeySet = new Set(dragState.groupKeys);
   return targetContext.groupKeys.some((key) => !sourceKeySet.has(key));
 }
@@ -10030,6 +10031,7 @@ function showGroupContextMenu(event, group) {
       ? [menuAction('Open Group', (windowBinding) => openDormantGroup(group, { windowBinding }))]
       : [menuAction('Close Group', (windowBinding) => closeGroupToSaved(group, { windowBinding }))]),
     menuAction('Delete Group', (windowBinding) => deleteGroup(group, { windowBinding })),
+    menuAction('New Subgroup', (windowBinding) => createEmptySubgroup(group, { windowBinding })),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })
     ))),
@@ -10046,6 +10048,7 @@ function showFolderContextMenu(event, folderContext) {
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameFolderGroup(folderContext, { windowBinding })),
     menuAction('Delete Group', (windowBinding) => deleteFolderGroup(folderContext, { windowBinding })),
+    menuAction('New Subgroup', (windowBinding) => createEmptySubgroup(folderContext, { windowBinding })),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveFolderGroupToSpace(folderContext, space.id, { windowBinding })
     ))),
@@ -10059,6 +10062,127 @@ function showSpaceContextMenu(event, space) {
     menuAction('Rename Space', (windowBinding) => renameSpace(space, { windowBinding })),
     menuAction('Delete Space', (windowBinding) => deleteSpace(space, { windowBinding })),
   ]);
+}
+
+// Empty subgroups are explicit folder placeholders stored per Space. The
+// title-derived folder tree cannot represent a folder with no member groups,
+// and an empty Tag would be purged as residue, so these paths are the only
+// way to prepare a destination before dragging groups under it.
+function storedFolderPathsForSpace(spaceId = state.activeSpaceId) {
+  if (!state.folderPaths || typeof state.folderPaths !== 'object') state.folderPaths = {};
+  const stored = state.folderPaths[spaceId];
+  return (Array.isArray(stored) ? stored : [])
+    .map((path) => String(path || '').trim())
+    .filter(Boolean);
+}
+
+function setStoredFolderPathsForSpace(spaceId, paths) {
+  if (!state.folderPaths || typeof state.folderPaths !== 'object') state.folderPaths = {};
+  state.folderPaths[spaceId] = paths;
+}
+
+function folderPartsForStoredPath(path) {
+  return String(path || '').split('/').map((part) => part.trim()).filter(Boolean);
+}
+
+function rekeyCollapsedFolderKeys(spaceId, beforePaths, afterPaths) {
+  if (!state.collapsedGroups || typeof state.collapsedGroups !== 'object') return;
+  const before = Array.isArray(beforePaths) ? beforePaths : [];
+  const prefix = `folder:${spaceId}:`;
+  for (const pathId of before) {
+    const key = `${prefix}${pathId}`;
+    if (!Object.hasOwn(state.collapsedGroups, key)) continue;
+    const value = state.collapsedGroups[key];
+    delete state.collapsedGroups[key];
+    const index = before.indexOf(pathId);
+    const nextPath = Array.isArray(afterPaths) ? afterPaths[index] : null;
+    if (nextPath) state.collapsedGroups[`${prefix}${nextPath}`] = value;
+  }
+}
+
+async function createEmptySubgroup(reference, options = {}) {
+  const windowBinding = options.windowBinding || capturePanelWindowBinding();
+  const name = await askText({
+    title: 'New Subgroup',
+    label: 'Subgroup title',
+    value: 'New Group',
+    confirmText: 'Create',
+  });
+  if (name === null) return;
+  const clean = String(name).replace(/\//g, ' ').trim();
+  if (!clean) return;
+  // Resolve the sibling level from the CURRENT drag context: the menu holds a
+  // reference captured at render time, so a re-render could have moved it.
+  const current = reference?.key ? renderedGroupDragContexts.get(reference.key) : null;
+  if (reference?.key && !current) {
+    throw new Error('This group changed in another Space Tabs view. Try the action again.');
+  }
+  const referencePath = Array.isArray(current?.path)
+    ? current.path
+    : folderTitleParts(current?.group?.title || current?.group?.displayTitle || '');
+  const parentPath = referencePath.slice(0, -1);
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const spaceId = state.activeSpaceId;
+  const paths = storedFolderPathsForSpace(spaceId);
+  const nextPathId = [...parentPath, clean].join('/');
+  if (paths.includes(nextPathId)) return;
+  setStoredFolderPathsForSpace(spaceId, [...paths, nextPathId]);
+  await saveState({ persistWindowState: false, windowBinding });
+  render();
+  setStatus(`Created subgroup "${clean}".`);
+}
+
+async function renameStoredEmptyFolder(folderContext, options = {}) {
+  const windowBinding = options.windowBinding;
+  const sourcePath = Array.isArray(folderContext?.path) ? folderContext.path : [];
+  if (sourcePath.length === 0) return;
+  const currentName = sourcePath.at(-1) || 'Group';
+  const nextName = await askText({
+    title: 'Rename Group',
+    label: 'Group title',
+    value: currentName,
+    confirmText: 'Save',
+  });
+  if (nextName === null) return;
+  const clean = String(nextName).replace(/\//g, ' ').trim();
+  if (!clean || clean === currentName) return;
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const spaceId = state.activeSpaceId;
+  const paths = storedFolderPathsForSpace(spaceId);
+  const oldPathId = sourcePath.join('/');
+  const oldPrefix = `${oldPathId}/`;
+  const renamedId = [...sourcePath.slice(0, -1), clean].join('/');
+  const nextPaths = paths.map((path) => {
+    if (path === oldPathId) return renamedId;
+    if (path.startsWith(oldPrefix)) {
+      const parts = folderPartsForStoredPath(path);
+      return [...sourcePath.slice(0, -1), clean, ...parts.slice(sourcePath.length)].join('/');
+    }
+    return path;
+  });
+  rekeyCollapsedFolderKeys(spaceId, paths, nextPaths);
+  setStoredFolderPathsForSpace(spaceId, nextPaths);
+  await saveState({ persistWindowState: false, windowBinding });
+  render();
+  setStatus(`Renamed group "${currentName}" to "${clean}".`);
+}
+
+async function deleteStoredEmptyFolder(folderContext, options = {}) {
+  const windowBinding = options.windowBinding;
+  const sourcePath = Array.isArray(folderContext?.path) ? folderContext.path : [];
+  if (sourcePath.length === 0) return;
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const spaceId = state.activeSpaceId;
+  const paths = storedFolderPathsForSpace(spaceId);
+  const removedId = sourcePath.join('/');
+  const removedPrefix = `${removedId}/`;
+  const keptPaths = paths.filter((path) => path !== removedId && !path.startsWith(removedPrefix));
+  if (keptPaths.length === paths.length) return;
+  rekeyCollapsedFolderKeys(spaceId, paths, keptPaths);
+  setStoredFolderPathsForSpace(spaceId, keptPaths);
+  await saveState({ persistWindowState: false, windowBinding });
+  render();
+  setStatus(`Deleted group "${sourcePath.at(-1) || 'Group'}".`);
 }
 
 function showContextMenu(event, items) {

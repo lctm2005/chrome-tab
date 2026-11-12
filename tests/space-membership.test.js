@@ -1656,6 +1656,11 @@ test('cleanup and Space deletion tolerate missing optional ownership collections
     tabOrder: {},
     spaceSnapshots: {},
   }, 'missing'));
+  const folderState = {
+    folderPaths: { gone: ['Research'], kept: ['Archive'] },
+  };
+  removeSpaceReferences(folderState, 'gone');
+  assert.deepEqual(folderState.folderPaths, { kept: ['Archive'] });
 });
 
 test('invalid entity ids cannot masquerade as Chrome group or tab id zero', () => {

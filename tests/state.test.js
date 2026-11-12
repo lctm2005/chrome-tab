@@ -797,6 +797,14 @@ test('preserves empty current shortcuts as disabled actions', () => {
   assert.equal(merged.shortcuts.previousSpace, 'Control+Alt+ArrowLeft');
 });
 
+test('stored empty folder paths survive a state merge', () => {
+  const merged = mergeStoredState({
+    folderPaths: { custom: ['Research', 'Research / Memory'] },
+  }, createDefaultState());
+
+  assert.deepEqual(merged.folderPaths.custom, ['Research', 'Research / Memory']);
+});
+
 test('merges stored state without dropping new defaults', () => {
   const merged = mergeStoredState({
     spaces: [{ id: 'custom', name: 'Custom', icon: 'C', color: 'blue' }],
@@ -813,6 +821,7 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal(merged.collapsedSpaceGroups.custom, true);
+  assert.deepEqual(merged.folderPaths, {});
 });
 
 test('resets old built-in Spaces during v4 migration and drops old clutter fields', () => {

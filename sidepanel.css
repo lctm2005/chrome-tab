@@ -263,6 +263,12 @@ button {
   min-width: 0;
 }
 
+/* Operation status text stays in the DOM (tests and screen readers still read
+   it), but the persistent line is no longer part of the visual chrome. */
+#syncStatus {
+  display: none;
+}
+
 h1,
 h2,
 h3,

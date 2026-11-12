@@ -165,6 +165,66 @@ test('folder rename falls back safely when paths no longer match or names are mi
   assert.equal(renamedFolderGroupTitle({ title: 'A / B' }, null, ''), 'B');
 });
 
+test('explicitly created empty folders render without member groups', () => {
+  const tree = createFolderTree([], {
+    activeSpaceId: 'space-1',
+    extraFolderPaths: ['Research'],
+  });
+
+  assert.equal(tree.length, 1);
+  assert.equal(tree[0].type, 'folder');
+  assert.equal(tree[0].title, 'Research');
+  assert.equal(tree[0].path.join('/'), 'Research');
+  assert.deepEqual(tree[0].children, []);
+  assert.equal(tree[0].key, 'folder:space-1:Research');
+});
+
+test('nested empty folder paths create their parent chain once', () => {
+  const tree = createFolderTree([], {
+    activeSpaceId: 'space-1',
+    extraFolderPaths: ['Research / Memory / Agents', 'Research / Memory'],
+  });
+
+  const research = tree[0];
+  assert.equal(research.title, 'Research');
+  const memory = research.children[0];
+  assert.equal(memory.type, 'folder');
+  assert.equal(memory.title, 'Memory');
+  const agents = memory.children[0];
+  assert.equal(agents.type, 'folder');
+  assert.equal(agents.title, 'Agents');
+  assert.deepEqual(agents.children, []);
+  assert.equal(research.children.length, 1);
+  assert.equal(memory.children.length, 1);
+});
+
+test('stored empty folder paths dedupe with title-derived folders', () => {
+  const tree = createFolderTree([
+    group('Research / Memory', ['https://memory.test/x']),
+  ], {
+    activeSpaceId: 'space-1',
+    extraFolderPaths: ['Research', 'Research / Deep'],
+  });
+
+  const research = tree.find((node) => node.type === 'folder' && node.title === 'Research');
+  assert.equal(research, tree[0]);
+  assert.equal(research.children.length, 2);
+  const memory = research.children.find((node) => node.type === 'group');
+  assert.equal(memory.group.displayTitle, 'Memory');
+  const deep = research.children.find((node) => node.type === 'folder');
+  assert.equal(deep.title, 'Deep');
+  assert.deepEqual(deep.children, []);
+});
+
+test('blank extra folder paths are ignored', () => {
+  const tree = createFolderTree([], {
+    activeSpaceId: 'space-1',
+    extraFolderPaths: ['', '   ', ' / ', 42, null],
+  });
+
+  assert.deepEqual(tree, []);
+});
+
 function group(title, urls) {
   return {
     id: title,

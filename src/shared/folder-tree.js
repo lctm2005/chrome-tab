@@ -45,6 +45,18 @@ export function createFolderTree(groupsToRender = [], options = {}) {
     });
   }
 
+  // Explicitly created empty folders persist in state and render even with no
+  // member groups: the title-derived tree cannot represent a brand-new
+  // subgroup, and without one there is nothing to drop a group into.
+  const extraFolderPaths = Array.isArray(options.extraFolderPaths)
+    ? options.extraFolderPaths
+    : [];
+  for (const folderPath of extraFolderPaths) {
+    const parts = folderTitleParts(typeof folderPath === 'string' ? folderPath : '');
+    if (parts.length === 0) continue;
+    ensureFolder(parts);
+  }
+
   return root;
 }
 
