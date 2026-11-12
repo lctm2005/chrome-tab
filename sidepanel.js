@@ -10025,12 +10025,10 @@ function showGroupContextMenu(event, group) {
     showContextMenu(event, [menuNotice('Open this Space in the other window to edit this group.')]);
     return;
   }
+  // The header already covers open/close (click) and delete (×), so the menu
+  // keeps only Rename, New Subgroup, and Move to.
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
-    ...(group.dormant
-      ? [menuAction('Open Group', (windowBinding) => openDormantGroup(group, { windowBinding }))]
-      : [menuAction('Close Group', (windowBinding) => closeGroupToSaved(group, { windowBinding }))]),
-    menuAction('Delete Group', (windowBinding) => deleteGroup(group, { windowBinding })),
     menuAction('New Subgroup', (windowBinding) => createEmptySubgroup(group, { windowBinding })),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })
@@ -10120,11 +10118,12 @@ async function createEmptySubgroup(reference, options = {}) {
   const referencePath = Array.isArray(current?.path)
     ? current.path
     : folderTitleParts(current?.group?.title || current?.group?.displayTitle || '');
-  const parentPath = referencePath.slice(0, -1);
   if (!isCurrentPanelWindowBinding(windowBinding)) return;
   const spaceId = state.activeSpaceId;
   const paths = storedFolderPathsForSpace(spaceId);
-  const nextPathId = [...parentPath, clean].join('/');
+  // The empty subgroup hangs UNDER the right-clicked node: nesting follows the
+  // same " / " title convention as dragging a group into a folder.
+  const nextPathId = [...referencePath, clean].join('/');
   if (paths.includes(nextPathId)) return;
   setStoredFolderPathsForSpace(spaceId, [...paths, nextPathId]);
   await saveState({ persistWindowState: false, windowBinding });

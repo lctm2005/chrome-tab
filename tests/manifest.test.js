@@ -119,6 +119,14 @@ test('sidepanel exposes Workbench, Arc import, and portable backup controls', as
     assert.doesNotMatch(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /id="openWorkbenchButton"/);
+  assert.match(html, /data-settings-panel="ai"[^>]*aria-label="AI"/);
+  assert.match(html, /data-settings-panel="tidy"[^>]*aria-label="Tidy Rules"/);
+  assert.match(html, /data-settings-panel="shortcuts"[^>]*aria-label="Shortcuts"/);
+  assert.match(html, /data-settings-panel="io"[^>]*aria-label="Import & Export"/);
+  assert.match(html, /class="settings-nav-item[^"]*"[^>]*>\s*<svg/);
+  assert.doesNotMatch(html, /data-settings-panel="[a-z]+"[^>]*>(?:(?!<svg)[\s\S])*?<\/button>/);
+  assert.match(styles, /\.settings-nav-item \{[\s\S]{0,400}width: 34px;/);
+  assert.doesNotMatch(html, /id="openWorkbenchButton"/);
   assert.doesNotMatch(source, /openWorkbenchButton|function openWorkbench\(/);
   assert.match(styles, /#syncStatus \{[\s\S]{0,120}display: none;/);
   assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
@@ -1040,9 +1048,14 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
   assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(group, \{ windowBinding \}\)\)/);
+  // The header already covers open/close and delete, so the group menu keeps
+  // only Rename, New Subgroup, and Move to.
+  assert.doesNotMatch(source, /menuAction\('Open Group'[^)]*\)\),\s*\n[\s\S]{0,200}menuAction\('Delete Group'[^)]*\)\),\s*\n[\s\S]{0,200}showGroupContextMenu/);
+  assert.match(source, /menuAction\('Delete Group', \(windowBinding\) => deleteFolderGroup\(folderContext, \{ windowBinding \}\)\)/);
   assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(folderContext, \{ windowBinding \}\)\)/);
   assert.match(source, /function createEmptySubgroup\(reference, options = \{\}\)[\s\S]*renderedGroupDragContexts\.get\(reference\.key\)/);
   assert.ok(source.includes(".replace(/\\//g, ' ').trim()"));
+  assert.match(source, /const nextPathId = \[\.\.\.referencePath, clean\]\.join\('\/'\)/);
   assert.match(source, /setStoredFolderPathsForSpace\(spaceId, \[\.\.\.paths, nextPathId\]\)/);
   assert.match(source, /function renameStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*oldPrefix[\s\S]*rekeyCollapsedFolderKeys\(spaceId, paths, nextPaths\)/);
   assert.match(source, /function deleteStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*keptPaths[\s\S]*setStoredFolderPathsForSpace\(spaceId, keptPaths\)/);

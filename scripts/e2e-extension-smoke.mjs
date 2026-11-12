@@ -12948,23 +12948,20 @@ async function main() {
         ${JSON.stringify(openedWorkbench.id)})()`);
 
     const openRenamedGroupDeleteDialog = async () => {
+      // The context menu no longer carries Delete Group (the header × button
+      // is the single delete affordance), so drive that button directly.
       await evaluate(client, `(() => {
         const container = [...document.querySelectorAll('#groupsList [data-group-key]')]
           .find((item) => item.querySelector(':scope > .group-header h2')?.textContent ===
             ${JSON.stringify(renameGroupRequestedTitle)});
-        const header = container?.querySelector(':scope > .group-header');
-        header?.dispatchEvent(new MouseEvent('contextmenu', {
+        const deleteButton = container?.querySelector(
+          ':scope > .group-header .group-actions button[title="Delete group"]',
+        );
+        deleteButton?.dispatchEvent(new MouseEvent('click', {
           bubbles: true,
           cancelable: true,
-          clientX: 24,
-          clientY: 24,
         }));
       })()`);
-      await waitFor(client, `!document.querySelector('#contextMenu')?.hidden &&
-        [...document.querySelectorAll('#contextMenu button')]
-          .some((button) => button.textContent === 'Delete Group')`);
-      await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
-        .find((button) => button.textContent === 'Delete Group')?.click()`);
       return waitFor(client, `(() => {
         if (!document.querySelector('#actionDialog')?.open ||
             document.querySelector('#actionDialogTitle')?.textContent !== 'Delete Group') return null;

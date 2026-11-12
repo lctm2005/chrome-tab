@@ -1450,16 +1450,24 @@ dialog::backdrop {
 }
 
 .settings-nav-item {
+  flex: 0 0 auto;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 13px;
-  white-space: nowrap;
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.settings-nav-item svg {
+  width: 16px;
+  height: 16px;
 }
 
 .settings-nav-item:hover {
