@@ -55,6 +55,14 @@ import {
   renamedFolderGroupTitle,
 } from './src/shared/folder-tree.js';
 import {
+  buildGroupTree,
+  descendantKeysOf,
+  parseTitlePath,
+  planHierarchyDrop,
+  planLegacyTitlePathMigration,
+  remapGroupParents,
+} from './src/shared/group-tree.js';
+import {
   chromeGroupTitle,
   chromeGroupTitleKey,
   groupTitleKey,
@@ -178,6 +186,7 @@ import {
   bindLiveTabsToSnapshot,
   claimViewSnapshotLifecycleId,
   ensureSnapshotLifecycleIds,
+  planStaleLifecycleBindingHeal,
   remapTabLifecycleGroupReferences,
   reduceTabLifecycleEvent,
   resolveViewSnapshotGroupId,
@@ -196,6 +205,7 @@ import {
   retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
   snapshotEmptyTagIsMergeCandidate,
+  snapshotGroupHasLiveBoundRows,
   snapshotGroupShouldPersist,
   snapshotHasPersistentContent,
   snapshotTabCount,
@@ -507,6 +517,13 @@ async function init() {
     // reverting a newer attach event.
     await confirmPanelHostBindingAfterInit();
     bindEvents();
+    try {
+      await migrateSpaceHierarchy(state.activeSpaceId, {
+        windowBinding: panelWindowBindingController.current(),
+      });
+    } catch (migrationError) {
+      console.error(migrationError);
+    }
     document.documentElement.dataset.initialized = 'true';
     renderSettings();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
@@ -5752,8 +5769,12 @@ async function switchSpace(spaceId, options = {}) {
       allowStaleWindowBinding: true,
     });
     await loadDormantSpaceView(spaceId, { force: true });
-    if (isCurrentPanelWindowBinding(windowBinding)) render();
-    else postCommitWarnings.push('This panel moved before its switched view could refresh.');
+    if (isCurrentPanelWindowBinding(windowBinding)) {
+      render();
+      await migrateSpaceHierarchy(spaceId, { windowBinding });
+    } else {
+      postCommitWarnings.push('This panel moved before its switched view could refresh.');
+    }
   } catch (error) {
     console.error(error);
     postCommitWarnings.push('The switched tab list could not refresh yet.');
@@ -7368,7 +7389,17 @@ function replaceActiveSpaceSnapshotGroups(groups, snapshotUpdates = null) {
   const nextSnapshot = {
     ...baseSnapshot,
     updatedAt: Date.now(),
-    groups: groups.filter((group) => snapshotGroupShouldPersist(baseSnapshot, group)),
+    groups: (() => {
+      // 快照组若仍有 tabLifecycle 行绑定则不得整组清退：删掉会让保存行身份
+      // 失联（保存数据丢失），并让 Auto Group checkpoint 回滚。
+      const liveBoundRows = new Set(Object.values(state.tabLifecycle || {})
+        .map((binding) => String(binding?.snapshotTabId || '').trim())
+        .filter(Boolean));
+      return groups.filter((group) => (
+        snapshotGroupShouldPersist(baseSnapshot, group) ||
+        snapshotGroupHasLiveBoundRows(group, liveBoundRows)
+      ));
+    })(),
   };
   const persistedSnapshot = snapshotHasPersistentContent(nextSnapshot) ? nextSnapshot : null;
   const remapped = remapSnapshotGroupIndexedState({
@@ -9192,17 +9223,7 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
       const snapshotTabId = validSnapshotLifecycleId(
         candidate?.source?.snapshot?.snapshotTabId || binding?.snapshotTabId,
       );
-      const matchingSnapshotGroup = uniqueSnapshotGroupForTabId(
-        snapshotGroups,
-        snapshotTabId,
-      );
-      const targetSnapshotGroupId = matchingSnapshotGroup
-        ? validSnapshotLifecycleId(matchingSnapshotGroup.snapshotGroupId)
-        : '';
-      if (
-        !currentTab || !isGroupedTab(currentTab) || !binding ||
-        !snapshotTabId || !targetSnapshotGroupId
-      ) {
+      if (!currentTab || !isGroupedTab(currentTab) || !binding) {
         const stableMatchCount = snapshotGroups.filter((group) => (
           (group?.tabs || []).some((tab) => (
             validSnapshotLifecycleId(tab?.snapshotTabId) === snapshotTabId
@@ -9212,9 +9233,30 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
           `The stable saved row for "${plannedGroup.title || 'Tabs'}" could not be checkpointed ` +
           `(row ${snapshotTabId || 'missing'}, matches ${stableMatchCount}, ` +
           `live ${Boolean(currentTab)}, grouped ${Boolean(currentTab && isGroupedTab(currentTab))}, ` +
-          `binding ${Boolean(binding)}, target ${targetSnapshotGroupId || 'missing'}). ` +
+          `binding ${Boolean(binding)}). ` +
           'The Auto Group change was rolled back.',
         );
+      }
+      if (!snapshotTabId) continue;
+      // 行身份可能已被上游快照重建/清退摘除；优先治愈而不是回滚整个变更。
+      const heal = planStaleLifecycleBindingHeal({
+        snapshotTabId,
+        snapshotGroups,
+        candidateSnapshotGroupId: binding.snapshotGroupId,
+      });
+      const targetSnapshotGroupId = validSnapshotLifecycleId(heal.snapshotGroupId);
+      if (heal.action === 'clear' || !targetSnapshotGroupId) {
+        console.warn(
+          `Healed stale saved-row binding by clear: row ${snapshotTabId} of "${plannedGroup.title || 'Tabs'}" no longer matches any saved Tag.`,
+        );
+        state.tabLifecycle[liveTabId] = {
+          ...binding,
+          tabId: liveTabId,
+          snapshotTabId: '',
+          snapshotGroupId: '',
+          provisional: true,
+        };
+        continue;
       }
       state.tabLifecycle[liveTabId] = {
         ...binding,
@@ -10081,6 +10123,91 @@ function setStoredFolderPathsForSpace(spaceId, paths) {
 
 function folderPartsForStoredPath(path) {
   return String(path || '').split('/').map((part) => part.trim()).filter(Boolean);
+}
+
+function createHierarchyNodeId() {
+  return `node:${crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+// One-time per-Space migration: legacy " / " title paths and stored empty
+// folder paths become state-backed parent links + stable empty nodes, and the
+// affected tags are retitled to their leaf segment. Idempotent: a migrated
+// Space produces an empty plan and exits without writing anything.
+async function migrateSpaceHierarchy(spaceId = state.activeSpaceId, options = {}) {
+  const windowBinding = options.windowBinding || capturePanelWindowBinding();
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const groupsToMigrate = spaceView.filter((group) => group.key !== 'ungrouped');
+  const hasNestedTitles = groupsToMigrate.some((group) => (
+    parseTitlePath(group.title || group.displayTitle || '').length > 1
+  ));
+  const storedPaths = storedFolderPathsForSpace(spaceId);
+  if (!hasNestedTitles && storedPaths.length === 0) return;
+  let plan;
+  try {
+    plan = planLegacyTitlePathMigration({
+      folderPathsBySpace: { [spaceId]: storedPaths },
+      groupsBySpace: { [spaceId]: groupsToMigrate },
+      idFactory: createHierarchyNodeId,
+    });
+  } catch (error) {
+    console.error('Hierarchy migration planning failed; leaving titles as-is.', error);
+    return;
+  }
+  const rollback = captureWorkspaceMemoryCheckpoint();
+  try {
+    await runChromeGroupMutationTransaction({
+      apply: async () => {
+        const nodeEntries = plan.emptyNodesBySpace[spaceId] || {};
+        state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), ...nodeEntries };
+        state.groupParents[spaceId] = {
+          ...(state.groupParents[spaceId] || {}),
+          ...(plan.parentsBySpace[spaceId] || {}),
+        };
+        for (const { key, nextTitle } of plan.renamesBySpace[spaceId] || []) {
+          const group = spaceView.find((item) => item.key === key);
+          if (!group) continue;
+          if (group.dormant) {
+            renameDormantSnapshotGroup(group, nextTitle);
+          } else if (isVirtualGroupKey(group.key)) {
+            retitleActiveSpaceSnapshotGroup(group, nextTitle);
+            state.virtualGroups[group.key] = {
+              ...(state.virtualGroups[group.key] || {}),
+              id: group.key,
+              title: nextTitle,
+              color: group.color || 'blue',
+              spaceId,
+            };
+          } else {
+            const groupId = groupIdFromKey(group.key);
+            if (groupId === null) continue;
+            const result = await send('groups:update', {
+              groupId,
+              update: { title: nextTitle },
+            }, { windowBinding });
+            if (!result.group) continue;
+            logicalChromeGroupTitles.set(groupId, normalizeGroupTitle(nextTitle, 'Group'));
+            retitleActiveSpaceSnapshotGroup(group, nextTitle);
+            bindChromeGroup(groupId, spaceId);
+          }
+        }
+        // 节点按创建顺序追加：父段先于子段，天然满足 DFS 序不变量。
+        for (const nodeKey of Object.keys(nodeEntries)) {
+          addGroupOrderKey(spaceId, nodeKey);
+        }
+        setStoredFolderPathsForSpace(spaceId, []);
+      },
+      checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
+      rollback: () => restoreWorkspaceMemoryCheckpoint(rollback),
+    });
+    lastRenderedGroupsSignature = '';
+    render();
+    setStatus('Migrated " / " group titles into nested groups.');
+  } catch (error) {
+    restoreWorkspaceMemoryCheckpoint(rollback, { renderView: true });
+    console.error('Hierarchy migration failed; leaving titles as-is.', error);
+  }
 }
 
 function rekeyCollapsedFolderKeys(spaceId, beforePaths, afterPaths) {
