@@ -22683,10 +22683,262 @@ ${error.message}`);
       })}`);
     }
 
+    // --- Hierarchy scenarios (state-backed parent-child groups) ---
+    // Self-contained: seed two tags, drive the panel flows, assert both the
+    // rendered tree and the persisted state. Runs before the summary so a
+    // failure still surfaces through `results`.
+    try {
+      await reactivateWorkbenchForUi();
+      progress('running group hierarchy scenarios');
+      await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        await chrome.storage.local.set({
+          spaceTabsState: {
+            ...saved,
+            groupParents: {},
+            emptyNodes: {},
+            folderPaths: {},
+            collapsedGroups: {},
+            groupOrder: { default: [] },
+          },
+        });
+        return true;
+      })`);
+      await evaluate(client, 'location.reload()');
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+
+      const [parentTab, childTab] = await Promise.all([
+        chrome.tabs.create({ url: 'https://example.com/hierarchy-parent', active: false }),
+        chrome.tabs.create({ url: 'https://example.com/hierarchy-child', active: false }),
+      ]);
+      const parentGroupId = await chrome.tabs.group({ tabIds: [parentTab.id] });
+      await chrome.tabGroups.update(parentGroupId, { title: 'Hierarchy Parent', color: 'blue' });
+      const childGroupId = await chrome.tabs.group({ tabIds: [childTab.id] });
+      await chrome.tabGroups.update(childGroupId, { title: 'Hierarchy Child', color: 'red' });
+      const parentTabJson = JSON.stringify(parentTab.id);
+      const childTabJson = JSON.stringify(childTab.id);
+      const parentGroupIdJson = JSON.stringify(parentGroupId);
+      const childGroupIdJson = JSON.stringify(childGroupId);
+      await evaluate(client, 'location.reload()');
+      const parentKeyJson = await waitFor(client, `(async () => {
+        const card = [...document.querySelectorAll('#groupsList > .group-card')]
+          .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Parent');
+        return card?.dataset.groupKey || '';
+      })()`, 20000);
+      if (!parentKeyJson) {
+        throw new Error('Hierarchy setup did not render the seeded parent tag card');
+      }
+
+      // 1. New Subgroup menu creates an empty child node nested under the tag.
+      await evaluate(client, `(() => {
+        const header = document.querySelector('.group-card[data-group-key=${parentKeyJson}] > .group-header');
+        header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        const menu = document.querySelector('#contextMenu');
+        const item = [...menu.querySelectorAll('[role="menuitem"]')]
+          .find((node) => node.textContent.trim() === 'New Subgroup');
+        if (!item) throw new Error('New Subgroup menu item missing');
+        item.click();
+        return true;
+      })()`);
+      await waitFor(client, `!document.querySelector('#actionDialog')?.hidden`);
+      await evaluate(client, `(() => {
+        const input = document.querySelector('#actionDialogInput');
+        input.value = 'Hierarchy Sub';
+        document.querySelector('#actionDialogConfirm').click();
+        return true;
+      })()`);
+      const nestedNodeState = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const nodes = stored.emptyNodes?.default || {};
+        const parents = stored.groupParents?.default || {};
+        const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
+        if (!nodeKey || parents[nodeKey] !== ${parentKeyJson}) return null;
+        return { nodeKey, parents, nodes };
+      })()`, 15000);
+      const nodeKeyJson = JSON.stringify(nestedNodeState.nodeKey);
+      const nestedRendered = await waitFor(client, `(async () => {
+        const parentCard = document.querySelector('.group-card[data-group-key=${parentKeyJson}]');
+        const child = parentCard?.querySelector(':scope > .group-children > .group-card[data-group-key=${nodeKeyJson}]');
+        return Boolean(child) && child.classList.contains('empty-node');
+      })()`, 15000);
+      record(
+        'Hierarchy: New Subgroup creates an empty child node inside the parent card',
+        Boolean(nestedRendered),
+        JSON.stringify({ nestedNodeState, nestedRendered }),
+      );
+
+      // 2. Dragging a sibling tag onto the parent header nests it (state-only).
+      const childKeyJson = await waitFor(client, `(async () => {
+        const card = [...document.querySelectorAll('#groupsList > .group-card')]
+          .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Child');
+        return card?.dataset.groupKey || '';
+      })()`, 15000);
+      if (!childKeyJson) {
+        throw new Error('Hierarchy setup did not render the seeded child tag card');
+      }
+      await dragElementThroughUI(
+        client,
+        `.group-card[data-group-key=${childKeyJson}] > .group-header`,
+        `.group-card[data-group-key=${parentKeyJson}] > .group-header`,
+        { targetYRatio: 0.5 },
+      );
+      const dragState = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const parents = stored.groupParents?.default || {};
+        if (parents[${childKeyJson}] !== ${parentKeyJson}) return null;
+        return parents;
+      })()`, 15000);
+      const chromeTitleAfterNest = await evaluate(client, `(async () => {
+        const group = await chrome.tabGroups.get(${childGroupIdJson});
+        return group?.title ?? '';
+      })()`);
+      record(
+        'Hierarchy: dragging a tag onto a parent nests it without renaming the Chrome tag',
+        Boolean(dragState) && !String(chromeTitleAfterNest).includes(' / '),
+        JSON.stringify({ dragState, chromeTitleAfterNest }),
+      );
+
+      // 3. Dragging the child out via the root drop zone returns it to top level.
+      await dragElementThroughUI(
+        client,
+        `.group-card[data-group-key=${childKeyJson}] > .group-header`,
+        '#hierarchyRootDropZone',
+        { targetYRatio: 0.5 },
+      );
+      const rootState = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const parents = stored.groupParents?.default || {};
+        if (parents[${childKeyJson}]) return null;
+        return parents;
+      })()`, 15000);
+      record(
+        'Hierarchy: root drop zone promotes a nested tag back to top level',
+        Boolean(rootState),
+        JSON.stringify({ rootState }),
+      );
+
+      // 4. Empty node deletes non-destructively via the header × button.
+      await evaluate(client, `(() => {
+        const card = document.querySelector('.group-card[data-group-key=${nodeKeyJson}]');
+        const button = card.querySelector('.group-actions button[title="Delete group"]');
+        if (!button) throw new Error('empty node delete button missing');
+        button.click();
+        return true;
+      })()`);
+      const nodeDeleted = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const nodes = stored.emptyNodes?.default || {};
+        const parents = stored.groupParents?.default || {};
+        if (nodes[${nodeKeyJson}] || parents[${nodeKeyJson}]) return null;
+        return true;
+      })()`, 15000);
+      const childStillOpen = await evaluate(client, `(await chrome.tabs.get(${childTabJson})).id`);
+      record(
+        'Hierarchy: empty node × deletes the node without touching sibling tags',
+        Boolean(nodeDeleted) && Number(childStillOpen) === Number(childTabJson),
+        JSON.stringify({ nodeDeleted, childStillOpen }),
+      );
+
+      // 5. Parent rename keeps child relations and single-segment titles.
+      await evaluate(client, `(() => {
+        const header = document.querySelector('.group-card[data-group-key=${parentKeyJson}] > .group-header');
+        header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        const menu = document.querySelector('#contextMenu');
+        const item = [...menu.querySelectorAll('[role="menuitem"]')]
+          .find((node) => node.textContent.trim() === 'Rename');
+        if (!item) throw new Error('Rename menu item missing');
+        item.click();
+        return true;
+      })()`);
+      await waitFor(client, `!document.querySelector('#actionDialog')?.hidden`);
+      await evaluate(client, `(() => {
+        const input = document.querySelector('#actionDialogInput');
+        input.value = 'Hierarchy Parent Renamed';
+        document.querySelector('#actionDialogConfirm').click();
+        return true;
+      })()`);
+      const renamedState = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const nodes = stored.emptyNodes?.default || {};
+        const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
+        const parents = stored.groupParents?.default || {};
+        if (!nodeKey) return null;
+        const parentCard = document.querySelector('.group-card[data-group-key=${parentKeyJson}] h2');
+        return {
+          childStillNested: parents[nodeKey] === ${parentKeyJson},
+          parentTitle: parentCard?.textContent || '',
+        };
+      })()`, 15000);
+      record(
+        'Hierarchy: renaming the parent keeps its nested child',
+        Boolean(renamedState?.childStillNested) && renamedState.parentTitle === 'Hierarchy Parent Renamed',
+        JSON.stringify({ renamedState }),
+      );
+
+      // 6. Legacy migration: " / " titles unwind into the state-backed tree.
+      await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        const snapshot = saved.spaceSnapshots?.default || { version: 1, updatedAt: 0, groups: [] };
+        await chrome.storage.local.set({
+          spaceTabsState: {
+            ...saved,
+            groupParents: { default: {} },
+            emptyNodes: { default: {} },
+            folderPaths: { default: ['Legacy Folder / Empty Place'] },
+            spaceSnapshots: {
+              default: {
+                ...snapshot,
+                groups: [
+                  ...(snapshot.groups || []),
+                  {
+                    snapshotGroupId: 'hierarchy-legacy-tag',
+                    title: 'Legacy Folder / Saved Tag',
+                    color: 'blue',
+                    tabs: [{ snapshotTabId: 'hierarchy-legacy-row', title: 'Legacy page', url: 'https://example.com/hierarchy-legacy' }],
+                  },
+                ],
+              },
+            },
+          },
+        });
+        return true;
+      })`);
+      await evaluate(client, 'location.reload()');
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+      const migrationState = await waitFor(client, `(async () => {
+        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
+        const nodes = stored.emptyNodes?.default || {};
+        const parents = stored.groupParents?.default || {};
+        const savedTag = (stored.spaceSnapshots?.default?.groups || [])
+          .find((group) => group.snapshotGroupId === 'hierarchy-legacy-tag');
+        if (!savedTag) return null;
+        const emptyPlace = Object.entries(nodes).find(([, node]) => node.title === 'Empty Place');
+        const legacyFolder = Object.entries(nodes).find(([, node]) => node.title === 'Legacy Folder');
+        if (!emptyPlace || !legacyFolder) return null;
+        const savedNested = Object.entries(parents).some(([child, parent]) => (
+          child.startsWith('snapshot:') && String(savedTag.title || '').includes('Saved Tag') && parent === legacyFolder[0]
+        ));
+        return {
+          savedTagTitle: savedTag.title,
+          savedNested,
+          emptyPlaceUnderLegacyFolder: parents[emptyPlace[0]] === legacyFolder[0],
+        };
+      })()`, 20000);
+      record(
+        'Hierarchy: legacy " / " titles and stored paths migrate into the parent map',
+        Boolean(migrationState?.savedNested) && migrationState.emptyPlaceUnderLegacyFolder &&
+          !String(migrationState?.savedTagTitle || '').includes(' / '),
+        JSON.stringify({ migrationState }),
+      );
+
+      await evaluate(client, `chrome.tabs.remove([${parentTabJson}, ${childTabJson}]).catch(() => {})`);
+    } catch (hierarchyError) {
+      record('Hierarchy scenarios completed', false, String(hierarchyError?.message || hierarchyError));
+    }
+
     const failures = results.filter((result) => !result.ok);
-    let coverage;
-    let coverageOutputPath = '';
-    let coverageCollectionError = null;
     let coverageGateError = null;
     if (coverageEnabled) {
       try {
