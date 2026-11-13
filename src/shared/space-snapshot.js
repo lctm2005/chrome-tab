@@ -991,3 +991,15 @@ function snapshotGroupKey(group = {}) {
 function isTemporaryUngroupedSnapshotGroup(group = {}) {
   return isUngroupedSnapshotGroup(group) && group.restorable !== true;
 }
+
+/**
+ * True when any row of this snapshot group is still bound to a live tab via
+ * tabLifecycle. Purge paths must keep such groups: deleting them orphans the
+ * live rows' saved identity and later Auto Group checkpoints roll back.
+ */
+export function snapshotGroupHasLiveBoundRows(group = {}, liveBoundSnapshotTabIds = new Set()) {
+  if (!(liveBoundSnapshotTabIds instanceof Set) || liveBoundSnapshotTabIds.size === 0) return false;
+  return (group?.tabs || []).some((tab) => (
+    liveBoundSnapshotTabIds.has(String(tab?.snapshotTabId || '').trim())
+  ));
+}

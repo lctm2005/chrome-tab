@@ -20,6 +20,50 @@ import {
   WINDOW_STATE_KEY,
 } from '../src/shared/state.js';
 
+test('merges groupParents and emptyNodes per space and sanitizes chrome-id links on session reset', () => {
+  const defaults = createDefaultState({ browserSessionId: 'session-one' });
+  const stored = mergeStoredState({
+    version: 9,
+    groupParents: {
+      work: { 'group:9': 'group:7', 'tag:1': 'node:2', 'node:3': 'group:9' },
+      broken: 'not-a-map',
+    },
+    emptyNodes: { work: { 'node:2': { title: 'New Group', color: 'blue' } } },
+  }, defaults);
+  assert.deepEqual(stored.groupParents.work, {
+    'group:9': 'group:7',
+    'tag:1': 'node:2',
+    'node:3': 'group:9',
+  });
+  assert.equal(stored.groupParents.broken, undefined);
+  assert.deepEqual(stored.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
+
+  const empty = mergeStoredState({ version: 9 }, createDefaultState({ browserSessionId: 'session-one' }));
+  assert.deepEqual(empty.groupParents, {});
+  assert.deepEqual(empty.emptyNodes, {});
+  assert.deepEqual(empty.folderPaths, {});
+
+  const arrayStored = mergeStoredState({
+    version: 9,
+    groupParents: ['not', 'a', 'map'],
+    emptyNodes: ['not', 'a', 'map'],
+  }, defaults);
+  assert.deepEqual(arrayStored.groupParents, {});
+  assert.deepEqual(arrayStored.emptyNodes, {});
+
+  const reset = resetChromeSessionBindings(stored, 'session-two');
+  // chrome 组 id 重启后可能被复用，派生父子键随会话清除；稳定键（snapshot/node）保留
+  assert.deepEqual(reset.groupParents.work, { 'tag:1': 'node:2' });
+  assert.equal(reset.groupParents.broken, undefined);
+  assert.deepEqual(reset.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
+
+  const invalidReset = resetChromeSessionBindings(
+    mergeStoredState({ version: 9, groupParents: 'garbage' }, defaults),
+    'session-three',
+  );
+  assert.deepEqual(invalidReset.groupParents, {});
+});
+
 test('keeps the durable browser fallback independent from per-window active Spaces', () => {
   const spaces = [
     { id: 'work' },

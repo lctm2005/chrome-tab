@@ -44,6 +44,8 @@ export function createDefaultState(localConfig = {}) {
     collapsedGroups: {},
     collapsedSpaceGroups: {},
     folderPaths: {},
+    groupParents: {},
+    emptyNodes: {},
     spaceContexts: {},
     spaceSnapshots: {},
     tidyRules: normalizeTidyRuleSettings(),
@@ -90,9 +92,39 @@ export function resetChromeSessionBindings(state, sessionId) {
     groupOrder: {},
     tabOrder: {},
     collapsedGroups: {},
+    // Chrome group ids can be reused after a restart, so parent links derived
+    // from them are dropped; stable keys (snapshot/node/vgroup) survive.
+    groupParents: sanitizeGroupParentsForNewSession(state.groupParents),
+    emptyNodes: state.emptyNodes || {},
     operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
       .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
   };
+}
+
+const CHROME_GROUP_KEY_PATTERN = /^group:\d+$/;
+
+function normalizeGroupParentsMap(groupParents) {
+  const next = {};
+  for (const [spaceId, parents] of Object.entries(groupParents)) {
+    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
+    next[spaceId] = { ...parents };
+  }
+  return next;
+}
+
+function sanitizeGroupParentsForNewSession(groupParents) {
+  if (!groupParents || typeof groupParents !== 'object' || Array.isArray(groupParents)) return {};
+  const next = {};
+  for (const [spaceId, parents] of Object.entries(groupParents)) {
+    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
+    const kept = {};
+    for (const [childKey, parentKey] of Object.entries(parents)) {
+      if (CHROME_GROUP_KEY_PATTERN.test(childKey) || CHROME_GROUP_KEY_PATTERN.test(parentKey)) continue;
+      kept[childKey] = parentKey;
+    }
+    if (Object.keys(kept).length > 0) next[spaceId] = kept;
+  }
+  return next;
 }
 
 /**
@@ -252,6 +284,12 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     collapsedGroups: compatibleSpaceModel ? { ...defaults.collapsedGroups, ...(stored.collapsedGroups || {}) } : defaults.collapsedGroups,
     collapsedSpaceGroups: { ...defaults.collapsedSpaceGroups, ...(stored.collapsedSpaceGroups || {}) },
     folderPaths: { ...defaults.folderPaths, ...(stored.folderPaths || {}) },
+    groupParents: compatibleSpaceModel && stored.groupParents && typeof stored.groupParents === 'object' && !Array.isArray(stored.groupParents)
+      ? normalizeGroupParentsMap(stored.groupParents)
+      : defaults.groupParents,
+    emptyNodes: compatibleSpaceModel && stored.emptyNodes && typeof stored.emptyNodes === 'object' && !Array.isArray(stored.emptyNodes)
+      ? { ...defaults.emptyNodes, ...stored.emptyNodes }
+      : defaults.emptyNodes,
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     tidyRules: normalizeTidyRuleSettings(stored.tidyRules),

@@ -2273,3 +2273,97 @@ test('invalid provisional identities and missing replacement rows never fabricat
   assert.deepEqual(replaced.spaceSnapshots, missingRowState.spaceSnapshots);
   assert.equal(replaced.tabLifecycle[43].snapshotTabId, 'missing-row');
 });
+
+import { planStaleLifecycleBindingHeal } from '../src/shared/tab-lifecycle.js';
+
+test('planStaleLifecycleBindingHeal keeps unique matches, heals by candidate group, clears otherwise', () => {
+  // g-old 仍存在但 row-orphan 已从其行列表消失（快照重建/合并后失联）
+  const snapshotGroups = [
+    { snapshotGroupId: 'g-docs', tabs: [{ snapshotTabId: 'row-1' }] },
+    { snapshotGroupId: 'g-old', tabs: [] },
+  ];
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-1', snapshotGroups }),
+    { action: 'keep', snapshotGroupId: 'g-docs' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-orphan', snapshotGroups, candidateSnapshotGroupId: 'g-old' }),
+    { action: 'heal', snapshotGroupId: 'g-old' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-orphan', snapshotGroups, candidateSnapshotGroupId: 'g-gone' }),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: '', snapshotGroups }),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-orphan', snapshotGroups: [] }),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+  // 多个组都包含同一行（快照损坏）时不猜测，按候选治愈或清除
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({
+      snapshotTabId: 'row-dup',
+      snapshotGroups: [
+        { snapshotGroupId: 'g-a', tabs: [{ snapshotTabId: 'row-dup' }] },
+        { snapshotGroupId: 'g-b', tabs: [{ snapshotTabId: 'row-dup' }] },
+      ],
+      candidateSnapshotGroupId: 'g-a',
+    }),
+    { action: 'heal', snapshotGroupId: 'g-a' },
+  );
+});
+
+test('planStaleLifecycleBindingHeal tolerates malformed snapshot groups and blank ids', () => {
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-1', snapshotGroups: 'garbage' }),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-1', snapshotGroups: [{ tabs: null }] }),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({
+      snapshotTabId: 'row-1',
+      snapshotGroups: [{ tabs: [null] }, { tabs: [{ snapshotTabId: 'row-1' }] }],
+    }),
+    { action: 'keep', snapshotGroupId: '' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({
+      snapshotTabId: 'row-9',
+      snapshotGroups: [{ tabs: [] }, { snapshotGroupId: 'g-old', tabs: [] }],
+      candidateSnapshotGroupId: 'g-old',
+    }),
+    { action: 'heal', snapshotGroupId: 'g-old' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({ snapshotTabId: 'row-1', snapshotGroups: [{ tabs: [{ snapshotTabId: 'row-1' }] }] }),
+    { action: 'keep', snapshotGroupId: '' },
+  );
+  // 行唯一归属时返回归一化后的组 id
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({
+      snapshotTabId: 'row-1',
+      snapshotGroups: [{ snapshotGroupId: '  g-old  ', tabs: [{ snapshotTabId: '  row-1  ' }] }],
+      candidateSnapshotGroupId: 'g-old',
+    }),
+    { action: 'keep', snapshotGroupId: 'g-old' },
+  );
+  // 行失联但候选组存在（组 id 带空白）→ 治愈并使用候选组原始 id
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({
+      snapshotTabId: 'row-9',
+      snapshotGroups: [{ tabs: [] }, { snapshotGroupId: '  g-old  ', tabs: [] }],
+      candidateSnapshotGroupId: 'g-old',
+    }),
+    { action: 'heal', snapshotGroupId: 'g-old' },
+  );
+  assert.deepEqual(
+    planStaleLifecycleBindingHeal({}),
+    { action: 'clear', snapshotGroupId: '' },
+  );
+});

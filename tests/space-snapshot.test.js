@@ -3230,3 +3230,19 @@ test('uses stable merge metadata defaults and honors preserveGroups from either 
   assert.equal(defaultVersion.version, 1);
   assert.equal(defaultVersion.updatedAt, 5);
 });
+
+import { snapshotGroupHasLiveBoundRows } from '../src/shared/space-snapshot.js';
+
+test('snapshotGroupHasLiveBoundRows detects groups whose rows are still live-bound', () => {
+  const group = { title: 'Docs', tabs: [{ snapshotTabId: 'row-1' }, { snapshotTabId: 'row-2' }] };
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set(['row-1'])), true);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set(['row-other'])), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set()), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, 'not-a-set'), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(null, new Set(['row-1'])), false);
+  assert.equal(snapshotGroupHasLiveBoundRows({ tabs: [{ snapshotTabId: '  row-1  ' }] }, new Set(['row-1'])), true);
+});
+
+test('snapshotGroupHasLiveBoundRows treats rows without snapshot ids as unbound', () => {
+  assert.equal(snapshotGroupHasLiveBoundRows({ tabs: [{}, null] }, new Set(['row-1'])), false);
+});
