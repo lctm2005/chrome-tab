@@ -131,7 +131,15 @@ export function planHierarchyDrop({
     insertAt = index;
   }
   working.splice(insertAt, 0, ...sourceBlock);
-  return { parents: nextParents, order: working };
+  // 回显拖放意图，调用方在锁内可用最新状态重算同一意图。
+  return {
+    parents: nextParents,
+    order: working,
+    sourceRootKeys,
+    sourceAllKeys,
+    targetKey,
+    intent,
+  };
 }
 
 // Replaces moved/renamed group keys in the parent map. replacements maps an

@@ -7,13 +7,12 @@ export function groupsRenderSignature({
   collapsedGroups = {},
   selectedTabIds = [],
   groups = [],
-  folderTree = [],
+  hierarchy = {},
 } = {}) {
   const renderedGroups = groups.filter(Boolean);
   const visibleCollapsedKeys = new Set(
     renderedGroups.map((group) => group.key).filter(Boolean),
   );
-  addVisibleFolderKeys(folderTree, visibleCollapsedKeys);
   const selected = new Set(selectedTabIds);
 
   return JSON.stringify({
@@ -23,6 +22,9 @@ export function groupsRenderSignature({
     collapsedGroups: [...visibleCollapsedKeys]
       .sort((left, right) => left.localeCompare(right))
       .map((key) => [key, Boolean(collapsedGroups[key])]),
+    // 父子关系改变结构但不改变组内容，必须单独进入签名。
+    hierarchy: Object.keys(hierarchy).sort()
+      .map((key) => [key, hierarchy[key]]),
     groups: renderedGroups.map((group) => groupRenderModel(group, selected)),
   });
 }
@@ -43,14 +45,6 @@ export function spacesRenderSignature({
     activeSpaceId,
     spaces.map((space) => [space.id, space.name, space.icon || '']),
   ]);
-}
-
-function addVisibleFolderKeys(nodes, keys) {
-  for (const node of nodes) {
-    if (node.type !== 'folder') continue;
-    if (node.key) keys.add(node.key);
-    addVisibleFolderKeys(node.children || [], keys);
-  }
 }
 
 function groupRenderModel(group, selectedTabIds) {

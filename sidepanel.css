@@ -424,6 +424,51 @@ h1 {
   gap: 0;
 }
 
+/* --- HIERARCHY TREE (state-backed parent-child groups) --- */
+.group-card .group-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 4px 18px;
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--group-color, #666) 45%, transparent);
+}
+
+.group-card.empty-node > .tab-list:empty::after {
+  content: 'Drop tabs or groups here';
+  display: block;
+  margin: 4px 8px 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  text-align: center;
+  color: color-mix(in srgb, currentColor 55%, transparent);
+  border: 1px dashed color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 10px;
+}
+
+.hierarchy-root-drop-zone {
+  display: none;
+  margin: 0 10px 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--group-color, #8a8580);
+  border: 1px dashed color-mix(in srgb, currentColor 45%, transparent);
+  border-radius: 12px;
+}
+
+body.hierarchy-dragging #hierarchyRootDropZone:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.hierarchy-dragging #hierarchyRootDropZone.drag-over {
+  color: #fff;
+  background: color-mix(in srgb, var(--accent, #6c5ce7) 55%, transparent);
+  border-style: solid;
+}
+
 /* --- GLASS CARDS (GROUPS / FOLDERS) --- */
 .group-card,
 .folder-direct-group,

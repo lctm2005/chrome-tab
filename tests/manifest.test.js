@@ -707,14 +707,15 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
-test('folder drag before or after reparents groups beside the target', async () => {
+test('hierarchy drops re-parent groups through the state-backed planner', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /moveGroupBlockBesideContext\(sourceKeys, targetContext, intent, \{ \.\.\.moveOptions, windowBinding \}\)/);
-  assert.match(source, /targetPathForSiblingMove\(targetContext\)/);
-  assert.match(source, /movedGroupTitleForFolderDrop\(/);
-  assert.match(source, /function reorderDormantSnapshotGroups[\s\S]*projectSnapshotGroupOrder\(snapshot, references, Date\.now\(\)\)/);
+  assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: hierarchyParentsForSpace\(\),[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = plan\.parents;[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
   assert.match(source, /function replaceActiveSpaceSnapshotGroups[\s\S]*remapSnapshotGroupIndexedState\(\{[\s\S]*groupOrder:[\s\S]*collapsedGroups:[\s\S]*tabOrder:/);
+  assert.match(source, /snapshotKeyReplacements[\s\S]*remapGroupParents\(currentParents, snapshotKeyReplacements\)/);
+  assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, hierarchyParentsForSpace\(\)\)/);
+  assert.doesNotMatch(source, /movedGroupTitleForFolderDrop|retitleGroupForNestedMove|targetPathForSiblingMove|moveGroupBlockBesideContext/);
 });
 
 test('single tab context menu can create a tab group', async () => {
@@ -1047,20 +1048,15 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /function chromeGroupForSnapshotIdentity[\s\S]*binding\?\.snapshotGroupId \|\| tab\.snapshotGroupId[\s\S]*bindChromeGroup\(groupId, spaceId\)[\s\S]*logicalChromeGroupTitles\.set/);
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
-  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(group, \{ windowBinding \}\)\)/);
+  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptyGroupNode\(group\.key, \{ windowBinding \}\)\)/);
+  // 空组节点：稳定键占位，支持独立建组/建子组；迁移把旧 folderPaths 转成节点。
+  assert.match(source, /async function createEmptyGroupNode\(parentKey = '', options = \{\}\)[\s\S]*createHierarchyNodeId\(\)[\s\S]*state\.emptyNodes\[spaceId\]/);
+  assert.match(source, /async function migrateSpaceHierarchy\(spaceId = state\.activeSpaceId, options = \{\}\)[\s\S]*planLegacyTitlePathMigration\(\{[\s\S]*folderPathsBySpace: \{ \[spaceId\]: storedPaths \},[\s\S]*groupsBySpace: \{ \[spaceId\]: groupsToMigrate \},[\s\S]*idFactory: createHierarchyNodeId/);
   // The header already covers open/close and delete, so the group menu keeps
   // only Rename, New Subgroup, and Move to.
   assert.doesNotMatch(source, /menuAction\('Open Group'[^)]*\)\),\s*\n[\s\S]{0,200}menuAction\('Delete Group'[^)]*\)\),\s*\n[\s\S]{0,200}showGroupContextMenu/);
-  assert.match(source, /menuAction\('Delete Group', \(windowBinding\) => deleteFolderGroup\(folderContext, \{ windowBinding \}\)\)/);
-  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptySubgroup\(folderContext, \{ windowBinding \}\)\)/);
-  assert.match(source, /function createEmptySubgroup\(reference, options = \{\}\)[\s\S]*renderedGroupDragContexts\.get\(reference\.key\)/);
-  assert.ok(source.includes(".replace(/\\//g, ' ').trim()"));
-  assert.match(source, /const nextPathId = \[\.\.\.referencePath, clean\]\.join\('\/'\)/);
-  assert.match(source, /setStoredFolderPathsForSpace\(spaceId, \[\.\.\.paths, nextPathId\]\)/);
-  assert.match(source, /function renameStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*oldPrefix[\s\S]*rekeyCollapsedFolderKeys\(spaceId, paths, nextPaths\)/);
-  assert.match(source, /function deleteStoredEmptyFolder\(folderContext, options = \{\}\)[\s\S]*keptPaths[\s\S]*setStoredFolderPathsForSpace\(spaceId, keptPaths\)/);
-  assert.match(source, /function canDropGroupContext\(targetContext\) \{[\s\S]*targetContext\?\.type === 'folder' &&[\s\S]*!targetContext\.groupKeys\?\.length/);
-  assert.match(source, /const canAcceptFolderDrops = canDragFolder \|\| \([\s\S]*\(dragContext\.groupKeys \|\| \[\]\)\.length === 0/);
+  assert.match(source, /intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /if \(canDragGroup \|\| group\.emptyNode\) \{[\s\S]*acceptGroupOrTabDrop\(event, group\)\);[\s\S]*dropGroupOrTab\(event, group\)\);/);
   assert.match(source, /groups\.push\(\{[\s\S]*title: physicalTitle/);
   assert.match(source, /\.\.\.logicalChromeGroupTitleOverride\(group\)/);
   assert.match(source, /\.\.\.snapshotLogicalChromeGroupTitleOverride\(group, identityTabs, spaceId\)/);
@@ -1172,7 +1168,8 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /snapshotHasPersistentContent\(snapshot\)/);
   assert.match(source, /function currentGroupForMutation[\s\S]*groupMutationFingerprint\(current\) !== groupMutationFingerprint\(reference\)/);
   assert.match(source, /function groupMutationFingerprint[\s\S]*url: snapshotUrlIdentity\(tab\?\.url\)/);
-  assert.match(source, /currentContext\.fingerprint !== folderContext\.fingerprint/);
+  assert.match(source, /async function deleteGroup\(group, options = \{\}\)[\s\S]*const current = renderedGroupContexts\.get\(group\.key\);[\s\S]*if \(!current\?\.emptyNode\) \{/);
+  assert.match(source, /clearHierarchyEntriesForKeys\(\[group\.key\]\)/);
 });
 
 test('destructive Settings and Undo actions bind the reviewed record and merge concurrent edits', async () => {
@@ -1285,16 +1282,18 @@ test('group deletion requires an explicit destructive confirmation with the affe
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const deletionSource = source.slice(
     source.indexOf('async function deleteGroup('),
-    source.indexOf('function groupsForFolderContext('),
+    source.indexOf('async function deleteGroupsAndTabs('),
   );
 
-  assert.equal((deletionSource.match(/await confirmGroupDeletion\(/g) || []).length, 2);
+  assert.equal((deletionSource.match(/await confirmGroupDeletion\(/g) || []).length, 1);
   assert.match(deletionSource, /title: 'Delete Group'/);
   assert.match(deletionSource, /Open tabs will be closed and saved tabs will be removed\. This cannot be undone\./);
   assert.match(deletionSource, /confirmText: tabCount > 0 \? `Delete \$\{count\}` : 'Delete group'/);
   assert.match(deletionSource, /danger: true/);
-  assert.equal((deletionSource.match(/showStatusToast\(message, 'success'\)/g) || []).length, 1);
-  assert.equal((deletionSource.match(/deletion\.skippedTabCount > 0 \? 'info' : 'success'/g) || []).length, 2);
+  assert.equal((deletionSource.match(/showStatusToast\(message, 'success'\)/g) || []).length, 2);
+  assert.equal((deletionSource.match(/deletion\.skippedTabCount > 0 \? 'info' : 'success'/g) || []).length, 1);
+  // 空组节点删除是非破坏性的：真实子组升根，不连带删 tab。
+  assert.match(deletionSource, /async function deleteHierarchyNode\(node, options = \{\}\)[\s\S]*startsWith\('node:'\)[\s\S]*saveState\(\{ persistWindowState: false, windowBinding: options\.windowBinding \}\)/);
   assert.doesNotMatch(deletionSource, /\btags\b/);
 
   const closeSource = source.slice(
@@ -1350,7 +1349,6 @@ test('Move to context actions render as a right-side submenu', async () => {
   assert.match(source, /moveSelectedTabsToSpace\(contextTabIds, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /moveTabToSpace\(tab, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space, windowBinding\) => \([\s\S]{0,100}moveGroupToSpace\(group, space\.id, \{ windowBinding \}\)/);
-  assert.match(source, /moveToSpaceSubmenu\(\(space, windowBinding\) => \([\s\S]{0,100}moveFolderGroupToSpace\(folderContext, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /function menuSubmenu\(label, items\)/);
   assert.doesNotMatch(source, /menuLabel\('Move to'\)/);
   assert.doesNotMatch(source, /submenu-left/);
@@ -1457,13 +1455,13 @@ test('shared render signatures cover panel dependencies without invalidating eve
   );
 
   assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
-  assert.match(source, /const tree = createFolderTree\(tabGroups, \{\s*\n\s*activeSpaceId: state\.activeSpaceId,\s*\n\s*extraFolderPaths: storedFolderPathsForSpace\(state\.activeSpaceId\),\s*\n\s*\}\);[\s\S]{0,800}groupsRenderSignature\(\{[\s\S]{0,800}collapsedGroups: state\.collapsedGroups,[\s\S]{0,800}selectedTabIds,[\s\S]{0,800}folderTree: tree/);
+  assert.match(source, /buildGroupTree\(nodes, parents\)[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}collapsedGroups: state\.collapsedGroups,[\s\S]{0,900}selectedTabIds,[\s\S]{0,900}hierarchy: collapsedAll \? \{\} : parents/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
   assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];
   assert.doesNotMatch(syncState, /lastRendered(?:Groups|Spaces)Signature\s*=\s*''/);
   assert.match(signatures, /import \{ tabRowPresentation \} from '\.\/tab-utils\.js'/);
-  assert.match(signatures, /visibleCollapsedKeys[\s\S]*addVisibleFolderKeys\(folderTree[\s\S]*collapsedGroups\[key\]/);
+  assert.match(signatures, /hierarchy: Object\.keys\(hierarchy\)\.sort\(\)/);
   assert.match(signatures, /const presentation = tabRowPresentation\(tab\)[\s\S]*selected: !tab\.dormant && !presentation\.foreign/);
   assert.match(source, /row\.dataset\.snapshotTabId = String\(tab\.snapshotTabId \|\| ''\)/);
   assert.match(source, /row\.dataset\.snapshotGroupId = String\(tab\.snapshotGroupId \|\| ''\)/);
@@ -1486,8 +1484,7 @@ test('moving tabs to another Space activates the target Space', async () => {
   assert.match(finishMoveSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function reportMoveSuccess\(message\)[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'success'\)/);
   assert.match(source, /async function moveSelectedTabsToSpace\(tabIds, spaceId, options = \{\}\)[\s\S]*moveTabsToSpace\(tabIds, spaceId, options\)[\s\S]*reportMoveSuccess\(`Moved \$\{moved\} selected tabs to \$\{spaceName\(spaceId\)\}\.`\)/);
-  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*checkpointMovedGroupsToSpace\(\[group\], spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
-  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId, options = \{\}\)[\s\S]*checkpointMovedGroupsToSpace\(groups, spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
+  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*subtreeGroupsForMove\(group\)[\s\S]*checkpointMovedGroupsToSpace\(subtreeGroups, spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
   assert.match(moveGroupsSource, /state\.spaces\.some\(\(space\) => space\.id === spaceId\)[\s\S]*destination Space no longer exists[\s\S]*captureChromeGroupMutationRollback\(\)[\s\S]*runChromeGroupMutationTransaction\([\s\S]*apply: \(\) => moveGroupsWithoutSaving[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)[\s\S]*rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)[\s\S]*await activateSpace[\s\S]*committedMoveActivationError/);
   assert.match(moveGroupsSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function moveGroupsWithoutSaving[\s\S]*transferSnapshotGroupsBetweenSpaces\([\s\S]*snapshotGroupIds:[\s\S]*snapshotTabIds:/);
@@ -1539,9 +1536,8 @@ test('Chrome group mutations and Auto Group Undo rollback browser side effects b
   assert.match(source, /async function groupSelectedTabs\([\s\S]*rememberCreatedGroupTabOrder\(groupId, selectedTabs\)[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)/);
   assert.match(source, /function rememberCreatedGroupTabOrder[\s\S]*removeTabFromSavedOrder\(tabId, spaceId\)[\s\S]*\[`group:\$\{numericGroupId\}`\] = uniqueKeys\(orderedIds\)/);
   assert.match(source, /async function moveTabsToSpace\([\s\S]*captureTabGroupMembership\([\s\S]*runChromeGroupMutationTransaction/);
-  assert.match(source, /async function renameFolderGroup\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
-  assert.match(source, /async function moveGroupBlockIntoContext\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
-  assert.match(source, /async function moveGroupBlockBesideContext\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
+  assert.match(source, /async function renameGroup\(group, options = \{\}\)[\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
+  assert.match(source, /async function materializeEmptyNodeWithTab\([\s\S]*runChromeGroupMutationTransaction[\s\S]*captureChromeGroupMutationRollback\(\)/);
   assert.match(source, /async function reorderTab\([\s\S]*targetNeedsBatchMaterialization[\s\S]*captureTabGroupMembership[\s\S]*runChromeGroupMutationTransaction[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)/);
   assert.match(source, /planMixedTabDropOrder\(\{[\s\S]*targetTabs: targetGroup\.tabs,[\s\S]*beforeTab,[\s\S]*dropPlan\.status === 'stale'[\s\S]*projectSnapshotTabOrder\([\s\S]*dropPlan\.visibleTabs[\s\S]*anchorTabId: dropPlan\.anchorTabId,[\s\S]*edge: dropPlan\.edge/);
   assert.match(source, /if \(\(!tab\.dormant[\s\S]*\|\| tab\.dormant\) \{[\s\S]*dropTabBefore\(event, tab, groupKey\)/);
@@ -1672,7 +1668,7 @@ test('window-bound saves report durable success once either storage transaction 
 test('group hover preview only binds for collapsed tag groups', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /bindGroupPreview\(header,\s*groupPreviewGroupForFolder\(folder,\s*collapsed\)\)/);
+  assert.match(source, /bindGroupPreview\(header, group\);/);
   assert.match(source, /if \(!group\?\.collapsed \|\| !group\?\.tabs\?\.length\) return;/);
 });
 
@@ -1708,15 +1704,10 @@ test('every Tag group exposes a real keyboard-operable disclosure button', async
   const toggleGroupSource = source.match(
     /async function toggleGroup\(group, options = \{\}\)[\s\S]*?(?=\nasync function refreshMissingChromeGroupView)/,
   )?.[0];
-  const toggleFolderSource = source.match(
-    /async function toggleFolder\(folderKey, options = \{\}\)[\s\S]*?(?=\nfunction createGroupCard)/,
-  )?.[0];
   assert.ok(toggleGroupSource);
-  assert.ok(toggleFolderSource);
 
   assert.match(source, /function createGroupToggle\(group, title\)[\s\S]*document\.createElement\('button'\)[\s\S]*type = 'button'[\s\S]*aria-expanded/);
-  assert.match(source, /createGroupCard\(group\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
-  assert.match(source, /createFolderTabs\(group\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| 'Tabs'\)/);
+  assert.match(source, /function createGroupCard\(node, depth = 0\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
   assert.match(toggleGroupSource, /captureChromeGroupMutationRollback\(\)[\s\S]*groups:update[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*restoreChromeGroupMutationMemory\(rollback\)[\s\S]*restoring the Chrome group collapse state/);
   assert.match(source, /async function toggleGroup\([\s\S]*Group was \$\{action\}, but the panel could not refresh yet/);
   assert.match(toggleGroupSource, /await refreshTabsView\(\{ windowBinding \}\)[\s\S]*Group was \$\{action\}, but the panel could not refresh yet[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*panel refreshed, but the latest Space snapshot could not be saved/);
@@ -1724,13 +1715,8 @@ test('every Tag group exposes a real keyboard-operable disclosure button', async
   assert.match(toggleGroupSource, /chromeGroupMissing = true[\s\S]*refreshMissingChromeGroupView\(\{ windowBinding \}\)[\s\S]*The Space view was refreshed/);
   assert.match(toggleGroupSource, /rollbackGroupMissing = true[\s\S]*rollbackFailures\.push[\s\S]*if \(rollbackGroupMissing\)[\s\S]*refreshMissingChromeGroupView\(\{ windowBinding \}\)/);
   assert.match(functionSource(source, 'refreshMissingChromeGroupView'), /refreshTabsView\(\{[\s\S]*adopt: false,[\s\S]*reloadDormant: true,[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /async function toggleFolder\([\s\S]*captureChromeGroupMutationRollback\(\)[\s\S]*restoreChromeGroupMutationMemory\(rollback\)[\s\S]*restoreDisclosureFocus\('folder'/);
-  assert.match(toggleFolderSource, /catch \(error\)[\s\S]*restoreDisclosureFocus\('folder', folderKey, options\.focusRestoreToken\)/);
   assert.match(toggleGroupSource, /catch \(error\)[\s\S]*currentDisclosureGroupKey\(group\)[\s\S]*options\.focusRestoreToken/);
-  assert.match(source, /function handleFolderHeaderClick[\s\S]*disclosureFocusGuard\.capture[\s\S]*focusRestoreToken/);
   assert.match(source, /function handleGroupHeaderClick[\s\S]*disclosureFocusGuard\.capture[\s\S]*focusRestoreToken/);
-  assert.match(source, /function restoreDisclosureFocus[\s\S]*folder-header[\s\S]*group-toggle[\s\S]*preventScroll: true/);
-  assert.match(source, /function restoreDisclosureFocus[\s\S]*folder-direct-group[\s\S]*group-toggle/);
   assert.match(styles, /\.group-toggle:focus-visible/);
 });
 

@@ -121,21 +121,19 @@ test('window-derived user mutations explicitly scope reads, browser commands, an
     'renameTab',
     'duplicateTab',
     'renameGroup',
-    'renameFolderGroup',
+    'createEmptyGroupNode',
     'groupSelectedTabs',
     'closeTab',
     'removeDormantTab',
     'updateSavedTabUrl',
     'moveTabsToSpace',
     'moveGroupToSpace',
-    'moveFolderGroupToSpace',
     'deleteGroup',
-    'deleteFolderGroup',
+    'deleteHierarchyNode',
     'deleteGroupsAndTabs',
-    'toggleFolder',
     'toggleGroup',
-    'moveGroupBlockIntoContext',
-    'moveGroupBlockBesideContext',
+    'applyHierarchyDrop',
+    'materializeEmptyNodeWithTab',
     'reorderTab',
     'runTidy',
     'applyTidyGroupingPhase',
@@ -206,7 +204,7 @@ test('Command Palette tools and group header buttons keep their gesture-time bin
   assert.match(paletteSource, /item\.action === 'settings'[\s\S]*activeView = 'settings';[\s\S]*render\(\)/);
   assert.match(paletteSource, /isCurrentPanelWindowBinding\(windowBinding\)/);
 
-  for (const name of ['createGroupCard', 'createFolderTabs']) {
+  for (const name of ['createGroupCard']) {
     const fn = functions.get(name);
     assert.ok(fn, `missing ${name}`);
     const fnSource = source.slice(fn.start, fn.end);

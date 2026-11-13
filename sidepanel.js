@@ -49,12 +49,6 @@ import {
   createPanelFocusController,
 } from './src/shared/panel-focus.js';
 import {
-  createFolderTree,
-  folderTitleParts,
-  movedGroupTitleForFolderDrop,
-  renamedFolderGroupTitle,
-} from './src/shared/folder-tree.js';
-import {
   buildGroupTree,
   descendantKeysOf,
   parseTitlePath,
@@ -363,6 +357,7 @@ const els = {
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   groupsList: document.querySelector('#groupsList'),
+  hierarchyRootDropZone: document.querySelector('#hierarchyRootDropZone'),
   testAIButton: document.querySelector('#testAIButton'),
   detectModelsButton: document.querySelector('#detectModelsButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
@@ -846,6 +841,20 @@ function bindEvents() {
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   els.groupsList.addEventListener('scroll', () => positionGroupPreview(), { passive: true });
+  // 根区投放：把子组拖出嵌套、回到顶层的可见目标。
+  els.hierarchyRootDropZone.addEventListener('dragover', acceptHierarchyRootDrop);
+  els.hierarchyRootDropZone.addEventListener('dragleave', () => {
+    els.hierarchyRootDropZone.classList.remove('drag-over');
+  });
+  els.hierarchyRootDropZone.addEventListener('drop', dropHierarchyRoot);
+  els.groupsList.addEventListener('contextmenu', (event) => {
+    if (event.target.closest('.group-card, .ungrouped-section, .tab-row')) return;
+    if (dragState) return;
+    event.preventDefault();
+    showContextMenu(event, [
+      menuAction('New Group', (windowBinding) => createEmptyGroupNode('', { windowBinding })),
+    ]);
+  });
   window.addEventListener('resize', hideGroupPreview);
   document.addEventListener('click', () => {
     hideContextMenu();
@@ -2283,29 +2292,30 @@ function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId)
 
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
-  const tabGroups = isSpaceGroupsCollapsed()
-    ? []
-    : spaceView.filter((group) => group.key !== 'ungrouped');
-  const tree = createFolderTree(tabGroups, {
-    activeSpaceId: state.activeSpaceId,
-    extraFolderPaths: storedFolderPathsForSpace(state.activeSpaceId),
-  });
+  const { nodes, parents } = visibleHierarchyNodes();
+  const collapsedAll = isSpaceGroupsCollapsed();
+  const tree = collapsedAll ? [] : buildGroupTree(nodes, parents);
   const signature = groupsRenderSignature({
     activeSpaceId: state.activeSpaceId,
     fileSchemeAccessAllowed,
-    spaceGroupsCollapsed: isSpaceGroupsCollapsed(),
+    spaceGroupsCollapsed: collapsedAll,
     collapsedGroups: state.collapsedGroups,
     selectedTabIds,
-    groups: [...tabGroups, ungrouped],
-    folderTree: tree,
+    groups: [...nodes, ungrouped],
+    hierarchy: collapsedAll ? {} : parents,
   });
   if (signature === lastRenderedGroupsSignature) return;
   lastRenderedGroupsSignature = signature;
   hideGroupPreview();
-  renderedGroupContexts = new Map();
-  renderedGroupDragContexts = new Map();
+  renderedGroupContexts = new Map(nodes.map((node) => [node.key, node]));
+  renderedGroupDragContexts = new Map(nodes.map((node) => [node.key, {
+    type: 'group',
+    key: node.key,
+    dormant: Boolean(node.dormant),
+    groupKeys: [node.key, ...descendantKeysOf(node.key, parents)],
+  }]));
 
-  if (tabGroups.length === 0 && !ungrouped) {
+  if (nodes.length === 0 && !ungrouped) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'No tabs in this Space. Move tabs here from a tab menu, or switch Spaces from the bottom dock.';
@@ -2313,76 +2323,49 @@ function renderGroups() {
     return;
   }
 
-  renderedGroupContexts = groupContextsFromFolderTree(tree);
-  renderedGroupDragContexts = groupDragContextsFromFolderTree(tree);
-  for (const context of renderedGroupDragContexts.values()) {
-    context.fingerprint = folderGroupContextFingerprint(context, renderedGroupContexts);
-  }
-  const nodes = tree.map(createFolderTreeNode);
-  if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
-  els.groupsList.replaceChildren(...nodes);
+  const cards = (collapsedAll ? nodes.map((node) => ({ node, children: [] })) : tree)
+    .map((entry) => createGroupCard(entry.node ?? entry, 0, entry.children ?? []));
+  if (ungrouped) cards.push(createUngroupedSection(ungrouped));
+  els.groupsList.replaceChildren(...cards);
 }
 
-function groupContextsFromFolderTree(nodes) {
-  const contexts = new Map();
-  for (const node of nodes) {
-    if (node.type === 'folder') {
-      for (const [key, group] of groupContextsFromFolderTree(node.children)) {
-        contexts.set(key, group);
-      }
-      continue;
-    }
-    if (node.group?.key) contexts.set(node.group.key, node.group);
-  }
-  return contexts;
+function hierarchyParentsForSpace(spaceId = state.activeSpaceId) {
+  const parents = state.groupParents?.[spaceId];
+  return parents && typeof parents === 'object' && !Array.isArray(parents) ? parents : {};
 }
 
-function groupDragContextsFromFolderTree(nodes) {
-  const contexts = new Map();
-  for (const node of nodes) {
-    if (node.type === 'folder') {
-      const childContexts = groupDragContextsFromFolderTree(node.children);
-      const groupKeys = [];
-      for (const [key, context] of childContexts) {
-        contexts.set(key, context);
-        groupKeys.push(...context.groupKeys);
-      }
-      contexts.set(node.key, {
-        type: 'folder',
-        key: node.key,
-        path: node.path,
-        groupKeys: uniqueKeys(groupKeys),
-      });
-      continue;
-    }
-    if (node.group?.key) {
-      contexts.set(node.group.key, {
-        type: 'group',
-        key: node.group.key,
-        path: folderTitleParts(node.group.title),
-        dormant: Boolean(node.group.dormant),
-        groupKeys: [node.group.key],
-      });
-    }
-  }
-  return contexts;
-}
-
-function folderGroupContextFingerprint(context, groupContexts = renderedGroupContexts) {
-  return JSON.stringify((context?.groupKeys || []).map((key) => {
-    const group = groupContexts.get(key);
-    return group ? groupMutationFingerprint(group) : `missing:${key}`;
+// Flattens the current Space view plus empty placeholder nodes into the
+// render-ready node list, ordered by the persisted DFS groupOrder.
+function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
+  const emptyNodes = state.emptyNodes?.[spaceId] || {};
+  const synthetic = Object.entries(emptyNodes).map(([key, node]) => ({
+    key,
+    id: key,
+    title: node.title || 'Group',
+    displayTitle: node.title || 'Group',
+    color: node.color || 'blue',
+    collapsed: Boolean(state.collapsedGroups[key]),
+    dormant: false,
+    emptyNode: true,
+    tabs: [],
+    spaceId,
   }));
+  const nodes = [
+    ...spaceView.filter((group) => group.key !== 'ungrouped'),
+    ...synthetic,
+  ];
+  const order = state.groupOrder?.[spaceId] || [];
+  nodes.sort((left, right) => orderIndexForNode(order, left.key) - orderIndexForNode(order, right.key));
+  return { nodes, parents: hierarchyParentsForSpace(spaceId) };
+}
+
+function orderIndexForNode(order, key) {
+  const index = order.indexOf(key);
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
 }
 
 function uniqueKeys(keys) {
   return [...new Set(keys.filter(Boolean))];
-}
-
-function createFolderTreeNode(node) {
-  if (node.type === 'folder') return createFolderSection(node);
-  if (node.type === 'folder-tabs') return createFolderTabs(node.group);
-  return createGroupCard(node.group);
 }
 
 function handleGroupHeaderContextMenu(event) {
@@ -2395,9 +2378,7 @@ function handleGroupHeaderContextMenu(event) {
     showGroupContextMenu(event, group);
     return;
   }
-  const folder = folderContextFromHeader(header);
-  if (folder) showFolderContextMenu(event, folder);
-  else hideContextMenu();
+  hideContextMenu();
 }
 
 function handleGroupHeaderMouseDown(event) {
@@ -2412,7 +2393,7 @@ function handleGroupHeaderMouseDown(event) {
 
 function groupHeaderFromEvent(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-  const header = target?.closest?.('.group-header, .folder-header');
+  const header = target?.closest?.('.group-header');
   if (!header || !els.groupsList.contains(header)) return null;
   return header;
 }
@@ -2425,113 +2406,18 @@ function groupContextFromHeader(header) {
   return group;
 }
 
-function folderContextFromHeader(header) {
-  if (!header.classList.contains('folder-header')) return null;
-  const key = header.dataset.folderKey ||
-    header.dataset.dragKey ||
-    header.closest('[data-folder-key]')?.dataset.folderKey;
-  const context = key ? renderedGroupDragContexts.get(key) : null;
-  return context?.type === 'folder' ? context : null;
-}
-
-function createFolderSection(folder) {
-  const collapsed = Boolean(state.collapsedGroups[folder.key]);
-  const dragContext = renderedGroupDragContexts.get(folder.key);
-  const canDragFolder = Boolean(
-    dragContext?.groupKeys?.length && !folderContextHasForeignLiveTabs(dragContext)
-  );
-  const section = document.createElement('section');
-  section.className = `folder-section${collapsed ? ' collapsed' : ''}`;
-  section.dataset.folderKey = folder.key;
-  section.style.setProperty('--folder-depth', String(Math.max(0, folder.path.length - 1)));
-
-  const header = document.createElement('button');
-  header.className = 'folder-header';
-  header.type = 'button';
-  header.draggable = canDragFolder;
-  header.dataset.folderKey = folder.key;
-  header.dataset.dragKey = folder.key;
-  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (canDragFolder) {
-    header.addEventListener('dragstart', (event) => startFolderDrag(event, folder));
-    header.addEventListener('dragend', clearDragState);
-  }
-  // Empty folders have no member keys to drag, but they must still accept
-  // dropped groups so a freshly created subgroup can be filled. Foreign
-  // folders keep refusing drops (their members render only in that window).
-  const canAcceptFolderDrops = canDragFolder || (
-    dragContext?.type === 'folder' && (dragContext.groupKeys || []).length === 0
-  );
-  if (canAcceptFolderDrops) {
-    header.addEventListener('dragover', (event) => acceptFolderDrop(event, folder));
-    header.addEventListener('dragleave', () => header.classList.remove('drag-over'));
-    header.addEventListener('drop', (event) => dropFolder(event, folder));
-  }
-
-  const folderSvg = collapsed
-    ? folderIconSvg('folder-svg-icon')
-    : folderOpenIconSvg('folder-svg-icon');
-
-  header.innerHTML = `
-    <span class="folder-caret" aria-hidden="true"></span>
-    <span class="folder-icon">${folderSvg}</span>
-    <strong>${escapeHtml(folder.title)}</strong>
-  `;
-  header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
-  header.addEventListener('keydown', (event) => {
-    if (!isContextMenuKey(event)) return;
-    showFolderContextMenu(event, dragContext);
-  });
-  bindGroupPreview(header, groupPreviewGroupForFolder(folder, collapsed));
-
-  const children = document.createElement('div');
-  children.className = 'folder-children';
-  if (!collapsed) children.replaceChildren(...folder.children.map(createFolderTreeNode));
-
-  section.append(header, children);
-  return section;
-}
-
-async function toggleFolder(folderKey, options = {}) {
-  const windowBinding = options.windowBinding;
-  // Folding a folder is pure disclosure state — no Chrome mutation, so no
-  // drag-context guard is needed; a click during a re-render must still work.
-  if (!options.stateLocked) {
-    try {
-      return await withFreshSpaceStateMutation(() => toggleFolder(folderKey, {
-        stateLocked: true,
-        focusRestoreToken: options.focusRestoreToken,
-        windowBinding,
-      }), { windowBinding });
-    } catch (error) {
-      restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-      throw error;
-    }
-  }
-  const rollback = captureChromeGroupMutationRollback();
-  try {
-    state.collapsedGroups[folderKey] = !state.collapsedGroups[folderKey];
-    await saveState({ persistWindowState: false, windowBinding });
-  } catch (error) {
-    restoreChromeGroupMutationMemory(rollback);
-    render();
-    restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-    throw error;
-  }
-  lastRenderedGroupsSignature = '';
-  render();
-  restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-}
-
-function createGroupCard(group) {
+function createGroupCard(node, depth = 0) {
+  const group = node;
+  const childNodes = Array.isArray(node.children) ? node.children : [];
   const hasForeignLiveTabs = groupHasForeignLiveTabs(group);
   const canDragGroup = Boolean(group.key && group.key !== 'ungrouped' && !hasForeignLiveTabs);
   const card = document.createElement('section');
-  card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
+  card.className = `group-card${group.collapsed ? ' collapsed' : ''}${group.emptyNode ? ' empty-node' : ''}`;
   card.dataset.groupKey = group.key;
+  card.style.setProperty('--group-depth', String(depth));
   // Chrome-style color band: the Tag's color tints the whole card.
   card.style.setProperty('--group-color', groupColor(group.color));
-  if (canDragGroup) {
+  if (canDragGroup || group.emptyNode) {
     card.addEventListener('dragover', (event) => acceptGroupOrTabDrop(event, group));
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
     card.addEventListener('drop', (event) => dropGroupOrTab(event, group));
@@ -2574,58 +2460,13 @@ function createGroupCard(group) {
   if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
 
   card.append(header, list);
+  if (!group.collapsed && childNodes.length > 0) {
+    const children = document.createElement('div');
+    children.className = 'group-children';
+    children.replaceChildren(...childNodes.map((child) => createGroupCard(child, depth + 1)));
+    card.append(children);
+  }
   return card;
-}
-
-function createFolderTabs(group) {
-  const hasForeignLiveTabs = groupHasForeignLiveTabs(group);
-  const canDragGroup = Boolean(group.key && group.key !== 'ungrouped' && !hasForeignLiveTabs);
-  const section = document.createElement('section');
-  section.className = `folder-direct-group${group.collapsed ? ' collapsed' : ''}`;
-  section.dataset.groupKey = group.key;
-  if (canDragGroup) {
-    section.addEventListener('dragover', (event) => acceptGroupOrTabDrop(event, group));
-    section.addEventListener('dragleave', () => section.classList.remove('drag-over'));
-    section.addEventListener('drop', (event) => dropGroupOrTab(event, group));
-  }
-
-  const header = document.createElement('div');
-  header.className = 'group-header folder-direct-header';
-  header.dataset.groupKey = group.key;
-  header.dataset.dragKey = group.key;
-  header.draggable = canDragGroup;
-  if (canDragGroup) {
-    header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
-    header.addEventListener('dragend', clearDragState);
-  }
-  const toggle = createGroupToggle(group, group.displayTitle || 'Tabs');
-  const chevron = document.createElement('span');
-  chevron.className = 'group-chevron';
-  chevron.setAttribute('aria-hidden', 'true');
-  chevron.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
-  const actions = document.createElement('div');
-  actions.className = 'group-actions';
-  const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
-  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
-  actions.append(renameButton, deleteButton);
-  header.append(toggle, actions, chevron);
-  header.addEventListener('click', (event) => {
-    if (event.target.closest('.group-actions')) return;
-    handleGroupHeaderClick(event, group);
-  });
-  bindGroupPreview(header, group);
-
-  const list = document.createElement('div');
-  list.className = 'tab-list folder-direct-list';
-  configureTabListAccessibility(list, `${group.displayTitle || group.title || 'Group'} tabs`);
-  list.dataset.groupKey = group.key;
-  if (!group.dormant && !hasForeignLiveTabs) {
-    list.addEventListener('dragover', (event) => acceptTabDrop(event));
-    list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
-  }
-  if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
-  section.append(header, list);
-  return section;
 }
 
 function createGroupToggle(group, title) {
@@ -2648,43 +2489,10 @@ function groupHasForeignLiveTabs(group) {
   return (group?.tabs || []).some((tab) => isForeignWindowTab(tab));
 }
 
-function folderContextHasForeignLiveTabs(folderContext) {
-  return (folderContext?.groupKeys || []).some((key) => (
-    groupHasForeignLiveTabs(renderedGroupContexts.get(key))
-  ));
-}
-
 function assertGroupActionsAreLocal(groups = []) {
   if (groups.some((group) => groupHasForeignLiveTabs(group))) {
     throw new Error('This group is open in another window. Open Space Tabs in that window to rename, move, or delete it.');
   }
-}
-
-function groupPreviewGroupForFolder(folder, collapsed = false) {
-  const tabs = tabsForFolderPreview(folder.children || []);
-  return {
-    key: folder.key,
-    title: folder.title,
-    displayTitle: folder.title,
-    collapsed: Boolean(collapsed),
-    color: 'grey',
-    tabs,
-  };
-}
-
-function tabsForFolderPreview(nodes = []) {
-  const previewTabs = [];
-  for (const node of nodes) {
-    if (node.type === 'folder') {
-      previewTabs.push(...tabsForFolderPreview(node.children || []));
-      continue;
-    }
-    const group = node.group;
-    for (const tab of group?.tabs || []) {
-      previewTabs.push({ ...tab, previewGroupKey: group.key });
-    }
-  }
-  return previewTabs;
 }
 
 function bindGroupPreview(anchor, group) {
@@ -4214,57 +4022,6 @@ async function renameGroup(group, options = {}) {
   }, { windowBinding });
 }
 
-async function renameFolderGroup(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) {
-    return renameStoredEmptyFolder(folderContext, { windowBinding });
-  }
-
-  const sourcePath = folderContext.path || [];
-  const currentName = sourcePath.at(-1) || 'Group';
-  const nextName = await askText({
-    title: 'Rename Group',
-    label: 'Group title',
-    value: currentName,
-    confirmText: 'Save',
-  });
-  if (nextName === null) return;
-  const clean = nextName.trim();
-  if (!clean) return;
-
-  await withFreshSpaceStateMutation(async () => {
-    const currentContext = renderedGroupDragContexts.get(folderContext.key);
-    if (
-      !currentContext ||
-      JSON.stringify(currentContext.path || []) !== JSON.stringify(sourcePath) ||
-      currentContext.fingerprint !== folderContext.fingerprint
-    ) {
-      throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-    }
-    const currentGroups = groupsForFolderContext(currentContext);
-    assertGroupActionsAreLocal(currentGroups);
-    const rollback = captureChromeGroupMutationRollback();
-    await runChromeGroupMutationTransaction({
-      apply: async () => {
-        const replacements = new Map();
-        const visibleKeys = spaceView.map((group) => group.key);
-        for (const group of currentGroups) {
-          rememberChromeGroupTitleRollback(rollback, group);
-          const title = renamedFolderGroupTitle(group, sourcePath, clean);
-          const nextKey = await retitleGroupWithoutSaving(group, title, { windowBinding });
-          if (nextKey) replacements.set(group.key, nextKey);
-        }
-        replaceGroupOrderKeys(replacements, visibleKeys);
-      },
-      checkpoint: () => saveState({ persistWindowState: false }),
-      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
-    });
-    await refreshTabs({ windowBinding });
-    setStatus(`Renamed group "${currentName}" to "${clean}".`);
-  }, { windowBinding });
-}
-
 async function groupSelectedTabs(tabIds, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
@@ -4776,34 +4533,18 @@ async function moveGroupToSpace(group, spaceId, options = {}) {
       { stateLocked: true, windowBinding },
     ), { windowBinding });
   }
-  assertGroupActionsAreLocal([group]);
-  await checkpointMovedGroupsToSpace([group], spaceId, { windowBinding });
+  const subtreeGroups = subtreeGroupsForMove(group);
+  assertGroupActionsAreLocal(subtreeGroups);
+  await checkpointMovedGroupsToSpace(subtreeGroups, spaceId, { windowBinding });
   reportMoveSuccess(`Moved group to ${spaceName(spaceId)}.`);
 }
 
-async function moveFolderGroupToSpace(folderContext, spaceId, options = {}) {
-  const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
-    return withFreshSpaceStateMutation(() => {
-      const currentContext = renderedGroupDragContexts.get(folderContext.key);
-      if (
-        !currentContext ||
-        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
-        currentContext.fingerprint !== folderContext.fingerprint
-      ) {
-        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-      }
-      return moveFolderGroupToSpace(currentContext, spaceId, {
-        stateLocked: true,
-        windowBinding,
-      });
-    }, { windowBinding });
-  }
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
-  assertGroupActionsAreLocal(groups);
-  await checkpointMovedGroupsToSpace(groups, spaceId, { windowBinding });
-  reportMoveSuccess(`Moved group to ${spaceName(spaceId)}.`);
+function subtreeGroupsForMove(group) {
+  const subtreeKeys = [group.key, ...descendantKeysOf(group.key, hierarchyParentsForSpace())];
+  const groups = subtreeKeys
+    .map((key) => renderedGroupContexts.get(key) || spaceView.find((item) => item.key === key))
+    .filter(Boolean);
+  return groups.length > 0 ? groups : [group];
 }
 
 async function checkpointMovedGroupsToSpace(groups, spaceId, options = {}) {
@@ -5005,7 +4746,16 @@ async function deleteGroup(group, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     if (!group || group.id === 'ungrouped') return;
-    assertGroupActionsAreLocal([group]);
+    if (!group.emptyNode) assertGroupActionsAreLocal([group]);
+    if (group.emptyNode) {
+      return withFreshSpaceStateMutation(() => {
+        const current = renderedGroupContexts.get(group.key);
+        if (!current?.emptyNode) {
+          throw new Error('This group changed in another Space Tabs view. Try the action again.');
+        }
+        return deleteGroup(current, { stateLocked: true, windowBinding });
+      }, { windowBinding });
+    }
     const confirmed = await confirmGroupDeletion(
       [group],
       group.displayTitle || group.title || 'Group',
@@ -5017,6 +4767,7 @@ async function deleteGroup(group, options = {}) {
     }), { windowBinding });
   }
   if (!group || group.id === 'ungrouped') return;
+  if (group.emptyNode) return deleteHierarchyNode(group, { windowBinding });
   assertGroupActionsAreLocal([group]);
   if (group.dormant) {
     const checkpoint = captureWorkspaceMemoryCheckpoint();
@@ -5025,6 +4776,7 @@ async function deleteGroup(group, options = {}) {
       if (!removed) {
         throw new Error(`Saved group "${group.displayTitle || group.title}" is no longer in this Space's saved state. Refresh and try again.`);
       }
+      clearHierarchyEntriesForKeys([group.key]);
       await persistDormantSnapshotMutation({
         windowBinding,
         staleMessage: 'This panel moved to another Chrome window before the saved group could be deleted.',
@@ -5040,6 +4792,7 @@ async function deleteGroup(group, options = {}) {
     return;
   }
   const deletion = await deleteGroupsAndTabs([group], { windowBinding });
+  clearHierarchyEntriesForKeys([group.key]);
   await refreshTabs({ reloadDormant: true, windowBinding });
   const message = destructiveGroupDeletionStatus(
     group.displayTitle || group.title,
@@ -5049,44 +4802,50 @@ async function deleteGroup(group, options = {}) {
   showStatusToast(message, deletion.skippedTabCount > 0 ? 'info' : 'success');
 }
 
-async function deleteFolderGroup(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
-    const groups = groupsForFolderContext(folderContext);
-    if (groups.length === 0) {
-      return deleteStoredEmptyFolder(folderContext, { windowBinding });
-    }
-    assertGroupActionsAreLocal(groups);
-    const confirmed = await confirmGroupDeletion(
-      groups,
-      folderContext.path?.at(-1) || 'Group',
-    );
-    if (!confirmed) return;
-    return withFreshSpaceStateMutation(() => {
-      const currentContext = renderedGroupDragContexts.get(folderContext.key);
-      if (
-        !currentContext ||
-        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
-        currentContext.fingerprint !== folderContext.fingerprint
-      ) {
-        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-      }
-      return deleteFolderGroup(currentContext, { stateLocked: true, windowBinding });
-    }, { windowBinding });
+// 删除空组节点（非破坏性）：该节点的空节点后代一并移除；真实子组升到被删
+// 节点的父级（根），不会连带删除任何 tab。
+async function deleteHierarchyNode(node, options = {}) {
+  const spaceId = state.activeSpaceId;
+  const parents = hierarchyParentsForSpace(spaceId);
+  const removedSet = new Set([
+    node.key,
+    ...descendantKeysOf(node.key, parents).filter((key) => String(key).startsWith('node:')),
+  ]);
+  const oldParents = { ...parents };
+  const nodeParent = oldParents[node.key] || '';
+  const nextParents = {};
+  for (const [childKey, parentKey] of Object.entries(oldParents)) {
+    if (removedSet.has(childKey)) continue;
+    const nextParent = removedSet.has(parentKey) ? nodeParent : parentKey;
+    if (!nextParent || nextParent === childKey) continue;
+    nextParents[childKey] = nextParent;
   }
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) {
-    return deleteStoredEmptyFolder(folderContext, { windowBinding });
-  }
-  assertGroupActionsAreLocal(groups);
-  const deletion = await deleteGroupsAndTabs(groups, { windowBinding });
-  await refreshTabs({ reloadDormant: true, windowBinding });
-  const message = destructiveGroupDeletionStatus(
-    folderContext.path?.at(-1) || 'Group',
-    deletion,
-  );
+  state.groupParents[spaceId] = nextParents;
+  const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
+  for (const key of removedSet) delete nodes[key];
+  if (Object.keys(nodes).length === 0) delete state.emptyNodes[spaceId];
+  else state.emptyNodes[spaceId] = nodes;
+  state.groupOrder[spaceId] = (state.groupOrder[spaceId] || [])
+    .filter((key) => !removedSet.has(key));
+  delete state.collapsedGroups[node.key];
+  await saveState({ persistWindowState: false, windowBinding: options.windowBinding });
+  lastRenderedGroupsSignature = '';
+  render();
+  const message = `Deleted group "${node.displayTitle || node.title}".`;
   setStatus(message);
-  showStatusToast(message, deletion.skippedTabCount > 0 ? 'info' : 'success');
+  showStatusToast(message, 'success');
+}
+
+function clearHierarchyEntriesForKeys(removedKeys, spaceId = state.activeSpaceId) {
+  const parents = state.groupParents?.[spaceId];
+  if (!parents || typeof parents !== 'object') return;
+  const removed = new Set(removedKeys);
+  const nextParents = {};
+  for (const [childKey, parentKey] of Object.entries(parents)) {
+    if (removed.has(childKey) || removed.has(parentKey)) continue;
+    nextParents[childKey] = parentKey;
+  }
+  state.groupParents[spaceId] = nextParents;
 }
 
 async function confirmGroupDeletion(groups, title) {
@@ -5115,37 +4874,6 @@ function groupDeletionTabCount(groups = []) {
     }
   }
   return liveTabIds.size + dormantTabs;
-}
-
-function groupsForFolderContext(folderContext) {
-  const seen = new Set();
-  return (folderContext?.groupKeys || [])
-    .map((key) => renderedGroupContexts.get(key))
-    .filter((group) => {
-      if (!group?.key || group.id === 'ungrouped' || seen.has(group.key)) return false;
-      seen.add(group.key);
-      return true;
-    });
-}
-
-async function retitleGroupWithoutSaving(group, title, options = {}) {
-  if (!group || group.id === 'ungrouped') return '';
-  if (group.dormant) {
-    renameDormantSnapshotGroup(group, title);
-    return group.key;
-  }
-  if (isVirtualGroupKey(group.key)) {
-    state.virtualGroups[group.key] = {
-      ...(state.virtualGroups[group.key] || {}),
-      id: group.key,
-      title,
-      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
-      spaceId: state.activeSpaceId,
-      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-    };
-    return group.key;
-  }
-  return retitleGroupForNestedMove(group, title, options);
 }
 
 function moveGroupsWithoutSaving(groups, spaceId) {
@@ -5216,6 +4944,16 @@ function moveGroupsWithoutSaving(groups, spaceId) {
       };
       for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
       addGroupOrderKey(spaceId, group.key);
+    } else if (String(group.key).startsWith('node:')) {
+      // Empty placeholder node: move its registration across Spaces.
+      const sourceNodes = state.emptyNodes?.[sourceSpaceId] || {};
+      const nodeEntry = sourceNodes[group.key];
+      if (nodeEntry) {
+        delete sourceNodes[group.key];
+        if (Object.keys(sourceNodes).length === 0) delete state.emptyNodes[sourceSpaceId];
+        state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), [group.key]: nodeEntry };
+        addGroupOrderKey(spaceId, group.key);
+      }
     } else {
       state.groupSpaces[group.id] = spaceId;
       addGroupOrderKey(spaceId, group.key);
@@ -5227,6 +4965,24 @@ function moveGroupsWithoutSaving(groups, spaceId) {
   }
   state.groupOrder[sourceSpaceId] = (state.groupOrder[sourceSpaceId] || [])
     .filter((key) => !removedKeys.has(key));
+  moveHierarchyEntriesBetweenSpaces(removedKeys, sourceSpaceId, spaceId);
+}
+
+// 父子关系随子树一起搬：父也被搬走的子级保留关系；父留下的子级在目标空间升根。
+function moveHierarchyEntriesBetweenSpaces(movedKeys, sourceSpaceId, targetSpaceId) {
+  if (!state.groupParents || typeof state.groupParents !== 'object') state.groupParents = {};
+  const sourceParents = { ...(state.groupParents[sourceSpaceId] || {}) };
+  const nextSourceParents = {};
+  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
+    if (!movedKeys.has(childKey)) nextSourceParents[childKey] = parentKey;
+  }
+  state.groupParents[sourceSpaceId] = nextSourceParents;
+  const nextTargetParents = { ...(state.groupParents[targetSpaceId] || {}) };
+  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
+    if (!movedKeys.has(childKey)) continue;
+    if (movedKeys.has(parentKey)) nextTargetParents[childKey] = parentKey;
+  }
+  state.groupParents[targetSpaceId] = nextTargetParents;
 }
 
 async function deleteGroupsAndTabs(groups, options = {}) {
@@ -5469,6 +5225,10 @@ function replaceGroupOrderKeys(replacements, fallbackOrder = []) {
   if (!replacements?.size) return;
   const order = fallbackOrder.length ? fallbackOrder : state.groupOrder[state.activeSpaceId] || [];
   state.groupOrder[state.activeSpaceId] = uniqueKeys(order.map((key) => replacements.get(key) || key));
+  const parents = state.groupParents?.[state.activeSpaceId];
+  if (parents && typeof parents === 'object') {
+    state.groupParents[state.activeSpaceId] = remapGroupParents(parents, replacements);
+  }
 }
 
 async function openDormantTab(tab, groupKey, options = {}) {
@@ -6929,17 +6689,6 @@ async function refreshMissingChromeGroupView(options = {}) {
   });
 }
 
-function handleFolderHeaderClick(event, folder) {
-  if (shouldSuppressHeaderClickAfterDrag(event)) return;
-  const focusRestoreToken = disclosureFocusGuard.capture(
-    document.activeElement === event.currentTarget,
-  );
-  runTask((windowBinding) => toggleFolder(folder.key, {
-    focusRestoreToken,
-    windowBinding,
-  }));
-}
-
 function handleGroupHeaderClick(event, group) {
   if (shouldSuppressHeaderClickAfterDrag(event)) return;
   // Collapse-on-live saves and closes the group's tabs (closeGroupToSaved);
@@ -6983,12 +6732,9 @@ function currentDisclosureGroupKey(reference = {}) {
 
 function restoreDisclosureFocus(kind, key, focusRestoreToken) {
   if (!focusRestoreToken || !key) return false;
-  const selector = kind === 'folder'
-    ? `.folder-header[data-folder-key="${CSS.escape(key)}"]`
-    : [
-      `.group-card[data-group-key="${CSS.escape(key)}"] .group-toggle`,
-      `.folder-direct-group[data-group-key="${CSS.escape(key)}"] .group-toggle`,
-    ].join(', ');
+  const selector = [
+    `.group-card[data-group-key="${CSS.escape(key)}"] .group-toggle`,
+  ].join(', ');
   const target = document.querySelector(selector);
   if (!target) return false;
   return disclosureFocusGuard.restore(focusRestoreToken, () => {
@@ -7011,33 +6757,20 @@ function startGroupDrag(event, group) {
     type: 'group',
     key: context.key,
     groupKeys: context.groupKeys,
-    sourceContext: context,
+    sourceRootKeys: [context.key],
     sourceSpaceId: state.activeSpaceId,
     organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
   };
-  event.dataTransfer.effectAllowed = 'move';
-  event.dataTransfer.setData('text/plain', context.key);
-}
-
-function startFolderDrag(event, folder) {
-  if (isInteractiveDragTarget(event.target)) return;
-  const context = dragContextForTarget(folder);
-  if (!context?.groupKeys?.length) return;
-  dragState = {
-    type: 'group',
-    key: context.key,
-    groupKeys: context.groupKeys,
-    sourceContext: context,
-    sourceSpaceId: state.activeSpaceId,
-    organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
-  };
+  document.body.classList.add('hierarchy-dragging');
+  if (els.hierarchyRootDropZone) els.hierarchyRootDropZone.hidden = false;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
 
 function acceptGroupDrop(event, target) {
-  const targetContext = dragContextForTarget(target);
-  if (!canDropGroupContext(targetContext)) return;
+  if (dragState?.type !== 'group') return;
+  if (dragState.sourceSpaceId !== state.activeSpaceId) return;
+  if (target?.key === 'ungrouped') return;
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
   event.currentTarget.classList.add('drag-over');
@@ -7051,32 +6784,30 @@ function acceptGroupOrTabDrop(event, targetGroup) {
   acceptGroupDrop(event, targetGroup);
 }
 
-function acceptFolderDrop(event, folder) {
-  if (dragState?.type === 'tab') {
-    acceptTabDrop(event);
-    return;
-  }
-  acceptGroupDrop(event, folder);
-}
-
 function dropGroup(event, target) {
-  const targetContext = dragContextForTarget(target);
-  if (!canDropGroupContext(targetContext)) return;
-  const sourceKeys = [...dragState.groupKeys];
+  if (dragState?.type !== 'group') return;
+  const targetKey = target?.key && target.key !== 'ungrouped' ? target.key : '';
   const moveOptions = {
-    sourceContext: dragState.sourceContext,
     sourceSpaceId: dragState.sourceSpaceId,
     expectedFingerprint: dragState.organizationFingerprint,
   };
-  const intent = groupDropIntent(event);
+  const plan = planHierarchyDrop({
+    parents: hierarchyParentsForSpace(),
+    order: state.groupOrder[state.activeSpaceId] || [],
+    sourceRootKeys: dragState.sourceRootKeys,
+    sourceAllKeys: dragState.groupKeys,
+    targetKey,
+    intent: targetKey ? groupDropIntent(event) : 'root',
+  });
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask((windowBinding) => (
-    intent === 'inside'
-      ? moveGroupBlockIntoContext(sourceKeys, targetContext, { ...moveOptions, windowBinding })
-      : moveGroupBlockBesideContext(sourceKeys, targetContext, intent, { ...moveOptions, windowBinding })
-  ));
+  clearDragState();
+  if (plan.error) {
+    if (plan.error !== 'no-op') setStatus(plan.message);
+    return;
+  }
+  runTask((windowBinding) => applyHierarchyDrop(plan, { ...moveOptions, windowBinding }));
 }
 
 function dropGroupOrTab(event, targetGroup) {
@@ -7087,17 +6818,9 @@ function dropGroupOrTab(event, targetGroup) {
   dropGroup(event, targetGroup);
 }
 
-function dropFolder(event, folder) {
-  if (dragState?.type === 'tab') {
-    dropTabAtEnd(event, groupForFolderTabDrop(folder));
-    return;
-  }
-  dropGroup(event, folder);
-}
-
 function groupDropIntent(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-  const header = target?.closest?.('.group-header, .folder-header');
+  const header = target?.closest?.('.group-header');
   const dropElement = header && event.currentTarget?.contains?.(header) ? header : event.currentTarget;
   const rect = dropElement?.getBoundingClientRect?.();
   if (!rect?.height) return 'inside';
@@ -7107,21 +6830,6 @@ function groupDropIntent(event) {
   return 'inside';
 }
 
-function canDropGroupContext(targetContext) {
-  if (dragState?.type !== 'group') return false;
-  // An explicitly created empty folder has no member keys yet, but it must
-  // still accept dropped groups so users can fill a fresh subgroup.
-  if (
-    targetContext?.type === 'folder' &&
-    Array.isArray(targetContext.path) &&
-    targetContext.path.length > 0 &&
-    !targetContext.groupKeys?.length
-  ) return true;
-  if (!targetContext?.groupKeys?.length) return false;
-  const sourceKeySet = new Set(dragState.groupKeys);
-  return targetContext.groupKeys.some((key) => !sourceKeySet.has(key));
-}
-
 function dragContextForTarget(target) {
   const key = typeof target === 'string' ? target : target?.key;
   return key ? renderedGroupDragContexts.get(key) : null;
@@ -7129,195 +6837,95 @@ function dragContextForTarget(target) {
 
 function isInteractiveDragTarget(target) {
   const element = target instanceof Element ? target : target?.parentElement;
-  return Boolean(element?.closest?.('.tab-row, button:not(.folder-header):not(.group-toggle), .group-actions'));
+  return Boolean(element?.closest?.('.tab-row, button:not(.group-toggle), .group-actions'));
 }
 
-async function moveGroupBlockIntoContext(sourceKeys, targetContext, options = {}) {
+function acceptHierarchyRootDrop(event) {
+  if (dragState?.type !== 'group') return;
+  if (dragState.sourceSpaceId !== state.activeSpaceId) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  els.hierarchyRootDropZone.classList.add('drag-over');
+}
+
+function dropHierarchyRoot(event) {
+  if (dragState?.type !== 'group') return;
+  els.hierarchyRootDropZone.classList.remove('drag-over');
+  dropGroup(event, { key: '' });
+}
+
+// 拖拽落点 = 纯状态事务：apply 只写内存（Chrome 侧零写入），checkpoint 落库。
+// 折叠键按节点键稳定存在，不需要重命名；回滚只是内存恢复。
+async function applyHierarchyDrop(plan, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
       assertFreshOrganizationDrag(options);
-      const currentTarget = dragContextForTarget(targetContext?.key);
-      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
-      return moveGroupBlockIntoContext(sourceKeys, currentTarget, { ...options, stateLocked: true });
+      // 排队期间状态可能已变：用最新 parents/order 重算同一个拖放意图。
+      const freshPlan = planHierarchyDrop({
+        parents: hierarchyParentsForSpace(),
+        order: state.groupOrder[state.activeSpaceId] || [],
+        sourceRootKeys: plan.sourceRootKeys,
+        sourceAllKeys: plan.sourceAllKeys,
+        targetKey: plan.targetKey,
+        intent: plan.intent,
+      });
+      if (freshPlan.error) {
+        if (freshPlan.error !== 'no-op') setStatus(freshPlan.message);
+        return undefined;
+      }
+      return applyHierarchyDrop(freshPlan, { ...options, stateLocked: true });
     }, { windowBinding });
   }
-  const targetPath = targetContext?.path || [];
-  if (!targetPath.length) return;
-
-  const sourceContext = options.sourceContext;
-  const visibleKeys = spaceView.map((group) => group.key);
-  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
-  if (sourceBlock.length === 0) return;
-
+  const spaceId = state.activeSpaceId;
   const rollback = captureChromeGroupMutationRollback();
   let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      const nextKeys = [];
-      const dormantMoves = [];
-      const referenceOverrides = new Map();
-      for (const sourceKey of sourceBlock) {
-        const group = spaceView.find((item) => item.key === sourceKey);
-        if (!group) continue;
-        const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
-        if (!nextTitle) continue;
-        let nextKey;
-        if (group.dormant) {
-          dormantMoves.push({ key: group.key, title: nextTitle });
-          nextKey = group.key;
-        } else {
-          rememberChromeGroupTitleRollback(rollback, group);
-          nextKey = await retitleGroupForNestedMove(group, nextTitle, { windowBinding });
-        }
-        nextKeys.push(nextKey);
-        referenceOverrides.set(nextKey, group);
-      }
-      if (nextKeys.length === 0) return;
-
-      state.groupOrder[state.activeSpaceId] = groupOrderAfterNestedMove(
-        visibleKeys,
-        sourceKeys,
-        targetContext,
-        nextKeys,
-      );
-      if (dormantMoves.length) {
-        moveDormantSnapshotGroupsToOrder(
-          dormantMoves,
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      } else {
-        reorderDormantSnapshotGroups(
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      }
+      state.groupParents[spaceId] = plan.parents;
+      state.groupOrder[spaceId] = plan.order;
       changed = true;
     },
-    checkpoint: () => changed ? saveState({ persistWindowState: false }) : undefined,
+    checkpoint: () => (changed ? saveState({ persistWindowState: false, windowBinding }) : undefined),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
   if (!changed) return;
   await refreshTabs({ windowBinding });
 }
 
-async function moveGroupBlockBesideContext(sourceKeys, targetContext, placement = 'before', options = {}) {
+// 拖 tab 进空组节点：物化为 Chrome 组并把 tab 落进去（键 node:* → group:*，
+// 由 createChromeGroup 的 sourceKey → transferGroupLocalState 完成登记迁移）。
+async function materializeEmptyNodeWithTab(tabId, node, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
       assertFreshOrganizationDrag(options);
-      const currentTarget = dragContextForTarget(targetContext?.key);
-      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
-      return moveGroupBlockBesideContext(sourceKeys, currentTarget, placement, { ...options, stateLocked: true });
+      const current = tabs.find((tab) => Number(tab.id) === Number(tabId));
+      if (!current || (options.expectedUrl && current.url !== options.expectedUrl)) {
+        throw new Error('This tab changed in another Space Tabs view. Try the drag again.');
+      }
+      return materializeEmptyNodeWithTab(tabId, node, { ...options, stateLocked: true });
     }, { windowBinding });
   }
-  const targetPath = targetPathForSiblingMove(targetContext);
-  const sourceContext = options.sourceContext;
-  const visibleKeys = spaceView.map((group) => group.key);
-  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
-  if (sourceBlock.length === 0) return;
-
+  const spaceId = state.activeSpaceId;
+  const entry = state.emptyNodes?.[spaceId]?.[node.key];
+  if (!entry) throw new Error('This empty group no longer exists. Try the drag again.');
   const rollback = captureChromeGroupMutationRollback();
-  let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      const nextKeys = [];
-      const dormantMoves = [];
-      const referenceOverrides = new Map();
-      for (const sourceKey of sourceBlock) {
-        const group = spaceView.find((item) => item.key === sourceKey);
-        if (!group) continue;
-        const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
-        if (!nextTitle) continue;
-        let nextKey;
-        if (group.dormant) {
-          dormantMoves.push({ key: group.key, title: nextTitle });
-          nextKey = group.key;
-        } else {
-          rememberChromeGroupTitleRollback(rollback, group);
-          nextKey = await retitleGroupForNestedMove(group, nextTitle, { windowBinding });
-        }
-        nextKeys.push(nextKey);
-        referenceOverrides.set(nextKey, group);
-      }
-      if (nextKeys.length === 0) return;
-
-      state.groupOrder[state.activeSpaceId] = groupOrderAfterSiblingMove(
-        visibleKeys,
-        sourceKeys,
-        targetContext,
-        nextKeys,
-        placement,
-      );
-      if (dormantMoves.length) {
-        moveDormantSnapshotGroupsToOrder(
-          dormantMoves,
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      } else {
-        reorderDormantSnapshotGroups(
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      }
-      changed = true;
+      const groupId = await createChromeGroup([Number(tabId)], {
+        title: entry.title,
+        color: entry.color || nextGroupColor(),
+        spaceId,
+        sourceKey: node.key,
+        windowBinding,
+      });
+      if (groupId === null) throw new Error('Chrome could not create the group.');
     },
-    checkpoint: () => changed ? saveState({ persistWindowState: false }) : undefined,
+    checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
-  if (!changed) return;
   await refreshTabs({ windowBinding });
-}
-
-function targetPathForSiblingMove(targetContext) {
-  return Array.isArray(targetContext?.path) ? targetContext.path.slice(0, -1) : [];
-}
-
-function groupTitleForNestedMove(group, sourceContext, targetPath) {
-  return movedGroupTitleForFolderDrop(
-    group.title || group.displayTitle || 'Group',
-    sourceContext,
-    targetPath,
-  );
-}
-
-async function retitleGroupForNestedMove(group, title, options = {}) {
-  if (isVirtualGroupKey(group.key)) {
-    const logicalTitle = normalizeGroupTitle(title, 'Group');
-    retitleActiveSpaceSnapshotGroup(group, logicalTitle);
-    state.virtualGroups[group.key] = {
-      ...(state.virtualGroups[group.key] || {}),
-      id: group.key,
-      title: logicalTitle,
-      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
-      spaceId: state.activeSpaceId,
-      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-    };
-    return group.key;
-  }
-
-  const groupId = groupIdFromKey(group.key);
-  if (groupId !== null) {
-    const result = await send('groups:update', {
-      groupId,
-      update: { title },
-    }, { windowBinding: options.windowBinding });
-    if (!result.group) throw new Error(`Chrome group ${groupId} no longer exists.`);
-    logicalChromeGroupTitles.set(groupId, normalizeGroupTitle(title, 'Group'));
-    retitleActiveSpaceSnapshotGroup(group, normalizeGroupTitle(title, 'Group'));
-    bindChromeGroup(groupId, state.activeSpaceId);
-    return group.key;
-  }
-
-  const groupKey = createVirtualGroup({ title, color: group.color || nextGroupColor() });
-  state.collapsedGroups[groupKey] = Boolean(state.collapsedGroups[group.key] ?? group.collapsed);
-  for (const tab of group.tabs || []) {
-    state.tabSpaces[tab.id] = state.activeSpaceId;
-    state.tabGroups[tab.id] = groupKey;
-  }
-  return groupKey;
 }
 
 function retitleActiveSpaceSnapshotGroup(group, title) {
@@ -7338,30 +6946,6 @@ function retitleActiveSpaceSnapshotGroup(group, title) {
   replaceGroupOrderKeys(replacements);
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-}
-
-function reorderDormantSnapshotGroups(orderedKeys, referenceOverrides = new Map()) {
-  const snapshot = activeSpaceSnapshot();
-  if (!snapshot) return;
-  const visibleGroupsByKey = new Map(spaceView.map((group) => [group.key, group]));
-  const references = (orderedKeys || [])
-    .map((key) => referenceOverrides.get(key) || visibleGroupsByKey.get(key))
-    .filter(Boolean);
-  const nextSnapshot = projectSnapshotGroupOrder(snapshot, references, Date.now());
-  if (nextSnapshot === snapshot) return;
-  replaceActiveSpaceSnapshotGroups(nextSnapshot.groups);
-}
-
-function moveDormantSnapshotGroupsToOrder(
-  moves,
-  orderedKeys,
-  referenceOverrides = new Map(),
-) {
-  for (const move of moves) {
-    const group = spaceView.find((item) => item.key === move.key);
-    if (group) renameDormantSnapshotGroup(group, move.title);
-  }
-  reorderDormantSnapshotGroups(orderedKeys, referenceOverrides);
 }
 
 function activeSpaceSnapshot() {
@@ -7415,34 +6999,15 @@ function replaceActiveSpaceSnapshotGroups(groups, snapshotUpdates = null) {
   state.groupOrder[state.activeSpaceId] = remapped.groupOrder;
   state.collapsedGroups = remapped.collapsedGroups;
   state.tabOrder[state.activeSpaceId] = remapped.tabOrder;
+  const snapshotKeyReplacements = new Map(Object.entries(remapped.replacements || {}));
+  const currentParents = state.groupParents?.[state.activeSpaceId];
+  if (currentParents && typeof currentParents === 'object' && snapshotKeyReplacements.size > 0) {
+    state.groupParents[state.activeSpaceId] = remapGroupParents(currentParents, snapshotKeyReplacements);
+  }
   if (!persistedSnapshot) delete state.spaceSnapshots[state.activeSpaceId];
   else state.spaceSnapshots[state.activeSpaceId] = persistedSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-}
-
-function groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys) {
-  const sourceKeySet = new Set(sourceKeys);
-  const nextKeySet = new Set(nextKeys);
-  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
-  const targetKeys = (targetContext.groupKeys || []).filter((key) => !sourceKeySet.has(key) && base.includes(key));
-  const targetIndex = targetKeys.length ? base.indexOf(targetKeys.at(-1)) + 1 : base.length;
-  base.splice(targetIndex, 0, ...uniqueKeys(nextKeys));
-  return base;
-}
-
-function groupOrderAfterSiblingMove(visibleKeys, sourceKeys, targetContext, nextKeys, placement = 'before') {
-  const sourceKeySet = new Set(sourceKeys);
-  const nextKeySet = new Set(nextKeys);
-  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
-  const targetKeys = (targetContext?.groupKeys || [])
-    .filter((key) => !sourceKeySet.has(key) && base.includes(key));
-  const targetKey = placement === 'after' ? targetKeys.at(-1) : targetKeys[0];
-  if (!targetKey) return visibleKeys;
-  const targetIndex = base.indexOf(targetKey);
-  const insertAt = placement === 'after' ? targetIndex + 1 : targetIndex;
-  base.splice(insertAt, 0, ...uniqueKeys(nextKeys));
-  return base;
 }
 
 function assertFreshOrganizationDrag(options = {}) {
@@ -7504,6 +7069,23 @@ function dropTabBefore(event, targetTab, targetGroupKey) {
 function dropTabAtEnd(event, targetGroup) {
   const targetRow = event.target.closest('.tab-row');
   if (dragState?.type !== 'tab' || (targetRow && !targetRow.classList.contains('dormant'))) return;
+  if (targetGroup?.emptyNode) {
+    const tabId = dragState.tabId;
+    const tabUrl = dragState.tabUrl;
+    const sourceSpaceId = dragState.sourceSpaceId;
+    const expectedFingerprint = dragState.organizationFingerprint;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.classList.remove('drag-over');
+    clearDragState();
+    runTask((windowBinding) => materializeEmptyNodeWithTab(tabId, targetGroup, {
+      expectedUrl: tabUrl,
+      sourceSpaceId,
+      expectedFingerprint,
+      windowBinding,
+    }));
+    return;
+  }
   const tabId = dragState.tabId;
   const moveOptions = {
     targetGroup,
@@ -7673,25 +7255,6 @@ async function ensureTabDropChromeGroup(targetGroup, tabId, options = {}) {
     sourceKey: targetGroup.key,
     windowBinding: options.windowBinding,
   });
-}
-
-function groupForFolderTabDrop(folder) {
-  const title = (folder?.path || []).join(' / ');
-  const existing = spaceView.find((group) => (
-    group.key !== 'ungrouped' &&
-    folderTitleParts(group.title).join(' / ') === title
-  ));
-  if (existing) return existing;
-  return {
-    id: `folder-drop:${folder?.key || title}`,
-    key: `folder-drop:${folder?.key || title}`,
-    title: title || folder?.title || 'Group',
-    displayTitle: folder?.title || title || 'Group',
-    color: 'blue',
-    collapsed: false,
-    dormant: false,
-    tabs: [],
-  };
 }
 
 function liveTabsForOrdering(group) {
@@ -7898,6 +7461,11 @@ function clearDragState(event) {
   event?.currentTarget?.classList?.remove('drag-over');
   if (dragState?.type === 'group') lastGroupDragEndedAt = Date.now();
   dragState = null;
+  document.body.classList.remove('hierarchy-dragging');
+  if (els.hierarchyRootDropZone) {
+    els.hierarchyRootDropZone.hidden = true;
+    els.hierarchyRootDropZone.classList.remove('drag-over');
+  }
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
 
@@ -10071,26 +9639,9 @@ function showGroupContextMenu(event, group) {
   // keeps only Rename, New Subgroup, and Move to.
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
-    menuAction('New Subgroup', (windowBinding) => createEmptySubgroup(group, { windowBinding })),
+    menuAction('New Subgroup', (windowBinding) => createEmptyGroupNode(group.key, { windowBinding })),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })
-    ))),
-  ]);
-}
-
-function showFolderContextMenu(event, folderContext) {
-  event.preventDefault();
-  event.stopPropagation();
-  if (folderContextHasForeignLiveTabs(folderContext)) {
-    showContextMenu(event, [menuNotice('Open this Space in the other window to edit this folder group.')]);
-    return;
-  }
-  showContextMenu(event, [
-    menuAction('Rename', (windowBinding) => renameFolderGroup(folderContext, { windowBinding })),
-    menuAction('Delete Group', (windowBinding) => deleteFolderGroup(folderContext, { windowBinding })),
-    menuAction('New Subgroup', (windowBinding) => createEmptySubgroup(folderContext, { windowBinding })),
-    ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
-      moveFolderGroupToSpace(folderContext, space.id, { windowBinding })
     ))),
   ]);
 }
@@ -10121,14 +9672,40 @@ function setStoredFolderPathsForSpace(spaceId, paths) {
   state.folderPaths[spaceId] = paths;
 }
 
-function folderPartsForStoredPath(path) {
-  return String(path || '').split('/').map((part) => part.trim()).filter(Boolean);
-}
-
 function createHierarchyNodeId() {
   return `node:${crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+// 独立建组（根级）或在某个组下建子组：先落一个稳定键的空节点占位，
+// 之后拖 tab 进来物化为 Chrome 组，拖组进来成为它的子组。
+async function createEmptyGroupNode(parentKey = '', options = {}) {
+  const windowBinding = options.windowBinding || capturePanelWindowBinding();
+  const name = await askText({
+    title: parentKey ? 'New Subgroup' : 'New Group',
+    label: 'Group title',
+    value: 'New Group',
+    confirmText: 'Create',
+  });
+  if (name === null) return;
+  const clean = String(name).trim();
+  if (!clean) return;
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const spaceId = state.activeSpaceId;
+  const key = createHierarchyNodeId();
+  state.emptyNodes[spaceId] = {
+    ...(state.emptyNodes[spaceId] || {}),
+    [key]: { title: clean, color: nextGroupColor() },
+  };
+  if (parentKey) {
+    state.groupParents[spaceId] = { ...(state.groupParents[spaceId] || {}), [key]: parentKey };
+  }
+  addGroupOrderKey(spaceId, key);
+  await saveState({ persistWindowState: false, windowBinding });
+  lastRenderedGroupsSignature = '';
+  render();
+  setStatus(`Created group "${clean}".`);
 }
 
 // One-time per-Space migration: legacy " / " title paths and stored empty
@@ -10208,107 +9785,6 @@ async function migrateSpaceHierarchy(spaceId = state.activeSpaceId, options = {}
     restoreWorkspaceMemoryCheckpoint(rollback, { renderView: true });
     console.error('Hierarchy migration failed; leaving titles as-is.', error);
   }
-}
-
-function rekeyCollapsedFolderKeys(spaceId, beforePaths, afterPaths) {
-  if (!state.collapsedGroups || typeof state.collapsedGroups !== 'object') return;
-  const before = Array.isArray(beforePaths) ? beforePaths : [];
-  const prefix = `folder:${spaceId}:`;
-  for (const pathId of before) {
-    const key = `${prefix}${pathId}`;
-    if (!Object.hasOwn(state.collapsedGroups, key)) continue;
-    const value = state.collapsedGroups[key];
-    delete state.collapsedGroups[key];
-    const index = before.indexOf(pathId);
-    const nextPath = Array.isArray(afterPaths) ? afterPaths[index] : null;
-    if (nextPath) state.collapsedGroups[`${prefix}${nextPath}`] = value;
-  }
-}
-
-async function createEmptySubgroup(reference, options = {}) {
-  const windowBinding = options.windowBinding || capturePanelWindowBinding();
-  const name = await askText({
-    title: 'New Subgroup',
-    label: 'Subgroup title',
-    value: 'New Group',
-    confirmText: 'Create',
-  });
-  if (name === null) return;
-  const clean = String(name).replace(/\//g, ' ').trim();
-  if (!clean) return;
-  // Resolve the sibling level from the CURRENT drag context: the menu holds a
-  // reference captured at render time, so a re-render could have moved it.
-  const current = reference?.key ? renderedGroupDragContexts.get(reference.key) : null;
-  if (reference?.key && !current) {
-    throw new Error('This group changed in another Space Tabs view. Try the action again.');
-  }
-  const referencePath = Array.isArray(current?.path)
-    ? current.path
-    : folderTitleParts(current?.group?.title || current?.group?.displayTitle || '');
-  if (!isCurrentPanelWindowBinding(windowBinding)) return;
-  const spaceId = state.activeSpaceId;
-  const paths = storedFolderPathsForSpace(spaceId);
-  // The empty subgroup hangs UNDER the right-clicked node: nesting follows the
-  // same " / " title convention as dragging a group into a folder.
-  const nextPathId = [...referencePath, clean].join('/');
-  if (paths.includes(nextPathId)) return;
-  setStoredFolderPathsForSpace(spaceId, [...paths, nextPathId]);
-  await saveState({ persistWindowState: false, windowBinding });
-  render();
-  setStatus(`Created subgroup "${clean}".`);
-}
-
-async function renameStoredEmptyFolder(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  const sourcePath = Array.isArray(folderContext?.path) ? folderContext.path : [];
-  if (sourcePath.length === 0) return;
-  const currentName = sourcePath.at(-1) || 'Group';
-  const nextName = await askText({
-    title: 'Rename Group',
-    label: 'Group title',
-    value: currentName,
-    confirmText: 'Save',
-  });
-  if (nextName === null) return;
-  const clean = String(nextName).replace(/\//g, ' ').trim();
-  if (!clean || clean === currentName) return;
-  if (!isCurrentPanelWindowBinding(windowBinding)) return;
-  const spaceId = state.activeSpaceId;
-  const paths = storedFolderPathsForSpace(spaceId);
-  const oldPathId = sourcePath.join('/');
-  const oldPrefix = `${oldPathId}/`;
-  const renamedId = [...sourcePath.slice(0, -1), clean].join('/');
-  const nextPaths = paths.map((path) => {
-    if (path === oldPathId) return renamedId;
-    if (path.startsWith(oldPrefix)) {
-      const parts = folderPartsForStoredPath(path);
-      return [...sourcePath.slice(0, -1), clean, ...parts.slice(sourcePath.length)].join('/');
-    }
-    return path;
-  });
-  rekeyCollapsedFolderKeys(spaceId, paths, nextPaths);
-  setStoredFolderPathsForSpace(spaceId, nextPaths);
-  await saveState({ persistWindowState: false, windowBinding });
-  render();
-  setStatus(`Renamed group "${currentName}" to "${clean}".`);
-}
-
-async function deleteStoredEmptyFolder(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  const sourcePath = Array.isArray(folderContext?.path) ? folderContext.path : [];
-  if (sourcePath.length === 0) return;
-  if (!isCurrentPanelWindowBinding(windowBinding)) return;
-  const spaceId = state.activeSpaceId;
-  const paths = storedFolderPathsForSpace(spaceId);
-  const removedId = sourcePath.join('/');
-  const removedPrefix = `${removedId}/`;
-  const keptPaths = paths.filter((path) => path !== removedId && !path.startsWith(removedPrefix));
-  if (keptPaths.length === paths.length) return;
-  rekeyCollapsedFolderKeys(spaceId, paths, keptPaths);
-  setStoredFolderPathsForSpace(spaceId, keptPaths);
-  await saveState({ persistWindowState: false, windowBinding });
-  render();
-  setStatus(`Deleted group "${sourcePath.at(-1) || 'Group'}".`);
 }
 
 function showContextMenu(event, items) {
@@ -11947,6 +11423,23 @@ function transferGroupLocalState(sourceKey, targetKey, spaceId = state.activeSpa
   const groupOrder = state.groupOrder[spaceId] || [];
   if (groupOrder.includes(sourceKey)) {
     state.groupOrder[spaceId] = uniqueKeys(groupOrder.map((key) => key === sourceKey ? targetKey : key));
+  }
+  const parents = state.groupParents?.[spaceId];
+  if (parents && typeof parents === 'object') {
+    const nextParents = {};
+    for (const [childKey, parentKey] of Object.entries(parents)) {
+      const nextChild = childKey === sourceKey ? targetKey : childKey;
+      const nextParent = parentKey === sourceKey ? targetKey : parentKey;
+      if (nextChild === nextParent) continue;
+      nextParents[nextChild] = nextParent;
+    }
+    state.groupParents[spaceId] = nextParents;
+  }
+  if (String(sourceKey).startsWith('node:')) {
+    const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
+    delete nodes[sourceKey];
+    if (Object.keys(nodes).length === 0) delete state.emptyNodes[spaceId];
+    else state.emptyNodes[spaceId] = nodes;
   }
 }
 
