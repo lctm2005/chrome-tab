@@ -420,6 +420,47 @@ h1 {
   background: var(--muted);
 }
 
+/* 拖组到面板空白处 = 回到顶层（无文字提示，背景微亮提示投放区） */
+#groupsList.root-drop-hover {
+  background: color-mix(in srgb, var(--accent, #6c5ce7) 8%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--accent, #6c5ce7) 45%, transparent);
+  outline-offset: -6px;
+}
+
+/* 无文字的固定投放带：出现时不推动布局，避免拖拽目标 rect 位移错位。 */
+.hierarchy-root-drop-zone {
+  display: none;
+  position: fixed;
+  top: 6px;
+  left: 10px;
+  right: 10px;
+  height: 20px;
+  z-index: 40;
+  border: 1px dashed color-mix(in srgb, var(--accent, #6c5ce7) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface, #14121a) 85%, transparent);
+}
+
+body.hierarchy-dragging #hierarchyRootDropZone:not([hidden]) {
+  display: block;
+}
+
+body.hierarchy-dragging #hierarchyRootDropZone.drag-over {
+  background: color-mix(in srgb, var(--accent, #6c5ce7) 35%, transparent);
+  border-style: solid;
+}
+
+.ungrouped-actions {
+  display: flex;
+  gap: 8px;
+  margin: 6px 8px 4px;
+}
+
+.ungrouped-actions .new-tab-row {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
 .space-view.groups-collapsed {
   gap: 0;
 }
@@ -444,35 +485,6 @@ h1 {
   color: color-mix(in srgb, currentColor 55%, transparent);
   border: 1px dashed color-mix(in srgb, currentColor 35%, transparent);
   border-radius: 10px;
-}
-
-/* 固定覆盖层：出现时不推动布局（否则拖拽目标 rect 位移、意图判定错位）。 */
-.hierarchy-root-drop-zone {
-  display: none;
-  position: fixed;
-  top: 8px;
-  left: 10px;
-  right: 10px;
-  z-index: 40;
-  padding: 10px 12px;
-  font-size: 12px;
-  text-align: center;
-  color: var(--group-color, #8a8580);
-  background: var(--surface, rgba(20, 18, 26, 0.92));
-  border: 1px dashed color-mix(in srgb, currentColor 45%, transparent);
-  border-radius: 12px;
-}
-
-body.hierarchy-dragging #hierarchyRootDropZone:not([hidden]) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-body.hierarchy-dragging #hierarchyRootDropZone.drag-over {
-  color: #fff;
-  background: color-mix(in srgb, var(--accent, #6c5ce7) 55%, transparent);
-  border-style: solid;
 }
 
 /* --- GLASS CARDS (GROUPS / FOLDERS) --- */

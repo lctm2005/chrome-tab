@@ -710,11 +710,10 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
 test('hierarchy drops re-parent groups through the state-backed planner', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: hierarchyParentsForSpace\(\),[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
-  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = plan\.parents;[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
+  assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: renderedHierarchyKeyParents,[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = toHierarchyParents\([\s\S]*plan\.parents,[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
   assert.match(source, /function replaceActiveSpaceSnapshotGroups[\s\S]*remapSnapshotGroupIndexedState\(\{[\s\S]*groupOrder:[\s\S]*collapsedGroups:[\s\S]*tabOrder:/);
-  assert.match(source, /snapshotKeyReplacements[\s\S]*remapGroupParents\(currentParents, snapshotKeyReplacements\)/);
-  assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, hierarchyParentsForSpace\(\)\)/);
+  assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, renderedHierarchyKeyParents\)/);
   assert.doesNotMatch(source, /movedGroupTitleForFolderDrop|retitleGroupForNestedMove|targetPathForSiblingMove|moveGroupBlockBesideContext/);
 });
 

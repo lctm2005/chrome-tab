@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Space Tabs</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="sidepanel.css?v=33">
+    <link rel="stylesheet" href="sidepanel.css?v=34">
   </head>
   <body>
     <div class="shell">
@@ -35,7 +35,7 @@
         <button type="button" class="link-button" id="undoOrganizationButton">Undo</button>
       </div>
 
-      <div class="hierarchy-root-drop-zone" id="hierarchyRootDropZone" hidden>Drop here to make it a top-level group</div>
+      <div class="hierarchy-root-drop-zone" id="hierarchyRootDropZone" hidden aria-hidden="true"></div>
       <main class="space-view" id="groupsList"></main>
     <main class="settings-view" id="settingsView" hidden>
       <div class="settings-head">
@@ -188,6 +188,6 @@
     </dialog>
 
     <script src="config.local.js"></script>
-    <script type="module" src="sidepanel.js?v=33"></script>
+    <script type="module" src="sidepanel.js?v=34"></script>
   </body>
 </html>

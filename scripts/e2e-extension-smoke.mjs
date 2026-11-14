@@ -22740,7 +22740,8 @@ ${error.message}`);
         const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
         const parents = stored.spaceTabsState?.groupParents?.default || {};
         const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
-        if (!nodeKey || parents[nodeKey] !== ${JSON.stringify(parentKey)}) return null;
+        // 父引用现在存稳定身份（父是 live Tag → sgid:<snapshotGroupId>）
+        if (!nodeKey || !String(parents[nodeKey] || '').startsWith('sgid:')) return null;
         return { nodeKey };
       })()`, 15000);
       const nodeKey = nestedNodeState.nodeKey;
@@ -22785,7 +22786,10 @@ ${error.message}`);
       const dragState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const parents = stored.spaceTabsState?.groupParents?.default || {};
-        if (parents[${JSON.stringify(childKey)}] !== ${JSON.stringify(parentKey)}) return null;
+        // 身份域：child/parent 都以 sgid:（或 node:）为前缀
+        const childHid = Object.keys(parents)
+          .find((child) => child.startsWith('sgid:') && String(parents[child]).startsWith('sgid:'));
+        if (!childHid) return null;
         return parents;
       })()`, 15000);
       const chromeTitleAfterNest = await evaluate(client, `(async () => {
@@ -22798,7 +22802,7 @@ ${error.message}`);
         JSON.stringify({ dragState, chromeTitleAfterNest }),
       );
 
-      // 3. Dragging the child out via the root drop zone returns it to top level.
+      // 3. Dragging the child out via the text-free root drop strip returns it to top level.
       await dragElementThroughUI(
         client,
         `${childKeySel} > .group-header`,
@@ -22808,7 +22812,12 @@ ${error.message}`);
       const rootState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const parents = stored.spaceTabsState?.groupParents?.default || {};
-        if (parents[${JSON.stringify(childKey)}]) return null;
+        // child 的身份 = 存档里 title 为 Hierarchy Child 的 snapshotGroupId
+        const childTag = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
+          .find((group) => group.title === 'Hierarchy Child');
+        if (!childTag?.snapshotGroupId) return null;
+        const childHid = 'sgid:' + childTag.snapshotGroupId;
+        if (parents[childHid]) return null;
         return parents;
       })()`, 15000);
       record(
@@ -22847,7 +22856,7 @@ ${error.message}`);
         if (!nodeKey) return null;
         const parentCard = document.querySelector(${JSON.stringify(`${parentKeySel} h2`)});
         return {
-          childStillNested: parents[nodeKey] === ${JSON.stringify(parentKey)},
+          childStillNested: String(parents[nodeKey] || '').startsWith('sgid:'),
           parentTitle: parentCard?.textContent || '',
         };
       })()`, 30000);
@@ -22857,7 +22866,49 @@ ${error.message}`);
         JSON.stringify({ renamedState }),
       );
 
-      // 5. Empty node deletes non-destructively via the header × button.
+      // 5. 折叠（close-to-saved）再展开（open-dormant）后层级必须保留：
+      //    chrome 组 id 再生，但父子引用走 snapshot 身份，不随键漂移。
+      await waitForLifecycleJournalToSettle(client);
+      await evaluate(client, `(async () => {
+        // 给父组一个 tab 使其成为可折叠的 live Tag（空节点无法 close-to-saved）。
+        const chromeId = Number(${JSON.stringify(parentKey)}.slice('group:'.length));
+        const tab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-fold', active: false });
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: chromeId });
+        return tab.id;
+      })()`);
+      await waitForLifecycleJournalToSettle(client);
+      await evaluate(client, `(() => {
+        const header = document.querySelector('${parentKeySel} > .group-header');
+        if (!header) throw new Error('parent header missing before fold');
+        header.click();
+        return true;
+      })()`);
+const foldedState = await waitFor(client, `(async () => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const nodeStillNested = Boolean(
+          parentCard?.querySelector(':scope > .group-children .group-card'),
+        );
+        return { folded: parentCard?.classList.contains('collapsed') || !parentCard, nodeStillNested };
+      })()`, 20000);
+      await evaluate(client, `(() => {
+        const card = document.querySelector(${JSON.stringify(parentKeySel)});
+        if (!card) throw new Error('parent card missing after fold');
+        card.querySelector('.group-header').click();
+        return true;
+      })()`);
+const hierarchyAfterReopen = await waitFor(client, `(async () => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const nestedChild = parentCard?.querySelector(':scope > .group-children .group-card');
+        // 展开后 chrome 组 id 已再生：parent 键变了但身份不变，层级应保留
+        return { nested: Boolean(nestedChild), parentKeyNow: parentCard?.dataset.groupKey || '' };
+      })()`, 20000);
+      record(
+        'Hierarchy: fold (close-to-saved) and expand keep the parent-child relation',
+        Boolean(hierarchyAfterReopen?.nested),
+        JSON.stringify({ foldedState, hierarchyAfterReopen }),
+      );
+
+      // 6. Empty node deletes non-destructively via the header × button.
       await evaluate(client, `(() => {
         const card = document.querySelector(${JSON.stringify(nodeKeySel)});
         const button = card.querySelector('.group-actions button[title="Delete group"]');
@@ -22921,9 +22972,8 @@ ${error.message}`);
         const emptyPlace = Object.entries(nodes).find(([, node]) => node.title === 'Empty Place');
         const legacyFolder = Object.entries(nodes).find(([, node]) => node.title === 'Legacy Folder');
         if (!emptyPlace || !legacyFolder) return null;
-        const savedNested = Object.entries(parents).some(([child, parent]) => (
-          child.startsWith('snapshot:') && parent === legacyFolder[0]
-        ));
+        // 身份域：dormant saved Tag 的身份是 sgid:hierarchy-legacy-tag
+        const savedNested = parents['sgid:hierarchy-legacy-tag'] === legacyFolder[0];
         return {
           savedTagTitle: savedTag.title,
           savedNested,

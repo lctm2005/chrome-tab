@@ -222,3 +222,48 @@ export function planLegacyTitlePathMigration({
   }
   return { emptyNodesBySpace, parentsBySpace, renamesBySpace };
 }
+
+// Hierarchy references persist across Chrome group id churn (folding a live
+// Tag destroys its chrome group; expanding mints a new id). Snapshot identity
+// survives those transitions, so parent links are stored against a stable
+// hierarchy id instead of the raw view key.
+export function groupHierarchyId(group = {}) {
+  const snapshotGroupId = String(group?.snapshotGroupId || '').trim();
+  if (snapshotGroupId) return `sgid:${snapshotGroupId}`;
+  return String(group?.key || '');
+}
+
+// Converts stored hierarchy-id parents into view-key parents for the current
+// render. References whose child or parent is not in the view are dropped
+// (the child renders at root; the link revives if the group returns).
+export function resolveKeyParents(nodes, parents) {
+  const hidToKey = new Map();
+  for (const node of nodes) {
+    const hid = groupHierarchyId(node);
+    if (!hidToKey.has(hid)) hidToKey.set(hid, node.key);
+  }
+  const keyParents = {};
+  for (const [childHid, parentHid] of Object.entries(parents)) {
+    const childKey = hidToKey.get(childHid);
+    const parentKey = hidToKey.get(parentHid);
+    if (!childKey || !parentKey || childKey === parentKey) continue;
+    keyParents[childKey] = parentKey;
+  }
+  return keyParents;
+}
+
+// Inverse: converts a key-based drop plan into stored hierarchy-id parents.
+export function toHierarchyParents(nodes, keyParents) {
+  const keyToHid = new Map();
+  for (const node of nodes) {
+    keyToHid.set(node.key, groupHierarchyId(node));
+  }
+  const hidParents = {};
+  for (const [childKey, parentKey] of Object.entries(keyParents)) {
+    const childHid = keyToHid.get(childKey) || childKey;
+    const parentHid = keyToHid.get(parentKey) || parentKey;
+    if (!childHid || !parentHid || childHid === parentHid) continue;
+    hidParents[childHid] = parentHid;
+  }
+  return hidParents;
+}

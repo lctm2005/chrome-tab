@@ -344,3 +344,92 @@ test('planLegacyTitlePathMigration skips blank stored paths and handles spaces i
   assert.deepEqual(s2Nodes, ['Only']);
   assert.deepEqual(plan.parentsBySpace.s2 ?? {}, {});
 });
+
+import { groupHierarchyId, resolveKeyParents, toHierarchyParents } from '../src/shared/group-tree.js';
+
+test('groupHierarchyId prefers snapshot identity over the raw key', () => {
+  assert.equal(groupHierarchyId({ key: 'group:9', snapshotGroupId: 'sg-a' }), 'sgid:sg-a');
+  assert.equal(groupHierarchyId({ key: 'group:9' }), 'group:9');
+  assert.equal(groupHierarchyId({ key: 'node:x' }), 'node:x');
+  assert.equal(groupHierarchyId({ key: 'group:9', snapshotGroupId: '  ' }), 'group:9');
+});
+
+test('resolveKeyParents maps stored ids to current view keys and drops orphans', () => {
+  const nodes = [
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'group:2', snapshotGroupId: 'sg-b', tabs: [] },
+    { key: 'node:x', tabs: [] },
+  ];
+  const keyParents = resolveKeyParents(nodes, {
+    'sgid:sg-b': 'sgid:sg-a',
+    'node:x': 'sgid:sg-a',
+    'sgid:sg-gone': 'sgid:sg-a',
+    'sgid:sg-a': 'sgid:sg-a',
+  });
+  assert.deepEqual(keyParents, { 'group:2': 'group:1', 'node:x': 'group:1' });
+});
+
+test('toHierarchyParents converts drop plans into stored ids', () => {
+  const nodes = [
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'group:2', tabs: [] },
+  ];
+  assert.deepEqual(
+    toHierarchyParents(nodes, { 'group:2': 'group:1' }),
+    { 'group:2': 'sgid:sg-a' },
+  );
+  // 不在视图里的键按原样保留（空节点键即身份）
+  assert.deepEqual(
+    toHierarchyParents(nodes, { 'node:y': 'group:1' }),
+    { 'node:y': 'sgid:sg-a' },
+  );
+});
+
+test('identity round-trip survives chrome id churn', () => {
+  const before = [{ key: 'group:11', snapshotGroupId: 'sg-a', tabs: [] }];
+  const stored = toHierarchyParents(before, { 'group:22': 'group:11' });
+  // 折叠后 chrome id 再生：子组 22 获得身份 sg-b，父组 11 → 新键 group:99
+  const after = [
+    { key: 'group:99', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'group:55', snapshotGroupId: 'sg-b', tabs: [] },
+  ];
+  const keyParents = resolveKeyParents(after, { 'sgid:sg-b': 'sgid:sg-a' });
+  assert.deepEqual(keyParents, { 'group:55': 'group:99' });
+  assert.equal(stored['group:22'], 'sgid:sg-a');
+});
+
+test('identity helpers cover fallback and self-link branches', () => {
+  const nodes = [{ key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }, { key: 'node:y', tabs: [] }];
+  // 重复身份取首个；child/parent 相同跳过；空 views 全跳过
+  assert.deepEqual(resolveKeyParents(nodes, {
+    'sgid:sg-a': 'sgid:sg-a',
+    'node:y': 'sgid:sg-a',
+  }), { 'node:y': 'group:1' });
+  assert.deepEqual(resolveKeyParents([], { 'sgid:sg-a': 'sgid:sg-a' }), {});
+  // toHierarchyParents：视图内键→身份；视图外键原样保留；自引用跳过
+  assert.deepEqual(toHierarchyParents(nodes, {
+    'group:1': 'node:y',
+    'node:y': 'group:1',
+  }), { 'sgid:sg-a': 'node:y', 'node:y': 'sgid:sg-a' });
+  const withSelf = toHierarchyParents(nodes, { 'group:1': 'group:1' });
+  assert.deepEqual(withSelf, {});
+  // groupHierarchyId 空键兜底
+  assert.equal(groupHierarchyId({}), '');
+  assert.deepEqual(resolveKeyParents(nodes, {}), {});
+  assert.deepEqual(toHierarchyParents(nodes, {}), {});
+});
+
+test('identity helpers tolerate unknown ids in both directions', () => {
+  const nodes = [{ key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }];
+  // resolveKeyParents：父/子身份都不在视图里 → 丢弃（渲染时孤儿升根）
+  assert.deepEqual(resolveKeyParents(nodes, { 'sgid:sg-x': 'sgid:sg-y' }), {});
+  // toHierarchyParents：双方都是视图外键 → 原样保留（调用方保证域正确）
+  assert.deepEqual(
+    toHierarchyParents(nodes, { 'group:1': 'group:99' }),
+    { 'sgid:sg-a': 'group:99' },
+  );
+  assert.deepEqual(
+    toHierarchyParents(nodes, { 'group:1': 'group:1' }),
+    {},
+  );
+});
