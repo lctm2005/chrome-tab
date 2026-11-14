@@ -433,3 +433,73 @@ test('identity helpers tolerate unknown ids in both directions', () => {
     {},
   );
 });
+
+test('resolveKeyParents resolves legacy key-domain entries against the current view', () => {
+  const nodes = [
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'node:x', tabs: [] },
+  ];
+  // 旧 key 域条目：group:1 → node:x（拖入时尚无身份）
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'group:1': 'node:x' }),
+    { 'group:1': 'node:x' },
+  );
+  // 身份 mint 后条目升级为 sgid 域，同样命中
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'sgid:sg-a': 'node:x' }),
+    { 'group:1': 'node:x' },
+  );
+  // 组身份消失（混合行）时 sgid 条目暂失联，key 域条目兜底
+  const mixed = [{ key: 'group:1', tabs: [] }, { key: 'node:x', tabs: [] }];
+  assert.deepEqual(
+    resolveKeyParents(mixed, { 'group:1': 'node:x' }),
+    { 'group:1': 'node:x' },
+  );
+  // 空节点作为 child：node 键即身份
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'node:y': 'node:x' }),
+    {},
+  );
+});
+
+test('resolveKeyParents covers parent resolved via key-domain fallback', () => {
+  const nodes = [
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'node:x', tabs: [] },
+  ];
+  // 父是 key 域遗留（身份缺失的 live 组），子是身份域
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'sgid:sg-a': 'group:9' }),
+    {},
+  );
+  const keyDomainParent = [{ key: 'group:9', tabs: [] }, { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }];
+  assert.deepEqual(
+    resolveKeyParents(keyDomainParent, { 'sgid:sg-a': 'group:9' }),
+    { 'group:1': 'group:9' },
+  );
+});
+
+test('resolveKeyParents drops entries whose parent resolves nowhere', () => {
+  const nodes = [
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+    { key: 'node:x', tabs: [] },
+  ];
+  // 父身份与父 key 都不在视图里 → 条目丢弃
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'sgid:sg-a': 'sgid:sg-gone' }),
+    {},
+  );
+  assert.deepEqual(
+    resolveKeyParents(nodes, { 'sgid:sg-a': 'group:99' }),
+    {},
+  );
+  // 父是 key 域遗留且该组现在有身份：key 域 fallback 命中当前键
+  const withIdentParent = [
+    { key: 'group:9', snapshotGroupId: 'sg-p', tabs: [] },
+    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
+  ];
+  assert.deepEqual(
+    resolveKeyParents(withIdentParent, { 'sgid:sg-a': 'group:9' }),
+    { 'group:1': 'group:9' },
+  );
+});

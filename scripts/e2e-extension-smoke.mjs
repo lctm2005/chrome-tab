@@ -22930,7 +22930,51 @@ const hierarchyAfterReopen = await waitFor(client, `(async () => {
         JSON.stringify({ nodeDeleted, childStillOpen }),
       );
 
-      // 6. Legacy migration: " / " titles unwind into the state-backed tree.
+      // 6. 普通（live）Tag 拖进空 subgroup：身份 mint 前后都保持嵌套。
+      const liveTagForNode = await evaluate(client, `(async () => {
+        const tab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-live-child', active: false });
+        const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+        await chrome.tabGroups.update(groupId, { title: 'Hierarchy Live Child', color: 'green' });
+        return { tabId: tab.id, groupId };
+      })()`);
+      await waitForLifecycleJournalToSettle(client);
+      const liveChildKey = await waitFor(client, `(() => {
+        const card = [...document.querySelectorAll('#groupsList > .group-card')]
+          .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Live Child');
+        return card?.dataset.groupKey || '';
+      })()`, 15000);
+      if (!liveChildKey) {
+        throw new Error('Hierarchy setup did not render the live child tag card');
+      }
+      const liveChildKeySel = `.group-card[data-group-key="${liveChildKey}"]`;
+      await dragElementThroughUI(
+        client,
+        `${liveChildKeySel} > .group-header`,
+        `${parentKeySel} > .group-header`,
+        { targetYRatio: 0.5 },
+      );
+      const liveNested = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const nested = parentCard?.querySelector(':scope > .group-children > ' + ${JSON.stringify(liveChildKeySel)});
+        return Boolean(nested);
+      })()`, 15000);
+      // 身份 mint 时序：立即 reload（可能存在尚未 settle 的 binding 写入）
+      await evaluate(client, 'location.reload()');
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`, 20000);
+      const liveNestedAfterReload = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const nested = parentCard?.querySelector(':scope > .group-children > ' + ${JSON.stringify(liveChildKeySel)});
+        return Boolean(nested);
+      })()`, 20000);
+      record(
+        'Hierarchy: live tag nested in an empty-node subgroup survives identity minting and reload',
+        Boolean(liveNested) && Boolean(liveNestedAfterReload),
+        JSON.stringify({ liveNested, liveNestedAfterReload, liveChildKey }),
+      );
+      await evaluate(client, `chrome.tabs.remove([${JSON.stringify(liveTagForNode.tabId)}]).catch(() => {})`);
+      await waitForLifecycleJournalToSettle(client);
+
+      // 7. Legacy migration: " / " titles unwind into the state-backed tree.
       await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = stored.spaceTabsState || {};

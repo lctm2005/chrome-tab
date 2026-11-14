@@ -238,14 +238,17 @@ export function groupHierarchyId(group = {}) {
 // (the child renders at root; the link revives if the group returns).
 export function resolveKeyParents(nodes, parents) {
   const hidToKey = new Map();
+  const keyNodes = new Set();
   for (const node of nodes) {
     const hid = groupHierarchyId(node);
     if (!hidToKey.has(hid)) hidToKey.set(hid, node.key);
+    keyNodes.add(node.key);
   }
   const keyParents = {};
   for (const [childHid, parentHid] of Object.entries(parents)) {
-    const childKey = hidToKey.get(childHid);
-    const parentKey = hidToKey.get(parentHid);
+    // 双向解析：身份命中，或 key 域遗留条目（key 即当前节点的键）
+    const childKey = hidToKey.get(childHid) || (keyNodes.has(childHid) ? childHid : null);
+    const parentKey = hidToKey.get(parentHid) || (keyNodes.has(parentHid) ? parentHid : null);
     if (!childKey || !parentKey || childKey === parentKey) continue;
     keyParents[childKey] = parentKey;
   }

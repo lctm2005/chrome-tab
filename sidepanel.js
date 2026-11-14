@@ -2331,6 +2331,8 @@ function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId)
 
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
+  // 每个渲染周期自愈：升级 key 域遗留条目、跟随组身份变化重写引用。
+  normalizeHierarchyParentIdentities();
   const { nodes, parents } = visibleHierarchyNodes();
   const collapsedAll = isSpaceGroupsCollapsed();
   const tree = collapsedAll ? [] : buildGroupTree(nodes, parents);
@@ -2401,17 +2403,19 @@ function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
 
 // Self-heals legacy key-based entries and groups that gained an identity
 // after their link was written: re-resolves every reference against the
-// current view and rewrites it in hierarchy-id form.
+// current view and rewrites it in hierarchy-id form. Runs every render so
+// identity minting (first binding write) cannot orphan a freshly nested
+// group. Key-domain entries that still resolve (identity-less groups,
+// empty nodes) are kept as-is; resolved entries replace their key form.
 function normalizeHierarchyParentIdentities(spaceId = state.activeSpaceId) {
   const parents = state.groupParents?.[spaceId];
   if (!parents || typeof parents !== 'object') return;
   const viewNodes = spaceView.filter((group) => group.key !== 'ungrouped');
   const keyToHid = new Map(viewNodes.map((node) => [node.key, groupHierarchyId(node)]));
-  const resolve = (id) => keyToHid.get(id) || id;
   const next = {};
   for (const [childHid, parentHid] of Object.entries(parents)) {
-    const nextChild = resolve(childHid);
-    const nextParent = resolve(parentHid);
+    const nextChild = keyToHid.get(childHid) || childHid;
+    const nextParent = keyToHid.get(parentHid) || parentHid;
     if (!nextChild || !nextParent || nextChild === nextParent) continue;
     next[nextChild] = nextParent;
   }
