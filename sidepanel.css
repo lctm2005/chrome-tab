@@ -427,29 +427,6 @@ h1 {
   outline-offset: -6px;
 }
 
-/* 无文字的固定投放带：出现时不推动布局，避免拖拽目标 rect 位移错位。 */
-.hierarchy-root-drop-zone {
-  display: none;
-  position: fixed;
-  top: 6px;
-  left: 10px;
-  right: 10px;
-  height: 20px;
-  z-index: 40;
-  border: 1px dashed color-mix(in srgb, var(--accent, #6c5ce7) 55%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface, #14121a) 85%, transparent);
-}
-
-body.hierarchy-dragging #hierarchyRootDropZone:not([hidden]) {
-  display: block;
-}
-
-body.hierarchy-dragging #hierarchyRootDropZone.drag-over {
-  background: color-mix(in srgb, var(--accent, #6c5ce7) 35%, transparent);
-  border-style: solid;
-}
-
 .ungrouped-actions {
   display: flex;
   gap: 8px;

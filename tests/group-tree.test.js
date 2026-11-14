@@ -345,161 +345,55 @@ test('planLegacyTitlePathMigration skips blank stored paths and handles spaces i
   assert.deepEqual(plan.parentsBySpace.s2 ?? {}, {});
 });
 
-import { groupHierarchyId, resolveKeyParents, toHierarchyParents } from '../src/shared/group-tree.js';
 
-test('groupHierarchyId prefers snapshot identity over the raw key', () => {
-  assert.equal(groupHierarchyId({ key: 'group:9', snapshotGroupId: 'sg-a' }), 'sgid:sg-a');
-  assert.equal(groupHierarchyId({ key: 'group:9' }), 'group:9');
-  assert.equal(groupHierarchyId({ key: 'node:x' }), 'node:x');
-  assert.equal(groupHierarchyId({ key: 'group:9', snapshotGroupId: '  ' }), 'group:9');
+import { nodeDepth, subtreeHeight } from '../src/shared/group-tree.js';
+
+test('nodeDepth and subtreeHeight measure identity-free chains', () => {
+  const parents = { b: 'a', c: 'b', x: 'z' };
+  assert.equal(nodeDepth('a', parents), 1);
+  assert.equal(nodeDepth('b', parents), 2);
+  assert.equal(nodeDepth('c', parents), 3);
+  assert.equal(nodeDepth('x', parents), 2);
+  assert.equal(nodeDepth('missing', parents), 1);
+  assert.equal(subtreeHeight('a', parents), 3);
+  assert.equal(subtreeHeight('b', parents), 2);
+  assert.equal(subtreeHeight('c', parents), 1);
+  assert.equal(subtreeHeight('missing', parents), 1);
 });
 
-test('resolveKeyParents maps stored ids to current view keys and drops orphans', () => {
-  const nodes = [
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'group:2', snapshotGroupId: 'sg-b', tabs: [] },
-    { key: 'node:x', tabs: [] },
-  ];
-  const keyParents = resolveKeyParents(nodes, {
-    'sgid:sg-b': 'sgid:sg-a',
-    'node:x': 'sgid:sg-a',
-    'sgid:sg-gone': 'sgid:sg-a',
-    'sgid:sg-a': 'sgid:sg-a',
+test('nodeDepth survives parent cycles', () => {
+  assert.equal(nodeDepth('p', { p: 'q', q: 'p' }), 2);
+  assert.equal(nodeDepth('q', { p: 'q', q: 'p' }), 2);
+});
+
+test('planHierarchyDrop enforces maxDepth for inside and sibling drops', () => {
+  const base = { parents: { b: 'a' }, order: ['a', 'b', 'c', 'd'] };
+  const insideOk = planHierarchyDrop({
+    ...base, sourceRootKeys: ['c'], sourceAllKeys: ['c'], targetKey: 'b', intent: 'inside', maxDepth: 3,
   });
-  assert.deepEqual(keyParents, { 'group:2': 'group:1', 'node:x': 'group:1' });
-});
+  assert.equal(insideOk.error, undefined);
+  assert.equal(insideOk.parents.c, 'b');
 
-test('toHierarchyParents converts drop plans into stored ids', () => {
-  const nodes = [
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'group:2', tabs: [] },
-  ];
-  assert.deepEqual(
-    toHierarchyParents(nodes, { 'group:2': 'group:1' }),
-    { 'group:2': 'sgid:sg-a' },
-  );
-  // 不在视图里的键按原样保留（空节点键即身份）
-  assert.deepEqual(
-    toHierarchyParents(nodes, { 'node:y': 'group:1' }),
-    { 'node:y': 'sgid:sg-a' },
-  );
-});
+  const tooDeep = planHierarchyDrop({
+    parents: { b: 'a', c: 'b' },
+    order: ['a', 'b', 'c', 'd'],
+    sourceRootKeys: ['d'], sourceAllKeys: ['d'], targetKey: 'c', intent: 'inside', maxDepth: 3,
+  });
+  assert.equal(tooDeep.error, 'max-depth');
 
-test('identity round-trip survives chrome id churn', () => {
-  const before = [{ key: 'group:11', snapshotGroupId: 'sg-a', tabs: [] }];
-  const stored = toHierarchyParents(before, { 'group:22': 'group:11' });
-  // 折叠后 chrome id 再生：子组 22 获得身份 sg-b，父组 11 → 新键 group:99
-  const after = [
-    { key: 'group:99', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'group:55', snapshotGroupId: 'sg-b', tabs: [] },
-  ];
-  const keyParents = resolveKeyParents(after, { 'sgid:sg-b': 'sgid:sg-a' });
-  assert.deepEqual(keyParents, { 'group:55': 'group:99' });
-  assert.equal(stored['group:22'], 'sgid:sg-a');
-});
+  const siblingOk = planHierarchyDrop({
+    parents: { b: 'a', c: 'b' },
+    order: ['a', 'b', 'c', 'd'],
+    sourceRootKeys: ['d'], sourceAllKeys: ['d'], targetKey: 'c', intent: 'after', maxDepth: 3,
+  });
+  assert.equal(siblingOk.error, undefined);
+  // d 与 c 同层（都是 b 的子，第 3 层）
+  assert.equal(siblingOk.parents.d, 'b');
 
-test('identity helpers cover fallback and self-link branches', () => {
-  const nodes = [{ key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }, { key: 'node:y', tabs: [] }];
-  // 重复身份取首个；child/parent 相同跳过；空 views 全跳过
-  assert.deepEqual(resolveKeyParents(nodes, {
-    'sgid:sg-a': 'sgid:sg-a',
-    'node:y': 'sgid:sg-a',
-  }), { 'node:y': 'group:1' });
-  assert.deepEqual(resolveKeyParents([], { 'sgid:sg-a': 'sgid:sg-a' }), {});
-  // toHierarchyParents：视图内键→身份；视图外键原样保留；自引用跳过
-  assert.deepEqual(toHierarchyParents(nodes, {
-    'group:1': 'node:y',
-    'node:y': 'group:1',
-  }), { 'sgid:sg-a': 'node:y', 'node:y': 'sgid:sg-a' });
-  const withSelf = toHierarchyParents(nodes, { 'group:1': 'group:1' });
-  assert.deepEqual(withSelf, {});
-  // groupHierarchyId 空键兜底
-  assert.equal(groupHierarchyId({}), '');
-  assert.deepEqual(resolveKeyParents(nodes, {}), {});
-  assert.deepEqual(toHierarchyParents(nodes, {}), {});
-});
-
-test('identity helpers tolerate unknown ids in both directions', () => {
-  const nodes = [{ key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }];
-  // resolveKeyParents：父/子身份都不在视图里 → 丢弃（渲染时孤儿升根）
-  assert.deepEqual(resolveKeyParents(nodes, { 'sgid:sg-x': 'sgid:sg-y' }), {});
-  // toHierarchyParents：双方都是视图外键 → 原样保留（调用方保证域正确）
-  assert.deepEqual(
-    toHierarchyParents(nodes, { 'group:1': 'group:99' }),
-    { 'sgid:sg-a': 'group:99' },
-  );
-  assert.deepEqual(
-    toHierarchyParents(nodes, { 'group:1': 'group:1' }),
-    {},
-  );
-});
-
-test('resolveKeyParents resolves legacy key-domain entries against the current view', () => {
-  const nodes = [
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'node:x', tabs: [] },
-  ];
-  // 旧 key 域条目：group:1 → node:x（拖入时尚无身份）
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'group:1': 'node:x' }),
-    { 'group:1': 'node:x' },
-  );
-  // 身份 mint 后条目升级为 sgid 域，同样命中
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'sgid:sg-a': 'node:x' }),
-    { 'group:1': 'node:x' },
-  );
-  // 组身份消失（混合行）时 sgid 条目暂失联，key 域条目兜底
-  const mixed = [{ key: 'group:1', tabs: [] }, { key: 'node:x', tabs: [] }];
-  assert.deepEqual(
-    resolveKeyParents(mixed, { 'group:1': 'node:x' }),
-    { 'group:1': 'node:x' },
-  );
-  // 空节点作为 child：node 键即身份
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'node:y': 'node:x' }),
-    {},
-  );
-});
-
-test('resolveKeyParents covers parent resolved via key-domain fallback', () => {
-  const nodes = [
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'node:x', tabs: [] },
-  ];
-  // 父是 key 域遗留（身份缺失的 live 组），子是身份域
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'sgid:sg-a': 'group:9' }),
-    {},
-  );
-  const keyDomainParent = [{ key: 'group:9', tabs: [] }, { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] }];
-  assert.deepEqual(
-    resolveKeyParents(keyDomainParent, { 'sgid:sg-a': 'group:9' }),
-    { 'group:1': 'group:9' },
-  );
-});
-
-test('resolveKeyParents drops entries whose parent resolves nowhere', () => {
-  const nodes = [
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-    { key: 'node:x', tabs: [] },
-  ];
-  // 父身份与父 key 都不在视图里 → 条目丢弃
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'sgid:sg-a': 'sgid:sg-gone' }),
-    {},
-  );
-  assert.deepEqual(
-    resolveKeyParents(nodes, { 'sgid:sg-a': 'group:99' }),
-    {},
-  );
-  // 父是 key 域遗留且该组现在有身份：key 域 fallback 命中当前键
-  const withIdentParent = [
-    { key: 'group:9', snapshotGroupId: 'sg-p', tabs: [] },
-    { key: 'group:1', snapshotGroupId: 'sg-a', tabs: [] },
-  ];
-  assert.deepEqual(
-    resolveKeyParents(withIdentParent, { 'sgid:sg-a': 'group:9' }),
-    { 'group:1': 'group:9' },
-  );
+  const subtreeTooDeep = planHierarchyDrop({
+    parents: { b: 'a', c: 'b' },
+    order: ['a', 'b', 'c', 'd'],
+    sourceRootKeys: ['a'], sourceAllKeys: ['a', 'b', 'c'], targetKey: 'd', intent: 'inside', maxDepth: 3,
+  });
+  assert.equal(subtreeTooDeep.error, 'max-depth');
 });

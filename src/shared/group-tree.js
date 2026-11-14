@@ -74,6 +74,30 @@ export function descendantKeysOf(key, parents = {}) {
 // The persisted order is a flat DFS list (parents before children). Insertion
 // keeps that invariant: "inside" lands after the target's existing subtree,
 // "before"/"after" bracket the target's subtree block, "root" appends.
+// 目标节点深度：根=1，沿父链累加。循环父链走一步即停，不挂死。
+export function nodeDepth(key, parents = {}) {
+  let depth = 1;
+  let current = key;
+  const seen = new Set([key]);
+  while (parents[current]) {
+    const parent = parents[current];
+    if (!parent || seen.has(parent)) break;
+    seen.add(parent);
+    current = parent;
+    depth += 1;
+  }
+  return depth;
+}
+
+// 子树高度：自身=1，子节点链的最大深度。
+export function subtreeHeight(key, parents = {}) {
+  const descendants = descendantKeysOf(key, parents);
+  if (descendants.size === 0) return 1;
+  const rootDepth = nodeDepth(key, parents);
+  const descendantDepths = [...descendants].map((d) => nodeDepth(d, parents));
+  return Math.max(...descendantDepths) - rootDepth + 1;
+}
+
 export function planHierarchyDrop({
   parents = {},
   order = [],
@@ -81,6 +105,7 @@ export function planHierarchyDrop({
   sourceAllKeys = [],
   targetKey = '',
   intent = 'inside',
+  maxDepth = null,
 }) {
   if (!Array.isArray(sourceAllKeys) || sourceAllKeys.length === 0) {
     return { error: 'empty-source', message: 'Nothing is being dragged.' };
@@ -116,6 +141,32 @@ export function planHierarchyDrop({
     const sharedParent = parents[targetKey];
     for (const rootKey of sourceRoots) {
       if (sharedParent) nextParents[rootKey] = sharedParent;
+    }
+  }
+  if (Number.isFinite(Number(maxDepth)) && Number(maxDepth) > 0) {
+    const maxDepthValue = Number(maxDepth);
+    const sourceHeight = Math.max(...sourceRoots.map((rootKey) => {
+      const rootDepth = nodeDepth(rootKey, nextParents);
+      const descendantDepths = [...descendantKeysOf(rootKey, nextParents)]
+        .map((descendant) => nodeDepth(descendant, nextParents));
+      return descendantDepths.length > 0
+        ? Math.max(...descendantDepths) - rootDepth + 1
+        : 1;
+    }));
+    for (const rootKey of sourceRoots) {
+      const depthAfterDrop = intent === 'inside'
+        ? nodeDepth(targetKey, nextParents) + 1
+        : nodeDepth(targetKey, nextParents);
+      if (depthAfterDrop + sourceHeight - 1 > maxDepthValue) {
+        return {
+          error: 'max-depth',
+          message: `Groups can nest at most ${maxDepthValue} levels.`,
+          sourceRootKeys,
+          sourceAllKeys,
+          targetKey,
+          intent,
+        };
+      }
     }
   }
 
@@ -221,52 +272,4 @@ export function planLegacyTitlePathMigration({
     }
   }
   return { emptyNodesBySpace, parentsBySpace, renamesBySpace };
-}
-
-// Hierarchy references persist across Chrome group id churn (folding a live
-// Tag destroys its chrome group; expanding mints a new id). Snapshot identity
-// survives those transitions, so parent links are stored against a stable
-// hierarchy id instead of the raw view key.
-export function groupHierarchyId(group = {}) {
-  const snapshotGroupId = String(group?.snapshotGroupId || '').trim();
-  if (snapshotGroupId) return `sgid:${snapshotGroupId}`;
-  return String(group?.key || '');
-}
-
-// Converts stored hierarchy-id parents into view-key parents for the current
-// render. References whose child or parent is not in the view are dropped
-// (the child renders at root; the link revives if the group returns).
-export function resolveKeyParents(nodes, parents) {
-  const hidToKey = new Map();
-  const keyNodes = new Set();
-  for (const node of nodes) {
-    const hid = groupHierarchyId(node);
-    if (!hidToKey.has(hid)) hidToKey.set(hid, node.key);
-    keyNodes.add(node.key);
-  }
-  const keyParents = {};
-  for (const [childHid, parentHid] of Object.entries(parents)) {
-    // 双向解析：身份命中，或 key 域遗留条目（key 即当前节点的键）
-    const childKey = hidToKey.get(childHid) || (keyNodes.has(childHid) ? childHid : null);
-    const parentKey = hidToKey.get(parentHid) || (keyNodes.has(parentHid) ? parentHid : null);
-    if (!childKey || !parentKey || childKey === parentKey) continue;
-    keyParents[childKey] = parentKey;
-  }
-  return keyParents;
-}
-
-// Inverse: converts a key-based drop plan into stored hierarchy-id parents.
-export function toHierarchyParents(nodes, keyParents) {
-  const keyToHid = new Map();
-  for (const node of nodes) {
-    keyToHid.set(node.key, groupHierarchyId(node));
-  }
-  const hidParents = {};
-  for (const [childKey, parentKey] of Object.entries(keyParents)) {
-    const childHid = keyToHid.get(childKey) || childKey;
-    const parentHid = keyToHid.get(parentKey) || parentKey;
-    if (!childHid || !parentHid || childHid === parentHid) continue;
-    hidParents[childHid] = parentHid;
-  }
-  return hidParents;
 }

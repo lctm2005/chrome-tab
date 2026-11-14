@@ -51,12 +51,11 @@ import {
 import {
   buildGroupTree,
   descendantKeysOf,
-  groupHierarchyId,
+  nodeDepth,
   parseTitlePath,
   planHierarchyDrop,
   planLegacyTitlePathMigration,
-  resolveKeyParents,
-  toHierarchyParents,
+  remapGroupParents,
 } from './src/shared/group-tree.js';
 import {
   chromeGroupTitle,
@@ -332,6 +331,7 @@ let restoreSpaceDataReviewTransitions = 0;
 let renderedGroupContexts = new Map();
 let renderedHierarchyKeyParents = new Map();
 let renderedGroupDragContexts = new Map();
+const HIERARCHY_MAX_DEPTH = 3;
 let lastGroupDragEndedAt = 0;
 let lastRenderedGroupsSignature = '';
 let lastRenderedSpacesSignature = '';
@@ -360,7 +360,6 @@ const els = {
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
   groupsList: document.querySelector('#groupsList'),
-  hierarchyRootDropZone: document.querySelector('#hierarchyRootDropZone'),
   testAIButton: document.querySelector('#testAIButton'),
   detectModelsButton: document.querySelector('#detectModelsButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
@@ -844,11 +843,6 @@ function bindEvents() {
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   els.groupsList.addEventListener('scroll', () => positionGroupPreview(), { passive: true });
-  els.hierarchyRootDropZone.addEventListener('dragover', acceptHierarchyRootDrop);
-  els.hierarchyRootDropZone.addEventListener('dragleave', () => {
-    els.hierarchyRootDropZone.classList.remove('drag-over');
-  });
-  els.hierarchyRootDropZone.addEventListener('drop', dropHierarchyRoot);
   // 根区投放：拖到面板空白处（不在任何卡片上）= 回到顶层。
   els.groupsList.addEventListener('dragover', (event) => {
     if (dragState?.type !== 'group' || dragState.sourceSpaceId !== state.activeSpaceId) return;
@@ -866,12 +860,6 @@ function bindEvents() {
     if (event.target.closest('.group-card, .ungrouped-section')) return;
     dropGroup(event, { key: '' });
   });
-  // 根区投放带（无文字）：拖组到顶部投放带 = 回到顶层。
-  els.hierarchyRootDropZone.addEventListener('dragover', acceptHierarchyRootDrop);
-  els.hierarchyRootDropZone.addEventListener('dragleave', () => {
-    els.hierarchyRootDropZone.classList.remove('drag-over');
-  });
-  els.hierarchyRootDropZone.addEventListener('drop', dropHierarchyRoot);
   els.groupsList.addEventListener('contextmenu', (event) => {
     if (event.target.closest('.group-card, .ungrouped-section, .tab-row')) return;
     if (dragState) return;
@@ -887,20 +875,6 @@ function bindEvents() {
   });
   els.contextMenu.addEventListener('keydown', handleContextMenuKeydown);
   document.addEventListener('keydown', panelKeyboardController.handleKeydown, { capture: true });
-}
-
-function acceptHierarchyRootDrop(event) {
-  if (dragState?.type !== 'group') return;
-  if (dragState.sourceSpaceId !== state.activeSpaceId) return;
-  event.preventDefault();
-  event.dataTransfer.dropEffect = 'move';
-  els.hierarchyRootDropZone.classList.add('drag-over');
-}
-
-function dropHierarchyRoot(event) {
-  if (dragState?.type !== 'group') return;
-  els.hierarchyRootDropZone.classList.remove('drag-over');
-  dropGroup(event, { key: '' });
 }
 
 function bindPanelWindowEvents() {
@@ -2331,8 +2305,6 @@ function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId)
 
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
-  // 每个渲染周期自愈：升级 key 域遗留条目、跟随组身份变化重写引用。
-  normalizeHierarchyParentIdentities();
   const { nodes, parents } = visibleHierarchyNodes();
   const collapsedAll = isSpaceGroupsCollapsed();
   const tree = collapsedAll ? [] : buildGroupTree(nodes, parents);
@@ -2398,43 +2370,7 @@ function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
   ];
   const order = state.groupOrder?.[spaceId] || [];
   nodes.sort((left, right) => orderIndexForNode(order, left.key) - orderIndexForNode(order, right.key));
-  return { nodes, parents: hierarchyKeyParentsForSpace(spaceId, nodes) };
-}
-
-// Self-heals legacy key-based entries and groups that gained an identity
-// after their link was written: re-resolves every reference against the
-// current view and rewrites it in hierarchy-id form. Runs every render so
-// identity minting (first binding write) cannot orphan a freshly nested
-// group. Key-domain entries that still resolve (identity-less groups,
-// empty nodes) are kept as-is; resolved entries replace their key form.
-function normalizeHierarchyParentIdentities(spaceId = state.activeSpaceId) {
-  const parents = state.groupParents?.[spaceId];
-  if (!parents || typeof parents !== 'object') return;
-  const viewNodes = spaceView.filter((group) => group.key !== 'ungrouped');
-  const keyToHid = new Map(viewNodes.map((node) => [node.key, groupHierarchyId(node)]));
-  const next = {};
-  for (const [childHid, parentHid] of Object.entries(parents)) {
-    const nextChild = keyToHid.get(childHid) || childHid;
-    const nextParent = keyToHid.get(parentHid) || parentHid;
-    if (!nextChild || !nextParent || nextChild === nextParent) continue;
-    next[nextChild] = nextParent;
-  }
-  state.groupParents[spaceId] = next;
-}
-
-// Stored parents use stable hierarchy ids (snapshot identity / node keys);
-// drag, subtree walks and the drop planner all work in view-key space.
-function hierarchyKeyParentsForSpace(spaceId = state.activeSpaceId, nodes = null) {
-  const viewNodes = nodes || [
-    ...spaceView.filter((group) => group.key !== 'ungrouped'),
-    ...Object.entries(state.emptyNodes?.[spaceId] || {}).map(([key, node]) => ({
-      key,
-      tabs: [],
-      snapshotGroupId: '',
-      emptyNode: true,
-    })),
-  ];
-  return resolveKeyParents(viewNodes, hierarchyParentsForSpace(spaceId));
+  return { nodes, parents: hierarchyParentsForSpace(spaceId) };
 }
 
 function orderIndexForNode(order, key) {
@@ -4803,6 +4739,31 @@ async function closeGroupToSaved(group, options = {}) {
     },
   });
   await refreshTabs({ reloadDormant: true, windowBinding });
+  // 存档后 dormant 卡的 snapshot 键替换原 live 键在 groupOrder 中的位置，
+  // 否则新键不在 order 里会被渲染排到列表底部。
+  // 存档后 dormant Tag 沿用原 live 组标题（唯一同名 Tag 已在 close 前收敛）
+  const snapshotGroupsAfterClose = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+  const savedGroupId = snapshotGroupsAfterClose.find((candidate) => (
+    candidate.snapshotGroupId && candidate.title === group.title
+  ))?.snapshotGroupId ?? null;
+  if (savedGroupId) {
+    const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+    const savedIndex = snapshotGroups.findIndex((candidate) => candidate.snapshotGroupId === savedGroupId);
+    if (savedIndex >= 0) {
+      const savedKey = snapshotGroupKey(savedIndex, snapshotGroups[savedIndex], targetSpaceId);
+      replaceGroupOrderKeys(new Map([[group.key, savedKey]]), state.groupOrder[targetSpaceId] || []);
+      const groupParents = state.groupParents?.[targetSpaceId];
+      if (groupParents && typeof groupParents === 'object') {
+        const nextParents = { ...groupParents };
+        for (const [childHid, parentHid] of Object.entries(nextParents)) {
+          if (childHid === group.key) nextParents[savedKey] = parentHid;
+          else if (parentHid === group.key) nextParents[childHid] = savedKey;
+        }
+        delete nextParents[group.key];
+        state.groupParents[targetSpaceId] = nextParents;
+      }
+    }
+  }
   const closed = result.closedTabIds.length;
   const skipped = result.skippedTabs.length;
   setStatus(`Closed ${formatCount(closed, 'tab')} in "${group.displayTitle || group.title}"; the Tag remains saved.` +
@@ -4819,9 +4780,31 @@ async function openDormantGroup(group, options = {}) {
   const windowBinding = options.windowBinding;
   const savedTabs = (group.tabs || []).filter((tab) => tab.dormant);
   let opened = 0;
+  let restoredLiveKey = '';
   for (const tab of savedTabs) {
     await openDormantTab(tab, group.key, { windowBinding });
+    const binding = state.tabLifecycle?.[Number(tab.id)];
+    if (Number.isFinite(Number(binding?.groupId)) && Number(binding.groupId) > 0) {
+      restoredLiveKey = `group:${binding.groupId}`;
+    }
     opened += 1;
+  }
+  // 展开后新 live 组的键替换原 snapshot 键在 groupOrder 中的位置，
+  // 否则新键不在 order 里会被渲染排到列表底部（顺序"变化"）。
+  if (restoredLiveKey) {
+    replaceGroupOrderKeys(new Map([[group.key, restoredLiveKey]]), state.groupOrder[state.activeSpaceId] || []);
+    const groupParents = state.groupParents?.[state.activeSpaceId];
+    if (groupParents && typeof groupParents === 'object') {
+      const nextParents = { ...groupParents };
+      for (const [childHid, parentHid] of Object.entries(nextParents)) {
+        if (childHid === group.key) nextParents[restoredLiveKey] = parentHid;
+        else if (parentHid === group.key) nextParents[childHid] = restoredLiveKey;
+      }
+      delete nextParents[group.key];
+      state.groupParents[state.activeSpaceId] = nextParents;
+    }
+    delete state.collapsedGroups[group.key];
+    lastRenderedGroupsSignature = '';
   }
   setStatus(`Opened ${formatCount(opened, 'tab')} in "${group.displayTitle || group.title}".`);
   // The restored Tag is an expanded live card; keep keyboard focus on its
@@ -4895,22 +4878,19 @@ async function deleteGroup(group, options = {}) {
 // 节点的父级（根），不会连带删除任何 tab。
 async function deleteHierarchyNode(node, options = {}) {
     const spaceId = state.activeSpaceId;
-  const parents = hierarchyKeyParentsForSpace(spaceId);
+  const parents = hierarchyParentsForSpace(spaceId);
   const removedSet = new Set([
     node.key,
     ...[...descendantKeysOf(node.key, parents)].filter((key) => String(key).startsWith('node:')),
   ]);
-  const removedHids = new Set([...removedSet]
-    .map((key) => hierarchyIdForViewKey(key, spaceId))
-    .filter(Boolean));
-  const oldParents = hierarchyParentsForSpace(spaceId);
+  const oldParents = { ...parents };
   const nodeParent = oldParents[node.key] || '';
   const nextParents = {};
-  for (const [childHid, parentHid] of Object.entries(oldParents)) {
-    if (removedHids.has(childHid)) continue;
-    const nextParent = removedHids.has(parentHid) ? nodeParent : parentHid;
-    if (!nextParent || nextParent === childHid) continue;
-    nextParents[childHid] = nextParent;
+  for (const [childKey, parentKey] of Object.entries(oldParents)) {
+    if (removedSet.has(childKey)) continue;
+    const nextParent = removedSet.has(parentKey) ? nodeParent : parentKey;
+    if (!nextParent || nextParent === childKey) continue;
+    nextParents[childKey] = nextParent;
   }
   state.groupParents[spaceId] = nextParents;
   const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
@@ -4931,13 +4911,11 @@ async function deleteHierarchyNode(node, options = {}) {
 function clearHierarchyEntriesForKeys(removedKeys, spaceId = state.activeSpaceId) {
   const parents = state.groupParents?.[spaceId];
   if (!parents || typeof parents !== 'object') return;
-  const removed = new Set([...removedKeys]
-    .map((key) => hierarchyIdForViewKey(key, spaceId))
-    .filter(Boolean));
+  const removed = new Set(removedKeys);
   const nextParents = {};
-  for (const [childHid, parentHid] of Object.entries(parents)) {
-    if (removed.has(childHid) || removed.has(parentHid)) continue;
-    nextParents[childHid] = parentHid;
+  for (const [childKey, parentKey] of Object.entries(parents)) {
+    if (removed.has(childKey) || removed.has(parentKey)) continue;
+    nextParents[childKey] = parentKey;
   }
   state.groupParents[spaceId] = nextParents;
 }
@@ -5059,33 +5037,22 @@ function moveGroupsWithoutSaving(groups, spaceId) {
   }
   state.groupOrder[sourceSpaceId] = (state.groupOrder[sourceSpaceId] || [])
     .filter((key) => !removedKeys.has(key));
-  const movedHids = new Set([...removedKeys]
-    .map((key) => hierarchyIdForViewKey(key, sourceSpaceId))
-    .filter(Boolean));
-  moveHierarchyEntriesBetweenSpaces(movedHids, sourceSpaceId, spaceId);
+  moveHierarchyEntriesBetweenSpaces(removedKeys, sourceSpaceId, spaceId);
 }
 
-function hierarchyIdForViewKey(key, spaceId = state.activeSpaceId) {
-  const node = renderedGroupContexts.get(key)
-    || spaceView.find((item) => item.key === key);
-  if (node) return groupHierarchyId(node);
-  if (String(key).startsWith('node:')) return key;
-  return '';
-}
-
-// 父子关系随子树一起搬（身份域）：父也被搬走的子级保留关系；父留下的子级在目标空间升根。
-function moveHierarchyEntriesBetweenSpaces(movedHids, sourceSpaceId, targetSpaceId) {
+// 父子关系随子树一起搬：父也被搬走的子级保留关系；父留下的子级在目标空间升根。
+function moveHierarchyEntriesBetweenSpaces(movedKeys, sourceSpaceId, targetSpaceId) {
   if (!state.groupParents || typeof state.groupParents !== 'object') state.groupParents = {};
   const sourceParents = { ...(state.groupParents[sourceSpaceId] || {}) };
   const nextSourceParents = {};
-  for (const [childHid, parentHid] of Object.entries(sourceParents)) {
-    if (!movedHids.has(childHid)) nextSourceParents[childHid] = parentHid;
+  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
+    if (!movedKeys.has(childKey)) nextSourceParents[childKey] = parentKey;
   }
   state.groupParents[sourceSpaceId] = nextSourceParents;
   const nextTargetParents = { ...(state.groupParents[targetSpaceId] || {}) };
-  for (const [childHid, parentHid] of Object.entries(sourceParents)) {
-    if (!movedHids.has(childHid)) continue;
-    if (movedHids.has(parentHid)) nextTargetParents[childHid] = parentHid;
+  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
+    if (!movedKeys.has(childKey)) continue;
+    if (movedKeys.has(parentKey)) nextTargetParents[childKey] = parentKey;
   }
   state.groupParents[targetSpaceId] = nextTargetParents;
 }
@@ -6810,6 +6777,20 @@ function handleGroupHeaderClick(event, group) {
     return;
   }
   if (!group.dormant && currentlyExpanded) {
+    // 含 pinned 或不可存档 tab 的组无法 close-to-saved：降级为纯显示折叠
+    //（Chrome 原生 collapsed 状态），tabs 保持打开。
+    const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
+    const cannotSave = liveTabs.some((tab) => tab.pinned || !isRestorableSnapshotTab(tab));
+    if (cannotSave) {
+      const focusRestoreToken = disclosureFocusGuard.capture(
+        document.activeElement === event.currentTarget,
+      );
+      runTask((windowBinding) => toggleGroup(group, {
+        focusRestoreToken,
+        windowBinding,
+      }));
+      return;
+    }
     runTask((windowBinding) => closeGroupToSaved(group, { windowBinding }));
     return;
   }
@@ -6863,7 +6844,6 @@ function startGroupDrag(event, group) {
     organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
   };
   document.body.classList.add('hierarchy-dragging');
-  if (els.hierarchyRootDropZone) els.hierarchyRootDropZone.hidden = false;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
@@ -6895,6 +6875,7 @@ function dropGroup(event, target) {
   const plan = planHierarchyDrop({
     parents: renderedHierarchyKeyParents,
     order: state.groupOrder[state.activeSpaceId] || [],
+    maxDepth: HIERARCHY_MAX_DEPTH,
     sourceRootKeys: dragState.sourceRootKeys,
     sourceAllKeys: dragState.groupKeys,
     targetKey,
@@ -6952,6 +6933,7 @@ async function applyHierarchyDrop(plan, options = {}) {
       const freshPlan = planHierarchyDrop({
         parents: renderedHierarchyKeyParents,
         order: state.groupOrder[state.activeSpaceId] || [],
+        maxDepth: HIERARCHY_MAX_DEPTH,
         sourceRootKeys: plan.sourceRootKeys,
         sourceAllKeys: plan.sourceAllKeys,
         targetKey: plan.targetKey,
@@ -6969,10 +6951,7 @@ async function applyHierarchyDrop(plan, options = {}) {
   let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      state.groupParents[spaceId] = toHierarchyParents(
-        spaceView.filter((group) => group.key !== 'ungrouped'),
-        plan.parents,
-      );
+      state.groupParents[spaceId] = plan.parents;
       state.groupOrder[spaceId] = plan.order;
       changed = true;
           },
@@ -7011,18 +6990,22 @@ async function materializeEmptyNodeWithTab(tabId, node, options = {}) {
         windowBinding,
       });
       if (groupId === null) throw new Error('Chrome could not create the group.');
-      // 空节点的父子引用改挂到物化组的稳定身份（binding 身份优先，其次新键）。
+      // 空节点的父子引用全部改挂到物化组的稳定身份（binding 身份优先，
+      // 其次新键）：node 作为 child 的条目重挂到 newHid 的父上；node 作为
+      // parent 的条目（已拖进去的子组）改挂到 newHid。漏掉任一侧都会让
+      // 物化后 node 键消失、整层子树掉回顶层。
       const parents = { ...(state.groupParents?.[spaceId] || {}) };
+      const binding = state.tabLifecycle?.[Number(tabId)];
+      const newHid = binding?.snapshotGroupId
+        ? `sgid:${binding.snapshotGroupId}`
+        : `group:${groupId}`;
       const parentHid = parents[node.key];
-      if (parentHid) {
-        const binding = state.tabLifecycle?.[Number(tabId)];
-        const newHid = binding?.snapshotGroupId
-          ? `sgid:${binding.snapshotGroupId}`
-          : `group:${groupId}`;
-        delete parents[node.key];
-        if (newHid !== parentHid) parents[newHid] = parentHid;
-        state.groupParents[spaceId] = parents;
+      delete parents[node.key];
+      if (parentHid && newHid !== parentHid) parents[newHid] = parentHid;
+      for (const [childHid, parentHid] of Object.entries(parents)) {
+        if (parentHid === node.key) parents[childHid] = newHid;
       }
+      state.groupParents[spaceId] = parents;
     },
     checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
@@ -7559,7 +7542,6 @@ function clearDragState(event) {
   if (dragState?.type === 'group') lastGroupDragEndedAt = Date.now();
   dragState = null;
   document.body.classList.remove('hierarchy-dragging');
-  if (els.hierarchyRootDropZone) els.hierarchyRootDropZone.hidden = true;
   els.groupsList?.classList.remove('root-drop-hover');
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
@@ -9732,9 +9714,12 @@ function showGroupContextMenu(event, group) {
   }
   // The header already covers open/close (click) and delete (×), so the menu
   // keeps only Rename, New Subgroup, and Move to.
+  const groupDepth = nodeDepth(group.key, renderedHierarchyKeyParents);
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
-    menuAction('New Subgroup', (windowBinding) => createEmptyGroupNode(group.key, { windowBinding })),
+    ...(groupDepth < HIERARCHY_MAX_DEPTH
+      ? [menuAction('New Subgroup', (windowBinding) => createEmptyGroupNode(group.key, { windowBinding }))]
+      : []),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })
     ))),
@@ -9794,13 +9779,11 @@ async function createEmptyGroupNode(parentKey = '', options = {}) {
     [key]: { title: clean, color: nextGroupColor() },
   };
   if (parentKey) {
-    const parentNode = renderedGroupContexts.get(parentKey)
-      || spaceView.find((item) => item.key === parentKey)
-      || { key: parentKey };
-    state.groupParents[spaceId] = {
-      ...(state.groupParents[spaceId] || {}),
-      [key]: groupHierarchyId(parentNode),
-    };
+    if (nodeDepth(parentKey, renderedHierarchyKeyParents) >= HIERARCHY_MAX_DEPTH) {
+      setStatus(`Groups can nest at most ${HIERARCHY_MAX_DEPTH} levels.`);
+      return;
+    }
+    state.groupParents[spaceId] = { ...(state.groupParents[spaceId] || {}), [key]: parentKey };
   }
   addGroupOrderKey(spaceId, key);
   await saveState({ persistWindowState: false, windowBinding });
@@ -9841,9 +9824,8 @@ async function migrateSpaceHierarchy(spaceId = state.activeSpaceId, options = {}
         state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), ...nodeEntries };
         state.groupParents[spaceId] = {
           ...(state.groupParents[spaceId] || {}),
-          ...toHierarchyParents(spaceView, plan.parentsBySpace[spaceId] || {}),
+          ...(plan.parentsBySpace[spaceId] || {}),
         };
-        normalizeHierarchyParentIdentities(spaceId);
         for (const { key, nextTitle } of plan.renamesBySpace[spaceId] || []) {
           const group = spaceView.find((item) => item.key === key);
           if (!group) continue;
