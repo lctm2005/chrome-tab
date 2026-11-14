@@ -452,18 +452,6 @@ h1 {
   border-left: 2px solid color-mix(in srgb, var(--group-color, #666) 45%, transparent);
 }
 
-.group-card.empty-node > .tab-list:empty::after {
-  content: 'Drop tabs or groups here';
-  display: block;
-  margin: 4px 8px 8px;
-  padding: 10px 12px;
-  font-size: 12px;
-  text-align: center;
-  color: color-mix(in srgb, currentColor 55%, transparent);
-  border: 1px dashed color-mix(in srgb, currentColor 35%, transparent);
-  border-radius: 10px;
-}
-
 /* --- GLASS CARDS (GROUPS / FOLDERS) --- */
 .group-card,
 .folder-direct-group,

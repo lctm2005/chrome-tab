@@ -2051,78 +2051,52 @@ async function main() {
     }
     await waitFor(client, `document.querySelectorAll('.tab-row.selected').length === 0`);
 
-    progress('checking collapse-bound close/open with keyboard focus');
-    // Collapse on a live Tag saves and closes its tabs; expand on a dormant
-    // Tag restores them. Keyboard focus must land on the replacement header.
+    progress('checking collapse/expand as display-only with keyboard focus');
+    // 折叠/展开 = 纯显示状态切换：tab 保持打开、chrome 组不销毁。
     const collapseCardSelector = `.group-card[data-group-key="group:${realGroup.group.id}"] .group-toggle`;
     await evaluate(client, `document.querySelector(${JSON.stringify(collapseCardSelector)})?.focus()`);
     await pressKeyWithCDP(client, 'Enter', 'Enter');
-    const closedOnCollapseState = await waitFor(client, `(async () => {
+    const collapseDisplayState = await waitFor(client, `(async () => {
+      // 等待折叠目标态（chrome collapsed + DOM + 存储三者齐），折叠生效前返回 null。
       const [stored, liveTabs] = await Promise.all([
         chrome.storage.local.get('spaceTabsState'),
         chrome.tabs.query({}),
       ]);
-      const savedGroup = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
-        .find((group) => group.title === ${JSON.stringify(realGroup.group.title)});
-      const card = [...document.querySelectorAll('.group-card.collapsed')]
-        .find((candidate) => candidate.querySelector('.group-header h2')?.textContent === ${JSON.stringify(realGroup.group.title)});
-      const toggle = card?.querySelector('.group-toggle');
-      const fixtureTabIds = ${JSON.stringify(realGroup.tabIds)};
-      const stillOpen = liveTabs.filter((tab) => fixtureTabIds.includes(tab.id));
-      return savedGroup?.tabs?.length === 2 && card && toggle &&
-        card.classList.contains('collapsed') &&
-        toggle.getAttribute('aria-expanded') === 'false' &&
-        stillOpen.length === 0 &&
-        document.activeElement === toggle
-        ? {
-          savedRows: savedGroup.tabs.length,
-          focusRestored: document.activeElement === toggle,
-        }
-        : null;
+      const card = document.querySelector(${JSON.stringify(collapseCardSelector.replace(' .group-toggle', ''))});
+      const chromeGroup = await chrome.tabGroups.get(${JSON.stringify(realGroup.group.id)}).catch(() => null);
+      const collapsedStored = stored.spaceTabsState?.collapsedGroups?.[${JSON.stringify('group:' + realGroup.group.id)}] ?? null;
+      if (chromeGroup?.collapsed !== true || collapsedStored !== true ||
+          !card?.classList.contains('collapsed')) return null;
+      return {
+        collapsed: true,
+        chromeCollapsed: chromeGroup.collapsed,
+        groupStillOpen: liveTabs.some((tab) => tab.id === ${JSON.stringify(realGroup.group.id ? realGroup.ids?.[0] : null)}) ||
+          liveTabs.filter((tab) => tab.groupId === ${JSON.stringify(realGroup.group.id)}).length > 0,
+        collapsedStored,
+        activeElementId: document.activeElement?.id || document.activeElement?.className || '',
+        status: document.querySelector('#syncStatus')?.textContent || '',
+        toast: document.querySelector('#workbenchToast')?.textContent || '',
+      };
     })()`, 15000);
     await pressKeyWithCDP(client, 'Enter', 'Enter');
-    const reopenedOnExpandState = await waitFor(client, `(async () => {
-      const [stored, liveTabs] = await Promise.all([
-        chrome.storage.local.get('spaceTabsState'),
-        chrome.tabs.query({}),
-      ]);
-      const savedGroup = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
-        .find((group) => group.title === ${JSON.stringify(realGroup.group.title)});
-      const card = [...document.querySelectorAll('.group-card:not(.collapsed)')]
-        .find((candidate) => candidate.querySelector('.group-header h2')?.textContent === ${JSON.stringify(realGroup.group.title)});
-      const toggle = card?.querySelector('.group-toggle');
-      const restored = liveTabs.filter((tab) => (
-        tab.groupId >= 0 && /tidy-(primary|secondary)/.test(tab.url || '')
-      ));
-      window.__tidyReopenedTabIds = restored.map((tab) => String(tab.id));
-      return restored.length === 2 && card && toggle &&
-        !card.classList.contains('collapsed') &&
-        toggle.getAttribute('aria-expanded') === 'true' &&
-        savedGroup?.tabs?.length === 2 &&
-        document.activeElement === toggle
-        ? {
-          restoredTabs: restored.length,
-          focusRestored: document.activeElement === toggle,
-        }
-        : null;
+    const expandDisplayState = await waitFor(client, `(async () => {
+      // 等待展开目标态：chrome collapsed === false 且 DOM 已还原。
+      const chromeGroup = await chrome.tabGroups.get(${JSON.stringify(realGroup.group.id)}).catch(() => null);
+      const card = document.querySelector(${JSON.stringify(collapseCardSelector.replace(' .group-toggle', ''))});
+      if (!chromeGroup || chromeGroup.collapsed || card?.classList.contains('collapsed')) return null;
+      return {
+        collapsed: false,
+        focusCardKey: document.activeElement?.closest('.group-card')?.dataset.groupKey || '',
+      };
     })()`, 15000);
-    // The reopened tabs carry fresh Chrome ids; refresh the shared fixture so
-    // downstream scenarios keep referencing live tabs.
-    const reopenedTidyTabs = await evaluate(client, `(async () => {
-      const liveTabs = await chrome.tabs.query({});
-      return liveTabs
-        .filter((tab) => tab.groupId >= 0 && /tidy-(primary|secondary)/.test(tab.url || ''))
-        .map((tab) => ({ id: tab.id, url: tab.url }));
-    })()`);
-    for (const reopened of reopenedTidyTabs) {
-      const fixture = realGroup.fixtures.find((item) => item.url === reopened.url);
-      if (fixture) fixture.id = reopened.id;
-    }
-    realGroup.tabIds = reopenedTidyTabs.map((tab) => tab.id);
-    realGroup.primaryTabId = (realGroup.fixtures.find((item) => item.url === askFixtureServer.tidyPrimaryUrl))?.id ??
-      realGroup.primaryTabId;
-    progress('collapse-bound close/open with keyboard focus passed');
-
+    record(
+      'Collapse/expand is display-only: tabs stay open, chrome group survives',
+      collapseDisplayState.chromeCollapsed === true && collapseDisplayState.groupStillOpen &&
+        collapseDisplayState.collapsedStored === true &&
+        expandDisplayState.focusCardKey === `group:${realGroup.group.id}`,
+      JSON.stringify({ collapseDisplayState, expandDisplayState }),
+    );
+    progress('collapse/expand as display-only with keyboard focus passed');
     progress('checking exact multi-select grouping and stale-selection refusal');
     const multiSelectFixture = await evaluate(client, `(async () => {
       const urls = [
@@ -20434,7 +20408,10 @@ ${error.message}`);
       `close ${count} open ${count === 1 ? 'tab' : 'tabs'} across all windows`;
 
     const openDeleteSafetyDialog = async () => {
-      await evaluate(client, `(() => {
+      // spaces 列表可能正在重渲染（新 Space 创建之后）：查询与派发必须同帧原子
+      // 完成，否则 contextmenu 落在已分离节点上，委托监听收不到 → 菜单打不开。
+      // 原子化后 waitFor 天然重试，消除重渲染竞态。
+      await waitFor(client, `(() => {
         const staleToast = document.querySelector('#workbenchToast');
         if (staleToast) staleToast.textContent = '';
         const button = [...document.querySelectorAll('.space')]
@@ -20447,11 +20424,10 @@ ${error.message}`);
           clientX: 24,
           clientY: 24,
         }));
-        return true;
-      })()`);
-      await waitFor(client, `!document.querySelector('#contextMenu')?.hidden &&
-        [...document.querySelectorAll('#contextMenu button')]
-          .some((button) => button.textContent === 'Delete Space')`);
+        return !document.querySelector('#contextMenu')?.hidden &&
+          [...document.querySelectorAll('#contextMenu button')]
+            .some((button) => button.textContent === 'Delete Space');
+      })()`, 20000);
       await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
         .find((button) => button.textContent === 'Delete Space')?.click()`);
       return waitFor(client, `(() => {
@@ -22772,16 +22748,6 @@ ${error.message}`);
         `${parentKeySel} > .group-header`,
         { targetYRatio: 0.5 },
       );
-      const __dragProbe = await evaluate(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const saved = stored.spaceTabsState || {};
-        return {
-          log: window.__hdropLog || [],
-          parents: saved.groupParents?.default || null,
-          order: (saved.groupOrder?.default || []).slice(0, 6),
-        };
-      })()`);
-      process.stderr.write(`[e2e] dragProbe ${JSON.stringify(__dragProbe)}\n`);
       const dragState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const parents = stored.spaceTabsState?.groupParents?.default || {};
@@ -22914,11 +22880,9 @@ ${error.message}`);
         JSON.stringify({ liveNested, liveNestedAfterReload, liveChildKey }),
       );
 
-      // 5. 折叠（close-to-saved）再展开（open-dormant）后层级必须保留（parent 已物化）：
-      //    chrome 组 id 再生，但父子引用走 snapshot 身份，不随键漂移。
+      // 5. 折叠/展开 = 纯显示状态切换：tab 保持打开、层级与位置保持。
       await waitForLifecycleJournalToSettle(client);
-      await evaluate(client, `(async () => {
-        // 给父组一个 tab 使其成为可折叠的 live Tag（空节点无法 close-to-saved）。
+      const foldTabId = await evaluate(client, `(async () => {
         const chromeId = Number(${JSON.stringify(parentKey)}.slice('group:'.length));
         const tab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-fold', active: false });
         await chrome.tabs.group({ tabIds: [tab.id], groupId: chromeId });
@@ -22926,50 +22890,63 @@ ${error.message}`);
       })()`);
       await waitForLifecycleJournalToSettle(client);
       await evaluate(client, `(() => {
-        const header = document.querySelector('${parentKeySel} > .group-header');
+        const header = document.querySelector(${JSON.stringify(`${parentKeySel} > .group-header`)});
         if (!header) throw new Error('parent header missing before fold');
         header.click();
         return true;
       })()`);
-      const __preFoldProbe = await evaluate(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        const groups = await chrome.tabGroups.query({});
-        return {
-          parentsBeforeFold: (stored.spaceTabsState?.groupParents || {}).default || null,
-          chromeGroups: groups.map((group) => ({ id: group.id, title: group.title })),
-        };
-      })()`);
-      process.stderr.write(`[e2e] preFoldProbe ${JSON.stringify(__preFoldProbe)}\n`);
-const foldedState = await waitFor(client, `(async () => {
+      const foldedState = await waitFor(client, `(async () => {
+        // 等待折叠目标态：Chrome collapsed === true 且 DOM 反映，再取结构快照。
+        // 注意：折叠渲染会把 tab 行/子组从 DOM 摘除，"关系保持"要查存储与 Chrome。
+        const chromeId = Number(${JSON.stringify(parentKey)}.slice('group:'.length));
+        const chromeGroup = await chrome.tabGroups.get(chromeId).catch(() => null);
         const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
-        const nodeStillNested = Boolean(
-          parentCard?.querySelector(':scope > .group-children .group-card'),
-        );
-        return { folded: parentCard?.classList.contains('collapsed') || !parentCard, nodeStillNested };
+        if (!chromeGroup?.collapsed || !parentCard?.classList.contains('collapsed')) return null;
+        const [stored, foldTab] = await Promise.all([
+          chrome.storage.local.get('spaceTabsState'),
+          chrome.tabs.get(${JSON.stringify(foldTabId)}).catch(() => null),
+        ]);
+        return {
+          folded: true,
+          chromeGroupOpen: chromeGroup !== null,
+          tabStillOpen: Boolean(foldTab),
+          childRelationKept: stored.spaceTabsState?.groupParents?.default?.[${JSON.stringify(liveChildKey)}] === ${JSON.stringify(parentKey)},
+        };
       })()`, 20000);
+      // 再按一次 Enter 展开。折叠由合成 header.click() 触发（不移动真实焦点，
+      // 焦点还原由 collapse-bound 场景的键盘路径覆盖），这里显式聚焦 toggle。
       await evaluate(client, `(() => {
         const card = document.querySelector(${JSON.stringify(parentKeySel)});
-        if (!card) throw new Error('parent card missing after fold');
-        card.querySelector('.group-header').click();
+        const toggle = card?.querySelector('.group-header .group-toggle');
+        if (!toggle) throw new Error('folded card toggle missing');
+        toggle.focus();
         return true;
       })()`);
-const hierarchyAfterReopen = await waitFor(client, `(async () => {
+      await pressKeyWithCDP(client, 'Enter', 'Enter');
+      const hierarchyAfterReopen = await waitFor(client, `(async () => {
+        // 等待展开目标态：Chrome collapsed === false，且 DOM 恢复子树与 tab 行。
+        const chromeId = Number(${JSON.stringify(parentKey)}.slice('group:'.length));
+        const chromeGroup = await chrome.tabGroups.get(chromeId).catch(() => null);
+        if (!chromeGroup || chromeGroup.collapsed) return null;
         const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
-        const nestedChild = parentCard?.querySelector(':scope > .group-children .group-card');
-        // 展开后 chrome 组 id 已再生：parent 键变了但身份不变，层级应保留，
-        // 且父卡不得掉到列表底部（顺序保持）。
+        if (!parentCard) return null;
         const cards = [...document.querySelectorAll('#groupsList > .group-card')];
         const position = cards.indexOf(parentCard);
         return {
-          nested: Boolean(nestedChild),
-          parentKeyNow: parentCard?.dataset.groupKey || '',
+          nested: Boolean(parentCard.querySelector(':scope > .group-children > ' + ${JSON.stringify(liveChildKeySel)})),
           position,
           notAtBottom: position >= 0 && position < cards.length - 1,
+          sameKey: parentCard.dataset.groupKey === ${JSON.stringify(parentKey)},
+          tabStillOpen: Boolean(parentCard.querySelector('.tab-row')),
         };
       })()`, 20000);
       record(
-        'Hierarchy: fold (close-to-saved) and expand keep the parent-child relation and position',
-        Boolean(hierarchyAfterReopen?.nested) && hierarchyAfterReopen.notAtBottom,
+        'Hierarchy: fold/expand keeps tabs open, the parent-child relation, and position',
+        Boolean(foldedState?.folded) && foldedState.chromeGroupOpen &&
+          Boolean(foldedState?.tabStillOpen) && Boolean(foldedState?.childRelationKept) &&
+          Boolean(hierarchyAfterReopen?.nested) &&
+          hierarchyAfterReopen.sameKey && hierarchyAfterReopen.notAtBottom &&
+          hierarchyAfterReopen.tabStillOpen,
         JSON.stringify({ foldedState, hierarchyAfterReopen }),
       );
 
@@ -23010,11 +22987,6 @@ const hierarchyAfterReopen = await waitFor(client, `(async () => {
       })()`, 15000);
       if (!thirdKey) throw new Error('third-level tag card missing');
       const thirdKeySel = `.group-card[data-group-key="${thirdKey}"]`;
-      const __preDragProbe = await evaluate(client, `(async () => {
-        const stored = await chrome.storage.local.get('spaceTabsState');
-        return { parents: stored.spaceTabsState?.groupParents?.default || null };
-      })()`);
-      process.stderr.write(`[e2e] preDragProbe ${JSON.stringify(__preDragProbe)}\n`);
       // 把 Third 拖到 Live Child（第 2 层）里 = 第 3 层 → 允许
       await dragElementThroughUI(
         client,

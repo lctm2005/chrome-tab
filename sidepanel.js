@@ -6615,7 +6615,7 @@ async function toggleGroup(group, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     try {
-      return await withFreshSpaceStateMutation(() => toggleGroup(currentGroupForMutation(group), {
+      return await withFreshSpaceStateMutation(() => toggleGroup(currentGroupForDisplayToggle(group), {
         stateLocked: true,
         focusRestoreToken: options.focusRestoreToken,
         windowBinding,
@@ -6759,13 +6759,10 @@ async function refreshMissingChromeGroupView(options = {}) {
 
 function handleGroupHeaderClick(event, group) {
   if (shouldSuppressHeaderClickAfterDrag(event)) return;
-  // Collapse-on-live saves and closes the group's tabs (closeGroupToSaved);
-  // expand-on-dormant restores them (openDormantGroup). A folded live group
-  // and an expanded dormant group toggle the plain disclosure state.
-  const currentlyExpanded = !group.collapsed;
-  if (group.dormant && !currentlyExpanded) {
-    // Rows already live in another window must not be materialized locally:
-    // expanding only discloses them (they render as Show-in-other-window).
+  // 折叠/展开 = 纯显示状态切换（Chrome 原生 collapsed），tab 保持打开。
+  // close-to-saved 改由右键菜单 "Close & Save" 显式触发。
+  if (group.dormant && group.collapsed) {
+    // 折叠的 dormant（已存档）组头点击 = 展开恢复 tabs（openDormantGroup）。
     const rowsOpenInOtherWindows = (group.tabs || []).some((tab) => (
       tab.dormant && Number.isFinite(Number(tab.foreignWindowTabId))
     ));
@@ -6773,29 +6770,19 @@ function handleGroupHeaderClick(event, group) {
       runTask((windowBinding) => toggleGroup(group, { windowBinding }));
       return;
     }
-    runTask((windowBinding) => openDormantGroup(group, { windowBinding }));
+    const focusRestoreToken = disclosureFocusGuard.capture(
+      document.activeElement === event.currentTarget,
+    );
+    runTask((windowBinding) => openDormantGroup(group, {
+      focusRestoreToken,
+      windowBinding,
+    }));
     return;
   }
-  if (!group.dormant && currentlyExpanded) {
-    // 含 pinned 或不可存档 tab 的组无法 close-to-saved：降级为纯显示折叠
-    //（Chrome 原生 collapsed 状态），tabs 保持打开。
-    const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
-    const cannotSave = liveTabs.some((tab) => tab.pinned || !isRestorableSnapshotTab(tab));
-    if (cannotSave) {
-      const focusRestoreToken = disclosureFocusGuard.capture(
-        document.activeElement === event.currentTarget,
-      );
-      runTask((windowBinding) => toggleGroup(group, {
-        focusRestoreToken,
-        windowBinding,
-      }));
-      return;
-    }
-    runTask((windowBinding) => closeGroupToSaved(group, { windowBinding }));
-    return;
-  }
+  // 键盘 Enter 激活的是 .group-toggle（header 的子按钮），currentTarget 是 header；
+  // 折叠渲染会重建卡片，令牌用于把焦点还原到新卡片的 toggle 上。
   const focusRestoreToken = disclosureFocusGuard.capture(
-    document.activeElement === event.currentTarget,
+    event.currentTarget.contains(document.activeElement),
   );
   runTask((windowBinding) => toggleGroup(group, {
     focusRestoreToken,
@@ -6906,6 +6893,7 @@ function groupDropIntent(event) {
   const dropElement = header && event.currentTarget?.contains?.(header) ? header : event.currentTarget;
   const rect = dropElement?.getBoundingClientRect?.();
   if (!rect?.height) return 'inside';
+  // 头部中部（25%-75%）= 放入该组；上下边缘 = 与兄弟组排序。
   const ratio = (event.clientY - rect.top) / rect.height;
   if (ratio < 0.25) return 'before';
   if (ratio > 0.75) return 'after';
@@ -9715,8 +9703,14 @@ function showGroupContextMenu(event, group) {
   // The header already covers open/close (click) and delete (×), so the menu
   // keeps only Rename, New Subgroup, and Move to.
   const groupDepth = nodeDepth(group.key, renderedHierarchyKeyParents);
+  const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
+  const canCloseToSaved = !group.dormant && liveTabs.length > 0
+    && liveTabs.every((tab) => !tab.pinned && isRestorableSnapshotTab(tab));
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
+    ...(canCloseToSaved
+      ? [menuAction('Close & Save', (windowBinding) => closeGroupToSaved(group, { windowBinding }))]
+      : []),
     ...(groupDepth < HIERARCHY_MAX_DEPTH
       ? [menuAction('New Subgroup', (windowBinding) => createEmptyGroupNode(group.key, { windowBinding }))]
       : []),
@@ -11176,6 +11170,25 @@ function currentGroupForMutation(reference) {
     : spaceView.filter((group) => group.key === reference?.key);
   const current = candidates.length === 1 ? candidates[0] : null;
   if (!current || groupMutationFingerprint(current) !== groupMutationFingerprint(reference)) {
+    throw new Error('This group changed in another Space Tabs view. Try the action again.');
+  }
+  return current;
+}
+
+// 折叠/展开是纯显示事务：只改 collapsed 状态，不动组内容。指纹校验（含每行
+// tab id/url）在这里会误伤——后台任何新 tab 入组都会让旧渲染指纹失配，把一次
+// 无害的折叠变成 "This group changed in another Space Tabs view" 报错。
+// 显示切换只需要"辨认出同一个组"：优先 snapshotGroupId（跨物化/快照重排稳定），
+// 其次渲染键（live 组折叠不销毁 chrome 组，键稳定），都不命中才报错。
+function currentGroupForDisplayToggle(reference) {
+  const snapshotGroupId = String(reference?.snapshotGroupId || '');
+  const bySnapshot = snapshotGroupId
+    ? spaceView.filter((group) => String(group.snapshotGroupId || '') === snapshotGroupId)
+    : [];
+  const byKey = spaceView.filter((group) => group.key === reference?.key);
+  const candidates = bySnapshot.length === 1 ? bySnapshot : byKey;
+  const current = candidates.length === 1 ? candidates[0] : null;
+  if (!current) {
     throw new Error('This group changed in another Space Tabs view. Try the action again.');
   }
   return current;
