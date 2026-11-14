@@ -51,11 +51,14 @@ import {
 import {
   buildGroupTree,
   descendantKeysOf,
+  hierarchyAnchorForNode,
   nodeDepth,
   parseTitlePath,
   planHierarchyDrop,
   planLegacyTitlePathMigration,
   remapGroupParents,
+  resolveHierarchyKeyParents,
+  upgradeHierarchyParentAnchors,
 } from './src/shared/group-tree.js';
 import {
   chromeGroupTitle,
@@ -2348,6 +2351,48 @@ function hierarchyParentsForSpace(spaceId = state.activeSpaceId) {
   return parents && typeof parents === 'object' && !Array.isArray(parents) ? parents : {};
 }
 
+// --- 层级 anchor 域 ----------------------------------------------------------
+// 层级边持久化为 anchor（sgid:<snapshotGroupId> / node:* / vgroup:* / 裸键兜底），
+// 不直接引用易变视图键（chrome 组 id、快照索引）。键再生点（折叠/恢复/快照重
+// 索引/会话轮换）因此无需各自重映射层级；读路径统一投影回当前视图键。
+
+// 当前 Space 视图（spaceView + 空节点）的 key → anchor 映射。
+function hierarchyAnchorMapForSpace(spaceId = state.activeSpaceId) {
+  const anchorByKey = new Map();
+  for (const group of spaceView) {
+    if (group.key === 'ungrouped') continue;
+    anchorByKey.set(group.key, hierarchyAnchorForNode(group));
+  }
+  for (const [key, node] of Object.entries(state.emptyNodes?.[spaceId] || {})) {
+    anchorByKey.set(key, hierarchyAnchorForNode({ key, ...node }));
+  }
+  return anchorByKey;
+}
+
+// sgid → 当前视图键。同一身份出现多张卡（live/dormant 未合并）时保留最后一张。
+function hierarchyBySnapshotGroupIdForNodes(nodes) {
+  const bySnapshotGroupId = new Map();
+  for (const node of nodes) {
+    const snapshotGroupId = String(node?.snapshotGroupId || '').trim();
+    if (snapshotGroupId) bySnapshotGroupId.set(snapshotGroupId, node.key);
+  }
+  return bySnapshotGroupId;
+}
+
+// 键域 parents → anchor 域（所有层级写路径的收口）。
+function anchorizeHierarchyParents(parents, spaceId = state.activeSpaceId) {
+  const anchorByKey = hierarchyAnchorMapForSpace(spaceId);
+  const next = {};
+  for (const [childKey, parentKey] of Object.entries(parents || {})) {
+    const childAnchor = anchorByKey.get(childKey) || childKey;
+    const parentAnchor = anchorByKey.get(parentKey) || parentKey;
+    if (childAnchor && parentAnchor && childAnchor !== parentAnchor) {
+      next[childAnchor] = parentAnchor;
+    }
+  }
+  return next;
+}
+
 // Flattens the current Space view plus empty placeholder nodes into the
 // render-ready node list, ordered by the persisted DFS groupOrder.
 function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
@@ -2370,7 +2415,21 @@ function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
   ];
   const order = state.groupOrder?.[spaceId] || [];
   nodes.sort((left, right) => orderIndexForNode(order, left.key) - orderIndexForNode(order, right.key));
-  return { nodes, parents: hierarchyParentsForSpace(spaceId) };
+  // anchor 域投影 + 每 render 自愈：裸键边升级为 sgid anchor（幂等，随下一次
+  // 保存持久化），再投影回视图键供树构建/拖拽规划消费。
+  const storedParents = hierarchyParentsForSpace(spaceId);
+  const upgraded = upgradeHierarchyParentAnchors(
+    storedParents,
+    new Map(nodes.map((node) => [node.key, hierarchyAnchorForNode(node)])),
+  );
+  if (upgraded.changed) state.groupParents[spaceId] = upgraded.parents;
+  return {
+    nodes,
+    parents: resolveHierarchyKeyParents(
+      upgraded.parents,
+      hierarchyBySnapshotGroupIdForNodes(nodes),
+    ),
+  };
 }
 
 function orderIndexForNode(order, key) {
@@ -4698,10 +4757,12 @@ async function closeGroupToSaved(group, options = {}) {
       }
       return liveReviewedTabCloseMismatch(reviewedTargets.get(Number(tabId)), { windowBinding });
     },
-    closeTab: (tabId) => guardedReviewedTabClose(
-      reviewedTargets.get(Number(tabId)),
-      { windowBinding },
-    ),
+    closeTab: (tabId) => {
+      return guardedReviewedTabClose(
+        reviewedTargets.get(Number(tabId)),
+        { windowBinding },
+      );
+    },
     commit: async ({ closedTabIds }) => {
       const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
       await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
@@ -4741,6 +4802,8 @@ async function closeGroupToSaved(group, options = {}) {
   await refreshTabs({ reloadDormant: true, windowBinding });
   // 存档后 dormant 卡的 snapshot 键替换原 live 键在 groupOrder 中的位置，
   // 否则新键不在 order 里会被渲染排到列表底部。
+  // 层级（groupParents）存 anchor 域：存档只换视图键，anchor（sgid 身份）不变，
+  // 父子关系无需重映射；但 order 替换必须落库，否则下一次 sync 会回滚排序。
   // 存档后 dormant Tag 沿用原 live 组标题（唯一同名 Tag 已在 close 前收敛）
   const snapshotGroupsAfterClose = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
   const savedGroupId = snapshotGroupsAfterClose.find((candidate) => (
@@ -4752,18 +4815,10 @@ async function closeGroupToSaved(group, options = {}) {
     if (savedIndex >= 0) {
       const savedKey = snapshotGroupKey(savedIndex, snapshotGroups[savedIndex], targetSpaceId);
       replaceGroupOrderKeys(new Map([[group.key, savedKey]]), state.groupOrder[targetSpaceId] || []);
-      const groupParents = state.groupParents?.[targetSpaceId];
-      if (groupParents && typeof groupParents === 'object') {
-        const nextParents = { ...groupParents };
-        for (const [childHid, parentHid] of Object.entries(nextParents)) {
-          if (childHid === group.key) nextParents[savedKey] = parentHid;
-          else if (parentHid === group.key) nextParents[childHid] = savedKey;
-        }
-        delete nextParents[group.key];
-        state.groupParents[targetSpaceId] = nextParents;
-      }
+      delete state.collapsedGroups[group.key];
     }
   }
+  await saveState({ persistWindowState: false });
   const closed = result.closedTabIds.length;
   const skipped = result.skippedTabs.length;
   setStatus(`Closed ${formatCount(closed, 'tab')} in "${group.displayTitle || group.title}"; the Tag remains saved.` +
@@ -4791,21 +4846,14 @@ async function openDormantGroup(group, options = {}) {
   }
   // 展开后新 live 组的键替换原 snapshot 键在 groupOrder 中的位置，
   // 否则新键不在 order 里会被渲染排到列表底部（顺序"变化"）。
+  // 层级（groupParents）存 anchor 域：恢复只是换视图键，anchor（sgid 身份）
+  // 不变，父子关系无需重映射；order 替换必须落库，否则下一次 sync 会回滚。
   if (restoredLiveKey) {
     replaceGroupOrderKeys(new Map([[group.key, restoredLiveKey]]), state.groupOrder[state.activeSpaceId] || []);
-    const groupParents = state.groupParents?.[state.activeSpaceId];
-    if (groupParents && typeof groupParents === 'object') {
-      const nextParents = { ...groupParents };
-      for (const [childHid, parentHid] of Object.entries(nextParents)) {
-        if (childHid === group.key) nextParents[restoredLiveKey] = parentHid;
-        else if (parentHid === group.key) nextParents[childHid] = restoredLiveKey;
-      }
-      delete nextParents[group.key];
-      state.groupParents[state.activeSpaceId] = nextParents;
-    }
     delete state.collapsedGroups[group.key];
     lastRenderedGroupsSignature = '';
   }
+  await saveState({ persistWindowState: false, windowBinding });
   setStatus(`Opened ${formatCount(opened, 'tab')} in "${group.displayTitle || group.title}".`);
   // The restored Tag is an expanded live card; keep keyboard focus on its
   // header so collapse-bound close stays reachable.
@@ -4848,7 +4896,7 @@ async function deleteGroup(group, options = {}) {
       if (!removed) {
         throw new Error(`Saved group "${group.displayTitle || group.title}" is no longer in this Space's saved state. Refresh and try again.`);
       }
-      clearHierarchyEntriesForKeys([group.key]);
+      clearHierarchyEntriesForKeys([group.key], state.activeSpaceId, [hierarchyAnchorForNode(group)]);
       await persistDormantSnapshotMutation({
         windowBinding,
         staleMessage: 'This panel moved to another Chrome window before the saved group could be deleted.',
@@ -4864,7 +4912,7 @@ async function deleteGroup(group, options = {}) {
     return;
   }
   const deletion = await deleteGroupsAndTabs([group], { windowBinding });
-  clearHierarchyEntriesForKeys([group.key]);
+  clearHierarchyEntriesForKeys([group.key], state.activeSpaceId, [hierarchyAnchorForNode(group)]);
   await refreshTabs({ reloadDormant: true, windowBinding });
   const message = destructiveGroupDeletionStatus(
     group.displayTitle || group.title,
@@ -4875,22 +4923,28 @@ async function deleteGroup(group, options = {}) {
 }
 
 // 删除空组节点（非破坏性）：该节点的空节点后代一并移除；真实子组升到被删
-// 节点的父级（根），不会连带删除任何 tab。
+// 节点的父级（根），不会连带删除任何 tab。子树用键域投影计算，落盘按 anchor。
 async function deleteHierarchyNode(node, options = {}) {
     const spaceId = state.activeSpaceId;
-  const parents = hierarchyParentsForSpace(spaceId);
+  const storedParents = hierarchyParentsForSpace(spaceId);
+  const anchorByKey = hierarchyAnchorMapForSpace(spaceId);
+  const resolvedParents = resolveHierarchyKeyParents(
+    storedParents,
+    hierarchyBySnapshotGroupIdForNodes(spaceView.filter((group) => group.key !== 'ungrouped')),
+  );
   const removedSet = new Set([
     node.key,
-    ...[...descendantKeysOf(node.key, parents)].filter((key) => String(key).startsWith('node:')),
+    ...[...descendantKeysOf(node.key, resolvedParents)].filter((key) => String(key).startsWith('node:')),
   ]);
-  const oldParents = { ...parents };
-  const nodeParent = oldParents[node.key] || '';
+  const removedAnchors = new Set([...removedSet].map((key) => anchorByKey.get(key) || key));
+  const nodeAnchor = anchorByKey.get(node.key) || node.key;
+  const nodeParentAnchor = storedParents[nodeAnchor] || '';
   const nextParents = {};
-  for (const [childKey, parentKey] of Object.entries(oldParents)) {
-    if (removedSet.has(childKey)) continue;
-    const nextParent = removedSet.has(parentKey) ? nodeParent : parentKey;
-    if (!nextParent || nextParent === childKey) continue;
-    nextParents[childKey] = nextParent;
+  for (const [childAnchor, parentAnchor] of Object.entries(storedParents)) {
+    if (removedAnchors.has(childAnchor)) continue;
+    const nextParentAnchor = removedAnchors.has(parentAnchor) ? nodeParentAnchor : parentAnchor;
+    if (!nextParentAnchor || nextParentAnchor === childAnchor) continue;
+    nextParents[childAnchor] = nextParentAnchor;
   }
   state.groupParents[spaceId] = nextParents;
   const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
@@ -4908,14 +4962,14 @@ async function deleteHierarchyNode(node, options = {}) {
   showStatusToast(message, 'success');
 }
 
-function clearHierarchyEntriesForKeys(removedKeys, spaceId = state.activeSpaceId) {
+function clearHierarchyEntriesForKeys(removedKeys, spaceId = state.activeSpaceId, removedAnchors = []) {
   const parents = state.groupParents?.[spaceId];
   if (!parents || typeof parents !== 'object') return;
-  const removed = new Set(removedKeys);
+  const removed = new Set([...removedKeys, ...removedAnchors]);
   const nextParents = {};
-  for (const [childKey, parentKey] of Object.entries(parents)) {
-    if (removed.has(childKey) || removed.has(parentKey)) continue;
-    nextParents[childKey] = parentKey;
+  for (const [childAnchor, parentAnchor] of Object.entries(parents)) {
+    if (removed.has(childAnchor) || removed.has(parentAnchor)) continue;
+    nextParents[childAnchor] = parentAnchor;
   }
   state.groupParents[spaceId] = nextParents;
 }
@@ -5041,18 +5095,25 @@ function moveGroupsWithoutSaving(groups, spaceId) {
 }
 
 // 父子关系随子树一起搬：父也被搬走的子级保留关系；父留下的子级在目标空间升根。
+// movedKeys 是视图键；落盘的边是 anchor 域，先换算成 anchor 再搬家。
 function moveHierarchyEntriesBetweenSpaces(movedKeys, sourceSpaceId, targetSpaceId) {
   if (!state.groupParents || typeof state.groupParents !== 'object') state.groupParents = {};
+  const anchorByKey = hierarchyAnchorMapForSpace(sourceSpaceId);
+  const movedAnchors = new Set([...movedKeys].map((key) => anchorByKey.get(key) || key));
   const sourceParents = { ...(state.groupParents[sourceSpaceId] || {}) };
   const nextSourceParents = {};
-  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
-    if (!movedKeys.has(childKey)) nextSourceParents[childKey] = parentKey;
+  const movedEntries = [];
+  for (const [childAnchor, parentAnchor] of Object.entries(sourceParents)) {
+    if (!movedAnchors.has(childAnchor)) {
+      nextSourceParents[childAnchor] = parentAnchor;
+    } else {
+      movedEntries.push([childAnchor, parentAnchor]);
+    }
   }
   state.groupParents[sourceSpaceId] = nextSourceParents;
   const nextTargetParents = { ...(state.groupParents[targetSpaceId] || {}) };
-  for (const [childKey, parentKey] of Object.entries(sourceParents)) {
-    if (!movedKeys.has(childKey)) continue;
-    if (movedKeys.has(parentKey)) nextTargetParents[childKey] = parentKey;
+  for (const [childAnchor, parentAnchor] of movedEntries) {
+    if (movedAnchors.has(parentAnchor)) nextTargetParents[childAnchor] = parentAnchor;
   }
   state.groupParents[targetSpaceId] = nextTargetParents;
 }
@@ -6939,7 +7000,8 @@ async function applyHierarchyDrop(plan, options = {}) {
   let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      state.groupParents[spaceId] = plan.parents;
+      // plan 在键域计算，落盘前转 anchor 域（键再生不再影响层级）。
+      state.groupParents[spaceId] = anchorizeHierarchyParents(plan.parents, spaceId);
       state.groupOrder[spaceId] = plan.order;
       changed = true;
           },
@@ -6978,10 +7040,11 @@ async function materializeEmptyNodeWithTab(tabId, node, options = {}) {
         windowBinding,
       });
       if (groupId === null) throw new Error('Chrome could not create the group.');
-      // 空节点的父子引用全部改挂到物化组的稳定身份（binding 身份优先，
-      // 其次新键）：node 作为 child 的条目重挂到 newHid 的父上；node 作为
-      // parent 的条目（已拖进去的子组）改挂到 newHid。漏掉任一侧都会让
-      // 物化后 node 键消失、整层子树掉回顶层。
+      // 空节点的父子引用全部改挂到物化组的稳定身份（binding 身份优先 →
+      // sgid anchor；无身份先落裸键，由每 render 自愈升级）：node 作为
+      // child 的条目重挂到 newHid 的父上；node 作为 parent 的条目（已拖
+      // 进去的子组）改挂到 newHid。漏掉任一侧都会让物化后 node 键消失、
+      // 整层子树掉回顶层。读路径（visibleHierarchyNodes）会投影 sgid anchor。
       const parents = { ...(state.groupParents?.[spaceId] || {}) };
       const binding = state.tabLifecycle?.[Number(tabId)];
       const newHid = binding?.snapshotGroupId
@@ -8601,6 +8664,17 @@ function remapMergedSnapshotGroupReferences(snapshotGroupIds) {
   state.tabLifecycle = remapTabLifecycleGroupReferences(state.tabLifecycle, {
     snapshotGroupIds,
   });
+  // 身份合并（重复同名 Tag 收敛）会替换 snapshotGroupId：层级边的 anchor
+  // 端点同步跟随，否则合并后的边失联（子组掉回顶层）。
+  for (const spaceId of Object.keys(state.groupParents || {})) {
+    const replacements = new Map();
+    for (const [oldId, newId] of Object.entries(snapshotGroupIds)) {
+      replacements.set(`sgid:${oldId}`, `sgid:${newId}`);
+    }
+    if (replacements.size > 0) {
+      state.groupParents[spaceId] = remapGroupParents(state.groupParents[spaceId], replacements);
+    }
+  }
   for (const virtualGroup of Object.values(state.virtualGroups || {})) {
     const snapshotGroupId = String(virtualGroup?.snapshotGroupId || '').trim();
     if (Object.hasOwn(snapshotGroupIds, snapshotGroupId)) {
@@ -9777,7 +9851,10 @@ async function createEmptyGroupNode(parentKey = '', options = {}) {
       setStatus(`Groups can nest at most ${HIERARCHY_MAX_DEPTH} levels.`);
       return;
     }
-    state.groupParents[spaceId] = { ...(state.groupParents[spaceId] || {}), [key]: parentKey };
+    state.groupParents[spaceId] = anchorizeHierarchyParents({
+      ...(state.groupParents[spaceId] || {}),
+      [key]: parentKey,
+    }, spaceId);
   }
   addGroupOrderKey(spaceId, key);
   await saveState({ persistWindowState: false, windowBinding });
@@ -9816,10 +9893,10 @@ async function migrateSpaceHierarchy(spaceId = state.activeSpaceId, options = {}
       apply: async () => {
         const nodeEntries = plan.emptyNodesBySpace[spaceId] || {};
         state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), ...nodeEntries };
-        state.groupParents[spaceId] = {
+        state.groupParents[spaceId] = anchorizeHierarchyParents({
           ...(state.groupParents[spaceId] || {}),
           ...(plan.parentsBySpace[spaceId] || {}),
-        };
+        }, spaceId);
         for (const { key, nextTitle } of plan.renamesBySpace[spaceId] || []) {
           const group = spaceView.find((item) => item.key === key);
           if (!group) continue;

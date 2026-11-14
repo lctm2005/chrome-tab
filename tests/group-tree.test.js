@@ -5,9 +5,13 @@ import {
   parseTitlePath,
   buildGroupTree,
   descendantKeysOf,
+  hierarchyAnchorForNode,
   planHierarchyDrop,
   remapGroupParents,
   planLegacyTitlePathMigration,
+  resolveHierarchyAnchorToKey,
+  resolveHierarchyKeyParents,
+  upgradeHierarchyParentAnchors,
 } from '../src/shared/group-tree.js';
 
 function group(key, title = key, extra = {}) {
@@ -361,6 +365,19 @@ test('nodeDepth and subtreeHeight measure identity-free chains', () => {
   assert.equal(subtreeHeight('missing', parents), 1);
 });
 
+test('nodeDepth and subtreeHeight default to an empty parent map', () => {
+  assert.equal(subtreeHeight('solo'), 1);
+  const rootDrop = planHierarchyDrop({
+    order: ['solo', 'x'],
+    sourceRootKeys: ['x'],
+    sourceAllKeys: ['x'],
+    intent: 'root',
+  });
+  assert.equal(rootDrop.error, undefined);
+  assert.deepEqual(rootDrop.order, ['solo', 'x']);
+  assert.deepEqual(rootDrop.parents, {});
+});
+
 test('nodeDepth survives parent cycles', () => {
   assert.equal(nodeDepth('p', { p: 'q', q: 'p' }), 2);
   assert.equal(nodeDepth('q', { p: 'q', q: 'p' }), 2);
@@ -396,4 +413,98 @@ test('planHierarchyDrop enforces maxDepth for inside and sibling drops', () => {
     sourceRootKeys: ['a'], sourceAllKeys: ['a', 'b', 'c'], targetKey: 'd', intent: 'inside', maxDepth: 3,
   });
   assert.equal(subtreeTooDeep.error, 'max-depth');
+});
+
+test('hierarchyAnchorForNode prefers snapshot identity then stable keys then raw keys', () => {
+  assert.equal(hierarchyAnchorForNode({ snapshotGroupId: 'group:u1', key: 'group:77' }), 'sgid:group:u1');
+  assert.equal(hierarchyAnchorForNode({ key: 'node:abc' }), 'node:abc');
+  assert.equal(hierarchyAnchorForNode({ key: 'vgroup:vg1' }), 'vgroup:vg1');
+  assert.equal(hierarchyAnchorForNode({ key: 'group:77' }), 'group:77');
+  assert.equal(hierarchyAnchorForNode({ key: 'snapshot:2:work:group:u1' }), 'snapshot:2:work:group:u1');
+  assert.equal(hierarchyAnchorForNode({ key: 'ungrouped' }), '');
+  assert.equal(hierarchyAnchorForNode(null), '');
+});
+
+test('resolveHierarchyKeyParents projects anchors to view keys and skips unresolved edges', () => {
+  const bySnapshotGroupId = new Map([
+    ['group:u1', 'snapshot:0:work:group:u1'],
+    ['group:u2', 'group:44'],
+  ]);
+  const resolved = resolveHierarchyKeyParents({
+    'sgid:group:u1': 'sgid:group:u2',
+    'node:abc': 'sgid:group:u2',
+    'snapshot:0:work:group:u1': 'vgroup:vg1',
+    'sgid:group:missing': 'sgid:group:u1',
+    'sgid:group:u1': 'sgid:group:u1',
+  }, bySnapshotGroupId);
+  assert.deepEqual(resolved, {
+    'snapshot:0:work:group:u1': 'group:44',
+    'node:abc': 'group:44',
+    'snapshot:0:work:group:u1': 'vgroup:vg1',
+  });
+  // raw legacy keys pass through unchanged (dual-domain read)
+  const legacy = resolveHierarchyKeyParents({ b: 'a' }, new Map());
+  assert.deepEqual(legacy, { b: 'a' });
+});
+
+test('upgradeHierarchyParentAnchors upgrades raw keys idempotently and reports changes', () => {
+  const anchorByKey = new Map([['group:77', 'sgid:group:u1']]);
+  const first = upgradeHierarchyParentAnchors(
+    { 'group:77': 'node:abc', 'snapshot:1:w:g:u9': 'group:77' },
+    anchorByKey,
+  );
+  assert.equal(first.changed, true);
+  assert.deepEqual(first.parents, {
+    'sgid:group:u1': 'node:abc',
+    'snapshot:1:w:g:u9': 'sgid:group:u1',
+  });
+  const second = upgradeHierarchyParentAnchors(first.parents, anchorByKey);
+  assert.equal(second.changed, false);
+  assert.deepEqual(second.parents, first.parents);
+});
+
+test('remapGroupParents replaces anchor endpoints and drops vanished keys', () => {
+  // child sgid:old → sgid:new（父已消失 → 条目被删，渲染时升根）
+  const vanishedParent = remapGroupParents({
+    'sgid:group:old': 'sgid:group:parent',
+  }, new Map([
+    ['sgid:group:old', 'sgid:group:new'],
+    ['sgid:group:parent', ''],
+  ]));
+  assert.deepEqual(vanishedParent, {});
+  // node:abc → sgid:old → sgid:new：物化/合并后边随身份迁移
+  const migrated = remapGroupParents({
+    'node:abc': 'sgid:group:old',
+  }, new Map([['sgid:group:old', 'sgid:group:new']]));
+  assert.deepEqual(migrated, { 'node:abc': 'sgid:group:new' });
+  // 自环被丢弃
+  const selfLoop = remapGroupParents({
+    'sgid:group:a': 'sgid:group:b',
+  }, new Map([['sgid:group:b', 'sgid:group:a']]));
+  assert.deepEqual(selfLoop, {});
+});
+
+test('anchor helpers handle empty and unresolvable inputs', () => {
+  assert.equal(resolveHierarchyAnchorToKey(''), '');
+  assert.equal(resolveHierarchyAnchorToKey('sgid:group:gone', new Map()), '');
+  // parents 未提供 → 空投影
+  assert.deepEqual(resolveHierarchyKeyParents(undefined, new Map()), {});
+  // 父端点解析失败 → 该边不进投影（数据保留在存储域）
+  assert.deepEqual(resolveHierarchyKeyParents({
+    'group:44': 'sgid:group:missing-parent',
+  }, new Map([['group:44', 'group:44']])), {});
+  // 空端点在升级时被丢弃且报告变化
+  const upgraded = upgradeHierarchyParentAnchors({
+    'group:77': '',
+    '': 'node:abc',
+  }, new Map([['group:77', 'sgid:group:u1']]));
+  assert.equal(upgraded.changed, true);
+  assert.deepEqual(upgraded.parents, {});
+});
+
+test('anchor projection and upgrade tolerate explicit null parent maps', () => {
+  assert.deepEqual(resolveHierarchyKeyParents(null, new Map()), {});
+  const upgraded = upgradeHierarchyParentAnchors(null, new Map());
+  assert.equal(upgraded.changed, false);
+  assert.deepEqual(upgraded.parents, {});
 });

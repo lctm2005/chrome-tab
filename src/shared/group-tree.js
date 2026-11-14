@@ -1,9 +1,17 @@
 // State-backed group hierarchy primitives.
 //
-// Hierarchy lives in state.groupParents[spaceId] as { childKey: parentKey }.
-// Titles stay single-segment: nothing here encodes or reads "/" paths except
-// the legacy migration planner. All functions are pure so the 100% branch
-// coverage gate can pin every edge case (cycles, orphans, vanished keys).
+// Hierarchy lives in state.groupParents[spaceId] as { child: parent } edges.
+// Edges are persisted in the ANCHOR domain (see hierarchyAnchorForNode): view
+// keys (chrome group ids, snapshot indexes) regenerate on fold/restore,
+// snapshot reindex and browser restarts, so referencing them directly made
+// every regeneration point a potential silent hierarchy loss. Titles stay
+// single-segment: nothing here encodes or reads "/" paths except the legacy
+// migration planner. All functions are pure so the 100% branch coverage gate
+// can pin every edge case (cycles, orphans, vanished keys).
+
+const SGID_ANCHOR_PREFIX = 'sgid:';
+
+const STABLE_KEY_PREFIXES = ['node:', 'vgroup:'];
 
 // Splits a legacy " / " title path into trimmed, non-empty parts with
 // adjacent duplicates collapsed ("A / A / B" → ["A", "B"]).
@@ -193,9 +201,71 @@ export function planHierarchyDrop({
   };
 }
 
+// --- Anchor domain ---------------------------------------------------------
+
+// Encodes the durable anchor for a view node. Preference order: snapshot row
+// identity (durable across restarts and materialization), stable keys, then
+// the raw view key as a fallback that the per-render normalizer upgrades once
+// the node gains an identity. Returns '' for nothing referenceable.
+export function hierarchyAnchorForNode(node = {}) {
+  const snapshotGroupId = String(node?.snapshotGroupId || '').trim();
+  if (snapshotGroupId) return `${SGID_ANCHOR_PREFIX}${snapshotGroupId}`;
+  const key = String(node?.key || '');
+  if (!key || key === 'ungrouped') return '';
+  if (STABLE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) return key;
+  return key;
+}
+
+// Resolves one anchor back to the current view key ('' when unresolvable).
+// Raw legacy keys pass through unchanged (dual-domain read).
+export function resolveHierarchyAnchorToKey(anchor, bySnapshotGroupId = new Map()) {
+  const value = String(anchor || '');
+  if (!value) return '';
+  if (value.startsWith(SGID_ANCHOR_PREFIX)) {
+    return bySnapshotGroupId.get(value.slice(SGID_ANCHOR_PREFIX.length)) || '';
+  }
+  return value;
+}
+
+// Projects persisted edges into the current view-key domain for rendering and
+// planning. Edges whose endpoint cannot be projected right now are omitted
+// from the projection only — storage keeps them until identity returns.
+export function resolveHierarchyKeyParents(parents = {}, bySnapshotGroupId = new Map()) {
+  const resolved = {};
+  for (const [childAnchor, parentAnchor] of Object.entries(parents || {})) {
+    const childKey = resolveHierarchyAnchorToKey(childAnchor, bySnapshotGroupId);
+    const parentKey = resolveHierarchyAnchorToKey(parentAnchor, bySnapshotGroupId);
+    if (childKey && parentKey && childKey !== parentKey) resolved[childKey] = parentKey;
+  }
+  return resolved;
+}
+
+// Idempotent per-render upgrade: raw keys become sgid anchors once the view
+// node has a durable identity. node:/vgroup:/sgid: entries pass through.
+// Returns the upgraded map plus whether anything changed (callers persist).
+export function upgradeHierarchyParentAnchors(parents = {}, anchorByKey = new Map()) {
+  const toAnchor = (value) => {
+    const raw = String(value || '');
+    if (!raw) return '';
+    if (raw.startsWith(SGID_ANCHOR_PREFIX)) return raw;
+    if (STABLE_KEY_PREFIXES.some((prefix) => raw.startsWith(prefix))) return raw;
+    return anchorByKey.get(raw) || raw;
+  };
+  const next = {};
+  let changed = false;
+  for (const [child, parent] of Object.entries(parents || {})) {
+    const nextChild = toAnchor(child);
+    const nextParent = toAnchor(parent);
+    if (nextChild !== child || nextParent !== parent) changed = true;
+    if (nextChild && nextParent && nextChild !== nextParent) next[nextChild] = nextParent;
+  }
+  return { parents: next, changed };
+}
+
 // Replaces moved/renamed group keys in the parent map. replacements maps an
 // old key to its new key; mapping a key to '' means it vanished and drops any
 // entry that referenced it (children promote to root at render time).
+// Domain-agnostic: works on view keys and anchors alike.
 export function remapGroupParents(parents = {}, replacements = new Map()) {
   const next = {};
   if (!(replacements instanceof Map)) return { ...parents };

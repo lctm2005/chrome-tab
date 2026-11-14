@@ -22713,10 +22713,17 @@ ${error.message}`);
       })()`);
       const nestedNodeState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
-        const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
-        const parents = stored.spaceTabsState?.groupParents?.default || {};
+        const saved = stored.spaceTabsState || {};
+        const nodes = saved.emptyNodes?.default || {};
+        const parents = saved.groupParents?.default || {};
+        const lifecycle = saved.tabLifecycle || {};
+        // anchor 域：node 端点保持 node: 键；父端点是父组身份的 sgid anchor
+        // （身份未 mint 时回退裸键，两种都接受）。
+        const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+          : ${JSON.stringify(parentKey)};
         const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
-        if (parents[nodeKey] !== ${JSON.stringify(parentKey)}) return null;
+        if (parents[nodeKey] !== parentAnchor) return null;
         return { nodeKey };
       })()`, 15000);
       const nodeKey = nestedNodeState.nodeKey;
@@ -22750,10 +22757,18 @@ ${error.message}`);
       );
       const dragState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
-        const parents = stored.spaceTabsState?.groupParents?.default || {};
-        // key 域：child 键 → parent 键
-        if (parents[${JSON.stringify(childKey)}] !== ${JSON.stringify(parentKey)}) return null;
-        return parents;
+        const saved = stored.spaceTabsState || {};
+        const parents = saved.groupParents?.default || {};
+        const lifecycle = saved.tabLifecycle || {};
+        // anchor 域：端点是组身份的 sgid（身份未 mint 时回退裸键）。
+        const childAnchor = lifecycle[${JSON.stringify(childTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(childTabId)}].snapshotGroupId
+          : ${JSON.stringify(childKey)};
+        const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+          : ${JSON.stringify(parentKey)};
+        if (parents[childAnchor] !== parentAnchor) return null;
+        return { childAnchor, parentAnchor };
       })()`, 15000);
       const chromeTitleAfterNest = await evaluate(client, `(async () => {
         const group = await chrome.tabGroups.get(${JSON.stringify(childGroupId)});
@@ -22787,10 +22802,15 @@ ${error.message}`);
       );
       const rootState = await waitFor(client, `(async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
-        const parents = stored.spaceTabsState?.groupParents?.default || {};
-        // 拖回根区后，child 键不再出现在父引用里
-        if (parents[${JSON.stringify(childKey)}]) return null;
-        return parents;
+        const saved = stored.spaceTabsState || {};
+        const parents = saved.groupParents?.default || {};
+        const lifecycle = saved.tabLifecycle || {};
+        // 拖回根区后，child 的 anchor（sgid 或裸键回退）不再出现在父引用里
+        const childAnchor = lifecycle[${JSON.stringify(childTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(childTabId)}].snapshotGroupId
+          : ${JSON.stringify(childKey)};
+        if (parents[childAnchor]) return null;
+        return { childAnchor };
       })()`, 15000);
       record(
         'Hierarchy: root drop zone promotes a nested tag back to top level',
@@ -22825,10 +22845,14 @@ ${error.message}`);
         const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
         const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
         const parents = stored.spaceTabsState?.groupParents?.default || {};
+        const lifecycle = stored.spaceTabsState?.tabLifecycle || {};
+        const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+          : ${JSON.stringify(parentKey)};
         if (!nodeKey) return null;
         const parentCard = document.querySelector(${JSON.stringify(`${parentKeySel} h2`)});
         return {
-          childStillNested: parents[nodeKey] === ${JSON.stringify(parentKey)},
+          childStillNested: parents[nodeKey] === parentAnchor,
           parentTitle: parentCard?.textContent || '',
         };
       })()`, 30000);
@@ -22910,7 +22934,17 @@ ${error.message}`);
           folded: true,
           chromeGroupOpen: chromeGroup !== null,
           tabStillOpen: Boolean(foldTab),
-          childRelationKept: stored.spaceTabsState?.groupParents?.default?.[${JSON.stringify(liveChildKey)}] === ${JSON.stringify(parentKey)},
+          // anchor 域：live 子组的端点是其身份 sgid（未 mint 时回退裸键）。
+          childRelationKept: (() => {
+            const lifecycle = stored.spaceTabsState?.tabLifecycle || {};
+            const childAnchor = lifecycle[${JSON.stringify(liveTagForNode.tabId)}]?.snapshotGroupId
+              ? 'sgid:' + lifecycle[${JSON.stringify(liveTagForNode.tabId)}].snapshotGroupId
+              : ${JSON.stringify(liveChildKey)};
+            const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+              ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+              : ${JSON.stringify(parentKey)};
+            return stored.spaceTabsState?.groupParents?.default?.[childAnchor] === parentAnchor;
+          })(),
         };
       })()`, 20000);
       // 再按一次 Enter 展开。折叠由合成 header.click() 触发（不移动真实焦点，
@@ -22949,6 +22983,227 @@ ${error.message}`);
           hierarchyAfterReopen.tabStillOpen,
         JSON.stringify({ foldedState, hierarchyAfterReopen }),
       );
+
+      // 5b. 回归（用户报的两问）：新建一个 live 子组嵌到父组下，再 Close & Save
+      // 存档成 dormant Tag —— ① 父组仍可折叠（0.5.12 曾因存档子组没法折叠）；
+      // ② 折叠态的 dormant 子组点击恢复 tabs 后仍嵌套在父组下（键再生不再
+      // 拉平层级）；③ reload 后 anchor 边持久存活。自包含：不复用其他步骤的组。
+      await waitForLifecycleJournalToSettle(client);
+      const dormantChildFixture = await evaluate(client, `(async () => {
+        const tab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-dormant-child', active: false });
+        const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+        await chrome.tabGroups.update(groupId, { title: 'Hierarchy Dormant Child', color: 'cyan' });
+        return { tabId: tab.id, groupId };
+      })()`);
+      await waitForLifecycleJournalToSettle(client);
+      const dormLiveKey = await waitFor(client, `(() => {
+        const card = [...document.querySelectorAll('#groupsList > .group-card')]
+          .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Dormant Child');
+        return card?.dataset.groupKey || '';
+      })()`, 15000);
+      if (!dormLiveKey) throw new Error('dormant-child fixture tag card missing');
+      const dormLiveKeySel = `.group-card[data-group-key="${dormLiveKey}"]`;
+      await dragElementThroughUI(
+        client,
+        `${dormLiveKeySel} > .group-header`,
+        `${parentKeySel} > .group-header`,
+        { targetYRatio: 0.5 },
+      );
+      const dormNestedBeforeClose = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        return Boolean(parentCard?.querySelector(':scope > .group-children > ' + ${JSON.stringify(dormLiveKeySel)}));
+      })()`, 15000);
+      // drop 事务含完整 refresh/save 链路；与既有场景一致，先给稳定窗口再点菜单。
+      await waitForLifecycleJournalToSettle(client);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      // Close & Save 点击 → tab 关闭，含轮询重试：多窗口 teardown 后首个写入
+      // 事务偶发停滞（storage 读取停摆），重试点击可恢复。断言仍是严格的：
+      // tab 关闭 + anchor 边保持。
+      let savedChild = null;
+      for (let attempt = 0; attempt < 3 && !savedChild?.tabGone; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const stillThere = await evaluate(client, `(() => {
+            const header = document.querySelector('${dormLiveKeySel} > .group-header');
+            if (!header) return false;
+            header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+            const item = [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+              .find((node) => node.textContent.trim() === 'Close & Save');
+            if (!item) return false;
+            item.click();
+            return true;
+          })()`);
+          if (!stillThere) {
+            // 菜单项消失 = 组已不再可关闭（多半是上一次点击迟到的存档完成了）。
+            // 重新轮询 tab 关闭状态与 anchor 边，更新 savedChild。
+            savedChild = await waitFor(client, `(async () => {
+              const stored = await chrome.storage.local.get('spaceTabsState');
+              const saved = stored.spaceTabsState || {};
+              const tabGone = await chrome.tabs.get(${JSON.stringify(dormantChildFixture.tabId)}).then(() => false).catch(() => true);
+              if (!tabGone) return null;
+              const dormantTags = (saved.spaceSnapshots?.default?.groups || [])
+                .filter((group) => group.title === 'Hierarchy Dormant Child');
+              const lifecycle = saved.tabLifecycle || {};
+              const childAnchor = dormantTags[0]?.snapshotGroupId
+                ? 'sgid:' + dormantTags[0].snapshotGroupId
+                : ${JSON.stringify(dormLiveKey)};
+              const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+                ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+                : ${JSON.stringify(parentKey)};
+              return {
+                tabGone,
+                dormantTagCount: dormantTags.length,
+                childAnchor,
+                parentAnchor,
+                edgeKept: saved.groupParents?.default?.[childAnchor] === parentAnchor,
+                status: document.querySelector('#syncStatus')?.textContent || '',
+                toast: document.querySelector('#workbenchToast')?.textContent || '',
+                attempt: ${attempt},
+              };
+            })()`, 20000);
+            break;
+          }
+        } else {
+          await evaluate(client, `(() => {
+            const header = document.querySelector('${dormLiveKeySel} > .group-header');
+            header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+            const item = [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+              .find((node) => node.textContent.trim() === 'Close & Save');
+            if (!item) throw new Error('Close & Save menu item missing');
+            item.click();
+            return true;
+          })()`);
+        }
+        savedChild = await waitFor(client, `(async () => {
+          // 存档完成 = tab 已关闭 + 快照里出现同名 dormant Tag。
+          // child 的 anchor 从快照行取（关闭后 tabLifecycle 行已被 forget 清除）。
+          const stored = await chrome.storage.local.get('spaceTabsState');
+          const saved = stored.spaceTabsState || {};
+          const tabGone = await chrome.tabs.get(${JSON.stringify(dormantChildFixture.tabId)}).then(() => false).catch(() => true);
+          const dormantTags = (saved.spaceSnapshots?.default?.groups || [])
+            .filter((group) => group.title === 'Hierarchy Dormant Child');
+          const lifecycle = saved.tabLifecycle || {};
+          const childAnchor = dormantTags[0]?.snapshotGroupId
+            ? 'sgid:' + dormantTags[0].snapshotGroupId
+            : ${JSON.stringify(dormLiveKey)};
+          const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+            ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+            : ${JSON.stringify(parentKey)};
+          return {
+            tabGone,
+            dormantTagCount: dormantTags.length,
+            childAnchor,
+            parentAnchor,
+            edgeKept: saved.groupParents?.default?.[childAnchor] === parentAnchor,
+            status: document.querySelector('#syncStatus')?.textContent || '',
+            toast: document.querySelector('#workbenchToast')?.textContent || '',
+            attempt: ${attempt},
+          };
+        })()`, 20000);
+      }
+      record(
+        'Hierarchy: closing the nested child to saved keeps its parent edge on the anchor domain',
+        Boolean(dormNestedBeforeClose) && Boolean(savedChild?.tabGone) &&
+          savedChild.dormantTagCount >= 1 && Boolean(savedChild.edgeKept),
+        JSON.stringify({ dormNestedBeforeClose, savedChild }),
+      );
+
+      const dormantChildKey = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const card = [...(parentCard?.querySelectorAll(':scope > .group-children > .group-card') || [])]
+          .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Dormant Child');
+        return card?.dataset.groupKey || '';
+      })()`, 20000);
+      if (!dormantChildKey) throw new Error('dormant child card is no longer nested after Close & Save');
+      // 父组折叠/展开（含 dormant 子组）：Chrome collapsed + 子组引用保持。
+      await evaluate(client, `(() => {
+        const header = document.querySelector('${parentKeySel} > .group-header');
+        if (!header) throw new Error('parent header missing before dormant-child fold');
+        header.click();
+        return true;
+      })()`);
+      const parentFoldWithDormantChild = await waitFor(client, `(async () => {
+        const chromeId = Number(${JSON.stringify(parentKey)}.slice('group:'.length));
+        const chromeGroup = await chrome.tabGroups.get(chromeId).catch(() => null);
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        if (!chromeGroup?.collapsed || !parentCard?.classList.contains('collapsed')) return null;
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        const lifecycle = saved.tabLifecycle || {};
+        const childAnchor = (saved.spaceSnapshots?.default?.groups || [])
+          .filter((group) => group.title === 'Hierarchy Dormant Child' && group.snapshotGroupId)
+          .map((group) => 'sgid:' + group.snapshotGroupId)[0] || ${JSON.stringify(dormLiveKey)};
+        const parentAnchor = lifecycle[${JSON.stringify(parentTabId)}]?.snapshotGroupId
+          ? 'sgid:' + lifecycle[${JSON.stringify(parentTabId)}].snapshotGroupId
+          : ${JSON.stringify(parentKey)};
+        return {
+          edgeKept: saved.groupParents?.default?.[childAnchor] === parentAnchor,
+        };
+      })()`, 20000);
+      // 展开同样带重试：折叠态若因写入事务停滞未生效，再点一次。
+      let parentExpandedWithDormantChild = null;
+      for (let attempt = 0; attempt < 3 && !parentExpandedWithDormantChild; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+        await evaluate(client, `(() => {
+          const card = document.querySelector(${JSON.stringify(parentKeySel)});
+          if (!card) throw new Error('parent card missing before expand');
+          card.querySelector('.group-header').click();
+          return true;
+        })()`);
+        parentExpandedWithDormantChild = await waitFor(client, `(() => {
+          const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+          if (!parentCard || parentCard.classList.contains('collapsed')) return null;
+          const dormantChildSel = '.group-card[data-group-key="' + ${JSON.stringify(dormantChildKey)} + '"]';
+          return Boolean(parentCard.querySelector(':scope > .group-children > ' + dormantChildSel));
+        })()`, 10000);
+      }
+      record(
+        'Hierarchy: parent folds/expands while its child is a dormant saved Tag',
+        Boolean(parentFoldWithDormantChild?.edgeKept) && Boolean(parentExpandedWithDormantChild),
+        JSON.stringify({ parentFoldWithDormantChild, parentExpandedWithDormantChild }),
+      );
+
+      // reload：anchor 边持久化 → dormant 子组仍嵌套（跨会话存活）。
+      await evaluate(client, 'location.reload()');
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`, 20000);
+      const dormantChildAfterReload = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const dormantChildSel = '.group-card[data-group-key="' + ${JSON.stringify(dormantChildKey)} + '"]';
+        return Boolean(parentCard?.querySelector(':scope > .group-children > ' + dormantChildSel));
+      })()`, 20000);
+      // 点击折叠的 dormant 子组 → 恢复 tabs → 仍嵌套在父组下（键再生不拉平）。
+      // 重启事务偶发停滞，带重试：按标题实时找卡（reload 后快照键可能再变），
+      // 卡片仍 dormant（未 keyChanged）时再点。
+      let restoredChildNested = null;
+      for (let attempt = 0; attempt < 3 && !restoredChildNested?.keyChanged; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+        await evaluate(client, `(() => {
+          const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+          const card = [...(parentCard?.querySelectorAll(':scope > .group-children > .group-card') || [])]
+            .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Dormant Child');
+          if (!card) throw new Error('dormant child card missing before restore');
+          card.querySelector('.group-header').click();
+          return card.dataset.groupKey || '';
+        })()`);
+        restoredChildNested = await waitFor(client, `(() => {
+          const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+          const card = [...(parentCard?.querySelectorAll(':scope > .group-children > .group-card') || [])]
+            .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Dormant Child');
+          return {
+            nested: Boolean(card),
+            key: card?.dataset.groupKey || '',
+            hasTabRow: Boolean(card?.querySelector('.tab-row')),
+            keyChanged: card?.dataset.groupKey !== ${JSON.stringify(dormantChildKey)},
+          };
+        })()`, 30000);
+      }
+      record(
+        'Hierarchy: restoring a dormant child keeps it nested (anchor edge survives key regeneration)',
+        Boolean(dormantChildAfterReload) && Boolean(restoredChildNested?.nested) &&
+          Boolean(restoredChildNested?.hasTabRow) && Boolean(restoredChildNested?.keyChanged),
+        JSON.stringify({ dormantChildAfterReload, restoredChildNested }),
+      );
+
 
       // 6. Empty node deletes non-destructively via the header × button.
       await evaluate(client, `(() => {
@@ -23066,10 +23321,13 @@ ${error.message}`);
         const emptyPlace = Object.entries(nodes).find(([, node]) => node.title === 'Empty Place');
         const legacyFolder = Object.entries(nodes).find(([, node]) => node.title === 'Legacy Folder');
         if (!emptyPlace || !legacyFolder) return null;
-        // key 域：dormant saved Tag 的键
-        const savedTagKey = 'snapshot:' + (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
-          .findIndex((group) => group.snapshotGroupId === 'hierarchy-legacy-tag') + ':default:hierarchy-legacy-tag';
-        const savedNested = parents[savedTagKey] === legacyFolder[0];
+        // anchor 域：dormant saved Tag 的端点是身份 sgid（每 render 自愈已升级，
+        // 兜底接受裸快照键）；node 端点保持 node: 键。
+        const savedTagIndex = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
+          .findIndex((group) => group.snapshotGroupId === 'hierarchy-legacy-tag');
+        const savedTagRawKey = 'snapshot:' + savedTagIndex + ':default:hierarchy-legacy-tag';
+        const savedNested = parents['sgid:hierarchy-legacy-tag'] === legacyFolder[0] ||
+          parents[savedTagRawKey] === legacyFolder[0];
         return {
           savedTagTitle: savedTag.title,
           savedNested,

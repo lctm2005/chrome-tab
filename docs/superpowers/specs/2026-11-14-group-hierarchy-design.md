@@ -133,3 +133,75 @@
 3. `sidepanel.css`：缩进、插入指示线、空组空态；`sidepanel.html` 需要时缓存戳 `?v=33`。
 4. 测试：`tests/group-tree.test.js`（新）等按第 8 节。
 5. e2e 场景 + 阈值更新。
+
+## 11. 增补设计（2026-11-15，0.5.14）：层级边改 anchor 域
+
+### 11.1 问题（键域引用的系统性缺陷）
+
+`groupParents` 的边端点引用**易变视图键**（chrome 组 id / 快照索引）。键在四类事件
+中再生，每处都靠手写重映射，且实测存在三类缺口：
+
+| 事件 | groupOrder | collapsedGroups | groupParents |
+|---|---|---|---|
+| 快照重索引 remapSnapshotGroupIndexedState | ✓ | ✓ | ✗ 不重映射 |
+| closeGroupToSaved / openDormantGroup 键替换 | ✓（未持久化）| ✗/✓ | ✓（未持久化）|
+| 会话轮换 resetChromeSessionBindings | — | — | ✗ 直接丢弃 group:* 边 |
+
+后果：存档/展开后层级静默拉平（syncStateFromStorage 回滚内存重映射）、
+快照变化后子组失挂、浏览器重启后 live-live 嵌套全部丢失。零散修补不可收敛。
+
+### 11.2 设计：anchor 域边 + 读投影 + 单一迁移
+
+**持久化域**：边的端点一律存 anchor：
+- `sgid:<snapshotGroupId>` — 快照行持久身份（跨重启、跨重索引、跨物化稳定）；
+- `node:<uuid>` / `vgroup:<key>` — 本来就稳定的键，原样保留；
+- 裸视图键（`group:<id>` / `snapshot:<idx>:…`）— 仅作为未获得身份时的兜底，
+  读路径按原样解析，写路径/自愈会尽快升级为 `sgid:`。
+
+**读路径**：`resolveHierarchyKeyParents(parents, bySgid)` 把 anchor 投影回当前
+视图键（sgid → 当前快照行键；node/vgroup/裸键原样）。投影失败的边**只跳过渲染，
+不删数据**（身份可能暂时失联，回来后边仍在）。buildGroupTree / planHierarchyDrop /
+nodeDepth 等纯函数不变，仍消费键域投影结果。
+
+**写路径**：所有层级写操作（拖拽/建组/物化/跨 Space 移动/删除）通过
+`hierarchyAnchorForNode(node)` 落 anchor（node.snapshotGroupId 优先，node:/vgroup:
+直存，其余裸键兜底）。
+
+**每 render 自愈**：`upgradeHierarchyParentAnchors` 把裸键边升级为 sgid anchor
+（幂等 O(边数)），结果写回 state，随下一次 save 持久化。这是身份 mint 时机
+不确定的唯一防线。
+
+**键再生管线不再触碰 parents**：
+- closeGroupToSaved / openDormantGroup：删除手写 parents 重映射（anchor 免疫）；
+  仅保留 groupOrder 替换（视图排序）并**新增 saveState 持久化**（修"未持久化"缺口）。
+- 快照重索引：parents 无需处理。
+- 物化（node→group）：`remapGroupParents(parents, {nodeKey → group:<newId>})`
+  保留（域无关字符串替换），随后由自愈升级为 sgid。
+- 身份合并/重塑（convergeDuplicateSavedTags、Auto Group 合并）：把
+  snapshotGroupIdReplacements（space-snapshot 已返回 old→new sgid 映射）套到
+  parents 上。
+- 会话轮换：`sanitizeGroupParentsForNewSession` 不再丢边——用**被擦除前的
+  tabLifecycle**（groupId→snapshotGroupId 桥）把 `group:<id>` 端点转成 sgid
+  anchor；`snapshot:idx:space:sgid` 裸键解析出 sgid 段；node/vgroup/sgid 原样；
+  不可解析才丢弃。→ **live-live 嵌套跨浏览器重启存活**。
+
+### 11.3 操作 → 动作映射（架构清晰性要求）
+
+| 用户操作 | 入口 | 层级动作 |
+|---|---|---|
+| 拖组嵌套/排序/回根 | applyHierarchyDrop | plan（键域投影）→ anchorize 落盘 |
+| New Subgroup / 删组 | createEmptyGroupNode / deleteHierarchyNode | node anchor 边增删 |
+| 拮 tab 进空组 | materializeEmptyNodeWithTab | node→group 键替换（单迁移函数）|
+| 折叠（纯显示）| toggleGroup | 不碰层级 |
+| 存档 / 恢复 | closeGroupToSaved / openDormantGroup | 仅 order 替换 + 持久化 |
+| 跨 Space 移动 | moveHierarchyEntriesBetweenSpaces | anchor 边随行 |
+| 身份合并 | converge / Auto Group | sgid 替换套 parents |
+| 浏览器重启 | resetChromeSessionBindings | anchor 天然存活，兜底转 sgid |
+
+### 11.4 测试
+
+- 单元：anchor 编解码/解析/升级/迁移纯函数全分支；会话轮换转换（group:→sgid、
+  snapshot:→sgid、node 保留、不可解析丢弃）；双域读。
+- e2e：dormant 子组在 live 父组下 → 父组折叠 OK → reload 后子组仍嵌套 →
+  点开子组恢复 tabs → **仍嵌套**（存 storage + DOM）→ 再 reload → 仍嵌套
+  （持久性）。既有 parents 断言改为 anchor 感知（由快照行 sgid 推导）。

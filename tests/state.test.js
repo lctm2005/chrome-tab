@@ -52,16 +52,74 @@ test('merges groupParents and emptyNodes per space and sanitizes chrome-id links
   assert.deepEqual(arrayStored.emptyNodes, {});
 
   const reset = resetChromeSessionBindings(stored, 'session-two');
-  // chrome 组 id 重启后可能被复用，派生父子键随会话清除；稳定键（snapshot/node）保留
+  // chrome 组 id 重启后可能被复用：没有 tabLifecycle 桥（groupId→snapshotGroupId）
+  // 时派生边无法转成持久身份，只能清除；稳定键（snapshot/node）保留。
   assert.deepEqual(reset.groupParents.work, { 'tag:1': 'node:2' });
   assert.equal(reset.groupParents.broken, undefined);
   assert.deepEqual(reset.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
+
+  // 有 tabLifecycle 桥时，live↔live 嵌套跨会话轮换转成 sgid anchor 存活。
+  // snapshotsBySpace 里的快照身份让 snapshot 裸键解析出 sgid；空端点被丢弃。
+  const bridged = resetChromeSessionBindings(mergeStoredState({
+    version: 9,
+    browserSessionId: 'session-one',
+    tabLifecycle: {
+      11: { tabId: 11, groupId: 9, snapshotGroupId: 'group:child-uuid' },
+      12: { tabId: 12, groupId: 9, snapshotGroupId: 'group:child-uuid' },
+      13: { tabId: 13, groupId: 7, snapshotGroupId: 'group:parent-uuid' },
+      14: { tabId: 14, groupId: 0, snapshotGroupId: '' },
+    },
+    spaceSnapshots: {
+      work: { groups: [{ snapshotGroupId: 'group:saved-uuid', title: 'Saved', tabs: [] }] },
+    },
+    groupParents: {
+      work: {
+        'group:9': 'group:7',
+        'snapshot:2:work:group:saved-uuid': 'group:7',
+        'node:3': 'group:9',
+        'vgroup:vg1': 'group:7',
+        'sgid:group:already-anchored': 'group:7',
+        'snapshot:4:work:group:ghost': 'group:7',
+        'group:8': 'group:8',
+        '': 'group:7',
+      },
+    },
+  }, defaults), 'session-two');
+  assert.deepEqual(bridged.groupParents.work, {
+    'sgid:group:child-uuid': 'sgid:group:parent-uuid',
+    'sgid:group:saved-uuid': 'sgid:group:parent-uuid',
+    'node:3': 'sgid:group:child-uuid',
+    'vgroup:vg1': 'sgid:group:parent-uuid',
+    'sgid:group:already-anchored': 'sgid:group:parent-uuid',
+    'snapshot:4:work:group:ghost': 'sgid:group:parent-uuid',
+  });
 
   const invalidReset = resetChromeSessionBindings(
     mergeStoredState({ version: 9, groupParents: 'garbage' }, defaults),
     'session-three',
   );
   assert.deepEqual(invalidReset.groupParents, {});
+
+  // 显式 null 的 tabLifecycle / spaceSnapshots → 桥与身份集为空；快照缺 groups
+  // / null 快照 / null 生命周期行都被跳过。
+  const nullInputs = resetChromeSessionBindings(mergeStoredState({
+    version: 9,
+    browserSessionId: 'session-one',
+    tabLifecycle: { 15: null },
+    spaceSnapshots: { work: { title: 'no groups key' }, gone: null },
+    groupParents: { work: { 'group:9': 'group:7' } },
+  }, defaults), 'session-two');
+  // 全部端点无法转成持久身份 → 该 Space 的层级整表清除
+  assert.equal(nullInputs.groupParents.work, undefined);
+
+  // 显式 null（不经 merge 默认值）：桥与身份集直接走空分支，边清除。
+  const explicitNull = resetChromeSessionBindings({
+    browserSessionId: 'session-one',
+    tabLifecycle: null,
+    spaceSnapshots: null,
+    groupParents: { work: { 'group:9': 'group:7' } },
+  }, 'session-two');
+  assert.equal(explicitNull.groupParents.work, undefined);
 });
 
 test('keeps the durable browser fallback independent from per-window active Spaces', () => {

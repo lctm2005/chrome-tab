@@ -711,7 +711,7 @@ test('hierarchy drops re-parent groups through the state-backed planner', async 
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: renderedHierarchyKeyParents,[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
-  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = plan\.parents;[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
+  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = anchorizeHierarchyParents\(plan\.parents, spaceId\);[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
   assert.match(source, /function replaceActiveSpaceSnapshotGroups[\s\S]*remapSnapshotGroupIndexedState\(\{[\s\S]*groupOrder:[\s\S]*collapsedGroups:[\s\S]*tabOrder:/);
   assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, renderedHierarchyKeyParents\)/);
   assert.doesNotMatch(source, /movedGroupTitleForFolderDrop|retitleGroupForNestedMove|targetPathForSiblingMove|moveGroupBlockBesideContext/);
@@ -1168,7 +1168,7 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /function currentGroupForMutation[\s\S]*groupMutationFingerprint\(current\) !== groupMutationFingerprint\(reference\)/);
   assert.match(source, /function groupMutationFingerprint[\s\S]*url: snapshotUrlIdentity\(tab\?\.url\)/);
   assert.match(source, /async function deleteGroup\(group, options = \{\}\)[\s\S]*const current = renderedGroupContexts\.get\(group\.key\);[\s\S]*if \(!current\?\.emptyNode\) \{/);
-  assert.match(source, /clearHierarchyEntriesForKeys\(\[group\.key\]\)/);
+  assert.match(source, /clearHierarchyEntriesForKeys\(\[group\.key\], state\.activeSpaceId, \[hierarchyAnchorForNode\(group\)\]\)/);
 });
 
 test('destructive Settings and Undo actions bind the reviewed record and merge concurrent edits', async () => {

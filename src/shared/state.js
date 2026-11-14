@@ -93,15 +93,23 @@ export function resetChromeSessionBindings(state, sessionId) {
     tabOrder: {},
     collapsedGroups: {},
     // Chrome group ids can be reused after a restart, so parent links derived
-    // from them are dropped; stable keys (snapshot/node/vgroup) survive.
-    groupParents: sanitizeGroupParentsForNewSession(state.groupParents),
+    // from them cannot survive as raw ids. Anchor-domain endpoints (sgid:,
+    // node:, vgroup:) survive untouched; raw chrome-keyed endpoints are
+    // CONVERTED to their snapshot identity via the not-yet-wiped tabLifecycle
+    // bridge, so live↔live nesting survives the restart. Only endpoints that
+    // carry no durable identity are dropped.
+    groupParents: sanitizeGroupParentsForNewSession(state.groupParents, {
+      tabLifecycle: state.tabLifecycle,
+      snapshotsBySpace: state.spaceSnapshots,
+    }),
     emptyNodes: state.emptyNodes || {},
     operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
       .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
   };
 }
 
-const CHROME_GROUP_KEY_PATTERN = /^group:\d+$/;
+const CHROME_GROUP_KEY_PATTERN = /^group:(\d+)$/;
+const SNAPSHOT_GROUP_KEY_PATTERN = /^snapshot:(\d+):([^:]*):([\s\S]+)$/;
 
 function normalizeGroupParentsMap(groupParents) {
   const next = {};
@@ -112,15 +120,66 @@ function normalizeGroupParentsMap(groupParents) {
   return next;
 }
 
-function sanitizeGroupParentsForNewSession(groupParents) {
+// groupId → snapshotGroupId bridge from the lifecycle rows that are about to
+// be wiped. Rows without a durable identity are skipped.
+function chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle) {
+  const bridge = new Map();
+  const bindings = tabLifecycle ? Object.values(tabLifecycle) : [];
+  for (const binding of bindings) {
+    const groupId = Number(binding?.groupId);
+    const snapshotGroupId = String(binding?.snapshotGroupId || '').trim();
+    if (Number.isSafeInteger(groupId) && groupId > 0 && snapshotGroupId && !bridge.has(groupId)) {
+      bridge.set(groupId, snapshotGroupId);
+    }
+  }
+  return bridge;
+}
+
+function knownSnapshotGroupIds(snapshotsBySpace) {
+  const ids = new Set();
+  const snapshots = snapshotsBySpace ? Object.values(snapshotsBySpace) : [];
+  for (const snapshot of snapshots) {
+    const groups = (snapshot && Array.isArray(snapshot.groups)) ? snapshot.groups : [];
+    for (const group of groups) {
+      const snapshotGroupId = String(group?.snapshotGroupId || '').trim();
+      if (snapshotGroupId) ids.add(snapshotGroupId);
+    }
+  }
+  return ids;
+}
+
+// Converts one raw view-key endpoint to its durable anchor for the new
+// session. Returns '' when the endpoint references nothing durable.
+function anchorForNewSession(endpoint, bridge, knownSnapshotGroupIds) {
+  const raw = String(endpoint || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('sgid:') || raw.startsWith('node:') || raw.startsWith('vgroup:')) return raw;
+  const chromeMatch = CHROME_GROUP_KEY_PATTERN.exec(raw);
+  if (chromeMatch) {
+    const snapshotGroupId = bridge.get(Number(chromeMatch[1]));
+    return snapshotGroupId ? `sgid:${snapshotGroupId}` : '';
+  }
+  const snapshotMatch = SNAPSHOT_GROUP_KEY_PATTERN.exec(raw);
+  if (snapshotMatch) {
+    const identity = snapshotMatch[3];
+    return knownSnapshotGroupIds.has(identity) ? `sgid:${identity}` : raw;
+  }
+  return raw;
+}
+
+function sanitizeGroupParentsForNewSession(groupParents, { tabLifecycle, snapshotsBySpace } = {}) {
   if (!groupParents || typeof groupParents !== 'object' || Array.isArray(groupParents)) return {};
+  const bridge = chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle);
+  const knownIds = knownSnapshotGroupIds(snapshotsBySpace);
   const next = {};
   for (const [spaceId, parents] of Object.entries(groupParents)) {
     if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
     const kept = {};
     for (const [childKey, parentKey] of Object.entries(parents)) {
-      if (CHROME_GROUP_KEY_PATTERN.test(childKey) || CHROME_GROUP_KEY_PATTERN.test(parentKey)) continue;
-      kept[childKey] = parentKey;
+      const childAnchor = anchorForNewSession(childKey, bridge, knownIds);
+      const parentAnchor = anchorForNewSession(parentKey, bridge, knownIds);
+      if (!childAnchor || !parentAnchor || childAnchor === parentAnchor) continue;
+      kept[childAnchor] = parentAnchor;
     }
     if (Object.keys(kept).length > 0) next[spaceId] = kept;
   }
