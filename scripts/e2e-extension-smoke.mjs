@@ -17483,7 +17483,7 @@ ${error.message}`);
         fixture.dormantGroupId,
       ].includes(group.snapshotGroupId));
       const cards = [...document.querySelectorAll('#groupsList [data-group-key]')]
-        .filter((card) => card.matches('.group-card, .folder-direct-group'));
+        .filter((card) => card.matches('.group-card'));
       const targetCards = cards.filter((card) => [
         'Reorder E2E',
         'Dormant Order E2E',
@@ -17588,11 +17588,13 @@ ${error.message}`);
       const captured = await (${captureMixedGroupOrderState})();
       const fixture = ${JSON.stringify(mixedGroupOrderFixture)};
       const expectedLiveIds = ${JSON.stringify(expectedMixedLiveTabIds)};
+      // 新语义：拖拽只写 groupParents/groupOrder。快照顺序与键保持不变，
+      // 折叠/行序键无需重映射（视图顺序由 groupOrder 持久化）。
       return JSON.stringify(captured.domOrder) === JSON.stringify([
         'Dormant Order E2E', 'Reorder E2E'
       ]) && JSON.stringify(captured.snapshotOrder) === JSON.stringify([
-        fixture.dormantGroupId, fixture.liveSnapshotGroupId
-      ]) && captured.dormantKey && captured.dormantKey !== fixture.dormantKey &&
+        fixture.liveSnapshotGroupId, fixture.dormantGroupId
+      ]) && captured.dormantKey === fixture.dormantKey &&
         JSON.stringify(captured.groupOrder) === JSON.stringify([
           captured.dormantKey, fixture.liveGroupKey
         ]) && !captured.dormantCollapsed && captured.dormantAriaExpanded === 'true' &&
@@ -17614,10 +17616,11 @@ ${error.message}`);
       const captured = await (${captureMixedGroupOrderState})();
       const fixture = ${JSON.stringify(mixedGroupOrderFixture)};
       const expectedLiveIds = ${JSON.stringify(expectedMixedLiveTabIds)};
+      // 新语义：拖拽只写 groupOrder，键与快照顺序稳定；视图顺序经 groupOrder 持久化。
       return JSON.stringify(captured.domOrder) === JSON.stringify([
         'Dormant Order E2E', 'Reorder E2E'
       ]) && JSON.stringify(captured.snapshotOrder) === JSON.stringify([
-        fixture.dormantGroupId, fixture.liveSnapshotGroupId
+        fixture.liveSnapshotGroupId, fixture.dormantGroupId
       ]) && captured.dormantKey === ${JSON.stringify(mixedGroupOrderMoved.dormantKey)} &&
         JSON.stringify(captured.groupOrder) === JSON.stringify([
           captured.dormantKey, fixture.liveGroupKey
@@ -17635,7 +17638,7 @@ ${error.message}`);
     record(
       'Mixed live and saved Tag drag preserves visible order, collapse, tab order, and stable identity after reload',
       mixedGroupOrderBaseline.dormantKey === mixedGroupOrderFixture.dormantKey &&
-        mixedGroupOrderMoved.dormantKey !== mixedGroupOrderFixture.dormantKey &&
+        mixedGroupOrderMoved.dormantKey === mixedGroupOrderFixture.dormantKey &&
         mixedGroupOrderReloaded.dormantKey === mixedGroupOrderMoved.dormantKey &&
         JSON.stringify(mixedGroupOrderReloaded.liveChromeTabIds) ===
           JSON.stringify(expectedMixedLiveTabIds),
@@ -19864,14 +19867,14 @@ ${error.message}`);
       const firstGroup = await chrome.runtime.sendMessage({
         type: 'tabs:group',
         tabIds: [folderAlpha.id],
-        title: 'Folder Safety / Alpha',
+        title: 'Folder Safety Alpha',
         color: 'blue',
         collapsed: false,
       });
       const secondGroup = await chrome.runtime.sendMessage({
         type: 'tabs:group',
         tabIds: [folderBeta.id],
-        title: 'Folder Safety / Beta',
+        title: 'Folder Safety Beta',
         color: 'green',
         collapsed: false,
       });
@@ -19892,16 +19895,16 @@ ${error.message}`);
       const chromeGroups = await Promise.all(fixture.groupIds.map((groupId) =>
         chrome.tabGroups.get(groupId).catch(() => null)));
       const sourceGroups = saved.spaceSnapshots?.[fixture.sourceSpaceId]?.groups || [];
-      const folderHeader = [...document.querySelectorAll('.folder-header')]
-        .find((header) => header.querySelector('strong')?.textContent === 'Folder Safety');
+      const folderHeader = [...document.querySelectorAll('#groupsList > .group-card .group-header h2')]
+        .find((node) => node.textContent === 'Folder Safety Alpha');
       const clearButton = document.querySelector('.ungrouped-section .ungrouped-divider button');
       const folderBindings = fixture.folderTabIds.map((tabId) => saved.tabLifecycle?.[String(tabId)] || null);
       if (chromeGroups.some((group) => !group) ||
           fixture.groupIds.some((groupId) => saved.groupSpaces?.[String(groupId)] !== fixture.sourceSpaceId) ||
           folderBindings.some((binding) => binding?.spaceId !== fixture.sourceSpaceId ||
             !binding.snapshotGroupId || !binding.snapshotTabId) ||
-          !sourceGroups.some((group) => group.title === 'Folder Safety / Alpha') ||
-          !sourceGroups.some((group) => group.title === 'Folder Safety / Beta') ||
+          !sourceGroups.some((group) => group.title === 'Folder Safety Alpha') ||
+          !sourceGroups.some((group) => group.title === 'Folder Safety Beta') ||
           !folderHeader || !clearButton || !clearButton.title.startsWith('Close 2 temporary tabs')) return null;
       return {
         chromeTitles: chromeGroups.map((group) => group.title),
@@ -20011,10 +20014,10 @@ ${error.message}`);
       JSON.stringify(clearRecoveryState),
     );
 
-    const openFolderMenu = async (folderName) => {
+    const openGroupMenu = async (groupTitle) => {
       await evaluate(client, `(() => {
-        const header = [...document.querySelectorAll('.folder-header')]
-          .find((item) => item.querySelector('strong')?.textContent === ${JSON.stringify(folderName)});
+        const header = [...document.querySelectorAll('#groupsList .group-card > .group-header')]
+          .find((item) => item.querySelector('.group-toggle h2')?.textContent === ${JSON.stringify(groupTitle)});
         if (!header) return false;
         header.dispatchEvent(new MouseEvent('contextmenu', {
           bubbles: true,
@@ -20028,7 +20031,7 @@ ${error.message}`);
       await waitFor(client, `!document.querySelector('#contextMenu')?.hidden`);
     };
 
-    await openFolderMenu('Folder Safety');
+    await openGroupMenu('Folder Safety Alpha');
     await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
       .find((button) => button.textContent === 'Rename')?.click()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
@@ -20041,7 +20044,7 @@ ${error.message}`);
         const titles = (value?.spaceTabsState?.spaceSnapshots?.[sourceSpaceId]?.groups || [])
           .map((group) => group.title || '');
         if (!window.__folderRenameFailureInjected &&
-            titles.some((title) => title.startsWith('Folder Renamed /'))) {
+            titles.some((title) => title.startsWith('Folder Renamed'))) {
           window.__folderRenameFailureInjected = true;
           return Promise.reject(new Error('Injected folder rename checkpoint failure E2E'));
         }
@@ -20066,13 +20069,12 @@ ${error.message}`);
       const titles = (stored.spaceTabsState?.spaceSnapshots?.[fixture.sourceSpaceId]?.groups || [])
         .map((group) => group.title || '');
       const browserTitles = chromeGroups.map((group) => group?.title || '');
-      const folderTitle = [...document.querySelectorAll('.folder-header strong')]
-        .map((node) => node.textContent).find((title) => title === 'Folder Safety') || '';
+      const folderTitle = [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+        .map((node) => node.textContent).find((title) => title === 'Folder Safety Alpha') || '';
       const toast = document.querySelector('#workbenchToast')?.textContent || '';
-      return browserTitles.includes('Folder Safety / Alpha') &&
-        browserTitles.includes('Folder Safety / Beta') &&
-        titles.includes('Folder Safety / Alpha') && titles.includes('Folder Safety / Beta') &&
-        folderTitle === 'Folder Safety' &&
+      return browserTitles.includes('Folder Safety Alpha') &&
+        titles.includes('Folder Safety Alpha') &&
+        folderTitle === 'Folder Safety Alpha' &&
         toast.includes('Injected folder rename checkpoint failure E2E')
         ? { browserTitles, titles, folderTitle, toast,
           toastTone: document.querySelector('#workbenchToast')?.dataset.tone || '' }
@@ -20085,18 +20087,18 @@ ${error.message}`);
     record(
       'Folder rename rolls every Chrome group and durable title back when its checkpoint fails',
       folderRenameRollbackState.browserTitles.length === 2 &&
-        folderRenameRollbackState.folderTitle === 'Folder Safety' &&
+        folderRenameRollbackState.folderTitle === 'Folder Safety Alpha' &&
         folderRenameRollbackState.toastTone === 'error',
       JSON.stringify(folderRenameRollbackState),
     );
 
-    await openFolderMenu('Folder Safety');
+    await openGroupMenu('Folder Safety Alpha');
     await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
       .find((button) => button.textContent === 'Rename')?.click()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Rename Group'`);
     await evaluate(client, `(() => {
-      document.querySelector('#actionDialogInput').value = 'Folder Renamed';
+      document.querySelector('#actionDialogInput').value = 'Folder Renamed Alpha';
       document.querySelector('#actionDialogConfirm').click();
     })()`);
     const folderRenameState = await waitFor(client, `(async () => {
@@ -20108,20 +20110,19 @@ ${error.message}`);
       const titles = (stored.spaceTabsState?.spaceSnapshots?.[fixture.sourceSpaceId]?.groups || [])
         .map((group) => group.title || '');
       const browserTitles = chromeGroups.map((group) => group?.title || '');
-      const folderVisible = [...document.querySelectorAll('.folder-header strong')]
-        .some((node) => node.textContent === 'Folder Renamed');
-      return browserTitles.includes('Folder Renamed / Alpha') &&
-        browserTitles.includes('Folder Renamed / Beta') &&
-        titles.includes('Folder Renamed / Alpha') && titles.includes('Folder Renamed / Beta') &&
+      const folderVisible = [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+        .some((node) => node.textContent === 'Folder Renamed Alpha');
+      return browserTitles.includes('Folder Renamed Alpha') &&
+        titles.includes('Folder Renamed Alpha') &&
         folderVisible ? { browserTitles, titles, folderVisible } : null;
     })()`, 15000);
     record(
-      'Folder rename updates every child Chrome group and stable saved group together',
+      'Group rename updates the Chrome group and stable saved group together',
       folderRenameState.browserTitles.length === 2 && folderRenameState.folderVisible,
       JSON.stringify(folderRenameState),
     );
 
-    await openFolderMenu('Folder Renamed');
+    await openGroupMenu('Folder Renamed Alpha');
     await evaluate(client, `document.querySelector('#contextMenu .context-submenu-trigger')?.click()`);
     await waitFor(client, `(() => {
       const target = [...document.querySelectorAll('#contextMenu .context-submenu-panel button')]
@@ -20137,16 +20138,15 @@ ${error.message}`);
       const saved = stored.spaceTabsState || {};
       const sourceGroups = saved.spaceSnapshots?.[fixture.sourceSpaceId]?.groups || [];
       const targetGroups = saved.spaceSnapshots?.[fixture.targetSpaceId]?.groups || [];
-      const movedIds = new Set(${JSON.stringify(mutationSafetyReady.snapshotGroupIds)});
+      const movedIds = new Set([${JSON.stringify(mutationSafetyReady.snapshotGroupIds[0])}]);
       const sourceMatches = sourceGroups.filter((group) => movedIds.has(group.snapshotGroupId));
       const targetMatches = targetGroups.filter((group) => movedIds.has(group.snapshotGroupId));
-      const folderVisible = [...document.querySelectorAll('.folder-header strong')]
-        .some((node) => node.textContent === 'Folder Renamed');
+      const folderVisible = [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+        .some((node) => node.textContent === 'Folder Renamed Alpha');
       return document.querySelector('#activeSpaceName')?.textContent ===
           ${JSON.stringify(mutationSafetySpaces.target.name)} &&
-        fixture.groupIds.every((groupId) =>
-          saved.groupSpaces?.[String(groupId)] === fixture.targetSpaceId) &&
-        sourceMatches.length === 0 && targetMatches.length === 2 && folderVisible
+        saved.groupSpaces?.[String(fixture.groupIds[0])] === fixture.targetSpaceId &&
+        sourceMatches.length === 0 && targetMatches.length === 1 && folderVisible
         ? {
           activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
           sourceMatches: sourceMatches.length,
@@ -20167,30 +20167,34 @@ ${error.message}`);
       const fixture = ${JSON.stringify(mutationSafetyFixture)};
       const stored = await chrome.storage.local.get('spaceTabsState');
       const saved = stored.spaceTabsState || {};
-      const movedIds = new Set(${JSON.stringify(mutationSafetyReady.snapshotGroupIds)});
+      const movedIds = new Set([${JSON.stringify(mutationSafetyReady.snapshotGroupIds[0])}]);
       const targetMatches = (saved.spaceSnapshots?.[fixture.targetSpaceId]?.groups || [])
         .filter((group) => movedIds.has(group.snapshotGroupId));
       return document.querySelector('#activeSpaceName')?.textContent ===
           ${JSON.stringify(mutationSafetySpaces.target.name)} &&
-        [...document.querySelectorAll('.folder-header strong')]
-          .some((node) => node.textContent === 'Folder Renamed') &&
-        targetMatches.length === 2
+        [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+          .some((node) => node.textContent === 'Folder Renamed Alpha') &&
+        targetMatches.length === 1
         ? { activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
           targetTitles: targetMatches.map((group) => group.title) }
         : null;
     })()`, 15000);
     record(
-      'Moving a folder transfers every stable child group once and survives Workbench reload',
+      'Moving a group transfers its stable saved rows once and survives Workbench reload',
       folderMoveState.sourceMatches === 0 &&
-        folderMoveState.targetMatches.length === 2 &&
-        folderMoveReloadState.targetTitles.includes('Folder Renamed / Alpha') &&
-        folderMoveReloadState.targetTitles.includes('Folder Renamed / Beta'),
+        folderMoveState.targetMatches.length === 1 &&
+        folderMoveReloadState.targetTitles.includes('Folder Renamed Alpha'),
       JSON.stringify({ folderMoveState, folderMoveReloadState }),
     );
 
-    await openFolderMenu('Folder Renamed');
-    await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
-      .find((button) => button.textContent === 'Delete Group')?.click()`);
+    await evaluate(client, `(() => {
+      const card = [...document.querySelectorAll('#groupsList .group-card > .group-header')]
+        .find((item) => item.querySelector('.group-toggle h2')?.textContent === 'Folder Renamed Alpha');
+      const button = card?.querySelector('.group-actions button[title="Delete group"]');
+      if (!button) throw new Error('group delete button missing');
+      button.click();
+      return true;
+    })()`);
     const folderDeleteDialog = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open ||
           document.querySelector('#actionDialogTitle')?.textContent !== 'Delete Group') return null;
@@ -20212,10 +20216,10 @@ ${error.message}`);
           .map(([tabId]) => Number(tabId));
         const tabs = await Promise.all(liveTabIds.map((tabId) =>
           chrome.tabs.get(tabId).catch(() => null)));
-        return !document.querySelector('#actionDialog')?.open && liveTabIds.length === 2 &&
+        return !document.querySelector('#actionDialog')?.open && liveTabIds.length === 1 &&
           tabs.every(Boolean) &&
-          [...document.querySelectorAll('.folder-header strong')]
-            .some((node) => node.textContent === 'Folder Renamed')
+          [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+            .some((node) => node.textContent === 'Folder Renamed Alpha')
           ? { tabIds: tabs.map((tab) => tab.id), folderVisible: true }
           : null;
       })()`, 10000);
@@ -20242,9 +20246,9 @@ ${error.message}`);
             url: tab.url || tab.pendingUrl || '',
           } : null),
           groups: groups.map((group) => group ? { id: group.id, title: group.title } : null),
-          folderTitles: [...document.querySelectorAll('.folder-header strong')]
+          folderTitles: [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
             .map((node) => node.textContent || ''),
-          groupTitles: [...document.querySelectorAll('.group-header h2')]
+          groupTitles: [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
             .map((node) => node.textContent || ''),
           activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
           toast: document.querySelector('#workbenchToast')?.textContent || '',
@@ -20260,16 +20264,21 @@ ${error.message}`);
       });
     }
     record(
-      'Canceling folder deletion is a complete no-op after showing the exact destructive tab count',
-      folderDeleteDialog.message.includes('2 tabs') &&
-        folderDeleteDialog.confirmText === 'Delete 2 tabs' &&
-        folderDeleteCancelState.tabIds.length === 2,
+      'Canceling group deletion is a complete no-op after showing the exact destructive tab count',
+      folderDeleteDialog.message.includes('1 tab') &&
+        folderDeleteDialog.confirmText === 'Delete 1 tab' &&
+        folderDeleteCancelState.tabIds.length === 1,
       JSON.stringify({ folderDeleteDialog, folderDeleteCancelState }),
     );
 
-    await openFolderMenu('Folder Renamed');
-    await evaluate(client, `[...document.querySelectorAll('#contextMenu button')]
-      .find((button) => button.textContent === 'Delete Group')?.click()`);
+    await evaluate(client, `(() => {
+      const card = [...document.querySelectorAll('#groupsList .group-card > .group-header')]
+        .find((item) => item.querySelector('.group-toggle h2')?.textContent === 'Folder Renamed Alpha');
+      const button = card?.querySelector('.group-actions button[title="Delete group"]');
+      if (!button) throw new Error('group delete button missing (confirm pass)');
+      button.click();
+      return true;
+    })()`);
     await waitFor(client, `document.querySelector('#actionDialog')?.open &&
       document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
     await clickElementWithCDP(client, '#actionDialogConfirm');
@@ -20279,25 +20288,28 @@ ${error.message}`);
         chrome.storage.local.get('spaceTabsState'),
         Promise.all(${JSON.stringify(folderDeleteCancelState.tabIds)}.map((tabId) =>
           chrome.tabs.get(tabId).catch(() => null))),
-        Promise.all(fixture.groupIds.map((groupId) => chrome.tabGroups.get(groupId).catch(() => null))),
+        Promise.all([fixture.groupIds[0]].map((groupId) => chrome.tabGroups.get(groupId).catch(() => null))),
         chrome.tabs.get(fixture.pinnedTabId).catch(() => null),
       ]);
       const saved = stored.spaceTabsState || {};
-      const movedIds = new Set(${JSON.stringify(mutationSafetyReady.snapshotGroupIds)});
+      const movedIds = new Set([${JSON.stringify(mutationSafetyReady.snapshotGroupIds[0])}]);
       const targetRows = (saved.spaceSnapshots?.[fixture.targetSpaceId]?.groups || [])
         .filter((group) => movedIds.has(group.snapshotGroupId));
-      if (liveTabs.some(Boolean) || chromeGroups.some(Boolean) || targetRows.length || !pinned?.pinned) return null;
+      if (liveTabs.some(Boolean) || chromeGroups.some(Boolean) || targetRows.length ||
+          !pinned?.pinned) return null;
+      const folderVisible = [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+        .some((node) => node.textContent === 'Folder Renamed Alpha');
+      if (folderVisible) return null;
       return {
         liveTabsPresent: liveTabs.filter(Boolean).length,
         chromeGroupsPresent: chromeGroups.filter(Boolean).length,
         targetRows: targetRows.length,
         pinned: { id: pinned.id, pinned: pinned.pinned },
-        folderVisible: [...document.querySelectorAll('.folder-header strong')]
-          .some((node) => node.textContent === 'Folder Renamed'),
+        folderVisible,
       };
     })()`, 20000);
     record(
-      'Confirming folder deletion closes every child group exactly once and preserves unrelated pinned tabs',
+      'Confirming group deletion closes its tab exactly once and preserves unrelated pinned tabs',
       folderDeleteState.liveTabsPresent === 0 &&
         folderDeleteState.chromeGroupsPresent === 0 &&
         folderDeleteState.targetRows === 0 &&
@@ -21795,7 +21807,7 @@ ${error.message}`);
       const grouped = await chrome.runtime.sendMessage({
         type: 'tabs:group',
         tabIds: [created.tab.id],
-        title: 'Foreign Safety / Child',
+        title: 'Foreign Safety Child',
         color: 'purple',
         collapsed: false,
       });
@@ -21826,30 +21838,14 @@ ${error.message}`);
       .find((button) => button.title === ${JSON.stringify(mutationSafetySpaces.target.name)})?.click()`);
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent ===
       ${JSON.stringify(mutationSafetySpaces.target.name)}`, 12000);
-    const foreignSafetyActionSelector = `.folder-section .tab-row` +
+    const foreignSafetyActionSelector = `.group-card .tab-row` +
       `[data-foreign-window-tab-id="${foreignSafetyFixture.tabId}"]` +
       `[data-foreign-window-id="${foreignSafetyFixture.windowId}"] ` +
       'button[title="Show in other window"]';
     const ensureForeignSafetyClickTarget = async (phase) => {
-      const folderState = await waitFor(client, `(() => {
-        const header = [...document.querySelectorAll('.folder-header')]
-          .find((item) => item.querySelector('strong')?.textContent === 'Foreign Safety');
-        if (!header?.dataset.folderKey) return null;
-        return {
-          selector: '.folder-header[data-folder-key="' + CSS.escape(header.dataset.folderKey) + '"]',
-          expanded: header.getAttribute('aria-expanded') === 'true',
-          draggable: header.draggable,
-        };
-      })()`, 12000);
-      if (!folderState.expanded) {
-        await clickElementWithCDP(client, folderState.selector);
-        await waitFor(client, `document.querySelector(${JSON.stringify(folderState.selector)})
-          ?.getAttribute('aria-expanded') === 'true'`, 12000);
-      }
-
       const groupState = await waitFor(client, `(() => {
         const identity = ${JSON.stringify(foreignSafetyIdentity)};
-        const header = [...document.querySelectorAll('.folder-section .group-header')]
+        const header = [...document.querySelectorAll('#groupsList .group-card > .group-header')]
           .find((item) => {
             const groupKey = item.dataset.groupKey || item.closest('[data-group-key]')?.dataset.groupKey || '';
             return groupKey.endsWith(':' + identity.snapshotGroupId);
@@ -21920,16 +21916,10 @@ ${error.message}`);
         actionSelector,
         action: describeElement(action),
         row: describeElement(action?.closest('.tab-row')),
-        folderStates: [...document.querySelectorAll('.folder-section')].map((section) => ({
-          title: section.querySelector('.folder-header strong')?.textContent || '',
-          key: section.dataset.folderKey || '',
-          className: section.className,
-          ariaExpanded: section.querySelector('.folder-header')?.getAttribute('aria-expanded') || '',
-        })),
-        groupStates: [...document.querySelectorAll('.group-header')].map((header) => ({
+        groupStates: [...document.querySelectorAll('#groupsList .group-card > .group-header')].map((header) => ({
           title: header.querySelector('h2')?.textContent || '',
           groupKey: header.dataset.groupKey || header.closest('[data-group-key]')?.dataset.groupKey || '',
-          className: header.closest('.group-card, .folder-direct-group')?.className || '',
+          className: header.closest('.group-card')?.className || '',
           ariaExpanded: header.querySelector('.group-toggle')?.getAttribute('aria-expanded') || '',
         })),
         matchingRows: [...document.querySelectorAll('.tab-row')]
@@ -21968,9 +21958,9 @@ ${error.message}`);
         const identity = ${JSON.stringify(foreignSafetyIdentity)};
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = stored.spaceTabsState || {};
-        const header = [...document.querySelectorAll('.folder-header')]
-          .find((item) => item.querySelector('strong')?.textContent === 'Foreign Safety');
-        const row = [...document.querySelectorAll('.folder-section .tab-row')]
+        const header = [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+          .find((node) => node.textContent === 'Foreign Safety Child');
+        const row = [...document.querySelectorAll('.group-card .tab-row')]
           .find((item) => item.dataset.snapshotTabId === identity.snapshotTabId &&
             item.dataset.snapshotGroupId === identity.snapshotGroupId);
         const showButton = row?.querySelector('button[title="Show in other window"]');
@@ -22038,20 +22028,14 @@ ${error.message}`);
               url: row.url || '',
             })),
           })),
-          folderTitles: [...document.querySelectorAll('.folder-header strong')]
+          folderTitles: [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
             .map((node) => node.textContent || ''),
-          groupTitles: [...document.querySelectorAll('.group-header h2')]
+          groupTitles: [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
             .map((node) => node.textContent || ''),
-          folderStates: [...document.querySelectorAll('.folder-section')].map((section) => ({
-            title: section.querySelector('.folder-header strong')?.textContent || '',
-            className: section.className,
-            ariaExpanded: section.querySelector('.folder-header')?.getAttribute('aria-expanded') || '',
-            draggable: section.querySelector('.folder-header')?.draggable,
-          })),
-          groupStates: [...document.querySelectorAll('.group-header')].map((header) => ({
+          groupStates: [...document.querySelectorAll('#groupsList .group-card > .group-header')].map((header) => ({
             title: header.querySelector('h2')?.textContent || '',
             groupKey: header.dataset.groupKey || header.closest('[data-group-key]')?.dataset.groupKey || '',
-            className: header.closest('.group-card, .folder-direct-group')?.className || '',
+            className: header.closest('.group-card')?.className || '',
             ariaExpanded: header.querySelector('.group-toggle')?.getAttribute('aria-expanded') || '',
             draggable: header.draggable,
           })),
@@ -22127,7 +22111,7 @@ ${error.message}`);
       JSON.stringify(foreignContextAvailability),
     );
 
-    await openFolderMenu('Foreign Safety');
+    await openGroupMenu('Foreign Safety Child');
     const foreignFolderMenuState = await evaluate(client, `(() => {
       const menu = document.querySelector('#contextMenu');
       return {
@@ -22137,7 +22121,7 @@ ${error.message}`);
       };
     })()`);
     record(
-      'A folder containing a foreign-window live tab exposes notice-only actions and cannot be dragged',
+      'A group containing a foreign-window live tab exposes notice-only actions and cannot be dragged',
       !foreignFolderMenuState.hidden &&
         foreignFolderMenuState.notice.includes('other window') &&
         foreignFolderMenuState.buttonLabels.length === 0 &&
@@ -22265,13 +22249,13 @@ ${error.message}`);
         missingResponse: window.__foreignStaleMissingResponse,
         activationBefore: window.__foreignStaleActivationBefore,
         activationAfter: window.__foreignStaleActivationAfter,
-        folderPresent: [...document.querySelectorAll('.folder-header strong')]
-          .some((node) => node.textContent === 'Foreign Safety'),
+        folderPresent: [...document.querySelectorAll('#groupsList .group-card > .group-header h2')]
+          .some((node) => node.textContent === 'Foreign Safety Child'),
         showButtonPresent: Boolean(document.querySelector(
           ${JSON.stringify(foreignSafetyActionSelector)},
         )),
         dormantOpenButtonPresent: Boolean([...document.querySelectorAll(
-          '.folder-section .tab-row.dormant',
+          '.group-card .tab-row.dormant',
         )].find((row) => row.dataset.snapshotTabId ===
             ${JSON.stringify(foreignSafetyIdentity.snapshotTabId)})
           ?.querySelector('button[title="Open"]')),
@@ -22686,16 +22670,19 @@ ${error.message}`);
     // --- Hierarchy scenarios (state-backed parent-child groups) ---
     // Self-contained: seed two tags, drive the panel flows, assert both the
     // rendered tree and the persisted state. Runs before the summary so a
-    // failure still surfaces through `results`.
+    // failure still surfaces through `results`. Key variables hold RAW group
+    // keys; selectors quote them, JS comparisons JSON.stringify them.
     try {
       await reactivateWorkbenchForUi();
       progress('running group hierarchy scenarios');
-      await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
+      await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = stored.spaceTabsState || {};
+        await chrome.storage.session.remove('spaceTabsWindowState');
         await chrome.storage.local.set({
           spaceTabsState: {
             ...saved,
+            activeSpaceId: 'default',
             groupParents: {},
             emptyNodes: {},
             folderPaths: {},
@@ -22704,35 +22691,35 @@ ${error.message}`);
           },
         });
         return true;
-      })`);
+      }))()`);
       await evaluate(client, 'location.reload()');
-      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`, 20000);
 
-      const [parentTab, childTab] = await Promise.all([
-        chrome.tabs.create({ url: 'https://example.com/hierarchy-parent', active: false }),
-        chrome.tabs.create({ url: 'https://example.com/hierarchy-child', active: false }),
-      ]);
-      const parentGroupId = await chrome.tabs.group({ tabIds: [parentTab.id] });
-      await chrome.tabGroups.update(parentGroupId, { title: 'Hierarchy Parent', color: 'blue' });
-      const childGroupId = await chrome.tabs.group({ tabIds: [childTab.id] });
-      await chrome.tabGroups.update(childGroupId, { title: 'Hierarchy Child', color: 'red' });
-      const parentTabJson = JSON.stringify(parentTab.id);
-      const childTabJson = JSON.stringify(childTab.id);
-      const parentGroupIdJson = JSON.stringify(parentGroupId);
-      const childGroupIdJson = JSON.stringify(childGroupId);
-      await evaluate(client, 'location.reload()');
-      const parentKeyJson = await waitFor(client, `(async () => {
+      const hierarchyFixture = await evaluate(client, `(async () => {
+        const parentTab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-parent', active: false });
+        const childTab = await chrome.tabs.create({ url: 'https://example.com/hierarchy-child', active: false });
+        const parentGroupId = await chrome.tabs.group({ tabIds: [parentTab.id] });
+        await chrome.tabGroups.update(parentGroupId, { title: 'Hierarchy Parent', color: 'blue' });
+        const childGroupId = await chrome.tabs.group({ tabIds: [childTab.id] });
+        await chrome.tabGroups.update(childGroupId, { title: 'Hierarchy Child', color: 'red' });
+        return { parentTabId: parentTab.id, childTabId: childTab.id, parentGroupId, childGroupId };
+      })()`);
+      const parentTabId = hierarchyFixture.parentTabId;
+      const childTabId = hierarchyFixture.childTabId;
+      const childGroupId = hierarchyFixture.childGroupId;
+      const parentKey = await waitFor(client, `(() => {
         const card = [...document.querySelectorAll('#groupsList > .group-card')]
           .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Parent');
         return card?.dataset.groupKey || '';
       })()`, 20000);
-      if (!parentKeyJson) {
+      if (!parentKey) {
         throw new Error('Hierarchy setup did not render the seeded parent tag card');
       }
+      const parentKeySel = `.group-card[data-group-key="${parentKey}"]`;
 
       // 1. New Subgroup menu creates an empty child node nested under the tag.
       await evaluate(client, `(() => {
-        const header = document.querySelector('.group-card[data-group-key=${parentKeyJson}] > .group-header');
+        const header = document.querySelector('${parentKeySel} > .group-header');
         header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
         const menu = document.querySelector('#contextMenu');
         const item = [...menu.querySelectorAll('[role="menuitem"]')]
@@ -22741,7 +22728,7 @@ ${error.message}`);
         item.click();
         return true;
       })()`);
-      await waitFor(client, `!document.querySelector('#actionDialog')?.hidden`);
+      await waitFor(client, `document.querySelector('#actionDialog')?.open === true`);
       await evaluate(client, `(() => {
         const input = document.querySelector('#actionDialogInput');
         input.value = 'Hierarchy Sub';
@@ -22749,17 +22736,18 @@ ${error.message}`);
         return true;
       })()`);
       const nestedNodeState = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const nodes = stored.emptyNodes?.default || {};
-        const parents = stored.groupParents?.default || {};
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
         const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
-        if (!nodeKey || parents[nodeKey] !== ${parentKeyJson}) return null;
-        return { nodeKey, parents, nodes };
+        if (!nodeKey || parents[nodeKey] !== ${JSON.stringify(parentKey)}) return null;
+        return { nodeKey };
       })()`, 15000);
-      const nodeKeyJson = JSON.stringify(nestedNodeState.nodeKey);
-      const nestedRendered = await waitFor(client, `(async () => {
-        const parentCard = document.querySelector('.group-card[data-group-key=${parentKeyJson}]');
-        const child = parentCard?.querySelector(':scope > .group-children > .group-card[data-group-key=${nodeKeyJson}]');
+      const nodeKey = nestedNodeState.nodeKey;
+      const nodeKeySel = `.group-card[data-group-key="${nodeKey}"]`;
+      const nestedRendered = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        const child = parentCard?.querySelector(':scope > .group-children > ' + ${JSON.stringify(nodeKeySel)});
         return Boolean(child) && child.classList.contains('empty-node');
       })()`, 15000);
       record(
@@ -22769,28 +22757,39 @@ ${error.message}`);
       );
 
       // 2. Dragging a sibling tag onto the parent header nests it (state-only).
-      const childKeyJson = await waitFor(client, `(async () => {
+      const childKey = await waitFor(client, `(() => {
         const card = [...document.querySelectorAll('#groupsList > .group-card')]
           .find((node) => node.querySelector('h2')?.textContent === 'Hierarchy Child');
         return card?.dataset.groupKey || '';
       })()`, 15000);
-      if (!childKeyJson) {
+      if (!childKey) {
         throw new Error('Hierarchy setup did not render the seeded child tag card');
       }
+      const childKeySel = `.group-card[data-group-key="${childKey}"]`;
       await dragElementThroughUI(
         client,
-        `.group-card[data-group-key=${childKeyJson}] > .group-header`,
-        `.group-card[data-group-key=${parentKeyJson}] > .group-header`,
+        `${childKeySel} > .group-header`,
+        `${parentKeySel} > .group-header`,
         { targetYRatio: 0.5 },
       );
+      const __dragProbe = await evaluate(client, `(async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        return {
+          log: window.__hdropLog || [],
+          parents: saved.groupParents?.default || null,
+          order: (saved.groupOrder?.default || []).slice(0, 6),
+        };
+      })()`);
+      process.stderr.write(`[e2e] dragProbe ${JSON.stringify(__dragProbe)}\n`);
       const dragState = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const parents = stored.groupParents?.default || {};
-        if (parents[${childKeyJson}] !== ${parentKeyJson}) return null;
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
+        if (parents[${JSON.stringify(childKey)}] !== ${JSON.stringify(parentKey)}) return null;
         return parents;
       })()`, 15000);
       const chromeTitleAfterNest = await evaluate(client, `(async () => {
-        const group = await chrome.tabGroups.get(${childGroupIdJson});
+        const group = await chrome.tabGroups.get(${JSON.stringify(childGroupId)});
         return group?.title ?? '';
       })()`);
       record(
@@ -22802,14 +22801,14 @@ ${error.message}`);
       // 3. Dragging the child out via the root drop zone returns it to top level.
       await dragElementThroughUI(
         client,
-        `.group-card[data-group-key=${childKeyJson}] > .group-header`,
+        `${childKeySel} > .group-header`,
         '#hierarchyRootDropZone',
         { targetYRatio: 0.5 },
       );
       const rootState = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const parents = stored.groupParents?.default || {};
-        if (parents[${childKeyJson}]) return null;
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
+        if (parents[${JSON.stringify(childKey)}]) return null;
         return parents;
       })()`, 15000);
       record(
@@ -22818,31 +22817,10 @@ ${error.message}`);
         JSON.stringify({ rootState }),
       );
 
-      // 4. Empty node deletes non-destructively via the header × button.
+      // 4. Parent rename keeps child relations and single-segment titles.
+      await waitForLifecycleJournalToSettle(client);
       await evaluate(client, `(() => {
-        const card = document.querySelector('.group-card[data-group-key=${nodeKeyJson}]');
-        const button = card.querySelector('.group-actions button[title="Delete group"]');
-        if (!button) throw new Error('empty node delete button missing');
-        button.click();
-        return true;
-      })()`);
-      const nodeDeleted = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const nodes = stored.emptyNodes?.default || {};
-        const parents = stored.groupParents?.default || {};
-        if (nodes[${nodeKeyJson}] || parents[${nodeKeyJson}]) return null;
-        return true;
-      })()`, 15000);
-      const childStillOpen = await evaluate(client, `(await chrome.tabs.get(${childTabJson})).id`);
-      record(
-        'Hierarchy: empty node × deletes the node without touching sibling tags',
-        Boolean(nodeDeleted) && Number(childStillOpen) === Number(childTabJson),
-        JSON.stringify({ nodeDeleted, childStillOpen }),
-      );
-
-      // 5. Parent rename keeps child relations and single-segment titles.
-      await evaluate(client, `(() => {
-        const header = document.querySelector('.group-card[data-group-key=${parentKeyJson}] > .group-header');
+        const header = document.querySelector('${parentKeySel} > .group-header');
         header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
         const menu = document.querySelector('#contextMenu');
         const item = [...menu.querySelectorAll('[role="menuitem"]')]
@@ -22851,36 +22829,62 @@ ${error.message}`);
         item.click();
         return true;
       })()`);
-      await waitFor(client, `!document.querySelector('#actionDialog')?.hidden`);
+      await waitFor(client, `document.querySelector('#actionDialog')?.open === true &&
+        document.querySelector('#actionDialogTitle')?.textContent === 'Rename Group'`);
       await evaluate(client, `(() => {
         const input = document.querySelector('#actionDialogInput');
         input.value = 'Hierarchy Parent Renamed';
         document.querySelector('#actionDialogConfirm').click();
         return true;
       })()`);
+      // 改名链路含一次完整 refresh；立即轮询会与渲染竞争，先给一个稳定窗口。
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       const renamedState = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const nodes = stored.emptyNodes?.default || {};
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
         const nodeKey = Object.keys(nodes).find((key) => nodes[key].title === 'Hierarchy Sub');
-        const parents = stored.groupParents?.default || {};
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
         if (!nodeKey) return null;
-        const parentCard = document.querySelector('.group-card[data-group-key=${parentKeyJson}] h2');
+        const parentCard = document.querySelector(${JSON.stringify(`${parentKeySel} h2`)});
         return {
-          childStillNested: parents[nodeKey] === ${parentKeyJson},
+          childStillNested: parents[nodeKey] === ${JSON.stringify(parentKey)},
           parentTitle: parentCard?.textContent || '',
         };
-      })()`, 15000);
+      })()`, 30000);
       record(
         'Hierarchy: renaming the parent keeps its nested child',
         Boolean(renamedState?.childStillNested) && renamedState.parentTitle === 'Hierarchy Parent Renamed',
         JSON.stringify({ renamedState }),
       );
 
+      // 5. Empty node deletes non-destructively via the header × button.
+      await evaluate(client, `(() => {
+        const card = document.querySelector(${JSON.stringify(nodeKeySel)});
+        const button = card.querySelector('.group-actions button[title="Delete group"]');
+        if (!button) throw new Error('empty node delete button missing');
+        button.click();
+        return true;
+      })()`);
+      const nodeDeleted = await waitFor(client, `(async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
+        if (nodes[${JSON.stringify(nodeKey)}] || parents[${JSON.stringify(nodeKey)}]) return null;
+        return true;
+      })()`, 15000);
+      const childStillOpen = await evaluate(client, `(async () => (await chrome.tabs.get(${JSON.stringify(childTabId)})).id)()`);
+      record(
+        'Hierarchy: empty node × deletes the node without touching sibling tags',
+        Boolean(nodeDeleted) && Number(childStillOpen) === Number(childTabId),
+        JSON.stringify({ nodeDeleted, childStillOpen }),
+      );
+
       // 6. Legacy migration: " / " titles unwind into the state-backed tree.
-      await evaluate(client, `navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
+      await evaluate(client, `(async () => navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, async () => {
         const stored = await chrome.storage.local.get('spaceTabsState');
         const saved = stored.spaceTabsState || {};
         const snapshot = saved.spaceSnapshots?.default || { version: 1, updatedAt: 0, groups: [] };
+        await chrome.storage.session.remove('spaceTabsWindowState');
         await chrome.storage.local.set({
           spaceTabsState: {
             ...saved,
@@ -22904,21 +22908,21 @@ ${error.message}`);
           },
         });
         return true;
-      })`);
+      }))()`);
       await evaluate(client, 'location.reload()');
-      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+      await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default'`, 20000);
       const migrationState = await waitFor(client, `(async () => {
-        const stored = (await chrome.storage.local.get('spaceTabsState')).spaceTabsState || {};
-        const nodes = stored.emptyNodes?.default || {};
-        const parents = stored.groupParents?.default || {};
-        const savedTag = (stored.spaceSnapshots?.default?.groups || [])
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const nodes = stored.spaceTabsState?.emptyNodes?.default || {};
+        const parents = stored.spaceTabsState?.groupParents?.default || {};
+        const savedTag = (stored.spaceTabsState?.spaceSnapshots?.default?.groups || [])
           .find((group) => group.snapshotGroupId === 'hierarchy-legacy-tag');
         if (!savedTag) return null;
         const emptyPlace = Object.entries(nodes).find(([, node]) => node.title === 'Empty Place');
         const legacyFolder = Object.entries(nodes).find(([, node]) => node.title === 'Legacy Folder');
         if (!emptyPlace || !legacyFolder) return null;
         const savedNested = Object.entries(parents).some(([child, parent]) => (
-          child.startsWith('snapshot:') && String(savedTag.title || '').includes('Saved Tag') && parent === legacyFolder[0]
+          child.startsWith('snapshot:') && parent === legacyFolder[0]
         ));
         return {
           savedTagTitle: savedTag.title,
@@ -22933,12 +22937,16 @@ ${error.message}`);
         JSON.stringify({ migrationState }),
       );
 
-      await evaluate(client, `chrome.tabs.remove([${parentTabJson}, ${childTabJson}]).catch(() => {})`);
+      await evaluate(client, `chrome.tabs.remove([${JSON.stringify(parentTabId)}, ${JSON.stringify(childTabId)}]).catch(() => {})`);
+      progress('group hierarchy scenarios passed');
     } catch (hierarchyError) {
-      record('Hierarchy scenarios completed', false, String(hierarchyError?.message || hierarchyError));
+      record('Hierarchy scenarios completed', false, `${hierarchyError?.message || hierarchyError}\n${hierarchyError?.stack || ''}`.slice(0, 600));
     }
 
     const failures = results.filter((result) => !result.ok);
+    let coverage;
+    let coverageOutputPath = '';
+    let coverageCollectionError = null;
     let coverageGateError = null;
     if (coverageEnabled) {
       try {

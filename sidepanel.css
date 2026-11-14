@@ -446,13 +446,19 @@ h1 {
   border-radius: 10px;
 }
 
+/* 固定覆盖层：出现时不推动布局（否则拖拽目标 rect 位移、意图判定错位）。 */
 .hierarchy-root-drop-zone {
   display: none;
-  margin: 0 10px 8px;
+  position: fixed;
+  top: 8px;
+  left: 10px;
+  right: 10px;
+  z-index: 40;
   padding: 10px 12px;
   font-size: 12px;
   text-align: center;
   color: var(--group-color, #8a8580);
+  background: var(--surface, rgba(20, 18, 26, 0.92));
   border: 1px dashed color-mix(in srgb, currentColor 45%, transparent);
   border-radius: 12px;
 }

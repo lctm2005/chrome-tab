@@ -4748,8 +4748,8 @@ async function deleteGroup(group, options = {}) {
     if (!group || group.id === 'ungrouped') return;
     if (!group.emptyNode) assertGroupActionsAreLocal([group]);
     if (group.emptyNode) {
-      return withFreshSpaceStateMutation(() => {
-        const current = renderedGroupContexts.get(group.key);
+            return withFreshSpaceStateMutation(() => {
+                const current = renderedGroupContexts.get(group.key);
         if (!current?.emptyNode) {
           throw new Error('This group changed in another Space Tabs view. Try the action again.');
         }
@@ -4767,7 +4767,7 @@ async function deleteGroup(group, options = {}) {
     }), { windowBinding });
   }
   if (!group || group.id === 'ungrouped') return;
-  if (group.emptyNode) return deleteHierarchyNode(group, { windowBinding });
+    if (group.emptyNode) return deleteHierarchyNode(group, { windowBinding });
   assertGroupActionsAreLocal([group]);
   if (group.dormant) {
     const checkpoint = captureWorkspaceMemoryCheckpoint();
@@ -4805,11 +4805,11 @@ async function deleteGroup(group, options = {}) {
 // 删除空组节点（非破坏性）：该节点的空节点后代一并移除；真实子组升到被删
 // 节点的父级（根），不会连带删除任何 tab。
 async function deleteHierarchyNode(node, options = {}) {
-  const spaceId = state.activeSpaceId;
+    const spaceId = state.activeSpaceId;
   const parents = hierarchyParentsForSpace(spaceId);
   const removedSet = new Set([
     node.key,
-    ...descendantKeysOf(node.key, parents).filter((key) => String(key).startsWith('node:')),
+    ...[...descendantKeysOf(node.key, parents)].filter((key) => String(key).startsWith('node:')),
   ]);
   const oldParents = { ...parents };
   const nodeParent = oldParents[node.key] || '';
@@ -4828,10 +4828,10 @@ async function deleteHierarchyNode(node, options = {}) {
   state.groupOrder[spaceId] = (state.groupOrder[spaceId] || [])
     .filter((key) => !removedSet.has(key));
   delete state.collapsedGroups[node.key];
-  await saveState({ persistWindowState: false, windowBinding: options.windowBinding });
-  lastRenderedGroupsSignature = '';
+    await saveState({ persistWindowState: false, windowBinding: options.windowBinding });
+    lastRenderedGroupsSignature = '';
   render();
-  const message = `Deleted group "${node.displayTitle || node.title}".`;
+    const message = `Deleted group "${node.displayTitle || node.title}".`;
   setStatus(message);
   showStatusToast(message, 'success');
 }
@@ -6785,7 +6785,7 @@ function acceptGroupOrTabDrop(event, targetGroup) {
 }
 
 function dropGroup(event, target) {
-  if (dragState?.type !== 'group') return;
+    if (dragState?.type !== 'group') return;
   const targetKey = target?.key && target.key !== 'ungrouped' ? target.key : '';
   const moveOptions = {
     sourceSpaceId: dragState.sourceSpaceId,
@@ -6807,7 +6807,7 @@ function dropGroup(event, target) {
     if (plan.error !== 'no-op') setStatus(plan.message);
     return;
   }
-  runTask((windowBinding) => applyHierarchyDrop(plan, { ...moveOptions, windowBinding }));
+    runTask((windowBinding) => applyHierarchyDrop(plan, { ...moveOptions, windowBinding }));
 }
 
 function dropGroupOrTab(event, targetGroup) {
@@ -6858,10 +6858,10 @@ function dropHierarchyRoot(event) {
 // 折叠键按节点键稳定存在，不需要重命名；回滚只是内存恢复。
 async function applyHierarchyDrop(plan, options = {}) {
   const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
+    if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
-      assertFreshOrganizationDrag(options);
-      // 排队期间状态可能已变：用最新 parents/order 重算同一个拖放意图。
+            assertFreshOrganizationDrag(options);
+            // 排队期间状态可能已变：用最新 parents/order 重算同一个拖放意图。
       const freshPlan = planHierarchyDrop({
         parents: hierarchyParentsForSpace(),
         order: state.groupOrder[state.activeSpaceId] || [],
@@ -6871,10 +6871,10 @@ async function applyHierarchyDrop(plan, options = {}) {
         intent: plan.intent,
       });
       if (freshPlan.error) {
-        if (freshPlan.error !== 'no-op') setStatus(freshPlan.message);
+                if (freshPlan.error !== 'no-op') setStatus(freshPlan.message);
         return undefined;
       }
-      return applyHierarchyDrop(freshPlan, { ...options, stateLocked: true });
+            return applyHierarchyDrop(freshPlan, { ...options, stateLocked: true });
     }, { windowBinding });
   }
   const spaceId = state.activeSpaceId;
@@ -6885,11 +6885,11 @@ async function applyHierarchyDrop(plan, options = {}) {
       state.groupParents[spaceId] = plan.parents;
       state.groupOrder[spaceId] = plan.order;
       changed = true;
-    },
+          },
     checkpoint: () => (changed ? saveState({ persistWindowState: false, windowBinding }) : undefined),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
-  if (!changed) return;
+    if (!changed) return;
   await refreshTabs({ windowBinding });
 }
 
@@ -11012,13 +11012,13 @@ function runTask(task) {
   // Capture the Workbench host window synchronously with the user gesture.
   // A queued task must never inherit whichever window the host happens to be
   // attached to when an earlier task finally releases the queue.
-  const windowBinding = capturePanelWindowBinding();
+    const windowBinding = capturePanelWindowBinding();
   activeTaskCount += 1;
   const execute = async () => {
     try {
       await task(windowBinding);
     } catch (error) {
-      const message = formatAIError(error);
+            const message = formatAIError(error);
       setStatus(message);
       if (activeView === 'settings') setSettingsStatus(message);
       else if (workbenchMode) showStatusToast(message, 'error');
