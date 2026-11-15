@@ -23204,6 +23204,78 @@ ${error.message}`);
         JSON.stringify({ dormantChildAfterReload, restoredChildNested }),
       );
 
+      // 5c. 回归（用户报）：空组节点（不在 spaceView 的合成节点）折叠/展开，
+      // 以及顶部折叠按钮只收起根节点、不得把子组拍平到根级。
+      await waitForLifecycleJournalToSettle(client);
+      // A. 空节点 'Hierarchy Sub' 折叠/展开：collapsedGroups + 卡片 class。
+      await evaluate(client, `(() => {
+        const card = document.querySelector(${JSON.stringify(nodeKeySel)});
+        if (!card) throw new Error('empty node card missing before fold');
+        card.querySelector('.group-header').click();
+        return true;
+      })()`);
+      const emptyNodeFoldState = await waitFor(client, `(async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        const card = document.querySelector(${JSON.stringify(nodeKeySel)});
+        const collapsedStored = saved.collapsedGroups?.[${JSON.stringify(nodeKey)}];
+        if (collapsedStored !== true || !card?.classList.contains('collapsed')) return null;
+        return { collapsedStored, cardCollapsed: true };
+      })()`, 20000);
+      await evaluate(client, `(() => {
+        const card = document.querySelector(${JSON.stringify(nodeKeySel)});
+        card.querySelector('.group-header').click();
+        return true;
+      })()`);
+      const emptyNodeExpand = await waitFor(client, `(async () => {
+        const stored = await chrome.storage.local.get('spaceTabsState');
+        const saved = stored.spaceTabsState || {};
+        const card = document.querySelector(${JSON.stringify(nodeKeySel)});
+        const collapsedStored = saved.collapsedGroups?.[${JSON.stringify(nodeKey)}];
+        if (collapsedStored === true || card?.classList.contains('collapsed')) return null;
+        return { collapsedStored: collapsedStored ?? false, cardCollapsed: false };
+      })()`, 20000);
+      record(
+        'Hierarchy: empty-node parent folds/expands as display-only state',
+        Boolean(emptyNodeFoldState?.collapsedStored) && Boolean(emptyNodeExpand?.collapsedStored === false),
+        JSON.stringify({ emptyNodeFoldState, emptyNodeExpand }),
+      );
+
+      // B. 顶部折叠按钮：只渲染根节点且强制折叠，层级不拍平。
+      // 断言不变量：嵌套的子组不得出现在根级（之前 bug：全部节点拍平）、
+      // 父卡强制折叠、无 children 容器。根级其他卡（早前场景遗留的
+      // dormant snapshot 卡）本就在根级，不算拍平。
+      await evaluate(client, `document.querySelector('#collapseGroupsButton')?.click()`);
+      const spaceCollapsedFlat = await waitFor(client, `(() => {
+        const rootKeys = [...document.querySelectorAll('#groupsList > .group-card')]
+          .map((card) => card.dataset.groupKey);
+        const nestedKeys = [${JSON.stringify(liveChildKey)}, ${JSON.stringify(restoredChildNested?.key || '')}]
+          .filter(Boolean);
+        const flattened = nestedKeys.filter((key) => rootKeys.includes(key));
+        // 诊断信息只在成功时返回；失败路径一律 null 让 waitFor 重试
+        // （点击后渲染异步完成，立即取值会拿到折叠前的状态）。
+        if (flattened.length > 0) return null;
+        const parentCard = rootKeys.includes(${JSON.stringify(parentKey)})
+          ? document.querySelector(${JSON.stringify(parentKeySel)})
+          : null;
+        if (!parentCard?.classList.contains('collapsed')) return null;
+        // 强制折叠下不得渲染 children 容器
+        if (parentCard.querySelector(':scope > .group-children')) return null;
+        return { rootKeys, collapsedAll: true, flattened };
+      })()`, 20000);
+      await evaluate(client, `document.querySelector('#collapseGroupsButton')?.click()`);
+      const spaceExpandedRestored = await waitFor(client, `(() => {
+        const parentCard = document.querySelector(${JSON.stringify(parentKeySel)});
+        if (!parentCard || parentCard.classList.contains('collapsed')) return null;
+        const liveChildSel = '.group-card[data-group-key="' + ${JSON.stringify(liveChildKey)} + '"]';
+        return Boolean(parentCard.querySelector(':scope > .group-children > ' + liveChildSel));
+      })()`, 20000);
+      record(
+        'Hierarchy: space-level collapse keeps roots only (no flattening) and restores the tree',
+        Boolean(spaceCollapsedFlat?.collapsedAll) && Boolean(spaceExpandedRestored),
+        JSON.stringify({ spaceCollapsedFlat, spaceExpandedRestored }),
+      );
+
 
       // 6. Empty node deletes non-destructively via the header × button.
       await evaluate(client, `(() => {

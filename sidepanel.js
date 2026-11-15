@@ -2310,7 +2310,10 @@ function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
   const { nodes, parents } = visibleHierarchyNodes();
   const collapsedAll = isSpaceGroupsCollapsed();
-  const tree = collapsedAll ? [] : buildGroupTree(nodes, parents);
+  // 树始终按层级构建：顶部折叠按钮只收起显示（仅渲染根节点且强制折叠），
+  // 不把子组拍平到根级——之前 collapsedAll 时用扁平 nodes 渲染，子组全部
+  // 变成根级卡片（层级"消失"）。
+  const tree = buildGroupTree(nodes, parents);
   const signature = groupsRenderSignature({
     activeSpaceId: state.activeSpaceId,
     fileSchemeAccessAllowed,
@@ -2318,7 +2321,7 @@ function renderGroups() {
     collapsedGroups: state.collapsedGroups,
     selectedTabIds,
     groups: [...nodes, ungrouped],
-    hierarchy: collapsedAll ? {} : parents,
+    hierarchy: parents,
   });
   if (signature === lastRenderedGroupsSignature) return;
   lastRenderedGroupsSignature = signature;
@@ -2340,8 +2343,10 @@ function renderGroups() {
     return;
   }
 
-  const cards = (collapsedAll ? nodes.map((node) => ({ node, children: [] })) : tree)
-    .map((entry) => createGroupCard(entry.node ?? entry, 0, entry.children ?? []));
+  const cards = tree.map((root) => createGroupCard(
+    collapsedAll ? { ...root, collapsed: true, children: [] } : root,
+    0,
+  ));
   if (ungrouped) cards.push(createUngroupedSection(ungrouped));
   els.groupsList.replaceChildren(...cards);
 }
@@ -11256,7 +11261,10 @@ function currentGroupForMutation(reference) {
 // tab id/url）在这里会误伤——后台任何新 tab 入组都会让旧渲染指纹失配，把一次
 // 无害的折叠变成 "This group changed in another Space Tabs view" 报错。
 // 显示切换只需要"辨认出同一个组"：优先 snapshotGroupId（跨物化/快照重排稳定），
-// 其次渲染键（live 组折叠不销毁 chrome 组，键稳定），都不命中才报错。
+// 其次渲染键（live 组折叠不销毁 chrome 组，键稳定）。空组节点不在 spaceView
+// （visibleHierarchyNodes 的合成节点），折叠空组直接用渲染期节点——display
+// toggle 只翻 collapsed，不触碰 Chrome 组，渲染上下文刚由 withFreshSpaceStateMutation
+// 重建过，即当前真身。
 function currentGroupForDisplayToggle(reference) {
   const snapshotGroupId = String(reference?.snapshotGroupId || '');
   const bySnapshot = snapshotGroupId
@@ -11266,6 +11274,8 @@ function currentGroupForDisplayToggle(reference) {
   const candidates = bySnapshot.length === 1 ? bySnapshot : byKey;
   const current = candidates.length === 1 ? candidates[0] : null;
   if (!current) {
+    const rendered = renderedGroupContexts.get(reference?.key);
+    if (rendered?.emptyNode) return rendered;
     throw new Error('This group changed in another Space Tabs view. Try the action again.');
   }
   return current;

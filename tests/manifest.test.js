@@ -1454,7 +1454,7 @@ test('shared render signatures cover panel dependencies without invalidating eve
   );
 
   assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
-  assert.match(source, /buildGroupTree\(nodes, parents\)[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}collapsedGroups: state\.collapsedGroups,[\s\S]{0,900}selectedTabIds,[\s\S]{0,900}hierarchy: collapsedAll \? \{\} : parents/);
+  assert.match(source, /buildGroupTree\(nodes, parents\)[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}collapsedGroups: state\.collapsedGroups,[\s\S]{0,900}selectedTabIds,[\s\S]{0,900}hierarchy: parents/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
   assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];
