@@ -1,8 +1,9 @@
+import { runBatchTabMoveScenarios } from './e2e-batch-tab-move.mjs';
 import assert from 'node:assert/strict';
 
 // Shared by preview and real-extension smoke runs. Seed the previous schema,
 // then exercise actual panel controls instead of calling implementation helpers.
-export async function runFlatTagScenarios({ client, evaluate, waitFor, drag }) {
+export async function runFlatTagScenarios({ client, evaluate, waitFor, drag, fixtureUrl }) {
   const io = "const extension = Boolean(chrome?.runtime?.id);"
     + "const read = async () => extension ? (await chrome.storage.local.get('spaceTabsState')).spaceTabsState : JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState;"
     + "const write = async (state) => extension ? chrome.storage.local.set({spaceTabsState:state}) : localStorage.setItem('spaceTabsState', JSON.stringify({spaceTabsState:state}));";
@@ -116,5 +117,6 @@ export async function runFlatTagScenarios({ client, evaluate, waitFor, drag }) {
   await waitFor(client, "document.querySelector('#actionDialog')?.open");
   await run("document.querySelector('#actionDialogInput').value='Created Flat Tag'; document.querySelector('#actionDialogConfirm').click();");
   await check("const state=await read(); return Object.values(state.emptyNodes.default||{}).some(node=>node.title==='Created Flat Tag') && !Object.hasOwn(state,'groupParents');");
-  return { ok: true, checks: ['legacy upgrade', 'flat rendering', 'expand one after collapse all', 'expand all live and saved rows', 'expansion survives reload without opening tabs', 'saved-only expansion does not restore tabs', 'display checkpoint rolls back native groups', 'slash titles', 'drag sorting', 'no subgroup menu', 'empty rename', 'reload', 'independent deletion', 'independent Space move', 'new Tag'] };
+  const batchChecks = await runBatchTabMoveScenarios({ client, evaluate, waitFor, drag, fixtureUrl });
+  return { ok: true, checks: [...batchChecks, 'legacy upgrade', 'flat rendering', 'expand one after collapse all', 'expand all live and saved rows', 'expansion survives reload without opening tabs', 'saved-only expansion does not restore tabs', 'display checkpoint rolls back native groups', 'slash titles', 'drag sorting', 'no subgroup menu', 'empty rename', 'reload', 'independent deletion', 'independent Space move', 'new Tag'] };
 }

@@ -20,7 +20,7 @@ involved and what will change before anything is applied.
 - Close group: turn an active Tag into a saved, inactive Tag without deleting its pages. Open group restores its saved pages; Delete Group remains a separate action.
 - Recovery: use the 10-second Undo prompt after Tidy or restore; Arc import has a dedicated Undo. Undo stops safely if the affected portable content changed afterward.
 - Command palette: switch Spaces and find tabs with `Cmd/Ctrl+K`.
-- Drag sorting: reorder tab groups and tabs inside a Space.
+- Drag sorting: reorder tab groups and tabs inside a Space. Shift-select multiple tabs and drag the selection together into an existing, empty, or saved Tag, or into Ungrouped.
 - Multi-select grouping: select multiple tabs with `Cmd/Ctrl` or `Shift`, then right-click to group them.
 - Portable backup: export and restore Spaces and saved tabs without API keys. Restore checks an 8 MB Chrome-storage safety budget before writing and rolls back on failure.
 - Local-first privacy: no account, hosted sync service, or persistent script running on every website.

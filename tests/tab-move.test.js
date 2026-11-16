@@ -5,6 +5,7 @@ import {
   moveIndexAfterTabs,
   moveIndexBeforeTab,
   planMixedTabDropOrder,
+  planMixedTabBatchDropOrder,
   planTabDropOrder,
   tabOrderAfterDuplicate,
 } from '../src/shared/tab-move.js';
@@ -289,4 +290,46 @@ test('mixed drop planning rejects ambiguous or malformed visible identities with
   ]) {
     assert.deepEqual(planMixedTabDropOrder(input), invalidPlan);
   }
+});
+
+test('batch drops preserve display order as one block among live and saved rows', () => {
+  const moving = [live(3), live(1)];
+  const saved = dormant(8);
+  const target = [live(5), saved, live(9)];
+  const result = planMixedTabBatchDropOrder({ tabs: moving, targetTabs: target, beforeTab: saved });
+  assert.equal(result.status, 'move');
+  assert.deepEqual(result.visibleTabs, [target[0], ...moving, saved, target[2]]);
+  assert.deepEqual(result.order, [5, 3, 1, 9]);
+  assert.equal(result.anchorTabId, 9);
+  assert.equal(result.edge, 'before');
+  assert.deepEqual(target, [live(5), saved, live(9)]);
+  const appended = planMixedTabBatchDropOrder({ tabs: moving, targetTabs: target });
+  assert.deepEqual(appended.order, [5, 9, 3, 1]);
+  assert.equal(appended.anchorTabId, 9);
+  assert.equal(appended.edge, 'after');
+});
+
+test('batch drops work in the same group, an empty group and a saved-only group', () => {
+  const rows = [live(1), live(2), live(3), live(4)];
+  assert.deepEqual(planMixedTabBatchDropOrder({ tabs: [rows[0], rows[2]], targetTabs: rows }).order, [2, 4, 1, 3]);
+  assert.deepEqual(planMixedTabBatchDropOrder({ tabs: rows.slice(0, 2), targetTabs: [] }).order, [1, 2]);
+  const saved = dormant(9);
+  const result = planMixedTabBatchDropOrder({ tabs: rows.slice(0, 2), targetTabs: [saved], beforeTab: saved });
+  assert.deepEqual(result.visibleTabs, [rows[0], rows[1], saved]);
+  assert.equal(result.anchorTabId, null);
+  assert.equal(result.edge, null);
+  assert.equal(planMixedTabBatchDropOrder({ tabs: rows.slice(0, 2), targetTabs: rows, beforeTab: rows[1] }).status, 'noop');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: rows.slice(2), targetTabs: rows }).status, 'noop');
+});
+
+test('batch drops reject stale targets, ambiguous identities and invalid selections', () => {
+  assert.equal(planMixedTabBatchDropOrder().status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: null }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [live(1), live(1)] }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [dormant(1)] }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [live(1)], targetTabs: [live(2), live(2)] }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [live(1)], targetTabs: [{}] }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [live(1)], beforeTab: {} }).status, 'invalid');
+  assert.equal(planMixedTabBatchDropOrder({ tabs: [live(1)], beforeTab: live(9) }).status, 'stale');
+  assert.deepEqual(planMixedTabBatchDropOrder({ tabs: [live(1)], targetTabs: null }).order, [1]);
 });

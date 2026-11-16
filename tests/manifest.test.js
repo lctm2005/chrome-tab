@@ -1536,7 +1536,7 @@ test('Chrome group mutations and Auto Group Undo rollback browser side effects b
   assert.match(source, /async function reorderTab\([\s\S]*targetNeedsBatchMaterialization[\s\S]*captureTabGroupMembership[\s\S]*runChromeGroupMutationTransaction[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)/);
   assert.match(source, /planMixedTabDropOrder\(\{[\s\S]*targetTabs: targetGroup\.tabs,[\s\S]*beforeTab,[\s\S]*dropPlan\.status === 'stale'[\s\S]*projectSnapshotTabOrder\([\s\S]*dropPlan\.visibleTabs[\s\S]*anchorTabId: dropPlan\.anchorTabId,[\s\S]*edge: dropPlan\.edge/);
   assert.match(source, /if \(\(!tab\.dormant[\s\S]*\|\| tab\.dormant\) \{[\s\S]*dropTabBefore\(event, tab, groupKey\)/);
-  assert.match(source, /import \{ planMixedTabDropOrder, tabOrderAfterDuplicate \} from '\.\/src\/shared\/tab-move\.js'/);
+  assert.match(source, /import \{ planMixedTabBatchDropOrder, planMixedTabDropOrder, tabOrderAfterDuplicate \} from '\.\/src\/shared\/tab-move\.js'/);
   assert.match(source, /projectSnapshotTabOrder,[\s\S]*projectSnapshotTabsRemoval/);
   assert.doesNotMatch(source, /planTabDropOrder/);
   assert.match(source, /async function undoLastOperation\([\s\S]*rollback\.live = captureLiveOrganization[\s\S]*restoreAutoGroupUndoAfterFailure/);

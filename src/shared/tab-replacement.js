@@ -46,7 +46,8 @@ export function migratePanelTabIdReplacement(model = {}, replacement = {}) {
     tabs: liveTabs.tabs,
     foreignLiveTabs: foreignLiveTabs.tabs,
     dragInvalidated: source.dragState?.type === 'tab' &&
-      tabIdEquals(source.dragState.tabId, removedTabId),
+      (tabIdEquals(source.dragState.tabId, removedTabId) ||
+        (source.dragState.tabIds || []).some((id) => tabIdEquals(id, removedTabId))),
     selectedTabIds: selection.selectedTabIds,
     selectionAnchorTabId: selection.anchorTabId,
     recentlyOpenedDormantTabs: migrateDormantTabs(

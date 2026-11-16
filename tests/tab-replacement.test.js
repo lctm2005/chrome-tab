@@ -294,3 +294,12 @@ test('null metadata never aliases the legitimate Chrome tab id zero', () => {
   assert.deepEqual(result.syntheticPlaceholderTabIds, [1]);
   assert.equal(result.dragInvalidated, false);
 });
+
+test('replacing any member of a multi-tab drag invalidates the complete drag', () => {
+  const result = migratePanelTabIdReplacement({
+    tabs: [{ id: 7 }, { id: 8 }], selectedTabIds: new Set([7, 8]),
+    dragState: { type: 'tab', tabId: 7, tabIds: [7, 8] },
+  }, { removedTabId: 8, addedTabId: 9 });
+  assert.equal(result.dragInvalidated, true);
+  assert.deepEqual(result.selectedTabIds, [7, 9]);
+});

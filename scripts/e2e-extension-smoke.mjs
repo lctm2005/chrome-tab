@@ -1686,7 +1686,7 @@ async function main() {
     if (process.env.E2E_FLAT_TAGS_ONLY === '1') {
       await waitFor(client, "document.documentElement.dataset.initialized === 'true'", 15000);
       console.log(JSON.stringify(await runFlatTagScenarios({
-        client, evaluate, waitFor, drag: dragElementThroughUI,
+        client, evaluate, waitFor, drag: dragElementThroughUI, fixtureUrl: askFixtureServer.sourceAlphaUrl,
       }), null, 2));
       return;
     }
@@ -22760,7 +22760,7 @@ ${error.message}`);
 
     try {
       await reactivateWorkbenchForUi();
-      const result = await runFlatTagScenarios({ client, evaluate, waitFor, drag: dragElementThroughUI });
+      const result = await runFlatTagScenarios({ client, evaluate, waitFor, drag: dragElementThroughUI, fixtureUrl: askFixtureServer.sourceAlphaUrl });
       record('Flat Tags upgrade and independent actions', result.ok, JSON.stringify(result));
     } catch (error) {
       record('Flat Tags upgrade and independent actions', false, error.stack || error.message);

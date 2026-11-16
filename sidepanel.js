@@ -168,7 +168,7 @@ import {
   tabCloseGuardFor,
   tabMatchesDestructiveTarget,
 } from './src/shared/tab-close-transaction.js';
-import { planMixedTabDropOrder, tabOrderAfterDuplicate } from './src/shared/tab-move.js';
+import { planMixedTabBatchDropOrder, planMixedTabDropOrder, tabOrderAfterDuplicate } from './src/shared/tab-move.js';
 import { migratePanelTabIdReplacement } from './src/shared/tab-replacement.js';
 import {
   bindLiveTabsToSnapshot,
@@ -7035,9 +7035,24 @@ function startTabDrag(event, tab, groupKey) {
     setStatus('Unpin this tab in Chrome before moving or grouping it.');
     return;
   }
+  const requested = new Set(selectionForContextMenu({
+    selectedTabIds: [...selectedTabIds], clickedTabId: tab.id,
+  }));
+  const tabIds = currentOrderedTabIds().filter((id) => requested.has(id));
+  const selection = resolveFreshTabSelection({
+    requestedTabIds: tabIds, tabs,
+    isEligible: (item) => !item.pinned && !item.dormant && !isForeignWindowTab(item),
+  });
+  if (selection.status !== 'ready') {
+    event.preventDefault();
+    setStatus('Some selected tabs cannot be moved. Unpin them or select the open tabs again.');
+    return;
+  }
   const organization = organizationForCurrentSpaceState(state.activeSpaceId);
   dragState = {
     type: 'tab',
+    tabIds,
+    expectedUrls: Object.fromEntries(selection.selectedTabs.map((item) => [item.id, item.url])),
     tabId: tab.id,
     tabUrl: tab.url,
     groupKey,
@@ -7058,6 +7073,8 @@ function dropTabBefore(event, targetTab, targetGroupKey) {
   if (dragState?.type !== 'tab') return;
   const tabId = dragState.tabId;
   const moveOptions = {
+    tabIds: [...(dragState.tabIds || [dragState.tabId])],
+    expectedUrls: { ...dragState.expectedUrls },
     expectedUrl: dragState.tabUrl,
     sourceSpaceId: dragState.sourceSpaceId,
     expectedFingerprint: dragState.organizationFingerprint,
@@ -7074,6 +7091,22 @@ function dropTabBefore(event, targetTab, targetGroupKey) {
 function dropTabAtEnd(event, targetGroup) {
   const targetRow = event.target.closest('.tab-row');
   if (dragState?.type !== 'tab' || (targetRow && !targetRow.classList.contains('dormant'))) return;
+  if (dragState.tabIds?.length > 1) {
+    const moveOptions = {
+      tabIds: [...dragState.tabIds],
+      expectedUrls: { ...dragState.expectedUrls },
+      sourceSpaceId: dragState.sourceSpaceId,
+      expectedFingerprint: dragState.organizationFingerprint,
+    };
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.classList.remove('drag-over');
+    clearDragState();
+    runTask((windowBinding) => reorderSelectedTabs(moveOptions.tabIds, targetGroup.key, null, {
+      ...moveOptions, windowBinding,
+    }));
+    return;
+  }
   if (targetGroup?.emptyNode) {
     const tabId = dragState.tabId;
     const tabUrl = dragState.tabUrl;
@@ -7094,6 +7127,8 @@ function dropTabAtEnd(event, targetGroup) {
   const tabId = dragState.tabId;
   const moveOptions = {
     targetGroup,
+    tabIds: [...(dragState.tabIds || [dragState.tabId])],
+    expectedUrls: { ...dragState.expectedUrls },
     expectedUrl: dragState.tabUrl,
     sourceSpaceId: dragState.sourceSpaceId,
     expectedFingerprint: dragState.organizationFingerprint,
@@ -7108,6 +7143,9 @@ function dropTabAtEnd(event, targetGroup) {
 }
 
 async function reorderTab(tabId, targetGroupKey, beforeTab, options = {}) {
+  if (options.tabIds?.length > 1) {
+    return reorderSelectedTabs(options.tabIds, targetGroupKey, beforeTab, options);
+  }
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
@@ -7233,6 +7271,103 @@ async function reorderTab(tabId, targetGroupKey, beforeTab, options = {}) {
       }
     },
     checkpoint: () => saveState({ persistWindowState: false }),
+    rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
+  });
+  await refreshTabs({ reloadDormant: true, windowBinding });
+}
+
+async function reorderSelectedTabs(tabIds, targetGroupKey, beforeTab, options = {}) {
+  const windowBinding = options.windowBinding;
+  if (!options.stateLocked) {
+    return withFreshSpaceStateMutation(() => {
+      assertFreshOrganizationDrag(options);
+      return reorderSelectedTabs(tabIds, targetGroupKey, beforeTab, { ...options, stateLocked: true });
+    }, { windowBinding });
+  }
+  const selection = resolveFreshTabSelection({
+    requestedTabIds: tabIds, tabs,
+    isEligible: (tab) => !tab.pinned && !isForeignWindowTab(tab) &&
+      tabBelongsToSpace(tab, state.activeSpaceId) &&
+      (!Object.hasOwn(options.expectedUrls || {}, tab.id) || tab.url === options.expectedUrls[tab.id]),
+  });
+  if (selection.status !== 'ready') throw new Error('The selected tabs changed while dragging. No tabs were moved.');
+  const movingTabs = selection.selectedTabs;
+  const movingIds = movingTabs.map((tab) => tab.id);
+  const movingSet = new Set(movingIds);
+  const targetGroup = [...visibleGroups(), ...spaceView.filter((group) => group.key === 'ungrouped')]
+    .find((group) => group.key === targetGroupKey);
+  if (!targetGroup || groupHasForeignLiveTabs(targetGroup)) {
+    throw new Error('The target group changed while dragging. No tabs were moved.');
+  }
+  const dropPlan = planMixedTabBatchDropOrder({ tabs: movingTabs, targetTabs: targetGroup.tabs, beforeTab });
+  if (dropPlan.status === 'noop') return;
+  if (dropPlan.status !== 'move') throw new Error('The target tab changed while dragging. No tabs were moved.');
+  const sourceGroups = spaceView.filter((group) => liveTabsForOrdering(group).some((tab) => movingSet.has(tab.id)));
+  const materialize = targetGroupKey !== 'ungrouped' && groupIdFromKey(targetGroupKey) === null;
+  const rollback = captureChromeGroupMutationRollback();
+  rollback.membership = captureTabGroupMembership(tabs, spaceView, [
+    ...movingIds, ...(materialize ? liveTabsForOrdering(targetGroup).map((tab) => tab.id) : []),
+  ]);
+  await runChromeGroupMutationTransaction({
+    apply: async () => {
+      let targetOrderKey = targetGroupKey;
+      if (targetGroupKey === 'ungrouped') {
+        const groupedIds = movingTabs.filter(isGroupedTab).map((tab) => tab.id);
+        if (groupedIds.length) {
+          const result = await send('tabs:ungroup', { tabIds: groupedIds }, { windowBinding });
+          if (result.missing) throw new Error('A selected tab is no longer open.');
+        }
+        clearLocalTabGrouping(movingIds);
+        for (const id of movingIds) state.tabSpaces[id] = state.activeSpaceId;
+      } else {
+        let groupId = groupIdFromKey(targetGroupKey);
+        if (materialize) {
+          groupId = await createChromeGroup([
+            ...liveTabsForOrdering(targetGroup).map((tab) => tab.id), ...movingIds,
+          ], {
+            title: targetGroup.title, color: targetGroup.color || nextGroupColor(),
+            collapsed: Boolean(targetGroup.collapsed), sourceKey: targetGroupKey, windowBinding,
+          });
+        } else {
+          const joiningIds = movingTabs.filter((tab) => Number(tab.groupId) !== groupId).map((tab) => tab.id);
+          if (joiningIds.length) groupId = await addTabsToChromeGroup(groupId, joiningIds, state.activeSpaceId, { windowBinding });
+          else {
+            bindChromeGroup(groupId, state.activeSpaceId);
+            clearLocalTabGrouping(movingIds);
+          }
+        }
+        if (groupId === null) throw new Error('Chrome could not move the selected tabs into the target group.');
+        targetOrderKey = 'group:' + groupId;
+      }
+      removeDormantSnapshotTabsForOpenTabs(movingTabs);
+      const order = ensureTabOrderForSpace(state.activeSpaceId);
+      for (const source of sourceGroups) {
+        if (source.key === targetOrderKey) continue;
+        order[source.key] = (order[source.key] || liveTabsForOrdering(source).map((tab) => tab.id))
+          .filter((id) => !movingSet.has(id));
+      }
+      order[targetOrderKey] = dropPlan.order;
+      const snapshot = activeSpaceSnapshot();
+      if (targetGroup.tabs.some((tab) => tab.dormant) || findDormantSnapshotGroupIndex(snapshot, targetGroup) >= 0) {
+        const next = projectSnapshotTabOrder(snapshot, targetGroup, dropPlan.visibleTabs, Date.now());
+        if (!next) throw new Error('The saved tab order changed while dragging.');
+        state.spaceSnapshots[state.activeSpaceId] = next;
+        dormantSpaceViewSpaceId = '';
+        lastRenderedGroupsSignature = '';
+      }
+      const anchorTabId = dropPlan.anchorTabId ?? movingIds[0];
+      const edge = dropPlan.edge || 'after';
+      const orderedIds = edge === 'before' ? movingIds : [...movingIds].reverse();
+      for (const id of orderedIds) {
+        if (id === anchorTabId) continue;
+        const moved = await send('tabs:moveRelative', {
+          tabId: id, anchorTabId, edge, expectedGroupId: groupIdFromKey(targetOrderKey) ?? -1,
+        }, { windowBinding });
+        if (moved.missing) throw new Error('A selected tab or its destination is no longer open.');
+      }
+      selectedTabIds = new Set(movingIds);
+    },
+    checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
   await refreshTabs({ reloadDormant: true, windowBinding });

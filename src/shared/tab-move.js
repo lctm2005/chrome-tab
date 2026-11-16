@@ -130,6 +130,34 @@ export function planMixedTabDropOrder({
 }
 
 /**
+ * Moves a selection as one contiguous block in display order, including when
+ * saved-only rows are interleaved with live rows in the destination.
+ */
+export function planMixedTabBatchDropOrder({ tabs = [], targetTabs = [], beforeTab = null } = {}) {
+  const moving = Array.isArray(tabs) ? tabs : [];
+  const ids = moving.map(liveTabId);
+  const sourceKeys = new Set(moving.map(visibleTabKey));
+  const rows = Array.isArray(targetTabs) ? targetTabs : [];
+  const keys = rows.map(visibleTabKey);
+  const originalOrder = rows.map(liveTabId).filter((id) => id !== null);
+  if (!moving.length || ids.some((id) => id === null) || sourceKeys.size !== moving.length ||
+      keys.some((key) => !key) || new Set(keys).size !== keys.length) return invalidMixedDropPlan();
+  const beforeKey = beforeTab === null ? '' : visibleTabKey(beforeTab);
+  if (beforeTab !== null && !beforeKey) return invalidMixedDropPlan();
+  if (beforeKey && !keys.includes(beforeKey)) return mixedDropPlan('stale', rows, originalOrder, null, null);
+  if (sourceKeys.has(beforeKey)) return mixedDropPlan('noop', rows, originalOrder, null, null);
+  const nextRows = rows.filter((row) => !sourceKeys.has(visibleTabKey(row)));
+  const insertAt = beforeKey ? nextRows.findIndex((row) => visibleTabKey(row) === beforeKey) : nextRows.length;
+  nextRows.splice(insertAt, 0, ...moving);
+  const status = sameValueOrder(nextRows.map(visibleTabKey), keys) ? 'noop' : 'move';
+  const following = nextRows.slice(insertAt + moving.length).find((row) => liveTabId(row) !== null);
+  const preceding = nextRows.slice(0, insertAt).reverse().find((row) => liveTabId(row) !== null);
+  return mixedDropPlan(status, nextRows, nextRows.map(liveTabId).filter((id) => id !== null),
+    following ? liveTabId(following) : preceding ? liveTabId(preceding) : null,
+    following ? 'before' : preceding ? 'after' : null);
+}
+
+/**
  * Places a newly duplicated Chrome tab immediately after the source in the
  * order the user can currently see. The visible order is authoritative here:
  * a saved order can temporarily omit a newly adopted or replaced source tab,
