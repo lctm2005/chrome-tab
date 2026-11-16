@@ -35,7 +35,7 @@ export async function runFlatTagScenarios({ client, evaluate, waitFor, drag }) {
     + "state.groupSpaces = {[ids[0]]:'default',[ids[1]]:'default'};"
     + "state.emptyNodes = {default:{'node:parent':{title:'Empty Parent',color:'blue'},'node:child':{title:'Empty Child',color:'green'}}};"
     + "state.groupParents = {default:{['group:'+ids[1]]:'group:'+ids[0],'node:child':'node:parent','sgid:flat-saved':'group:'+ids[0]}};"
-    + "state.collapsedGroups = {'node:parent':true};"
+    + "state.collapsedGroups = {'node:parent':true}; state.collapsedSpaceGroups={default:true};"
     + "state.groupOrder={default:['group:'+ids[1],'group:'+ids[0],'node:parent','node:child']};"
     + "state.spaceSnapshots={default:{version:1,groups:[{title:'Work / Docs',color:'purple',collapsed:true,snapshotGroupId:'flat-saved',tabs:[{title:'Saved Reference',url:'https://example.com/flat-saved',snapshotTabId:'flat-saved-tab'}]}]}};"
     + "await write(state); return {parent:'group:'+ids[0],child:'group:'+ids[1],tabIds};"
@@ -48,6 +48,35 @@ export async function runFlatTagScenarios({ client, evaluate, waitFor, drag }) {
     + " && !Object.hasOwn(state,'groupParents') && !document.querySelector('.group-children') ? {titles,version:state.version} : null;"
   );
   assert.equal(flat.version, 13);
+  const liveHeader = card(fixture.parent) + ' > .group-header';
+  await run("document.querySelector(" + JSON.stringify(liveHeader) + ").click();");
+  await check("return document.querySelector(" + JSON.stringify(card(fixture.parent) + ' .tab-row') + ") && !document.querySelector('#collapseGroupsButton').classList.contains('active');");
+  const otherCollapsed = await run("return document.querySelector(" + JSON.stringify(card(fixture.child)) + ").classList.contains('collapsed');");
+  assert.equal(otherCollapsed, true);
+  await run("document.querySelector('#collapseGroupsButton').click();");
+  await check("return document.querySelector('#collapseGroupsButton').classList.contains('active') && document.querySelectorAll('#groupsList > .group-card .tab-row').length===0;");
+  const tabCountBeforeExpand = await run("return extension ? (await chrome.tabs.query({})).length : JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime')).tabs.length;");
+  await run("document.querySelector('#collapseGroupsButton').click();");
+  await check("return !document.querySelector('#collapseGroupsButton').classList.contains('active') && [...document.querySelectorAll('#groupsList > .group-card')].every(card=>!card.classList.contains('collapsed')) && [...document.querySelectorAll('#groupsList > .group-card .tab-row')].some(row=>row.textContent.includes('Saved Reference'));");
+  const tabCountAfterExpand = await run("return extension ? (await chrome.tabs.query({})).length : JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime')).tabs.length;");
+  assert.equal(tabCountAfterExpand, tabCountBeforeExpand);
+  await reload();
+  await check("return [...document.querySelectorAll('#groupsList > .group-card')].every(card=>!card.classList.contains('collapsed')) && document.querySelectorAll('#groupsList > .group-card .tab-row').length>=3;");
+  await run("document.querySelector('#collapseGroupsButton').click();");
+  await check("return document.querySelector('#collapseGroupsButton').classList.contains('active');");
+  await run("const header=[...document.querySelectorAll('.group-header')].find(header=>header.querySelector('h2')?.textContent==='Work / Docs'); header.click();");
+  await check("return !document.querySelector('#collapseGroupsButton').classList.contains('active') && [...document.querySelectorAll('.tab-row.dormant')].some(row=>row.textContent.includes('Saved Reference'));");
+  const tabCountAfterSavedExpand = await run("return extension ? (await chrome.tabs.query({})).length : JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime')).tabs.length;");
+  assert.equal(tabCountAfterSavedExpand, tabCountBeforeExpand);
+  await run("document.querySelector('#collapseGroupsButton').click();");
+  await check("return document.querySelector('#collapseGroupsButton').classList.contains('active');");
+  await run("document.querySelector('#collapseGroupsButton').click();");
+  await check("return !document.querySelector('#collapseGroupsButton').classList.contains('active') && [...document.querySelectorAll('#groupsList > .group-card')].every(card=>!card.classList.contains('collapsed'));");
+  // A failed display checkpoint must restore both the rows and native groups.
+  await run("window.__flatDisclosureWriteFailed=false; if(extension) { const original=chrome.storage.local.set; chrome.storage.local.set=async function(values,...rest) { if(!window.__flatDisclosureWriteFailed && values.spaceTabsState) { window.__flatDisclosureWriteFailed=true; throw Error('Flat disclosure checkpoint failure'); } return original.call(this,values,...rest); }; window.__restoreFlatDisclosureWrite=()=>{chrome.storage.local.set=original;}; } else { const original=Storage.prototype.setItem; Storage.prototype.setItem=function(key,value) { if(this===localStorage && key==='spaceTabsState' && !window.__flatDisclosureWriteFailed) { window.__flatDisclosureWriteFailed=true; throw Error('Flat disclosure checkpoint failure'); } return original.call(this,key,value); }; window.__restoreFlatDisclosureWrite=()=>{Storage.prototype.setItem=original;}; } document.querySelector('#collapseGroupsButton').click();");
+  await check("return window.__flatDisclosureWriteFailed && !document.querySelector('#collapseGroupsButton').disabled && !document.querySelector('#collapseGroupsButton').classList.contains('active') && [...document.querySelectorAll('#groupsList > .group-card')].every(card=>!card.classList.contains('collapsed'));");
+  const nativeRollback = await run("window.__restoreFlatDisclosureWrite(); const nativeGroups=extension ? await chrome.tabGroups.query({}) : JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime')).groups; return nativeGroups.filter(group=>['Flat Parent','Flat Child'].includes(group.title)).every(group=>!group.collapsed);");
+  assert.equal(nativeRollback,true);
   const before = await run("const state=await read(); return state.spaceSnapshots.default.groups.find(g=>g.snapshotGroupId==='flat-saved');");
   const source = card(fixture.child) + ' > .group-header';
   const target = card(fixture.parent) + ' > .group-header';
@@ -87,5 +116,5 @@ export async function runFlatTagScenarios({ client, evaluate, waitFor, drag }) {
   await waitFor(client, "document.querySelector('#actionDialog')?.open");
   await run("document.querySelector('#actionDialogInput').value='Created Flat Tag'; document.querySelector('#actionDialogConfirm').click();");
   await check("const state=await read(); return Object.values(state.emptyNodes.default||{}).some(node=>node.title==='Created Flat Tag') && !Object.hasOwn(state,'groupParents');");
-  return { ok: true, checks: ['legacy upgrade', 'flat rendering', 'slash titles', 'drag sorting', 'no subgroup menu', 'empty rename', 'reload', 'independent deletion', 'independent Space move', 'new Tag'] };
+  return { ok: true, checks: ['legacy upgrade', 'flat rendering', 'expand one after collapse all', 'expand all live and saved rows', 'expansion survives reload without opening tabs', 'saved-only expansion does not restore tabs', 'display checkpoint rolls back native groups', 'slash titles', 'drag sorting', 'no subgroup menu', 'empty rename', 'reload', 'independent deletion', 'independent Space move', 'new Tag'] };
 }

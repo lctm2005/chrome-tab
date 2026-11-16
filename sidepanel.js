@@ -6584,6 +6584,15 @@ async function toggleGroup(group, options = {}) {
       throw error;
     }
   }
+  if (isSpaceGroupsCollapsed()) {
+    try {
+      return await setSpaceGroupDisclosure({
+        collapsed: true, spaceCollapsed: false, expandedKey: group.key, windowBinding,
+      });
+    } finally {
+      restoreDisclosureFocus('group', currentDisclosureGroupKey(group), options.focusRestoreToken);
+    }
+  }
   const rollback = captureChromeGroupMutationRollback();
   const previousCollapsed = Boolean(group.collapsed);
   const nextCollapsed = !group.collapsed;
@@ -6714,6 +6723,14 @@ async function refreshMissingChromeGroupView(options = {}) {
 
 function handleGroupHeaderClick(event, group) {
   if (shouldSuppressHeaderClickAfterDrag(event)) return;
+  if (isSpaceGroupsCollapsed()) {
+    const focusRestoreToken = disclosureFocusGuard.capture(
+      event.currentTarget.contains(document.activeElement),
+    );
+    // Opening one card must escape Collapse all, including saved-only Tags.
+    runTask((windowBinding) => toggleGroup(group, { focusRestoreToken, windowBinding }));
+    return;
+  }
   // 折叠/展开 = 纯显示状态切换（Chrome 原生 collapsed），tab 保持打开。
   // close-to-saved 改由右键菜单 "Close & Save" 显式触发。
   if (group.dormant && group.collapsed) {
@@ -8828,17 +8845,63 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
 }
 
 async function toggleSpaceGroups(options = {}) {
-  await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) return;
-    const next = !isSpaceGroupsCollapsed();
-    state.collapsedSpaceGroups[state.activeSpaceId] = next;
-    await saveState({
-      persistWindowState: false,
-      windowBinding: options.windowBinding,
-    });
+  const windowBinding = options.windowBinding;
+  return withFreshSpaceStateMutation(() => {
+    const collapsed = !isSpaceGroupsCollapsed();
+    return setSpaceGroupDisclosure({ collapsed, spaceCollapsed: collapsed, windowBinding });
+  }, { windowBinding });
+}
+
+// The caller holds the workspace lock. Keep Chrome's native disclosure and
+// the panel's saved/empty Tag flags in sync so a refresh cannot hide rows again.
+async function setSpaceGroupDisclosure({
+  collapsed, spaceCollapsed, expandedKey = '', windowBinding,
+}) {
+  const rollback = captureChromeGroupMutationRollback();
+  const changedChromeGroups = [];
+  try {
+    state.collapsedSpaceGroups[state.activeSpaceId] = spaceCollapsed;
+    for (const group of visibleGroups()) {
+      const nextCollapsed = group.key === expandedKey ? false : collapsed;
+      state.collapsedGroups[group.key] = nextCollapsed;
+      if (isVirtualGroupKey(group.key) && state.virtualGroups?.[group.key]) {
+        state.virtualGroups[group.key].collapsed = nextCollapsed;
+      }
+      const groupId = groupIdFromKey(group.key);
+      if (group.dormant || groupId === null || groupHasForeignLiveTabs(group)) continue;
+      const chromeGroup = groups.find((entry) => Number(entry.id) === groupId);
+      const previousCollapsed = Boolean(chromeGroup?.collapsed);
+      if (previousCollapsed === nextCollapsed) continue;
+      changedChromeGroups.push({ groupId, collapsed: previousCollapsed });
+      const result = await send('groups:update', {
+        groupId, update: { collapsed: nextCollapsed },
+      }, { windowBinding });
+      if (!result.group || Boolean(result.group.collapsed) !== nextCollapsed) {
+        throw new Error('Chrome could not update the group display. Try again.');
+      }
+    }
+    const saved = await saveState({ persistWindowState: false, windowBinding });
+    if (saved === false) throw new Error('This panel moved before the group display could be saved.');
+  } catch (error) {
+    restoreChromeGroupMutationMemory(rollback);
+    const failures = [];
+    for (const previous of changedChromeGroups.reverse()) {
+      try {
+        const result = await send('groups:update', {
+          groupId: previous.groupId, update: { collapsed: previous.collapsed },
+        }, { windowBinding, allowStaleWindowBinding: true });
+        if (!result.group || Boolean(result.group.collapsed) !== previous.collapsed) {
+          throw new Error('Chrome could not restore the group display.');
+        }
+      } catch (rollbackError) {
+        failures.push({ stage: 'restoring group display', error: rollbackError });
+      }
+    }
     render();
-  });
+    if (failures.length) throw createRollbackFailureError(error, failures);
+    throw error;
+  }
+  render();
 }
 
 function isSpaceGroupsCollapsed() {
