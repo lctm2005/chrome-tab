@@ -40,9 +40,11 @@ test('declares the Chrome MV3 side panel extension surface', async () => {
   assert.equal(manifest.commands._execute_action.suggested_key.mac, 'Alt+S');
   assert.equal(manifest.commands._execute_action.description, 'Toggle Space Tabs panel');
   assert.equal(manifest.content_scripts, undefined);
-  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'scripting', 'favicon', 'alarms']) {
+  for (const permission of ['sidePanel', 'tabs', 'tabGroups', 'storage', 'favicon']) {
     assert.ok(manifest.permissions.includes(permission), `missing ${permission}`);
   }
+  // The alarms permission only served Ask stream recovery and is gone with it.
+  assert.equal(manifest.permissions.includes('alarms'), false);
   assert.equal(manifest.permissions.includes('activeTab'), false);
   assert.equal(manifest.permissions.includes('bookmarks'), false);
   assert.equal(manifest.permissions.includes('downloads'), false);
@@ -71,194 +73,86 @@ test('settings expose provider and model selectors without prefilled free text m
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
   assert.match(html, /<select id="providerInput"/);
-  assert.match(html, /<select id="modelInput"/);
-  assert.match(html, /id="customModelInput"/);
+  // One free-text model field backed by a suggestion datalist (provider
+  // catalog + provider-detected models) replaced the old select/custom pair.
+  assert.match(html, /<input id="modelInput" type="text" list="modelOptions"/);
+  assert.match(html, /<datalist id="modelOptions">/);
+  assert.doesNotMatch(html, /id="customModelInput"|id="customModelLabel"/);
+  assert.doesNotMatch(source, /CUSTOM_MODEL_VALUE|updateCustomModelVisibility/);
   assert.match(source, /AI_PROVIDER_CATALOG/);
   assert.match(source, /selectedModelFromControls\(/);
   assert.doesNotMatch(source, /model:\s*els\.modelInput\.value\.trim\(\)\s*\|\|\s*'glm-5\.1'/);
 });
 
-test('sidepanel exposes single-page Ask Page and portable backup controls without Context or Summary UI', async () => {
+test('sidepanel exposes portable backup controls without Ask Page, Context, or Summary UI', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
 
-  for (const id of ['askScope', 'askProvider', 'askSourceSummary', 'askSourceList', 'exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
+  for (const id of ['exportSpaceDataButton', 'spaceBackupInput', 'restoreSpaceDataButton']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.match(html, /class="ask-scope" id="askScope" hidden/);
-  assert.match(html, /class="ask-disclosure" id="askDisclosure"[^>]* hidden/);
-  assert.match(source, /askButton\.className = `space ask-page/);
-  assert.match(html, />Ask Page</);
-  assert.match(html, /Ask Page sends the current page and recent conversation context directly to your configured provider\./);
-  assert.match(source, /createPrompt\('ask-page'/);
-  assert.match(source, /purpose: 'ask-page'/);
-  assert.match(source, /sessionKeyForTab\(sourceTab\)/);
-  assert.match(source, /normalizeSessionUrl\(page\.url\) !== normalizeSessionUrl\(sourceTab\.url\)/);
-  assert.match(source, /appendAskSourceLink\(answerText, page\)/);
-  assert.match(source, /chrome\.tabs\.onActivated\.addListener\(handleChromeTabActivated\)/);
-  assert.match(source, /lastActivatedAskPageTab/);
-  assert.match(source, /selectEligibleTabSource\(tabs, lastActivatedAskPageTab, isEligibleAskPageTab\)/);
-  assert.match(source, /function cacheAskPageTab[\s\S]*const authoritative = options\.authoritative === true[\s\S]*active: Boolean\(tab\.active\)[\s\S]*mergeTabActivationCache\(tabs, observed, \{ authoritative \}\)[\s\S]*tabs = merged\.tabs[\s\S]*return merged\.tab/);
-  assert.match(source, /function observeAskPageTab[\s\S]*const previousSource = currentAskPageTab\(\)[\s\S]*cacheAskPageTab\(tab, observedAt\)[\s\S]*const nextSource = currentAskPageTab\(\)[\s\S]*refreshAskPageTargetUI\(\)/);
-  assert.match(source, /function rememberAskPageTab[\s\S]*cacheAskPageTab\(tab, fallbackLastAccessed, \{ authoritative: true \}\)[\s\S]*lastActivatedAskPageTab = remembered/);
-  assert.match(source, /startAskFromUserGesture/);
-  assert.match(source, /requestAskPermissionsFromUserGesture/);
-  assert.match(source, /chrome\.permissions\.request\(\{ origins \}\)/);
-  assert.match(source, /send\('pages:extract', \{[\s\S]*tabIds: \[sourceTab\.id\]/);
-  const askCustomPrompt = source.slice(
-    source.indexOf('async function askCustomPrompt'),
-    source.indexOf('async function beginAskTurn'),
-  );
-  assert.match(askCustomPrompt, /const sessionKey = sessionKeyForTab\(sourceTab\);\s*const session = projectAskSessionForTab\(state\.askSessions, sourceTab\)/);
-  assert.match(askCustomPrompt, /const preparedSessionRevision = askSessionRevision\(session\)/);
-  assert.doesNotMatch(askCustomPrompt, /ensureAskSessionByKey\(|setActiveAskSessionKey\(/);
-  assert.doesNotMatch(askCustomPrompt, /showPlanPreview|Review Ask Page|Send to provider/);
-  assert.match(askCustomPrompt, /assertPreparedAskPageStillCurrent\(page, sourceTab\)[\s\S]*beginAskTurn\([\s\S]*sessionKey,[\s\S]*prompt,[\s\S]*sourceTab,[\s\S]*session,[\s\S]*preparedSessionRevision,[\s\S]*requestId/);
-  assert.ok(
-    askCustomPrompt.indexOf('statusMessage = await beginAskTurn') < askCustomPrompt.indexOf("send('ai:chat'"),
-    'the durable Ask begin contract completes before provider dispatch',
-  );
-  assert.match(source, /materializeAskSessionForTurn,[\s\S]{0,320}from '.\/src\/shared\/ask-session\.js'/);
-  assert.match(source, /async function beginAskTurn[\s\S]*if \(extensionRuntime\) \{[\s\S]*await send\('ask:begin', \{[\s\S]*projectedSession,[\s\S]*preparedSessionRevision,[\s\S]*requestId,[\s\S]*setActiveAskSessionKey\(started\.sessionKey\)[\s\S]*withSharedStateLock\(\(\) => syncAskSessionsFromStorage\(\)\)[\s\S]*return \{[\s\S]*messageId: started\.messageId/);
-  assert.match(source, /async function beginAskTurn[\s\S]*syncStateFromStorage\(\)[\s\S]*materializeAskSessionForTurn\([\s\S]*state\.askSessions,[\s\S]*sourceTab,[\s\S]*projectedSession,[\s\S]*askSessionRevision\(latestSession\) !== preparedSessionRevision[\s\S]*Nothing was sent; try again[\s\S]*setActiveAskSessionKey\(latestSession\.key\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*pruneCurrentAskSessions\(latestSession\.key\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  assert.match(background, /case 'ask:begin':[\s\S]*beginAskStreamTurn\(message\.askTurn\)/);
-  assert.match(background, /async function beginAskStreamTurn[\s\S]*withLifecycleStateLock[\s\S]*askSessionRevision\(latestSession\)[\s\S]*markAskStreamPending\(assistant, requestId\)[\s\S]*storage\.local\.set[\s\S]*scheduleAskStreamRecoveryAlarm\(binding\.requestId\)/);
-  assert.match(source, /async function assertPreparedAskPageStillCurrent[\s\S]*send\('tabs:listAll'\)[\s\S]*normalizeSessionUrl\(current\.pendingUrl \|\| current\.url\)[\s\S]*normalizeSessionUrl\(page\.url\)[\s\S]*Nothing was sent/);
-  assert.doesNotMatch(source, /title: 'Review Ask Page'/);
-  assert.match(source, /Switch to an http or https page before using Ask Page\./);
-  const recentHistorySource = source.slice(
-    source.indexOf('function recentAskHistory'),
-    source.indexOf('async function beginAskTurn'),
-  );
-  assert.match(recentHistorySource, /text: askHistoryMessageText\(message\)/);
-  assert.match(recentHistorySource, /filter\(\(message\) => message\.text\.trim\(\)\)/);
-  assert.doesNotMatch(recentHistorySource, /\.split\(/);
-  assert.match(source, /updateAskMessage\(stream\.messageRef, stream\.text \|\| 'Thinking\.\.\.', \{ persist: false \}\)/);
-  assert.match(source, /async function persistAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  const beginAskTurnSource = source.slice(
-    source.indexOf('async function beginAskTurn'),
-    source.indexOf('async function persistAskMessage'),
-  );
-  const persistAskMessageSource = source.slice(
-    source.indexOf('async function persistAskMessage'),
-    source.indexOf('async function refreshPersistedAskMessage'),
-  );
-  const refreshPersistedAskMessageSource = source.slice(
-    source.indexOf('async function refreshPersistedAskMessage'),
-    source.indexOf('async function syncAskSessionsFromStorage'),
-  );
-  const syncAskSessionsSource = source.slice(
-    source.indexOf('async function syncAskSessionsFromStorage'),
-    source.indexOf('function replayAskMessageTabReplacements'),
-  );
-  const addAskMessageSource = source.slice(
-    source.indexOf('async function addAskMessage'),
-    source.indexOf('async function updateAskMessage'),
-  );
-  for (const askWriter of [beginAskTurnSource, persistAskMessageSource, addAskMessageSource]) {
-    assert.doesNotMatch(askWriter, /saveState\(\)/, 'Ask-only writes must never persist a window Space mapping');
-    assert.match(askWriter, /saveState\(\{ persistWindowState: false \}\)/);
-  }
-  assert.match(refreshPersistedAskMessageSource, /syncAskSessionsFromStorage\(\)/);
-  assert.doesNotMatch(refreshPersistedAskMessageSource, /syncStateFromStorage|saveState|windowState/);
-  assert.match(syncAskSessionsSource, /storageGet\(\)[\s\S]*state\.askSessions = workspace\.askSessions/);
-  assert.doesNotMatch(syncAskSessionsSource, /windowState|panelWindowId|saveState|state\s*=\s*workspace/);
-  assert.match(background, /case 'pages:extract'/);
-  assert.doesNotMatch(background, /case 'page:(?:extract|outline)'/);
-  assert.match(background, /reason: 'content-limit'/);
-  assert.match(background, /if \(event\.done\)[\s\S]*reader\.cancel/);
-  assert.match(background, /beginAskStreamPersistence\(binding\)/);
-  assert.match(background, /checkpointAskStream\(sessions, binding, latestText, now\)/);
-  assert.match(background, /finalizeAskStream\(sessions, binding, outcome\)/);
-  assert.match(background, /handleAskStreamRecoveryAlarm/);
   assert.match(source, /createSpaceBackup\(state\)/);
   assert.match(source, /restoreSpaceBackup\(state, confirmedBackup\)/);
-  assert.doesNotMatch(source, /createPrompt\('ask-space'|purpose: 'ask-space'|selectAskSpaceSources|appendAskSourceLinks|12-page limit/);
-  assert.doesNotMatch(html, /Ask Space/);
-  assert.doesNotMatch(html, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"/);
-  assert.doesNotMatch(source, /currentSpaceContextForAI|summarizeCurrentPage/);
+
+  // The Ask Page surface was removed: no scope selectors, disclosure buttons,
+  // per-page prompt construction, stream recovery, or page extraction remain.
+  assert.doesNotMatch(html, /Ask Page|Ask Space|id="askScope"|id="askDisclosure"|id="askSourceList"/);
+  assert.doesNotMatch(source, /ask-page|ask-scope|askCustomPrompt|beginAskTurn|askSessions|activeAskSessionKey|lastActivatedAskPageTab|pages:extract|ask:begin|createPrompt\('ask-page'\)|purpose: 'ask-page'/);
+  assert.doesNotMatch(background, /ask:begin|pages:extract|askSessions|AskStream|scheduleAskStreamRecoveryAlarm|handleAskStreamRecoveryAlarm/);
+  assert.doesNotMatch(background, /case 'page:(?:extract|outline)'/);
+  assert.doesNotMatch(source, /id="contextView"|id="spaceContextInput"|id="summarizePageButton"|currentSpaceContextForAI|summarizeCurrentPage/);
 });
 
-test('sidepanel exposes focused onboarding and full-page Workbench Settings', async () => {
+test('sidepanel exposes Workbench, Arc import, and portable backup controls', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
 
   for (const id of [
-    'openWorkbenchButton',
-    'onboardingDialog',
-    'onboardingArcInput',
-    'onboardingArcChooseButton',
     'arcImportChooseButton',
     'undoArcImportButton',
-    'onboardingProviderInput',
-    'onboardingBaseUrlInput',
-    'onboardingModelInput',
-    'onboardingCustomModelInput',
-    'onboardingApiKeyInput',
-    'onboardingThinkingLabel',
-    'onboardingThinkingInput',
-    'onboardingThinkingHint',
-    'onboardingTestAIButton',
-    'onboardingOpenWorkbenchButton',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  for (const id of ['onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
+  for (const id of ['onboardingDialog', 'onboardingSkipAIButton', 'onboardingExportButton', 'onboardingUndoArcButton']) {
     assert.doesNotMatch(html, new RegExp(`id="${id}"`));
-    assert.doesNotMatch(source, new RegExp(`\\b${id}\\b`));
   }
+  assert.doesNotMatch(html, /id="openWorkbenchButton"/);
+  assert.match(html, /data-settings-panel="ai"[^>]*aria-label="AI"/);
+  assert.match(html, /data-settings-panel="tidy"[^>]*aria-label="Tidy Rules"/);
+  assert.match(html, /data-settings-panel="shortcuts"[^>]*aria-label="Shortcuts"/);
+  assert.match(html, /data-settings-panel="io"[^>]*aria-label="Import & Export"/);
+  assert.match(html, /class="settings-nav-item[^"]*"[^>]*>\s*<svg/);
+  assert.doesNotMatch(html, /data-settings-panel="[a-z]+"[^>]*>(?:(?!<svg)[\s\S])*?<\/button>/);
+  assert.match(styles, /\.settings-nav-item \{[\s\S]{0,400}width: 34px;/);
+  assert.doesNotMatch(html, /id="openWorkbenchButton"/);
+  assert.doesNotMatch(source, /openWorkbenchButton|function openWorkbench\(/);
+  assert.match(styles, /#syncStatus \{[\s\S]{0,120}display: none;/);
   assert.doesNotMatch(html, /id="(?:maxTokensInput|onboardingMaxTokensInput)"|Max output/i);
   assert.match(source, /const workbenchMode = layoutMode === 'workbench'/);
-  assert.match(html, /id="onboardingOpenWorkbenchButton">Save</);
   assert.match(source, /function updateAIThinkingControl[\s\S]*providerSupportsThinking\(candidate\)[\s\S]*thinkingInput\.disabled = !supported[\s\S]*does not support Space Tabs’ Thinking control/);
-  assert.match(html, /<option value="" selected>No provider<\/option>/);
-  assert.match(html, /id="onboardingLanguageInput"[\s\S]*value="zh-CN"[\s\S]*value="en"[\s\S]*value="auto"/);
-  assert.match(source, /function onboardingAIControls\(\)[\s\S]*languageInput: els\.onboardingLanguageInput/);
-  assert.match(source, /renderOnboardingAISettings[\s\S]*controls\.languageInput\.value = state\.ai\?\.language \|\| 'zh-CN'/);
-  assert.match(source, /async function saveOnboardingAIAndFinish\(options = \{\}\)[\s\S]*if \(!onboardingAIControls\(\)\.providerInput\.value\) \{[\s\S]*await finishOnboarding\(true, \{ \.\.\.options, clearAI: true \}\)/);
-  assert.doesNotMatch(html, /Stay in side panel|id="onboardingStayButton"/);
-  assert.match(source, /maybeShowOnboarding\(\)/);
   assert.match(source, /rememberArcImport\(/);
-  assert.match(source, /url\.searchParams\.set\('layout', 'workbench'\)/);
-  assert.match(source, /send\('tabs:openUnique'/);
   assert.match(source, /state\.onboarding\?\.completed === true/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
   assert.match(html, /id="workbenchToast"/);
-  assert.match(styles, /html\[data-layout="workbench"\] #settingsDialog/);
+  assert.match(styles, /html\[data-layout="workbench"\] \.settings-view/);
   assert.match(styles, /\.workbench-toast[\s\S]*top: 18px;[\s\S]*left: 50%;/);
   assert.match(styles, /\.workbench-toast\[data-tone="success"\]/);
-  assert.match(html, /class="arc-import-settings"/);
-  assert.match(html, /data-onboarding-path="arc"/);
-  assert.doesNotMatch(html, /data-onboarding-path="arc" hidden/);
+  assert.match(html, /class="io-settings"/);
   assert.doesNotMatch(html, /Arc import is not available/i);
-  assert.match(html, /id="onboardingArcInput" type="file"/);
   assert.match(html, /id="arcImportInput" type="file"/);
-  assert.match(source, /function startArcFileSelectionFromUserGesture\(target\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);
+  assert.match(source, /function startArcFileSelectionFromUserGesture\(\)[\s\S]*input\.value = '';[\s\S]*input\.click\(\)/);
   assert.doesNotMatch(source, /showOpenFilePicker|rememberArcFileHandle|loadRememberedArcFileHandle|rememberedArcFileHandle/);
   assert.doesNotMatch(source, /indexedDB(?:\?\.|\.)open(?:\?\.)?\(/);
   assert.match(source, /clearLegacyArcFileHandleStorage[\s\S]*deleteDatabase\?\.\('space-tabs-local-files'\)/);
   assert.doesNotMatch(html, /arcImportUseButton|authorized Arc file|Authorize Arc file/i);
-  assert.match(source, /onboardingArcInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
   assert.match(source, /arcImportInput\.addEventListener\('cancel', \(event\) => event\.stopPropagation\(\)\)/);
-  assert.match(source, /if \(event\.target !== event\.currentTarget\) return/);
-  assert.match(source, /async function previewOnboardingArcFile[\s\S]*selectionGeneration !== onboardingArcSelectionGeneration[\s\S]*onboardingStep !== 1 \|\| onboardingPath !== 'arc'/);
   assert.match(source, /async function previewArcImportFile[\s\S]*selectionGeneration !== arcImportSelectionGeneration/);
-  assert.match(source, /function clearOnboardingArcSelection[\s\S]*pendingOnboardingArcText = '';[\s\S]*onboardingArcInput\.value = '';[\s\S]*onboardingArcSpaces\.replaceChildren\(\)/);
-  assert.match(source, /function chooseOnboardingPath\(path\)[\s\S]*path === 'fresh'[\s\S]*clearOnboardingArcSelection\(\)/);
-  assert.match(source, /function goBackOnboarding\(\)[\s\S]*onboardingPath === 'arc'[\s\S]*clearOnboardingArcSelection\(\)/);
-  assert.match(source, /async function applyArcOnboarding[\s\S]*finally \{[\s\S]*clearOnboardingArcSelection\(\{ preserveStatus: true \}\)/);
-  assert.match(source, /async function finishOnboarding[\s\S]*clearOnboardingArcSelection\(\);[\s\S]*onboardingApiKeyInput\.value = '';/);
-  assert.match(source, /async function finishOnboarding[\s\S]*captureWorkspaceMemoryCheckpoint\(\)[\s\S]*persistStorageStep\([\s\S]*restoreWorkspaceMemoryCheckpoint\(checkpoint\)/);
-  assert.match(source, /async function applyFreshOnboardingFromCurrentState[\s\S]*committedCheckpoint = captureWorkspaceMemoryCheckpoint\(\)[\s\S]*restoreWorkspaceMemoryCheckpoint\(committedCheckpoint, \{ renderView: true \}\)[\s\S]*was created and saved, but its tabs could not refresh[\s\S]*return true/);
   assert.match(source, /function arcPlanResolutionSignature[\s\S]*preview\.sourceSpaceId,[\s\S]*preview\.resolvedId,[\s\S]*preview\.resolvedName/);
   assert.match(source, /async function importArcFile[\s\S]*arcPlanResolutionSignature\(pendingArcImportPlan\) !== arcPlanResolutionSignature\(latestPlan\)[\s\S]*previewInvalidated = true/);
-  assert.match(source, /state\.onboarding = \{ version: 2, completed: false, stage: 'ai' \}/);
-  assert.match(source, /state\.onboarding = \{ version: 2, completed: true, stage: 'done' \}/);
-  assert.match(source, /saveOnboardingAIAndFinish[\s\S]*persistCurrentAIConfiguration\(\)/);
   assert.match(source, /function stateForStorage\(\)[\s\S]*apiKey: ''/);
-  assert.match(source, /scopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
+  assert.match(source, /reconcileScopedAIKey\(secrets\[SECRET_STORAGE_KEY\]\?\.ai, nextState\.ai\)/);
   assert.match(source, /function persistCurrentAIConfiguration\(\)[\s\S]*persistScopedAIConfiguration[\s\S]*readSettings: storageGet[\s\S]*readAuth: \(\) => aiAuthVault\.snapshot\(\)[\s\S]*persistSettings: \(\) => storageSet\(\{ \[STORAGE_KEY\]: stateForStorage\(\) \}\)[\s\S]*persistAuth:[\s\S]*clearAuth:[\s\S]*restoreSettings:[\s\S]*restoreAuth:/);
   assert.match(source, /providerInput\.addEventListener\('change', \(\) => handleAIProviderChange/);
   assert.match(source, /baseUrlInput\.addEventListener\('input', \(\) => clearAIKeyAfterEndpointEdit/);
@@ -268,36 +162,14 @@ test('sidepanel exposes focused onboarding and full-page Workbench Settings', as
   assert.doesNotMatch(source, /workspace-search/);
 });
 
-test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', async () => {
+test('sidepanel keeps the compact Settings and group-hover surfaces', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
-  const choosePathSource = functionSource(source, 'chooseOnboardingPath');
 
-  assert.match(
-    html,
-    /data-onboarding-path="fresh">[\s\S]*?<strong>Create new space<\/strong>[\s\S]*?data-onboarding-path="arc">[\s\S]*?<strong>Move from Arc<\/strong>/,
-  );
-  assert.doesNotMatch(
-    html,
-    /Skip setup|Start with one thing|Create a focused Space\.|Preview and choose the Spaces to import\./,
-  );
-  assert.match(
-    html,
-    /<footer class="onboarding-footer" id="onboardingFooter">[\s\S]*?id="onboardingBackButton"[\s\S]*?id="skipOnboardingButton">Skip<\/button>[\s\S]*?id="onboardingNextButton">Continue<\/button>[\s\S]*?<\/footer>/,
-  );
-  assert.match(source, /onboardingFooter\.classList\.toggle\('no-back', isChoose\)/);
-  assert.match(styles, /\.onboarding-footer\.no-back\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
-  assert.match(
-    html,
-    /id="onboardingProgress"[\s\S]*?<small>Space<\/small>[\s\S]*?<small>AI<\/small>[\s\S]*?<\/div>/,
-  );
-  assert.doesNotMatch(html, /<small>Choose<\/small>|AI &amp; ready|Keep Chrome\.<br>Bring your Arc workflow/);
-  assert.match(html, /id="onboardingStepLabel">Step 1 of 2<\/span>/);
-  assert.match(styles, /\.onboarding-progress\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
-  assert.match(choosePathSource, /onboardingPath = path;[\s\S]*renderOnboarding\(\)/);
-  assert.doesNotMatch(choosePathSource, /onboardingStep\s*=|startArcFileSelectionFromUserGesture|\.focus\(/);
-  assert.match(source, /const visibleStep = isFinish \? 1 : 0;[\s\S]*`Step \$\{visibleStep \+ 1\} of 2`/);
+  assert.doesNotMatch(html, /data-onboarding-path|onboarding-footer|onboardingProgress|onboardingStepLabel/);
+  assert.doesNotMatch(html, /Skip setup|Start with one thing|Create a focused Space\.|Preview and choose the Spaces to import\./);
+  assert.doesNotMatch(source, /onboardingFooter|const visibleStep = isFinish \? 1 : 0;/);
 
   assert.doesNotMatch(html, /Panel Shortcuts|Toggle panel is a Chrome global shortcut/);
   assert.match(html, /<section class="shortcut-settings">\s*<div id="shortcutsList" class="shortcuts-list"><\/div>/);
@@ -313,13 +185,12 @@ test('sidepanel keeps the compact setup, Settings, and group-hover surfaces', as
   );
 });
 
-test('Workbench setup preserves its surface while Space switching keeps target Tags dormant', async () => {
+test('Space switching keeps target Tags dormant across guarded cleanup', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const switchSource = functionSource(source, 'switchSpace');
   const materializeSource = functionSource(source, 'materializeSpaceSwitchTarget');
   const closeSource = functionSource(source, 'closeSpaceSwitchSourceTabs');
 
-  assert.match(source, /runOnboardingButton[\s\S]*activeView = workbenchMode \? 'ask' : 'space';[\s\S]*openOnboarding\(\{ restart: true \}\)/);
   assert.match(source, /async function activateSpace\(spaceId, options = \{\}\)[\s\S]*return switchSpace\(spaceId, \{ \.\.\.options, windowBinding \}\)/);
   assert.match(source, /if \(spaceId === state\.activeSpaceId\) \{[\s\S]*activeView = 'space';[\s\S]*render\(\);[\s\S]*return true;[\s\S]*\}\s*return switchSpace/);
   assert.match(switchSource, /options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)[\s\S]*withCreatedTabCheckpointRollback\(createdTabIds[\s\S]*snapshotOpenSpace\(previousSpaceId\)[\s\S]*planSpaceSwitch\(/);
@@ -346,24 +217,9 @@ test('Workbench setup preserves its surface while Space switching keeps target T
   assert.match(closeSource, /spaceSwitchTargetTabGuards\([\s\S]*verifyMaterializedSpaceSwitchTarget\([\s\S]*focusSpaceSwitchSurvivor\([\s\S]*guardedReviewedTabClose\([\s\S]*requiredActiveSurvivorTabId[\s\S]*requiredTargetTabGuards/);
 });
 
-test('new Space transactions roll back to pre-insert storage without undoing a committed switch', async () => {
+test('Space switch honors caller rollback checkpoints for newly inserted targets', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const onboardingSource = functionSource(source, 'applyFreshOnboardingFromCurrentState');
   const switchSource = functionSource(source, 'switchSpace');
-
-  const checkpointIndex = onboardingSource.indexOf('const checkpoint = captureWorkspaceMemoryCheckpoint()');
-  const insertIndex = onboardingSource.indexOf('state.spaces.push(targetSpace)');
-  const switchIndex = onboardingSource.indexOf('const switched = await switchSpace(targetSpace.id');
-  assert.ok(
-    checkpointIndex >= 0 && checkpointIndex < insertIndex && insertIndex < switchIndex,
-    'fresh onboarding must checkpoint the durable workspace before inserting its new Space',
-  );
-  assert.match(onboardingSource, /const switched = await switchSpace\(targetSpace\.id, \{[\s\S]*rollbackCheckpoint: checkpoint,[\s\S]*windowBinding: options\.windowBinding[\s\S]*if \(switched !== true\)/,
-    'fresh onboarding must give Space switching the pre-insert checkpoint');
-  assert.doesNotMatch(onboardingSource, /switched !== true \|\| !isCurrentPanelWindowBinding/,
-    'a host-window change after switchSpace reports success must not roll back its committed Space');
-  assert.match(onboardingSource, /if \(canReuseDefault\) \{[\s\S]*saved !== true \|\| !isCurrentPanelWindowBinding/,
-    'the direct-save onboarding path must retain its pre-commit window guard');
 
   assert.match(switchSource, /const checkpoint = options\.rollbackCheckpoint \|\| captureWorkspaceMemoryCheckpoint\(\)/,
     'switchSpace must prefer a caller checkpoint that predates a newly inserted target');
@@ -655,45 +511,6 @@ test('in-flight Workbench tab creation is bound to the user gesture epoch and fu
   assert.match(ephemeralCleanupSource, /result\.closedTabIds\.length > 0[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
 });
 
-test('Ask session selection and pruning are safe across Chrome windows', async () => {
-  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-
-  assert.match(sidepanel, /let activeAskSessionKey = ''/);
-  assert.match(sidepanel, /state = nextState;[\s\S]*state\.activeAskSessionKey = activeAskSessionKey/);
-  assert.match(sidepanel, /function stateForStorage\(\)[\s\S]*activeAskSessionKey,[\s\S]*ai,/);
-  assert.match(sidepanel, /function ensureCurrentAskSession\(\)[\s\S]*pruneCurrentAskSessions\(key\)/);
-  assert.match(sidepanel, /function pruneCurrentAskSessions[\s\S]*inFlightKeys:\s*\[\.\.\.activeAskStreams\.values\(\)\]/);
-  assert.match(sidepanel, /function currentAskSessionForRender\(\)[\s\S]*return projectAskSessionForTab\(state\.askSessions, tab\)/);
-  assert.doesNotMatch(sidepanel.slice(
-    sidepanel.indexOf('function currentAskSessionForRender()'),
-    sidepanel.indexOf('function setActiveAskSessionKey'),
-  ), /adoptPortableAskSession|ensureAskSessionByKey/);
-  assert.match(sidepanel, /function renderAskMessages\(\) \{\s*const session = currentAskSessionForRender\(\)/);
-  const passiveRefresh = sidepanel.slice(
-    sidepanel.indexOf('function refreshAskPageTargetUI()'),
-    sidepanel.indexOf('function readableAskPageTab()'),
-  );
-  assert.doesNotMatch(passiveRefresh, /ensureCurrentAskSession\(\)/);
-  assert.match(sidepanel, /const openTabs = \[\.\.\.tabs, \.\.\.foreignLiveTabs\]/);
-  assert.match(sidepanel, /openTabIds:\s*openTabs\.map\(\(item\) => item\.id\)/);
-  assert.match(sidepanel, /openSessionKeys:\s*openTabs\.map\(\(item\) => sessionKeyForTab\(item\)\)/);
-  assert.match(sidepanel, /askSessionTabFromKey,[\s\S]{0,260}from '\.\/src\/shared\/ask-session\.js'/);
-  assert.match(sidepanel, /askSessionTabFromKey\(safeKey, tabs\)/);
-  assert.match(sidepanel, /currentAskPageTab\(\) \|\| askSessionTabFromKey\(sessionKey, tabs\)/);
-  assert.doesNotMatch(sidepanel, /function askSessionTabFromKey\(/);
-  assert.match(sidepanel, /if \(ref\.sessionKey === activeAskSessionKey && activeView === 'ask'\) renderAskMessages\(\)/);
-  assert.doesNotMatch(sidepanel, /ref\.sessionKey === state\.activeAskSessionKey/);
-  assert.match(sidepanel, /chrome\.tabs\.onDetached\?\.addListener\(handleChromeTabDetached\)/);
-  assert.match(sidepanel, /function currentAskPageTab\(\)[\s\S]*selectEligibleTabSource\(tabs, lastActivatedAskPageTab, isEligibleAskPageTab\)/);
-  assert.match(sidepanel, /createEligibleTabActivationController\(\{[\s\S]*getTab:[\s\S]*isEligible: isEligibleAskPageTab,[\s\S]*onObserve:[^\n]*observeAskPageTab[\s\S]*onActivate:/);
-  assert.doesNotMatch(sidepanel, /createEligibleTabActivationController\(\{[\s\S]{0,300}getCachedTab:/);
-  assert.match(sidepanel, /async function handleChromeTabActivated[\s\S]*askPageActivationController\.handle\(activeInfo\)/);
-  assert.match(sidepanel, /function handleChromeTabRemoved[\s\S]*const wasCurrentSource[\s\S]*askPageActivationController\.invalidate\(tabId\)[\s\S]*tabs = tabs\.filter[\s\S]*if \(wasRememberedSource\) lastActivatedAskPageTab = null;[\s\S]*if \(wasCurrentSource \|\| wasRememberedSource\) refreshAskPageTargetUI\(\)/);
-  assert.match(sidepanel, /function handleChromeTabUpdated[\s\S]*const wasCurrentSource[\s\S]*const isEligible = isEligibleAskPageTab\(tab\)[\s\S]*if \(changeInfo\.url \|\| !isEligible\) askPageActivationController\.invalidate\(tabId\)[\s\S]*if \(isEligible && tab\.active\)[\s\S]*askPageActivationController\.commitFresh\(tab,[\s\S]*if \(wasCurrentSource\) refreshAskPageTargetUI\(\)[\s\S]*lastActivatedAskPageTab = null/);
-  assert.match(sidepanel, /function handleChromeTabDetached[\s\S]*detachInfo\.oldWindowId[\s\S]*askPageActivationController\.invalidate\(tabId\)[\s\S]*tabs = tabs\.filter[\s\S]*lastActivatedAskPageTab = null[\s\S]*refreshAskPageTargetUI\(\)/);
-  assert.match(sidepanel, /function handleChromeTabReplaced[\s\S]*askPageActivationController\.invalidate\(removedTabId\)/);
-});
-
 test('a new Chrome session drops recycled entity ids and restores portable snapshot metadata', async () => {
   const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
@@ -752,7 +569,8 @@ test('deleting a Space previews and closes its tabs across every Chrome window',
   assert.doesNotMatch(sidepanel, /async function deleteSpaceFromCurrentState\(space, options = \{\}\)[\s\S]{0,160}loadTabs\(\{ adopt: true \}\)/);
   assert.match(sidepanel, /async function liveSpaceDeletionInventory[\s\S]*tabs:listAll[\s\S]*response\.allChromeTabs \|\| response\.tabs[\s\S]*allBrowserTabs[\s\S]*planSpaceTabDeletion\(allTabs, state, spaceId\)/);
   assert.match(sidepanel, /fingerprint: spaceDeletionIntentFingerprint\(\{[\s\S]*deletingSpaceId: spaceId,[\s\S]*plan/);
-  assert.match(deletionProjection, /export function spaceDeletionIntentFingerprint[\s\S]*savedOnlySnapshot[\s\S]*context:[\s\S]*askSession:/);
+  assert.match(deletionProjection, /export function spaceDeletionIntentFingerprint[\s\S]*savedOnlySnapshot[\s\S]*context:/);
+  assert.doesNotMatch(deletionProjection, /askSession/);
   assert.match(sidepanel, /planSpaceDeletionWindowKeepalives\(\s*checkpointInventory\.allChromeTabs/);
   assert.match(closeAcrossWindowsSource, /tabIds: \(\) => transactionClosingTabs\.map[\s\S]*checkpointInventory = await liveSpaceDeletionInventory\(spaceId, \{ windowBinding \}\)[\s\S]*assertFreshSpaceDeletionPlan\(checkpointInventory\.plan[\s\S]*planSpaceDeletionWindowKeepalives\([\s\S]*sourceTabs: checkpointInventory\.allTabs[\s\S]*sourceGroups: checkpointInventory\.response\.groups/);
   assert.match(sidepanel, /beforeClose: async \(tabId, \{ closedTabIds \}\)[\s\S]*expectedRemainingTabs[\s\S]*for \(const expectedTab of expectedRemainingTabs\)[\s\S]*spaceDeletionCloseCandidateMismatch/);
@@ -818,7 +636,7 @@ test('shortcut focus retries stop as soon as the panel succeeds or the user move
   );
 
   assert.match(source, /import \{[\s\S]*createDisclosureFocusGuard,[\s\S]*createPanelFocusController,[\s\S]*\} from '\.\/src\/shared\/panel-focus\.js'/);
-  assert.match(source, /const panelFocusController = createPanelFocusController\(\{[\s\S]*getTarget: \(\) => activeView === 'ask'[\s\S]*requestBackgroundFocus:[\s\S]*Number\.isSafeInteger\(panelWindowId\)[\s\S]*type: 'panel:focus', windowId: panelWindowId/);
+  assert.match(source, /const panelFocusController = createPanelFocusController\(\{[\s\S]*getTarget: \(\) => activeView === 'space'[\s\S]*requestBackgroundFocus:[\s\S]*Number\.isSafeInteger\(panelWindowId\)[\s\S]*type: 'panel:focus', windowId: panelWindowId/);
   assert.match(source, /const disclosureFocusGuard = createDisclosureFocusGuard\(\)/);
   assert.match(source, /addEventListener\('focusin', panelFocusController\.handleFocusIn, \{ capture: true \}\)/);
   assert.match(source, /addEventListener\('pointerdown', panelFocusController\.handleUserIntent, \{ capture: true \}\)/);
@@ -839,17 +657,6 @@ test('shortcut focus retries stop as soon as the panel succeeds or the user move
   assert.match(controller, /handleUserIntent[\s\S]*cancel\('user-intent'\)/);
   assert.match(controller, /documentOwnsTargetFocus\(documentTarget, target\)[\s\S]*cancel\('focused'\)/);
   assert.match(controller, /function restore\(token, focus\)[\s\S]*token\.generation !== generation[\s\S]*generation \+= 1[\s\S]*focus\(\)/);
-});
-
-test('Ask streaming cannot overwrite the final cited answer with a late partial event', async () => {
-  const sidepanel = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
-
-  assert.match(background, /return chrome\.runtime\.sendMessage\(\{ type: 'ai:stream', requestId, text \}\)\.catch/);
-  assert.match(background, /if \(event\.text\)[\s\S]*await onStream\(text\)/);
-  assert.match(sidepanel, /if \(!stream \|\| stream\.finished\) return/);
-  assert.match(sidepanel, /completedStream[\s\S]*completedStream\.finished = true[\s\S]*appendAskSourceLink\(answerText, page\)/);
-  assert.match(sidepanel, /const stream = activeAskStreams\.get\(requestId\);[\s\S]*if \(stream\) stream\.finished = true;[\s\S]*appendAskSourceLink/);
 });
 
 test('sidepanel refresh adopts orphan groups without overwriting newer Workbench state', async () => {
@@ -895,22 +702,19 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /function refreshTabLifecycleIdentityDecorations\(\)[\s\S]*tabs = tabsWithLifecycleIdentity\(tabs\);[\s\S]*foreignLiveTabs = tabsWithLifecycleIdentity\(foreignLiveTabs\)/);
   assert.match(source, /function organizationForCurrentSpaceState\(spaceId, options = \{\}\)[\s\S]*sourceTabs: tabsWithLifecycleIdentity\(tabs\)/);
   assert.match(source, /function tabsWithLifecycleIdentity\(rawTabs = \[\]\)[\s\S]*delete undecorated\.snapshotGroupId[\s\S]*lifecycleBindingMatchesPhysicalGroup/);
-  assert.match(source, /async function addAskMessage[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage[\s\S]*await saveState/);
-  assert.match(source, /async function updateAskMessage[\s\S]*await persistAskMessage\(ref, text\)/);
-  assert.match(source, /function startAskFromUserGesture\(\)[\s\S]*if \(activeAIRequestId\) \{[\s\S]*void abortActiveAIRequest\(\)/);
-  assert.match(source, /async function tidyTabNames\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*active Space changed while Tidy Names was open/);
-  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
+  assert.match(source, /async function applyTidyNamingPhase\(plan = \{\}, options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*state\.activeSpaceId !== plan\.sourceSpaceId[\s\S]*The active Space changed while Tidy was running/);
+  assert.match(source, /async function applyTidyGroupingPhase\(plan = \{\}, options = \{\}\)[\s\S]*sourceSpaceId[\s\S]*withSharedStateLock[\s\S]*rebaseOrganizationPlan\(\{[\s\S]*previewCandidates: plan\.organization\.candidates[\s\S]*currentCandidates: currentOrganization\.candidates[\s\S]*plannedGroups/);
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
-test('folder drag before or after reparents groups beside the target', async () => {
+test('hierarchy drops re-parent groups through the state-backed planner', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /moveGroupBlockBesideContext\(sourceKeys, targetContext, intent, \{ \.\.\.moveOptions, windowBinding \}\)/);
-  assert.match(source, /targetPathForSiblingMove\(targetContext\)/);
-  assert.match(source, /movedGroupTitleForFolderDrop\(/);
-  assert.match(source, /function reorderDormantSnapshotGroups[\s\S]*projectSnapshotGroupOrder\(snapshot, references, Date\.now\(\)\)/);
+  assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: renderedHierarchyKeyParents,[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = anchorizeHierarchyParents\(plan\.parents, spaceId\);[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
   assert.match(source, /function replaceActiveSpaceSnapshotGroups[\s\S]*remapSnapshotGroupIndexedState\(\{[\s\S]*groupOrder:[\s\S]*collapsedGroups:[\s\S]*tabOrder:/);
+  assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, renderedHierarchyKeyParents\)/);
+  assert.doesNotMatch(source, /movedGroupTitleForFolderDrop|retitleGroupForNestedMove|targetPathForSiblingMove|moveGroupBlockBesideContext/);
 });
 
 test('single tab context menu can create a tab group', async () => {
@@ -955,7 +759,13 @@ test('tidy names uses AI when configured without overwriting manual names', asyn
   assert.match(source, /const renameableTabs = visibleTabs\.filter\(\(tab\) => !tab\.pinned\)/);
   assert.match(source, /const aiCandidates = renameableTabs\.filter/);
   assert.match(source, /planTidyTabNames\(renameableTabs/);
-  assert.match(source, /currentTargets\.some\(\(tab\) => tab\.pinned\)/);
+  assert.match(source, /const plannedNames = \{ \.\.\.localNames, \.\.\.namingResult\.names \}/);
+  assert.match(
+    source,
+    /namingResult = await tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*rules: renameRuleText,/,
+    'the rename rule text must flow into the tidy-names AI request',
+  );
+  assert.match(source, /currentTargets\.length !== renameItems\.length/);
 });
 
 test('Tidy Names renders the original broom initially and after busy state', async () => {
@@ -965,57 +775,124 @@ test('Tidy Names renders the original broom initially and after busy state', asy
     readFile(new URL('../sidepanel.css', import.meta.url), 'utf8'),
   ]);
 
-  assert.match(html, /<button class="icon-button compact" id="tidyNamesButton" title="Tidy names" aria-label="Tidy Names">\s*<span class="tidy-icon" aria-hidden="true">🧹<\/span>\s*<\/button>/);
+  assert.match(html, /<button class="icon-button compact" id="tidyNamesButton" title="Tidy" aria-label="Tidy">\s*<span class="tidy-icon" aria-hidden="true">🧹<\/span>\s*<\/button>/);
+  assert.doesNotMatch(html, /autoGroupButton/);
   assert.match(source, /const TIDY_NAMES_ICON = `[^`]*<span class="tidy-icon" aria-hidden="true">🧹<\/span>[^`]*`;/);
   assert.match(source, /els\.tidyNamesButton\.innerHTML = tidyBusy \? '\.\.\.' : TIDY_NAMES_ICON/);
   assert.match(css, /\.tidy-icon\s*\{[^}]*font-size:\s*15px;[^}]*line-height:\s*1;/);
 });
 
-test('Tidy Names and Auto Group preview changes before applying them', async () => {
+test('Tidy runs one consolidated preview and applies grouping then naming phases', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
+  );
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
+  );
+  const namingSlice = source.slice(
+    source.indexOf('async function applyTidyNamingPhase'),
+    source.indexOf('async function tidyTabNamesWithAI'),
+  );
 
-  assert.match(source, /title: 'Preview Tidy Names'/);
-  assert.match(source, /title: 'Rename in panel'/);
-  assert.match(source, /type: 'tidy-names'/);
+  // Unified entry: one button flow replaces tidyTabNames/autoGroupTabs.
+  assert.doesNotMatch(source, /async function tidyTabNames\(|async function autoGroupTabs\(|prepareAutoGroupRequestFromUserGesture|hasCurrentAutoGroupAICandidates|AUTO_GROUP_ICON/);
+  assert.match(tidySlice, /beginPanelAction\('tidyNames'\)/);
+  assert.match(tidySlice, /const refreshed = await refreshOrganizationActionState\(\{ adopt: true, windowBinding \}\)/);
+  assert.match(source, /async function refreshOrganizationActionState[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*loadTabs\(\{ adopt, windowBinding \}\)[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
+  assert.match(source, /showStatusToast\(message, 'error'\)/);
+
+  // Tidy rules drive the pipeline.
+  assert.match(tidySlice, /const rules = normalizeTidyRuleSettings\(state\.tidyRules\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'group-by-topic'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'group-by-domain'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'rename-tabs'\)/);
+  assert.match(tidySlice, /tidyRuleEnabled\(rules, 'dedupe-urls'\)/);
+  assert.match(tidySlice, /const groupRuleText = tidyRulePrompt\(rules, 'group-by-topic'\)/);
+  assert.match(tidySlice, /const renameRuleText = tidyRulePrompt\(rules, 'rename-tabs'\)/);
+
+  // Naming plan: AI with the rename rule text, local fallback otherwise.
+  assert.match(tidySlice, /const localNames = planTidyTabNames\(renameableTabs/);
+  assert.match(tidySlice, /namingResult = await tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*rules: renameRuleText,/);
+
+  // Topic grouping plan via AI; domain rule only covers tabs the topic plan missed.
+  assert.match(tidySlice, /purpose: 'auto-group'/);
+  assert.match(tidySlice, /createPrompt\('tidy-tabs', \{[\s\S]*rules: groupRuleText,/);
+  assert.match(tidySlice, /assertCompleteAutoGroupPlan\(plannedGroups, candidates\)/);
+  assert.match(tidySlice, /const topicPlannedIds = new Set\(plannedGroups\.flatMap/);
+  assert.match(tidySlice, /const domainCandidates = candidates\.filter\(\(candidate\) => !topicPlannedIds\.has\(Number\(candidate\.id\)\)\)/);
+  assert.match(tidySlice, /const domainPlan = planTidyGroups\(domainCandidates\)/);
+  assert.doesNotMatch(tidySlice, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
+
+  // URL dedupe plan is rule-gated.
+  assert.match(tidySlice, /const urlCloseIds = dedupeUrlsEnabled \? planDuplicateUrlClosures\(visibleTabs\) : \[\]/);
+
+  // One consolidated preview with the full disclosure sections.
+  assert.match(tidySlice, /title: 'Close duplicate tabs'/);
+  assert.match(tidySlice, /title: 'Untouched'/);
+  assert.match(tidySlice, /const plannedTargetTitleKeys = new Set\(plannedGroups\.map/);
+  assert.match(tidySlice, /title: 'Merge duplicates'/);
+  assert.match(tidySlice, /const mergedDuplicateTitleKeys = new Set/);
+  assert.match(tidySlice, /title: 'Rename tabs'/);
+  assert.doesNotMatch(tidySlice, /title: 'Merge empty duplicates'|title: 'Remain untouched'/);
+  // The preview renders a per-tab diff: movers carry from → to, tabs that
+  // already sit in their target Tag are flagged unchanged, and renames carry
+  // the before → after pair. The domain-rule re-resolution must refresh the
+  // same preview set so the diff always describes the final plan.
+  assert.match(tidySlice, /let previewGroups = resolvedPlan\.previewGroups/);
+  assert.match(tidySlice, /let unchangedPlannedIds = new Set\(resolvedPlan\.unchangedCandidateIds\)/);
+  assert.match(tidySlice, /previewGroups = domainResolved\.previewGroups/);
+  assert.match(tidySlice, /unchangedPlannedIds = new Set\(domainResolved\.unchangedCandidateIds\)/);
+  assert.match(tidySlice, /diff: \{ from: fromTitle, to: group\.title \}/);
+  assert.match(tidySlice, /unchanged: true,\n(\s*)source: fromTitle/);
+  assert.match(tidySlice, /rename: \{ from: item\.title, to: item\.result \}/);
+  assert.doesNotMatch(tidySlice, /`From \$\{item\.source\}`|· renamed to/);
+  assert.match(source, /action-preview-diff\b[\s\S]*action-preview-diff-from[\s\S]*action-preview-diff-to/);
+  assert.match(source, /item\.unchanged\) \{[\s\S]*is-unchanged[\s\S]*`Already in \$\{item\.source/);
+  assert.doesNotMatch(source, /group-plan-source/);
+  assert.match(tidySlice, /const confirmed = await showPlanPreview\(\{[\s\S]*title: 'Tidy Preview',[\s\S]*confirmText: 'Apply tidy',[\s\S]*variant: 'groups',/);
+  assert.doesNotMatch(source, /title: 'Auto Group Preview'/);
+  assert.match(tidySlice, /message: previewSummary\.join\(' · '\)/);
+  assert.match(tidySlice, /AI returned no valid groups/);
+  assert.match(tidySlice, /Topic grouping needs a configured AI provider\./);
+
+  // Apply order: grouping+merge transaction first, then the pure rename transaction.
+  const previewCall = tidySlice.indexOf('const confirmed = await showPlanPreview({');
+  const groupingCall = tidySlice.indexOf('await applyTidyGroupingPhase({');
+  const namingCall = tidySlice.indexOf('await applyTidyNamingPhase({');
+  assert.ok(previewCall >= 0 && previewCall < groupingCall && groupingCall < namingCall);
+
+  // Grouping phase: merge + regroup transaction recording the auto-group operation.
+  assert.match(groupingSlice, /recordOperation\(\{[\s\S]*type: 'auto-group'/);
+  assert.match(groupingSlice, /applyOrganizationPlanToSnapshot/);
+  assert.match(groupingSlice, /isPageShortcutCapableUrl\(candidate\.url\)/);
+  assert.match(groupingSlice, /Tidy organized \$\{groupedCount\} \$\{groupedCount === 1 \? 'tab' : 'tabs'\}/);
+  assert.match(groupingSlice, /Tidy merged \$\{plan\.duplicateGroupCount\} duplicate/);
+
+  // Naming phase: pure rename transaction recording the tidy-names operation.
+  assert.match(namingSlice, /recordOperation\(\{[\s\S]*type: 'tidy-names'/);
+  assert.match(namingSlice, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
+  assert.doesNotMatch(namingSlice, /showPlanPreview|mergeDuplicateSnapshotTags|plannedGroups/);
   assert.doesNotMatch(source, /duplicateTabIds/);
   assert.match(source, /buildOrganizationCandidates/);
   assert.match(source, /isPageShortcutCapableUrl\(tab\.url\)/);
-  assert.match(source, /candidate\.currentGroup\?\.title/);
-  assert.match(source, /title: 'Auto Group Preview'/);
-  assert.match(source, /title: 'Untouched'/);
-  assert.match(source, /const plannedTargetTitleKeys = new Set\(plannedGroups\.map/);
-  assert.match(source, /title: 'Merge duplicates'/);
-  assert.match(source, /const mergedDuplicateTitleKeys = new Set/);
-  assert.doesNotMatch(source, /title: 'Merge empty duplicates'/);
-  assert.match(source, /variant: 'groups'/);
-  assert.match(source, /AI returned no valid groups/);
-  assert.match(source, /applyOrganizationPlanToSnapshot/);
-  assert.match(source, /type: 'auto-group'/);
-  assert.match(source, /No live or saved http\(s\) tabs are available to organize/);
-  assert.match(source, /extensionRuntime && candidates\.length > 0 && !hasUsableAISettings\(aiSettings\)/);
-  assert.match(source, /async function autoGroupTabs\(options = \{\}\)[\s\S]*beginPanelAction\('autoGroup'\);\s*try \{\s*const refreshed = await refreshOrganizationActionState\(\{[\s\S]*adopt: true,[\s\S]*windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /async function refreshOrganizationActionState[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*loadTabs\(\{ adopt, windowBinding \}\)[\s\S]*await loadDormantSpaceView\(state\.activeSpaceId, \{ force: true \}\)/);
-  assert.match(source, /showStatusToast\(message, 'error'\)/);
-  assert.doesNotMatch(source, /Auto Group needs[\s\S]{0,200}openWorkbench/);
-  assert.doesNotMatch(source, /plannedGroups\.length === 0\) plannedGroups = planTidyGroups/);
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function foreignOpenOrganizationCandidateIds'),
-  );
-  assert.match(autoSource, /assertCompleteAutoGroupPlan\(plannedGroups, candidates\)/);
-  assert.match(autoSource, /resolvedPlan\.previewGroups/);
-  assert.doesNotMatch(autoSource, /title: 'Remain untouched'/);
 });
 
-test('Auto Group delegates cross-window candidate safety and revalidates it after confirmation', async () => {
+test('Tidy delegates cross-window candidate safety and revalidates it after confirmation', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const shared = await readFile(
     new URL('../src/shared/organization-plan.js', import.meta.url),
     'utf8',
   );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const planSlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
+  );
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
   );
   const foreignSource = functionSource(source, 'foreignOpenOrganizationCandidateIds');
 
@@ -1025,31 +902,31 @@ test('Auto Group delegates cross-window candidate safety and revalidates it afte
   assert.match(shared, /candidate\.snapshotTabId === foreign\.snapshotTabId/);
   assert.match(foreignSource, /foreignLiveTabs\.filter[\s\S]*entityBelongsToSpace\(tab, state, spaceId\)[\s\S]*organizationCandidateIdsOpenInOtherWindows/);
   assert.ok(
-    autoSource.indexOf('const foreignCandidateIds = foreignOpenOrganizationCandidateIds') <
-      autoSource.indexOf("send('ai:chat'"),
+    planSlice.indexOf('const foreignCandidateIds = foreignOpenOrganizationCandidateIds') <
+      planSlice.indexOf("send('ai:chat'"),
   );
-  assert.match(autoSource, /const rebasedPreviewGroups = rebaseOrganizationPlan\(\{[\s\S]*plannedGroups: previewGroups/);
-  assert.match(autoSource, /resolveOrganizationPlanChanges\(\{[\s\S]*plannedGroups: rebasedPreviewGroups/);
-  assert.match(autoSource, /currentResolvedPlan\.previewGroups\)[\s\S]*JSON\.stringify\(rebasedPreviewGroups\)/);
-  assert.match(autoSource, /const rebasedPlannedGroups = currentResolvedPlan\.plannedGroups/);
-  assert.match(autoSource, /rebasedPreviewGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
-  assert.match(autoSource, /An Auto Group target is now open in another window[\s\S]*review a fresh preview/);
+  assert.match(groupingSlice, /const rebasedPreviewGroups = rebaseOrganizationPlan\(\{[\s\S]*plannedGroups: plan\.previewGroups/);
+  assert.match(groupingSlice, /resolveOrganizationPlanChanges\(\{[\s\S]*plannedGroups: rebasedPreviewGroups/);
+  assert.match(groupingSlice, /currentResolvedPlan\.previewGroups\)[\s\S]*JSON\.stringify\(rebasedPreviewGroups\)/);
+  assert.match(groupingSlice, /const rebasedPlannedGroups = currentResolvedPlan\.plannedGroups/);
+  assert.match(groupingSlice, /rebasedPreviewGroups\.some\([\s\S]*currentForeignCandidateIds\.has\(Number\(candidateId\)\)/);
+  assert.match(groupingSlice, /A Tidy target is now open in another window[\s\S]*review a fresh preview/);
 });
 
-test('Auto Group identifies newly organized saved Tags before lifecycle checkpointing', async () => {
+test('Tidy identifies newly organized saved Tags before lifecycle checkpointing', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
   );
   assert.match(
-    autoSource,
+    groupingSlice,
     /ensureSnapshotLifecycleIds\(\s*organizedSnapshot,\s*createSnapshotLifecycleId,?\s*\)[\s\S]*mergeDuplicateSnapshotTags\([\s\S]*checkpointAutoGroupLifecycleBindings/,
   );
   assert.ok(
-    autoSource.indexOf('mergedGroups = await mergeDuplicateGroupsInActiveSpace') <
-      autoSource.indexOf('remapMergedSnapshotGroupReferences(\n            appliedDuplicateSnapshotPlan'),
-    'Auto Group must choose the canonical physical Tag before remapping duplicate saved identities',
+    groupingSlice.indexOf('mergedGroups = await mergeDuplicateGroupsInActiveSpace') <
+      groupingSlice.indexOf('remapMergedSnapshotGroupReferences(\n          appliedDuplicateSnapshotPlan'),
+    'Tidy must choose the canonical physical Tag before remapping duplicate saved identities',
   );
   assert.match(
     functionSource(source, 'activeChromeGroupsByTitle'),
@@ -1069,41 +946,39 @@ test('Auto Group identifies newly organized saved Tags before lifecycle checkpoi
   );
 });
 
-test('Tidy Names and Auto Group generate first and open only their final previews', async () => {
+test('Tidy generates AI plans with rule text then applies through the unified preview', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames(options = {})'),
-    source.indexOf('async function tidyTabNamesWithAI'),
-  );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
   );
   assert.doesNotMatch(source, /confirmAIProposalGeneration|confirmText: 'Generate preview'|Generate \$\{action\} preview\?/);
-  assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyNamesRequestFromUserGesture\(\)[\s\S]*runTask\(\(windowBinding\) => tidyTabNames\(\{ \.\.\.request, windowBinding \}\)\)/);
-  assert.match(tidySource, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
-  assert.match(tidySource, /tidyTabNamesWithAI\([\s\S]*showPlanPreview\(\{/);
-  assert.match(tidySource, /title: 'Preview Tidy Names'/);
-  assert.match(tidySource, /previewSummary\.push\(formatPreviewDuration[\s\S]*message: previewSummary\.join\(' · '\)/);
+  assert.match(source, /function startTidyNamesFromUserGesture\(\)[\s\S]*prepareTidyRequestFromUserGesture\(\)[\s\S]*runTask\(\(windowBinding\) => runTidy\(\{ \.\.\.request, windowBinding \}\)\)/);
+  assert.match(source, /function prepareTidyRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentTidyRunCandidates\)/);
+  assert.match(tidySlice, /tidyTabNamesWithAI\(aiCandidates, \{[\s\S]*permissionRequest: permissionRequested \? permissionRequest : null,[\s\S]*settings: aiSettings/);
+  assert.ok(
+    tidySlice.indexOf('await tidyTabNamesWithAI') < tidySlice.indexOf('const confirmed = await showPlanPreview({'),
+    'the naming plan must be ready before the consolidated preview opens',
+  );
   assert.match(source, /async function tidyTabNamesWithAI[\s\S]*options\.permissionRequest \|\| ensureAIHostPermission\(settings\)[\s\S]*send\('ai:chat', \{\s*settings,/);
-  assert.match(tidySource, /showPlanPreview\(\{[\s\S]*namingResult\.sourceLabel/);
+  assert.match(tidySlice, /setStatus\(`Tidy updated \$\{currentSpace\(\)\.name\}: \$\{statusParts\.join\(', '\)/);
   assert.match(source, /sourceLabel: `Local fallback \(AI unavailable: \$\{reason\}\)`/);
-  assert.match(source, /function prepareAutoGroupRequestFromUserGesture\(\)[\s\S]*prepareOrganizationAIRequestFromUserGesture\(hasCurrentAutoGroupAICandidates\)/);
   assert.match(source, /function prepareOrganizationAIRequestFromUserGesture\(candidateProbe\)[\s\S]*requestAIHostPermissionFromUserGesture\(aiSettings\)/);
   assert.match(source, /permissionRequest\.catch\(\(\) => null\)/);
-  assert.match(autoSource, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
-  assert.match(autoSource, /purpose: 'auto-group'/);
-  assert.match(autoSource, /itemCount: candidates\.length/);
-  assert.match(autoSource, /title: 'Auto Group Preview'/);
-  assert.match(autoSource, /message: previewSummary\.join\(' · '\)/);
-  assert.doesNotMatch(autoSource, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
-  assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*simplified URLs, domains, current Tags, and live\/saved status[\s\S]*aria-label/);
-  assert.match(source, /Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent/);
-  assert.match(source, /If the provider is unavailable, it falls back to local naming/);
-  assert.match(source, /Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent/);
-  assert.match(source, /only duplicate Tags to clean up, they can still be merged locally after one preview/);
+  assert.match(tidySlice, /if \(permissionRequested\) await permissionRequest;\s*else await ensureAIHostPermission\(aiSettings\)/);
+  assert.match(tidySlice, /purpose: 'auto-group'/);
+  assert.match(tidySlice, /itemCount: candidates\.length/);
+  assert.match(tidySlice, /title: 'Tidy Preview'/);
+  assert.match(tidySlice, /confirmText: 'Apply tidy'/);
+  assert.match(tidySlice, /message: previewSummary\.join\(' · '\)/);
+  assert.doesNotMatch(tidySlice, /sent \$\{candidates\.length\}|simplified URLs|live\/saved status/);
+  assert.match(source, /function updateOrganizationActionDisclosures\(\)[\s\S]*Sends only the disclosed tab titles, simplified URLs, and domains[\s\S]*aria-label/);
+  assert.match(source, /Tidy with \$\{provider\.label\}: merges duplicate Tags, regroups tabs by topic/);
+  assert.match(source, /Tidy merges duplicate Tags locally and renames tabs with local rules without sending tab metadata/);
+  assert.match(source, /Script rules and local naming still run when AI is unavailable/);
+  assert.match(source, /Topic grouping needs a configured AI provider/);
   assert.match(source, /function hasUsableAISettings[\s\S]*baseUrl[\s\S]*model[\s\S]*providerRequiresApiKey/);
-  assert.ok(autoSource.indexOf("send('ai:chat'") < autoSource.indexOf("title: 'Auto Group Preview'"));
+  assert.ok(tidySlice.indexOf("send('ai:chat'") < tidySlice.indexOf("title: 'Tidy Preview'"));
 });
 
 test('organization previews have one bounded scroll area and fixed actions', async () => {
@@ -1114,6 +989,12 @@ test('organization previews have one bounded scroll area and fixed actions', asy
   assert.match(styles, /\.action-preview\s*\{[\s\S]*?flex: 1 1 auto;[\s\S]*?overflow-y: auto;/);
   assert.match(styles, /\.action-preview\.group-plan-preview\s*\{[\s\S]*?max-height: none;/);
   assert.match(styles, /\.action-buttons\s*\{[\s\S]*?flex: 0 0 auto;/);
+  // Tidy preview diff rows: movers and renames read as before → after, and
+  // unchanged tabs render dimmed with an explicit "already there" note.
+  assert.match(styles, /\.action-preview-item\.is-unchanged\s*\{[^}]*opacity:\s*0\.55/);
+  assert.match(styles, /\.action-preview-diff\s*\{[\s\S]*?\.action-preview-diff-from/);
+  assert.match(styles, /\.action-preview-diff-to/);
+  assert.match(styles, /\.action-preview-stays\s*\{/);
 });
 
 test('sidepanel delegates stable-identity Space view merging to the shared module', async () => {
@@ -1131,7 +1012,16 @@ test('sidepanel delegates stable-identity Space view merging to the shared modul
   assert.match(mergeSource, /pruneRecentlyOpenedDormantTabs\(\)/);
   assert.match(mergeSource, /mergeLiveAndDormantGroups\(\{[\s\S]*liveGroups: liveView,[\s\S]*dormantGroups: dormantView,[\s\S]*collapsedGroups: state\.collapsedGroups,[\s\S]*recentlyOpenedTabs: recentlyOpenedDormantTabs/);
   assert.match(sharedSource, /const liveStableIndexes = indexesByStableIdentity\(liveEntries\)/);
-  assert.match(sharedSource, /if \(liveIdentity && dormantIdentity\) continue/);
+  // Divergent group ids stay separate unless stable ROW evidence ties the
+  // pair together (a regenerated live copy of the same saved Tag).
+  assert.match(sharedSource, /liveIdentity && dormantIdentity &&\s*\n\s*!groupsShareStableRows\(/);
+  assert.match(sharedSource, /function groupsShareStableRows\(/);
+  // A mixed-identity live Tag (rows saved under duplicate same-name Tags) must
+  // absorb its fully-matched saved copies instead of rendering empty pills.
+  assert.match(sharedSource, /if \(dormantEntryAbsorbedByMixedLiveEntry\(entry, liveMatchByDormantTab\)\) continue;/);
+  assert.match(sharedSource, /function dormantEntryAbsorbedByMixedLiveEntry\([\s\S]*match\.entry\.ungrouped \|\| !match\.entry\.identity\.ambiguous[\s\S]*match\.snapshotTabId !== dormantSnapshotTabId[\s\S]*absorber !== match\.entry/);
+  assert.match(source, /convergeDuplicateSavedTags\(\);\s*\n\s*savedGroups = mapTabsToSavedGroups\(\);/);
+  assert.match(source, /function mapTabsToSavedGroups|const mapTabsToSavedGroups = \(\) =>/);
   assert.match(sharedSource, /function groupMetadataKey[\s\S]*chromeGroupTitleKey\(group\.title\)[\s\S]*normalizeColor\(group\.color\)/);
   assert.doesNotMatch(mergeSource, /liveGroupsByTitle|groupTitleKeyCounts/);
 });
@@ -1146,10 +1036,26 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /const requestedTitle = Object\.hasOwn\(options, 'title'\)[\s\S]*const logicalTitle = requestedTitle === '' \? '' : normalizeGroupTitle\(requestedTitle, 'Tabs'\)[\s\S]*const physicalTitle = logicalTitle === '' \? '' : chromeGroupTitle\(logicalTitle, 'Tabs'\)/);
   assert.match(source, /title: physicalTitle/);
   assert.match(source, /const existing = await chromeGroupForTitle\(group\.title, spaceId, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /const existing = chromeGroupForSnapshotIdentity\(dormantGroup, state\.activeSpaceId\) \|\|\s*await chromeGroupForTitle\(dormantGroup\.title, state\.activeSpaceId, \{ windowBinding \}\)/);
+  // A dormant row joining a same-titled live Tag must converge the duplicate
+  // saved identity first; two identities in one chrome group can never match a
+  // saved Tag again and left permanently-stuck duplicate pills behind.
+  assert.match(source, /async function resolveDormantChromeGroupTarget\([\s\S]*chromeGroupForSnapshotIdentity\(dormantGroup, state\.activeSpaceId\)[\s\S]*await chromeGroupForTitle\(\s*dormantGroup\.title,\s*state\.activeSpaceId,\s*\{ windowBinding: options\.windowBinding \},\s*\)[\s\S]*convergeDuplicateSavedTags\(\)[\s\S]*remapMergedSnapshotGroupReferences\(\{ \[liveSavedGroupId\]: snapshotGroupId \}\)/);
+  assert.match(source, /function convergeDuplicateSavedTags\(\)[\s\S]*mergeDuplicateSnapshotTags\(\s*state\.spaceSnapshots\?\.\[state\.activeSpaceId\] \|\| null,\s*\)[\s\S]*replaceActiveSpaceSnapshotGroups\(mergedPlan\.snapshot\.groups, mergedPlan\.snapshot\)[\s\S]*remapMergedSnapshotGroupReferences\(mergedPlan\.snapshotGroupIdReplacements\)/);
+  assert.match(source, /function canonicalSameTitleSavedGroupId\(title\)[\s\S]*groupTitleKey\(group\.title\) === titleKey/);
+  assert.match(source, /function coherentSavedGroupIdForChromeGroup\(chromeGroupId\)[\s\S]*savedIds\.size === 1/);
+  assert.match(source, /snapshotGroupId: dormantTarget\?\.\s*snapshotGroupId \|\|\s*tab\.snapshotGroupId \|\| dormantGroup\?\.snapshotGroupId,/);
   assert.match(source, /function chromeGroupForSnapshotIdentity[\s\S]*binding\?\.snapshotGroupId \|\| tab\.snapshotGroupId[\s\S]*bindChromeGroup\(groupId, spaceId\)[\s\S]*logicalChromeGroupTitles\.set/);
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
+  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptyGroupNode\(group\.key, \{ windowBinding \}\)\)/);
+  // 空组节点：稳定键占位，支持独立建组/建子组；迁移把旧 folderPaths 转成节点。
+  assert.match(source, /async function createEmptyGroupNode\(parentKey = '', options = \{\}\)[\s\S]*createHierarchyNodeId\(\)[\s\S]*state\.emptyNodes\[spaceId\]/);
+  assert.match(source, /async function migrateSpaceHierarchy\(spaceId = state\.activeSpaceId, options = \{\}\)[\s\S]*planLegacyTitlePathMigration\(\{[\s\S]*folderPathsBySpace: \{ \[spaceId\]: storedPaths \},[\s\S]*groupsBySpace: \{ \[spaceId\]: groupsToMigrate \},[\s\S]*idFactory: createHierarchyNodeId/);
+  // The header already covers open/close and delete, so the group menu keeps
+  // only Rename, New Subgroup, and Move to.
+  assert.doesNotMatch(source, /menuAction\('Open Group'[^)]*\)\),\s*\n[\s\S]{0,200}menuAction\('Delete Group'[^)]*\)\),\s*\n[\s\S]{0,200}showGroupContextMenu/);
+  assert.match(source, /intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /if \(canDragGroup \|\| group\.emptyNode\) \{[\s\S]*acceptGroupOrTabDrop\(event, group\)\);[\s\S]*dropGroupOrTab\(event, group\)\);/);
   assert.match(source, /groups\.push\(\{[\s\S]*title: physicalTitle/);
   assert.match(source, /\.\.\.logicalChromeGroupTitleOverride\(group\)/);
   assert.match(source, /\.\.\.snapshotLogicalChromeGroupTitleOverride\(group, identityTabs, spaceId\)/);
@@ -1174,13 +1080,17 @@ test('organization Undo banner expires after ten seconds without deleting histor
 
 test('organization commits validate freshness and record Undo only after the applied state refreshes', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const tidySource = source.slice(
-    source.indexOf('async function tidyTabNames(options = {})'),
-    source.indexOf('async function tidyTabNamesWithAI'),
+  const tidySlice = source.slice(
+    source.indexOf('async function runTidy(options = {})'),
+    source.indexOf('async function applyTidyGroupingPhase'),
   );
-  const autoSource = source.slice(
-    source.indexOf('async function autoGroupTabs(options = {})'),
-    source.indexOf('function activeChromeGroupsByTitle'),
+  const groupingSlice = source.slice(
+    source.indexOf('async function applyTidyGroupingPhase'),
+    source.indexOf('async function applyTidyNamingPhase'),
+  );
+  const namingSlice = source.slice(
+    source.indexOf('async function applyTidyNamingPhase'),
+    source.indexOf('async function tidyTabNamesWithAI'),
   );
   const undoSource = source.slice(
     source.indexOf('async function undoLastOperation'),
@@ -1190,49 +1100,54 @@ test('organization commits validate freshness and record Undo only after the app
 
   assert.match(source, /fingerprintTidyNameTargets\(currentTargets, state\.renamedTabs, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
   assert.match(source, /organizationForCurrentSpaceState\(operation\.spaceId, \{[\s\S]*tabIdAliases: operation\.after\?\.tabIdAliases/);
-  assert.match(tidySource, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
+
+  // The rename phase is a pure rename transaction and records Undo after verification.
+  assert.match(namingSlice, /setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
   assert.ok(
-    tidySource.indexOf('const refreshed = await refreshTabsView({') <
-      tidySource.indexOf('recordOperation({'),
+    namingSlice.indexOf('const refreshed = await refreshTabsView({') <
+      namingSlice.indexOf('recordOperation({'),
     'Tidy must verify the merged live/snapshot view before recording Undo',
   );
-  assert.match(tidySource, /renameItems\.length === 0 && duplicateTagCount === 0/);
-  assert.match(tidySource, /title: 'Merge duplicate Tags'/);
-  assert.match(tidySource, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== duplicateTagFingerprint/);
-  assert.match(tidySource, /replaceActiveSpaceSnapshotGroups\(currentDuplicateTagPlan\.snapshot\.groups\)[\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences[\s\S]*setLiveTabPanelTitle\(state, item\.id, item\.result\)/);
-  assert.match(tidySource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
-  assert.match(tidySource, /This panel moved before Tidy Names could apply the reviewed changes/);
-  assert.match(tidySource, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
-  assert.match(tidySource, /Tidy Names was saved, but this view could not refresh[\s\S]*showStatusToast\(postCommitWarning, 'info'\)/);
-  const rollbackCapture = autoSource.indexOf('const rollback = captureChromeGroupMutationRollback();');
-  const authoritativeLoad = autoSource.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
-  const snapshotRefresh = autoSource.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
-  const membershipCapture = autoSource.indexOf('rollback.membership = captureTabGroupMembership(');
-  const transaction = autoSource.indexOf('await runChromeGroupMutationTransaction({');
-  const refreshedView = autoSource.indexOf('const refreshed = await refreshTabsView({');
-  const operationRecord = autoSource.indexOf('recordOperation({');
-  const checkpoint = autoSource.indexOf('checkpoint: async () => {');
-  const workspaceSave = autoSource.indexOf('saveState({ persistWindowState: false, windowBinding })');
+  assert.match(namingSlice, /refreshedTargets\.length !== renameItems\.length/);
+  assert.match(namingSlice, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(namingSlice, /This panel moved before Tidy could apply the planned renames/);
+  assert.match(namingSlice, /runChromeGroupMutationTransaction\(\{[\s\S]*saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*restoreChromeGroupMutationAfterFailure/);
+  assert.match(namingSlice, /Tidy stopped before its planned renames could be committed\. Nothing was changed\./);
+
+  // The grouping phase owns duplicate merges and regrouping in one transaction.
+  assert.match(tidySlice, /duplicateTagSummary\.merges/);
+  assert.match(groupingSlice, /fingerprintTidyDuplicateTags\(currentSnapshot\) !== plan\.duplicateGroupFingerprint/);
+  assert.match(groupingSlice, /replaceActiveSpaceSnapshotGroups\([\s\S]*mergeDuplicateGroupsInActiveSpace[\s\S]*remapMergedSnapshotGroupReferences/);
+  assert.match(groupingSlice, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
+  assert.match(tidySlice, /showStatusToast\(postCommitWarning, 'info'\)/);
+  const rollbackCapture = groupingSlice.indexOf('const rollback = captureChromeGroupMutationRollback();');
+  const authoritativeLoad = groupingSlice.indexOf('const loaded = await loadTabs({ adopt: true, windowBinding });');
+  const snapshotRefresh = groupingSlice.indexOf('snapshotOpenSpace(sourceSpaceId);', authoritativeLoad);
+  const membershipCapture = groupingSlice.indexOf('rollback.membership = captureTabGroupMembership(');
+  const transaction = groupingSlice.indexOf('await runPlanInFlight(() => runChromeGroupMutationTransaction({');
+  const refreshedView = groupingSlice.indexOf('const refreshed = await refreshTabsView({');
+  const operationRecord = groupingSlice.indexOf('recordOperation({');
+  const checkpoint = groupingSlice.indexOf('checkpoint: async () => {');
+  const workspaceSave = groupingSlice.indexOf('saveState({ persistWindowState: false, windowBinding })');
   assert.ok(
     rollbackCapture >= 0 && rollbackCapture < authoritativeLoad && authoritativeLoad < snapshotRefresh &&
     snapshotRefresh < membershipCapture && membershipCapture < transaction &&
     transaction < refreshedView && refreshedView < operationRecord && operationRecord < checkpoint &&
     checkpoint < workspaceSave,
-    'Auto Group must capture durable memory before refresh side effects, then verify, record Undo, and commit once',
+    'Tidy must capture durable memory before refresh side effects, then verify, record Undo, and commit once',
   );
-  assert.match(autoSource, /const beforeLive = captureLiveOrganization\(sourceSpaceId\);[\s\S]*rollback\.membership = captureTabGroupMembership\([\s\S]*beforeLive\.tabs\.map\(\(tab\) => tab\.tabId\)[\s\S]*runChromeGroupMutationTransaction\(\{/);
-  assert.equal(autoSource.match(/saveState\(/g)?.length, 1, 'Auto Group has one durable workspace checkpoint');
-  assert.match(autoSource, /checkpoint: async \(\) => \{[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true/);
-  assert.match(autoSource, /rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding,[\s\S]*persistRestoredState: true/);
-  assert.match(autoSource, /const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds\([\s\S]*const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags\([\s\S]*identifiedOrganizedSnapshot/);
-  assert.match(autoSource, /replaceActiveSpaceSnapshotGroups\([\s\S]*appliedDuplicateSnapshotPlan\.snapshot\.groups,[\s\S]*appliedDuplicateSnapshotPlan\.snapshot,[\s\S]*remapMergedSnapshotGroupReferences/);
-  assert.match(autoSource, /mergeDuplicateSnapshotTags\(state\.spaceSnapshots\?\.\[sourceSpaceId\]\)\.mergedCount > 0/);
-  assert.match(autoSource, /let committed = false[\s\S]*committed = true[\s\S]*if \(!committed\)/);
-  assert.match(autoSource, /Auto Group was saved, but this panel moved before its view could refresh/);
-  assert.match(autoSource, /Auto Group was saved, but this view could not refresh/);
-  assert.match(autoSource, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
-  assert.match(autoSource, /Chrome could not (?:apply|create) the proposed group/);
-  assert.doesNotMatch(autoSource, /withoutOperationRecord|createRollbackFailureError/);
+  assert.match(groupingSlice, /const beforeLive = captureLiveOrganization\(sourceSpaceId\);[\s\S]*rollback\.membership = captureTabGroupMembership\([\s\S]*beforeLive\.tabs\.map\(\(tab\) => tab\.tabId\)[\s\S]*runChromeGroupMutationTransaction\(\{/);
+  assert.equal(groupingSlice.match(/saveState\(/g)?.length, 1, 'Tidy has one durable workspace checkpoint');
+  assert.match(groupingSlice, /checkpoint: async \(\) => \{[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true/);
+  assert.match(groupingSlice, /rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding,[\s\S]*persistRestoredState: true/);
+  assert.match(groupingSlice, /const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds\([\s\S]*const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags\([\s\S]*identifiedOrganizedSnapshot/);
+  assert.match(groupingSlice, /replaceActiveSpaceSnapshotGroups\([\s\S]*appliedDuplicateSnapshotPlan\.snapshot\.groups,[\s\S]*appliedDuplicateSnapshotPlan\.snapshot,[\s\S]*remapMergedSnapshotGroupReferences/);
+  assert.match(groupingSlice, /mergeDuplicateSnapshotTags\(state\.spaceSnapshots\?\.\[sourceSpaceId\]\)\.mergedCount > 0/);
+  assert.match(groupingSlice, /Tidy was saved, but this panel moved before its view could refresh/);
+  assert.match(groupingSlice, /Tidy was saved, but this view could not refresh/);
+  assert.match(groupingSlice, /assertLivePlannedGroupsApplied\(livePlannedGroups, sourceSpaceId\)/);
+  assert.match(groupingSlice, /Chrome could not (?:apply|create) the proposed group/);
+  assert.doesNotMatch(groupingSlice, /withoutOperationRecord|createRollbackFailureError/);
   assert.match(source, /import \{[\s\S]{0,240}createRollbackAggregateError,[\s\S]{0,240}createRollbackFailureError,[\s\S]{0,240}withoutOperationRecord,[\s\S]{0,240}\} from '\.\/src\/shared\/operation-safety\.js'/);
   assert.match(source, /await assertOperationUndoIsFresh\(operation, \{ windowBinding \}\)/);
   assert.match(source, /operation\.type === 'tidy-names'[\s\S]*setLiveTabPanelTitle\(state, tabId, previousName\)/);
@@ -1240,8 +1155,7 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(undoSource, /Tidy Names Undo was saved, but this view could not refresh/);
   assert.match(undoSource, /operation\.type === 'auto-group'[\s\S]*saved = await saveState\(\{ persistWindowState: false, windowBinding \}\)[\s\S]*saved !== true[\s\S]*Auto Group Undo could save its checkpoint/);
   assert.match(undoSource, /Auto Group Undo was saved, but this panel moved before its view could refresh[\s\S]*Auto Group Undo was saved, but this view could not refresh/);
-  assert.match(source, /Auto Group with \$\{provider\.label\}:[^`]+merges duplicate Tags locally/);
-  assert.match(source, /If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview/);
+  assert.match(source, /Tidy with \$\{provider\.label\}: merges duplicate Tags, regroups tabs by topic/);
   assert.match(source, /type: 'restore-backup'[\s\S]*after: \{ portableFingerprint: fingerprintPortableWorkspaceContent\(state\) \}/);
   assert.match(source, /snapshotIdentities: beforeSnapshotIdentities/);
   assert.match(source, /restoreSnapshotIdentityOverlay\([\s\S]*operation\.before\?\.snapshotIdentities/);
@@ -1253,7 +1167,8 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /snapshotHasPersistentContent\(snapshot\)/);
   assert.match(source, /function currentGroupForMutation[\s\S]*groupMutationFingerprint\(current\) !== groupMutationFingerprint\(reference\)/);
   assert.match(source, /function groupMutationFingerprint[\s\S]*url: snapshotUrlIdentity\(tab\?\.url\)/);
-  assert.match(source, /currentContext\.fingerprint !== folderContext\.fingerprint/);
+  assert.match(source, /async function deleteGroup\(group, options = \{\}\)[\s\S]*const current = renderedGroupContexts\.get\(group\.key\);[\s\S]*if \(!current\?\.emptyNode\) \{/);
+  assert.match(source, /clearHierarchyEntriesForKeys\(\[group\.key\], state\.activeSpaceId, \[hierarchyAnchorForNode\(group\)\]\)/);
 });
 
 test('destructive Settings and Undo actions bind the reviewed record and merge concurrent edits', async () => {
@@ -1265,7 +1180,7 @@ test('destructive Settings and Undo actions bind the reviewed record and merge c
   assert.match(source, /runTask\(\(windowBinding\) => undoLastOperation\(operationId, \{ windowBinding \}\)\)/);
   assert.match(source, /resolveOperationUndoTarget\(state\.operationHistory, expectedOperationId\)/);
   assert.doesNotMatch(
-    source.slice(source.indexOf('async function undoLastOperation'), source.indexOf('function currentAskPageTab')),
+    source.slice(source.indexOf('async function undoLastOperation'), source.indexOf('function operationUndoTargetMessage')),
     /latestAppliedOperation\(/,
   );
   assert.match(source, /token: createArcImportToken\(\)/);
@@ -1282,15 +1197,12 @@ test('destructive Settings and Undo actions bind the reviewed record and merge c
 
 test('Arc import and backup restore separate pre-commit rollback from post-commit UI warnings', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const restoreSource = functionSource(source, 'restoreSpaceData');
+  const restoreSource = functionSource(source, 'runRestoreSpaceData');
   const restorePreflightSource = restoreSource.slice(
     restoreSource.indexOf('const selectedBackup = pendingSpaceBackup'),
     restoreSource.indexOf('const ok = await askConfirm'),
   );
-  const arcSource = [
-    functionSource(source, 'applyArcOnboarding'),
-    functionSource(source, 'importArcFile'),
-  ].join('\n');
+  const arcSource = functionSource(source, 'importArcFile');
 
   assert.match(source, /function assertCurrentStateFitsStorage[\s\S]*assertWorkspaceStorageBudget/);
   assert.match(source, /function captureWorkspaceMemoryCheckpoint[\s\S]*function restoreWorkspaceMemoryCheckpoint/);
@@ -1309,16 +1221,22 @@ test('Arc import and backup restore separate pre-commit rollback from post-commi
   assert.match(restoreSource, /Space data changed while confirmation was open\. Nothing was restored; review the selected backup and confirm again\./);
   assert.match(restoreSource, /backup restore was saved, but this view could not finish refreshing/i);
   assert.doesNotMatch(restoreSource, /restoreFailedWorkspaceMutation/);
-  assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 2);
-  assert.equal((arcSource.match(/runDurableCommitBoundary\(\{/g) || []).length, 2);
-  assert.equal((arcSource.match(/restoreWorkspaceMemoryCheckpoint\(beforeImport, \{ renderView: true \}\)/g) || []).length, 2);
-  assert.ok((arcSource.match(/The import was saved, but this view could not refresh/g) || []).length >= 2);
+  // Queued Restore Backup gestures must not run a second review once the
+  // automatic review from the file selection resolves (transition counting).
+  assert.match(source, /let restoreSpaceDataReviewTransitions = 0/);
+  assert.match(source, /restoreSpaceDataReviewTransitions \+= 1;[\s\S]*await runRestoreSpaceData\(windowBinding\);[\s\S]*finally[\s\S]*restoreSpaceDataReviewTransitions \+= 1/);
+  assert.match(source, /const enqueueRestoreSpaceDataReview = \(\) => \{[\s\S]*restoreSpaceDataReviewTransitions !== seenTransitions\) return;[\s\S]*await restoreSpaceData\(\{ windowBinding \}\)/);
+  assert.match(source, /restoreSpaceDataButton\.addEventListener\('click'[\s\S]*enqueueRestoreSpaceDataReview\(\)/);
+  assert.equal((arcSource.match(/assertCurrentStateFitsStorage\(\);/g) || []).length, 1);
+  assert.equal((arcSource.match(/runDurableCommitBoundary\(\{/g) || []).length, 1);
+  assert.equal((arcSource.match(/restoreWorkspaceMemoryCheckpoint\(beforeImport, \{ renderView: true \}\)/g) || []).length, 1);
+  assert.ok((arcSource.match(/The import was saved, but this view could not refresh/g) || []).length >= 1);
   assert.doesNotMatch(arcSource, /restoreFailedWorkspaceMutation/);
 });
 
 test('backup restore discloses and immediately adopts currently open browser tabs', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const restoreSource = functionSource(source, 'restoreSpaceData');
+  const restoreSource = functionSource(source, 'runRestoreSpaceData');
   const adoptOpenTabsSource = functionSource(source, 'adoptAllOpenTabsIntoRestoredActiveSpace');
 
   assert.match(restoreSource, /Current browser tabs will stay open and join the restored active Space\./);
@@ -1328,25 +1246,7 @@ test('backup restore discloses and immediately adopts currently open browser tab
   assert.match(restoreSource, /adoptAllOpenTabsIntoRestoredActiveSpace\(\{ windowBinding \}\)/);
   assert.match(adoptOpenTabsSource, /send\('tabs:listAll', \{\}, \{ windowBinding: options\.windowBinding \}\)[\s\S]*isCurrentPanelWindowBinding\(options\.windowBinding\)[\s\S]*adoptUnassignedEntities\([\s\S]*adoptGroups: true[\s\S]*snapshotOpenSpace\(state\.activeSpaceId, \{[\s\S]*sourceTabs: openTabs,[\s\S]*sourceGroups: openGroups/);
   assert.match(source, /adopt: operation\.type === 'restore-backup'/);
-  assert.match(source, /sanitizeSnapshotWithLifecycleIds\(\s*state\.spaceSnapshots\[spaceId\],\s*createSnapshotLifecycleId/);
-});
-
-test('non-Ask task failures never become persisted Ask conversation messages', async () => {
-  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-  const runTaskSource = source.slice(
-    source.indexOf('function runTask(task)'),
-    source.indexOf('async function withSharedStateLock'),
-  );
-  const askSource = source.slice(
-    source.indexOf('async function askCustomPrompt'),
-    source.indexOf('function recentAskHistory'),
-  );
-
-  assert.doesNotMatch(runTaskSource, /addAskMessage/);
-  assert.match(runTaskSource, /setStatus\(message\)/);
-  assert.match(runTaskSource, /else if \(workbenchMode\) showStatusToast\(message, 'error'\)/);
-  assert.match(askSource, /if \(statusMessage\)[\s\S]*persistAskMessage\(statusMessage, answer\)/);
-  assert.match(askSource, /else \{[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'error'\)/);
+  assert.match(source, /sanitizeSnapshotWithLifecycleIds\(\s*storedSnapshot,\s*createSnapshotLifecycleId/);
 });
 
 test('Settings keeps Chrome global shortcut handling out of the compact shortcut surface', async () => {
@@ -1366,12 +1266,12 @@ test('Settings keeps Chrome global shortcut handling out of the compact shortcut
   assert.match(renderShortcutSource, /filter\(\(action\) => action\.id !== 'togglePanel'\)/);
   assert.match(source, /function shortcutConflict\(shortcuts\)[\s\S]*delete panelShortcuts\.togglePanel/);
   assert.match(source, /findReservedShortcutConflict\(panelShortcuts\[action\.id\]\)/);
-  assert.match(source, /function hasBlockingDialogOpen\(\)[\s\S]*dialog !== els\.settingsDialog/);
+  assert.match(source, /function hasBlockingDialogOpen\(\)[\s\S]*querySelectorAll\('dialog\[open\]'\)/);
   assert.match(source, /import \{ createPanelKeyboardController \} from '\.\/src\/shared\/panel-keyboard\.js'/);
   assert.match(source, /const panelKeyboardController = createPanelKeyboardController\(\{[\s\S]*getShortcuts: \(\) => mergeShortcuts\(state\.shortcuts\)[\s\S]*hasBlockingDialogOpen,[\s\S]*dispatchShortcutAction: \(action\) => \{[\s\S]*prepareOrganizationRequestForAction\(action\)[\s\S]*runTask\(\(windowBinding\) => runShortcutAction\(action, organizationRequest, \{[\s\S]*windowBinding,[\s\S]*\}\)\)/);
   assert.match(source, /addEventListener\('keydown', panelKeyboardController\.handleKeydown, \{ capture: true \}\)/);
   assert.match(keyboardSource, /export function createPanelKeyboardController[\s\S]*if \(event\.key === 'Escape'\)[\s\S]*hasBlockingDialogOpen\(\)[\s\S]*shortcutMatchesEvent\(commandPaletteShortcut, event\)/);
-  assert.match(keyboardSource, /shouldPreserveNativeCopy\(event, options\.getSelection\(\)\)[\s\S]*exclude: \['togglePanel', 'askSubmit', 'askAbort'\]/);
+  assert.match(keyboardSource, /shouldPreserveNativeCopy\(event, options\.getSelection\(\)\)[\s\S]*exclude: \['togglePanel'\]/);
   assert.match(keyboardSource, /export function captureShortcutInput[\s\S]*event\.key === 'Tab'[\s\S]*event\.key === 'Backspace' \|\| event\.key === 'Delete'[\s\S]*shortcutFromEvent\(event\)/);
   assert.doesNotMatch(keyboardSource, /shortcuts\.togglePanel/);
   assert.doesNotMatch(keyboardSource, /runTask|runShortcutAction|prepareOrganizationRequestForAction/);
@@ -1381,16 +1281,18 @@ test('group deletion requires an explicit destructive confirmation with the affe
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
   const deletionSource = source.slice(
     source.indexOf('async function deleteGroup('),
-    source.indexOf('function groupsForFolderContext('),
+    source.indexOf('async function deleteGroupsAndTabs('),
   );
 
-  assert.equal((deletionSource.match(/await confirmGroupDeletion\(/g) || []).length, 2);
+  assert.equal((deletionSource.match(/await confirmGroupDeletion\(/g) || []).length, 1);
   assert.match(deletionSource, /title: 'Delete Group'/);
   assert.match(deletionSource, /Open tabs will be closed and saved tabs will be removed\. This cannot be undone\./);
   assert.match(deletionSource, /confirmText: tabCount > 0 \? `Delete \$\{count\}` : 'Delete group'/);
   assert.match(deletionSource, /danger: true/);
-  assert.equal((deletionSource.match(/showStatusToast\(message, 'success'\)/g) || []).length, 1);
-  assert.equal((deletionSource.match(/deletion\.skippedTabCount > 0 \? 'info' : 'success'/g) || []).length, 2);
+  assert.equal((deletionSource.match(/showStatusToast\(message, 'success'\)/g) || []).length, 2);
+  assert.equal((deletionSource.match(/deletion\.skippedTabCount > 0 \? 'info' : 'success'/g) || []).length, 1);
+  // 空组节点删除是非破坏性的：真实子组升根，不连带删 tab。
+  assert.match(deletionSource, /async function deleteHierarchyNode\(node, options = \{\}\)[\s\S]*startsWith\('node:'\)[\s\S]*saveState\(\{ persistWindowState: false, windowBinding: options\.windowBinding \}\)/);
   assert.doesNotMatch(deletionSource, /\btags\b/);
 
   const closeSource = source.slice(
@@ -1446,7 +1348,6 @@ test('Move to context actions render as a right-side submenu', async () => {
   assert.match(source, /moveSelectedTabsToSpace\(contextTabIds, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /moveTabToSpace\(tab, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /moveToSpaceSubmenu\(\(space, windowBinding\) => \([\s\S]{0,100}moveGroupToSpace\(group, space\.id, \{ windowBinding \}\)/);
-  assert.match(source, /moveToSpaceSubmenu\(\(space, windowBinding\) => \([\s\S]{0,100}moveFolderGroupToSpace\(folderContext, space\.id, \{ windowBinding \}\)/);
   assert.match(source, /function menuSubmenu\(label, items\)/);
   assert.doesNotMatch(source, /menuLabel\('Move to'\)/);
   assert.doesNotMatch(source, /submenu-left/);
@@ -1486,11 +1387,10 @@ test('custom context menus expose menu semantics and a complete keyboard focus m
   );
 });
 
-test('every dialog exposes a stable accessible name', async () => {
+test('every dialog and settings surface exposes a stable accessible name', async () => {
   const html = await readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
   assert.match(html, /<dialog id="actionDialog" aria-labelledby="actionDialogTitle">/);
-  assert.match(html, /<dialog id="onboardingDialog"[^>]*aria-label="Set up Space Tabs"/);
-  assert.match(html, /<dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">[\s\S]*id="settingsDialogTitle"/);
+  assert.match(html, /<main class="settings-view" id="settingsView" hidden>[\s\S]*id="settingsDialogTitle"/);
   assert.match(html, /<dialog id="commandPaletteDialog"[^>]*aria-labelledby="commandPaletteTitle"[\s\S]*id="commandPaletteTitle"/);
 });
 
@@ -1553,15 +1453,14 @@ test('shared render signatures cover panel dependencies without invalidating eve
     'utf8',
   );
 
-  assert.match(source, /import \{[\s\S]{0,180}askMessagesRenderSignature,[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
-  assert.match(source, /const tree = createFolderTree\(tabGroups, \{ activeSpaceId: state\.activeSpaceId \}\);[\s\S]{0,800}groupsRenderSignature\(\{[\s\S]{0,800}collapsedGroups: state\.collapsedGroups,[\s\S]{0,800}selectedTabIds,[\s\S]{0,800}folderTree: tree/);
+  assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
+  assert.match(source, /buildGroupTree\(nodes, parents\)[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}collapsedGroups: state\.collapsedGroups,[\s\S]{0,900}selectedTabIds,[\s\S]{0,900}hierarchy: parents/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
-  assert.match(source, /askMessagesRenderSignature\(session\)/);
-  assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature|askMessagesSignature)\(/);
+  assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];
-  assert.doesNotMatch(syncState, /lastRendered(?:Groups|Ask|Spaces)Signature\s*=\s*''/);
+  assert.doesNotMatch(syncState, /lastRendered(?:Groups|Spaces)Signature\s*=\s*''/);
   assert.match(signatures, /import \{ tabRowPresentation \} from '\.\/tab-utils\.js'/);
-  assert.match(signatures, /visibleCollapsedKeys[\s\S]*addVisibleFolderKeys\(folderTree[\s\S]*collapsedGroups\[key\]/);
+  assert.match(signatures, /hierarchy: Object\.keys\(hierarchy\)\.sort\(\)/);
   assert.match(signatures, /const presentation = tabRowPresentation\(tab\)[\s\S]*selected: !tab\.dormant && !presentation\.foreign/);
   assert.match(source, /row\.dataset\.snapshotTabId = String\(tab\.snapshotTabId \|\| ''\)/);
   assert.match(source, /row\.dataset\.snapshotGroupId = String\(tab\.snapshotGroupId \|\| ''\)/);
@@ -1584,8 +1483,7 @@ test('moving tabs to another Space activates the target Space', async () => {
   assert.match(finishMoveSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function reportMoveSuccess\(message\)[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'success'\)/);
   assert.match(source, /async function moveSelectedTabsToSpace\(tabIds, spaceId, options = \{\}\)[\s\S]*moveTabsToSpace\(tabIds, spaceId, options\)[\s\S]*reportMoveSuccess\(`Moved \$\{moved\} selected tabs to \$\{spaceName\(spaceId\)\}\.`\)/);
-  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*checkpointMovedGroupsToSpace\(\[group\], spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
-  assert.match(source, /async function moveFolderGroupToSpace\(folderContext, spaceId, options = \{\}\)[\s\S]*checkpointMovedGroupsToSpace\(groups, spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
+  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*subtreeGroupsForMove\(group\)[\s\S]*checkpointMovedGroupsToSpace\(subtreeGroups, spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
   assert.match(moveGroupsSource, /state\.spaces\.some\(\(space\) => space\.id === spaceId\)[\s\S]*destination Space no longer exists[\s\S]*captureChromeGroupMutationRollback\(\)[\s\S]*runChromeGroupMutationTransaction\([\s\S]*apply: \(\) => moveGroupsWithoutSaving[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)[\s\S]*rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)[\s\S]*await activateSpace[\s\S]*committedMoveActivationError/);
   assert.match(moveGroupsSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function moveGroupsWithoutSaving[\s\S]*transferSnapshotGroupsBetweenSpaces\([\s\S]*snapshotGroupIds:[\s\S]*snapshotTabIds:/);
@@ -1599,20 +1497,16 @@ test('tab replacement preserves durable identity without retaining obsolete auto
     new URL('../src/shared/tab-replacement.js', import.meta.url),
     'utf8',
   );
-  const persistAskSource = functionSource(source, 'persistAskMessage');
 
   assert.doesNotMatch(source, /function (?:discardInactiveTabsInSpace|discardRestoredTabs|canAutoCloseTab)\b/);
   assert.match(source, /chrome\.tabs\.onReplaced\?\.addListener\(handleChromeTabReplaced\)/);
   assert.match(source, /function handleChromeTabReplaced[\s\S]*state = reduceTabLifecycleEvent\([\s\S]*type: 'replaced'[\s\S]*applyPanelTabIdReplacement\(addedTabId, removedTabId, immediateTab\)/);
-  assert.match(source, /async function reconcileChromeTabReplacement[\s\S]*capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*type: 'replaced'[\s\S]*restoreInFlightAskMessages\(\)[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
-  assert.match(source, /function restoreInFlightAskMessages[\s\S]*activeAskStreams\.values\(\)[\s\S]*if \(stream\?\.finished\) continue;[\s\S]*updateAskSessionMessage\(session, ref\.messageId, stream\.text \|\| 'Thinking\.\.\.'\)/);
-  assert.match(persistAskSource, /syncStateFromStorage\(\)[\s\S]*replayAskMessageTabReplacements\(ref\)[\s\S]*updateAskSessionMessage\(latestSession, ref\.messageId, text\)[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
-  assert.match(source, /function replayAskMessageTabReplacements[\s\S]*replayAskSessionTabReplacements\([\s\S]*ref\?\.tabReplacements[\s\S]*state\.activeAskSessionKey = activeAskSessionKey/);
+  assert.match(source, /async function reconcileChromeTabReplacement[\s\S]*capturePanelWindowBinding\(\)[\s\S]*withSharedStateLock[\s\S]*syncStateFromStorage\(\{ windowBinding \}\)[\s\S]*type: 'replaced'[\s\S]*await saveState\(\{ persistWindowState: false, windowBinding \}\)/);
   assert.match(source, /import \{ migratePanelTabIdReplacement \} from '\.\/src\/shared\/tab-replacement\.js'/);
-  assert.match(source, /function applyPanelTabIdReplacement[\s\S]*migratePanelTabIdReplacement\([\s\S]*state\.askSessions = migrated\.askSessions[\s\S]*activeAskStreams\.clear\(\)[\s\S]*if \(migrated\.dragInvalidated\)[\s\S]*clearDragState\(\)[\s\S]*setStatus\(/);
+  assert.match(source, /function applyPanelTabIdReplacement[\s\S]*migratePanelTabIdReplacement\([\s\S]*recentlyOpenedDormantTabs[\s\S]*syntheticPlaceholderTabIds[\s\S]*if \(migrated\.dragInvalidated\)[\s\S]*clearDragState\(\)[\s\S]*setStatus\(/);
   assert.match(source, /function applyPanelTabIdReplacement[\s\S]*tabs = migrated\.tabs[\s\S]*foreignLiveTabs = migrated\.foreignLiveTabs[\s\S]*if \(migrated\.visibleTabsChanged\) render\(\)/);
-  assert.match(replacementHelper, /export function migratePanelTabIdReplacement[\s\S]*replaceSelectionTabId[\s\S]*rebindAskSessionsForTabReplacement/);
-  assert.match(replacementHelper, /dragInvalidated:[\s\S]*migrateActiveAskStreams/);
+  assert.match(replacementHelper, /export function migratePanelTabIdReplacement[\s\S]*replaceSelectionTabId/);
+  assert.match(replacementHelper, /dragInvalidated:[\s\S]*source\.dragState\?\.type === 'tab'/);
 });
 
 test('Chrome group mutations and Auto Group Undo rollback browser side effects before reporting failure', async () => {
@@ -1620,7 +1514,7 @@ test('Chrome group mutations and Auto Group Undo rollback browser side effects b
   const helper = await readFile(new URL('../src/shared/chrome-group-transaction.js', import.meta.url), 'utf8');
   const autoGroupRollbackSource = functionSource(source, 'restoreAutoGroupUndoAfterFailure');
   const captureLiveSource = functionSource(source, 'captureLiveOrganization');
-  const autoGroupSource = functionSource(source, 'autoGroupTabs');
+  const autoGroupSource = functionSource(source, 'applyTidyGroupingPhase');
 
   assert.match(source, /from '\.\/src\/shared\/chrome-group-transaction\.js'/);
   assert.match(source, /captureChromeGroupMutationMemory,[\s\S]*captureChromeGroupTitleRollback,[\s\S]*captureTabGroupMembership,[\s\S]*projectChromeGroupRollbackMemory,[\s\S]*resolveChromeGroupIdReplacement/);
@@ -1641,9 +1535,8 @@ test('Chrome group mutations and Auto Group Undo rollback browser side effects b
   assert.match(source, /async function groupSelectedTabs\([\s\S]*rememberCreatedGroupTabOrder\(groupId, selectedTabs\)[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)/);
   assert.match(source, /function rememberCreatedGroupTabOrder[\s\S]*removeTabFromSavedOrder\(tabId, spaceId\)[\s\S]*\[`group:\$\{numericGroupId\}`\] = uniqueKeys\(orderedIds\)/);
   assert.match(source, /async function moveTabsToSpace\([\s\S]*captureTabGroupMembership\([\s\S]*runChromeGroupMutationTransaction/);
-  assert.match(source, /async function renameFolderGroup\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
-  assert.match(source, /async function moveGroupBlockIntoContext\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
-  assert.match(source, /async function moveGroupBlockBesideContext\([\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
+  assert.match(source, /async function renameGroup\(group, options = \{\}\)[\s\S]*runChromeGroupMutationTransaction[\s\S]*rememberChromeGroupTitleRollback/);
+  assert.match(source, /async function materializeEmptyNodeWithTab\([\s\S]*runChromeGroupMutationTransaction[\s\S]*captureChromeGroupMutationRollback\(\)/);
   assert.match(source, /async function reorderTab\([\s\S]*targetNeedsBatchMaterialization[\s\S]*captureTabGroupMembership[\s\S]*runChromeGroupMutationTransaction[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)/);
   assert.match(source, /planMixedTabDropOrder\(\{[\s\S]*targetTabs: targetGroup\.tabs,[\s\S]*beforeTab,[\s\S]*dropPlan\.status === 'stale'[\s\S]*projectSnapshotTabOrder\([\s\S]*dropPlan\.visibleTabs[\s\S]*anchorTabId: dropPlan\.anchorTabId,[\s\S]*edge: dropPlan\.edge/);
   assert.match(source, /if \(\(!tab\.dormant[\s\S]*\|\| tab\.dormant\) \{[\s\S]*dropTabBefore\(event, tab, groupKey\)/);
@@ -1686,7 +1579,7 @@ test('durable tab lifecycle identity is wired through sidepanel snapshots and ba
   for (const eventName of ['onCreated', 'onRemoved', 'onUpdated', 'onMoved']) {
     assert.match(background, new RegExp(`chrome\\.tabGroups\\.${eventName}\\?\\.addListener`));
   }
-  assert.match(background, /chrome\.runtime\.onStartup\?\.addListener\(\(\) => \{[\s\S]*scheduleLifecycleDrain\(\);[\s\S]*recoverAskStreamsAtWorkerStart\(\)/);
+  assert.match(background, /chrome\.runtime\.onStartup\?\.addListener\(\(\) => \{[\s\S]*scheduleLifecycleDrain\(\)/);
   assert.match(background, /reduceTabLifecycleEvent\(/);
   assert.match(background, /async function captureUpdatedLifecycleEvent[\s\S]*return captureReservedLifecycleEvent\(reserved, \(\) => withLifecycleStateLock\(async \(\) => \{[\s\S]*chrome\.storage\.session\.get\(WINDOW_STATE_KEY\)[\s\S]*chrome\.storage\.local\.get\(STORAGE_KEY\)[\s\S]*persistLifecycleJournalEntry\(/);
 });
@@ -1774,7 +1667,7 @@ test('window-bound saves report durable success once either storage transaction 
 test('group hover preview only binds for collapsed tag groups', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
 
-  assert.match(source, /bindGroupPreview\(header,\s*groupPreviewGroupForFolder\(folder,\s*collapsed\)\)/);
+  assert.match(source, /bindGroupPreview\(header, group\);/);
   assert.match(source, /if \(!group\?\.collapsed \|\| !group\?\.tabs\?\.length\) return;/);
 });
 
@@ -1810,15 +1703,10 @@ test('every Tag group exposes a real keyboard-operable disclosure button', async
   const toggleGroupSource = source.match(
     /async function toggleGroup\(group, options = \{\}\)[\s\S]*?(?=\nasync function refreshMissingChromeGroupView)/,
   )?.[0];
-  const toggleFolderSource = source.match(
-    /async function toggleFolder\(folderKey, options = \{\}\)[\s\S]*?(?=\nfunction createGroupCard)/,
-  )?.[0];
   assert.ok(toggleGroupSource);
-  assert.ok(toggleFolderSource);
 
   assert.match(source, /function createGroupToggle\(group, title\)[\s\S]*document\.createElement\('button'\)[\s\S]*type = 'button'[\s\S]*aria-expanded/);
-  assert.match(source, /createGroupCard\(group\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
-  assert.match(source, /createFolderTabs\(group\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| 'Tabs'\)/);
+  assert.match(source, /function createGroupCard\(node, depth = 0\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
   assert.match(toggleGroupSource, /captureChromeGroupMutationRollback\(\)[\s\S]*groups:update[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*restoreChromeGroupMutationMemory\(rollback\)[\s\S]*restoring the Chrome group collapse state/);
   assert.match(source, /async function toggleGroup\([\s\S]*Group was \$\{action\}, but the panel could not refresh yet/);
   assert.match(toggleGroupSource, /await refreshTabsView\(\{ windowBinding \}\)[\s\S]*Group was \$\{action\}, but the panel could not refresh yet[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*panel refreshed, but the latest Space snapshot could not be saved/);
@@ -1826,13 +1714,8 @@ test('every Tag group exposes a real keyboard-operable disclosure button', async
   assert.match(toggleGroupSource, /chromeGroupMissing = true[\s\S]*refreshMissingChromeGroupView\(\{ windowBinding \}\)[\s\S]*The Space view was refreshed/);
   assert.match(toggleGroupSource, /rollbackGroupMissing = true[\s\S]*rollbackFailures\.push[\s\S]*if \(rollbackGroupMissing\)[\s\S]*refreshMissingChromeGroupView\(\{ windowBinding \}\)/);
   assert.match(functionSource(source, 'refreshMissingChromeGroupView'), /refreshTabsView\(\{[\s\S]*adopt: false,[\s\S]*reloadDormant: true,[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)/);
-  assert.match(source, /async function toggleFolder\([\s\S]*captureChromeGroupMutationRollback\(\)[\s\S]*restoreChromeGroupMutationMemory\(rollback\)[\s\S]*restoreDisclosureFocus\('folder'/);
-  assert.match(toggleFolderSource, /catch \(error\)[\s\S]*restoreDisclosureFocus\('folder', folderKey, options\.focusRestoreToken\)/);
   assert.match(toggleGroupSource, /catch \(error\)[\s\S]*currentDisclosureGroupKey\(group\)[\s\S]*options\.focusRestoreToken/);
-  assert.match(source, /function handleFolderHeaderClick[\s\S]*disclosureFocusGuard\.capture[\s\S]*focusRestoreToken/);
   assert.match(source, /function handleGroupHeaderClick[\s\S]*disclosureFocusGuard\.capture[\s\S]*focusRestoreToken/);
-  assert.match(source, /function restoreDisclosureFocus[\s\S]*folder-header[\s\S]*group-toggle[\s\S]*preventScroll: true/);
-  assert.match(source, /function restoreDisclosureFocus[\s\S]*folder-direct-group[\s\S]*group-toggle/);
   assert.match(styles, /\.group-toggle:focus-visible/);
 });
 
@@ -1871,4 +1754,25 @@ test('tab rows expose valid multi-select semantics and keyboard behavior', async
   assert.match(source, /async function reorderTab[\s\S]*if \(tab\.pinned\)[\s\S]*pinned while dragging/);
   assert.match(source, /async function reorderTab[\s\S]*const ungrouped = await send\('tabs:ungroup'[\s\S]*if \(ungrouped\.missing\)[\s\S]*No order change was saved/);
   assert.match(source, /requestedContextTabIds[\s\S]*excludedPinnedCount[\s\S]*pinned tab[^`]*left out/);
+});
+
+test('settings AI controls expose every property the panel reads at runtime', async () => {
+  const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+  const factoryStart = source.indexOf('function settingsAIControls()');
+  const factoryEnd = source.indexOf('function renderProviderOptions', factoryStart);
+  assert.ok(factoryStart >= 0 && factoryEnd > factoryStart, 'settingsAIControls factory is missing');
+  const factory = source.slice(factoryStart, factoryEnd);
+  const keys = [...factory.matchAll(/(\w+): els\./g)].map((match) => match[1]);
+  assert.ok(keys.length >= 8, 'settingsAIControls should expose the full AI control set');
+
+  // Every controls.<key> property read anywhere in the panel must be
+  // provided by the factory — a missing key only explodes at runtime
+  // (this exact gap shipped once as controls.modelOptions).
+  const reads = new Set([...source.matchAll(/controls\.(\w+)/g)].map((match) => match[1]));
+  for (const key of reads) {
+    assert.ok(
+      keys.includes(key),
+      `settingsAIControls is missing "${key}", read at runtime as controls.${key}`,
+    );
+  }
 });

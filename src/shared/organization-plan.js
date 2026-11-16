@@ -3,7 +3,7 @@ import {
   snapshotTabIdentitiesConflict,
 } from './space-snapshot.js';
 
-const ORGANIZATION_FINGERPRINT_VERSION = 3;
+const ORGANIZATION_FINGERPRINT_VERSION = 4;
 
 /**
  * Builds the logical Auto Group input without presenting saved snapshot rows as
@@ -767,9 +767,9 @@ function fingerprintLiveGroups(liveGroups, tabIdAliases) {
               : tabIndex,
             value: {
               tabId: Number.isSafeInteger(alias) && alias >= 0 ? alias : tab?.id ?? null,
-              title: String(tab?.title || ''),
-              displayTitle: cleanText(tab?.displayTitle),
-              panelTitle: cleanText(tab?.panelTitle),
+              // Titles drift on every page load; including them turned the
+              // drag-freshness guard into a false "another view changed it"
+              // error. Only durable identity fields belong here.
               url: String(tab?.url || ''),
               pinned: Boolean(tab?.pinned),
               windowId: tab?.windowId ?? null,
@@ -828,13 +828,25 @@ function fingerprintSnapshotGroups(snapshot, liveGroups) {
   };
 }
 
+function stableLiveBackedSnapshotRow(tab = {}) {
+  const { title, panelTitle, displayTitle, pageTitle, ...rest } = tab;
+  return rest;
+}
+
 function fingerprintLiveBackedSnapshotGroup(group, liveSnapshotTabIds) {
   const liveBackedTabs = [];
   const savedOnlyTabs = [];
   arrayValue(group?.tabs).forEach((tab, index) => {
     const snapshotTabId = cleanText(tab?.snapshotTabId);
     if (snapshotTabId && liveSnapshotTabIds.has(snapshotTabId)) {
-      liveBackedTabs.push({ key: snapshotTabId, value: tab });
+      // Live-backed rows mirror live state; only their titles drift on page
+      // load, so strip the volatile title fields and keep every other stored
+      // field (custom metadata stays protected). Saved-only rows keep their
+      // full stored content.
+      liveBackedTabs.push({
+        key: snapshotTabId,
+        value: stableLiveBackedSnapshotRow(tab),
+      });
     } else {
       // A dormant row's exact position among the open rows remains saved user
       // data. Only the redundant order among identified open rows is ignored;

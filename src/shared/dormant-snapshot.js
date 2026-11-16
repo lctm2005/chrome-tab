@@ -442,9 +442,20 @@ function storedGroupIndex(groups, reference = {}) {
   if (!isRecord(reference)) return -1;
   const snapshotGroupId = snapshotIdentity(reference.snapshotGroupId);
   if (snapshotGroupId) {
-    return uniqueIndex(groups, (group) => (
+    const unique = uniqueIndex(groups, (group) => (
       snapshotIdentity(group.snapshotGroupId) === snapshotGroupId
     ));
+    if (unique >= 0) return unique;
+    // Duplicate stable ids are ambiguous, but the rendered key carries the
+    // array index this row came from. Use it only when that row still owns
+    // the same id; otherwise refuse to guess between duplicates.
+    const keyIndex = dormantSnapshotGroupIndexFromKey(reference.key);
+    if (
+      keyIndex >= 0 &&
+      keyIndex < groups.length &&
+      snapshotIdentity(groups[keyIndex]?.snapshotGroupId) === snapshotGroupId
+    ) return keyIndex;
+    return -1;
   }
 
   const title = cleanText(reference.title);
@@ -458,6 +469,17 @@ function storedGroupIndex(groups, reference = {}) {
 
   const keyIndex = dormantSnapshotGroupIndexFromKey(reference.key);
   return keyIndex < 0 || keyIndex === metadataIndex ? metadataIndex : -1;
+}
+
+/**
+ * Public resolution check for callers that must know whether a projected
+ * mutation actually found its row. Projections return the snapshot unchanged
+ * on a miss, which callers previously could not distinguish from a no-op.
+ */
+export function findDormantSnapshotGroupIndex(snapshot, reference = {}) {
+  const groups = validSnapshotGroups(snapshot);
+  if (!groups) return -1;
+  return storedGroupIndex(groups, reference);
 }
 
 function persistentSnapshot(snapshot, groups, now) {

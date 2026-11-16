@@ -8,6 +8,7 @@ import {
   shouldPreserveNativeCopy,
 } from './shortcuts.js';
 
+
 const REQUIRED_CONTROLLER_OPTIONS = [
   'getShortcuts',
   'hasBlockingDialogOpen',
@@ -19,7 +20,6 @@ const REQUIRED_CONTROLLER_OPTIONS = [
   'getSelection',
   'openCommandPalette',
   'abortActiveAIRequest',
-  'submitAsk',
   'dispatchShortcutAction',
 ];
 
@@ -58,14 +58,7 @@ export function createPanelKeyboardController(options = {}) {
     }
 
     const shortcuts = options.getShortcuts();
-    if (options.hasBlockingDialogOpen()) {
-      if (shouldAbortAsk(event, shortcuts, options)) {
-        consumeEvent(event);
-        options.abortActiveAIRequest();
-        return 'ask-aborted';
-      }
-      return 'blocked';
-    }
+    if (options.hasBlockingDialogOpen()) return 'blocked';
 
     if (shortcutMatchesEvent(commandPaletteShortcut, event)) {
       consumeEvent(event);
@@ -75,17 +68,10 @@ export function createPanelKeyboardController(options = {}) {
 
     if (shouldPreserveNativeCopy(event, options.getSelection())) return 'native-copy';
 
-    if (shouldAbortAsk(event, shortcuts, options)) {
+    if (shouldAbortActiveAI(event, options)) {
       consumeEvent(event);
       options.abortActiveAIRequest();
-      return 'ask-aborted';
-    }
-
-    if (options.getActiveView() === 'ask' && shortcutMatchesEvent(shortcuts.askSubmit, event)) {
-      consumeEvent(event);
-      if (options.getActiveAIRequestId()) options.abortActiveAIRequest();
-      else options.submitAsk();
-      return 'ask-submitted';
+      return 'ai-aborted';
     }
 
     if (isEditableTarget(event.target) && shouldIgnoreShortcutInEditable(event)) {
@@ -93,7 +79,7 @@ export function createPanelKeyboardController(options = {}) {
     }
 
     const action = shortcutActionFromEvent(event, shortcuts, {
-      exclude: ['togglePanel', 'askSubmit', 'askAbort'],
+      exclude: ['togglePanel'],
     });
     if (!action) return 'ignored';
     consumeEvent(event);
@@ -127,10 +113,12 @@ export function isEditableTarget(target) {
     String(contentEditable).toLowerCase() !== 'false';
 }
 
-function shouldAbortAsk(event, shortcuts, options) {
+function shouldAbortActiveAI(event, options) {
+  // Escape is the generic stop gesture for an in-flight provider request
+  // (Tidy/Auto Group/Test AI), regardless of the stored shortcut table.
   return Boolean(
     options.getActiveAIRequestId() &&
-    shortcutMatchesEvent(shortcuts.askAbort, event) &&
+    event.key === 'Escape' &&
     !shouldPreserveNativeCopy(event, options.getSelection()),
   );
 }

@@ -62,20 +62,6 @@ function deletionIntentFixture() {
         }],
       },
     },
-    askSessions: {
-      'space:work': {
-        key: 'space:work',
-        spaceId: 'work',
-        title: 'Work',
-        url: '',
-        createdAt: 1,
-        updatedAt: 2,
-        messages: [
-          { id: 'q1', role: 'user', text: 'What is left?', createdAt: 1 },
-          { id: 'a1', role: 'assistant', text: 'One saved task.', createdAt: 2 },
-        ],
-      },
-    },
   };
 }
 
@@ -113,9 +99,6 @@ test('Space deletion intent fingerprints every reviewed content owner without mu
   viewOnly.spaceSnapshots.work.groups[0].snapshotGroupId = 'new-generated-group-id';
   viewOnly.spaceSnapshots.work.groups[0].tabs[0].snapshotTabId = 'new-generated-live-id';
   viewOnly.spaceSnapshots.work.groups[0].tabs[1].snapshotTabId = 'new-generated-saved-id';
-  viewOnly.askSessions['space:work'].updatedAt = 999;
-  viewOnly.askSessions['space:work'].messages[0].id = 'generated-id';
-  viewOnly.askSessions['space:work'].messages[0].createdAt = 999;
   viewOnly.spaceContexts.later = '# Changed elsewhere';
   viewOnly.spaces[2].name = 'Changed elsewhere';
   assert.equal(spaceDeletionIntentFingerprint({
@@ -131,8 +114,6 @@ test('Space deletion intent fingerprints every reviewed content owner without mu
     (next) => { next.spaceSnapshots.work.groups[0].tabs[1].title = 'Revised saved title'; },
     (next) => { next.spaceSnapshots.work.groups[0].tabs[1].url += '?revised=1'; },
     (next) => { next.spaceSnapshots.work.groups[0].tabs[1].panelTitle = 'Do now'; },
-    (next) => { next.askSessions['space:work'].messages[1].text = 'Two saved tasks.'; },
-    (next) => { next.askSessions['space:work'].messages.push({ role: 'user', text: 'New question' }); },
   ]) {
     const changed = deletionIntentFixture();
     mutate(changed);
@@ -225,13 +206,12 @@ test('Space deletion intent follows fallback selection and tolerates absent opti
     state: {
       spaces: [{ id: 'work', name: 'Work' }],
       spaceSnapshots: { work: { groups: 'invalid' } },
-      askSessions: { 'space:work': { messages: null } },
     },
     deletingSpaceId: 'work',
   }));
 });
 
-test('Space deletion intent normalizes sparse tabs, snapshots, sessions, and Space identities', () => {
+test('Space deletion intent normalizes sparse tabs, snapshots, and Space identities', () => {
   const sparse = {
     spaces: [null, { id: 'work' }],
     spaceSnapshots: {
@@ -240,15 +220,6 @@ test('Space deletion intent normalizes sparse tabs, snapshots, sessions, and Spa
           title: 'Only live rows',
           tabs: [{ title: 'Pending', url: 'https://pending.test/' }],
         }],
-      },
-    },
-    askSessions: {
-      'space:work': {
-        url: 'https://conversation.test/',
-        messages: [
-          { role: 'system', text: '' },
-          { role: 'assistant', text: 'Retained answer' },
-        ],
       },
     },
   };
@@ -268,7 +239,6 @@ test('Space deletion intent normalizes sparse tabs, snapshots, sessions, and Spa
   });
   assert.match(fingerprint, /"windowId":null,"groupId":null/);
   assert.match(fingerprint, /"savedOnlySnapshot":null/);
-  assert.match(fingerprint, /Retained answer/);
 
   const unmatched = structuredClone(sparse);
   unmatched.spaceSnapshots.work.groups[0].tabs[0].url = 'https://saved-only.test/';
@@ -293,7 +263,6 @@ test('Space deletion intent normalizes sparse tabs, snapshots, sessions, and Spa
           }],
         },
       },
-      askSessions: { 'space:work': { messages: [] } },
     },
     deletingSpaceId: 'work',
     plan: {
@@ -413,7 +382,7 @@ test('inactive deletion captures an independent rollback journal without changin
     deletingSpaceId: 'inactive',
     durableActiveSpaceId: 'active',
     windowSpaceState,
-    activeView: 'ask',
+    activeView: 'settings',
     deletingActiveSpace: false,
   });
 
@@ -422,7 +391,7 @@ test('inactive deletion captures an independent rollback journal without changin
     deletingSpaceId: 'inactive',
     durableActiveSpaceId: 'active',
     windowSpaceState,
-    activeView: 'ask',
+    activeView: 'settings',
     deletingActiveSpace: false,
     createdTabIds: [],
     checkpointState: null,

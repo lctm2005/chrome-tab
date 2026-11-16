@@ -1,10 +1,6 @@
 import { chromeGroupTitle } from './group-title.js';
 import { isChromeNewTabUrl } from './tab-utils.js';
 import {
-  askSessionKeyAfterTabReplacement,
-  rebindAskSessionsForTabReplacement,
-} from './ask-session.js';
-import {
   isRestorableSnapshotTab,
   sanitizeSpaceSnapshot,
 } from './space-snapshot.js';
@@ -602,22 +598,6 @@ function reduceReplaced(state, event, now) {
   next = transferRecordKey(next, 'tabGroups', removedTabId, addedTabId);
   next.ephemeralTabIds = replaceNumericId(next.ephemeralTabIds, removedTabId, addedTabId);
   next.tabOrder = replaceTabOrderId(next.tabOrder, removedTabId, addedTabId);
-  if (isRecord(state.askSessions)) {
-    const rebound = rebindAskSessionsForTabReplacement(
-      state.askSessions,
-      removedTabId,
-      addedTabId,
-    );
-    next.askSessions = rebound.sessions;
-    next.activeAskSessionKey = rebound.keyMap[state.activeAskSessionKey] ||
-      askSessionKeyAfterTabReplacement(state.activeAskSessionKey, removedTabId, addedTabId);
-  } else if (typeof state.activeAskSessionKey === 'string') {
-    next.activeAskSessionKey = askSessionKeyAfterTabReplacement(
-      state.activeAskSessionKey,
-      removedTabId,
-      addedTabId,
-    );
-  }
   if (Array.isArray(state.operationHistory)) {
     next.operationHistory = replaceOperationHistoryTabId(
       state.operationHistory,
@@ -1303,4 +1283,33 @@ function spaceExists(state, spaceId) {
 
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+/**
+ * Decides how a live row's stale snapshot binding should be reconciled before
+ * an Auto Group checkpoint commits. Row identity can outlive its saved Tag
+ * when snapshot rebuilds merge or purge groups; instead of aborting the whole
+ * change, callers heal the binding to the candidate's group when that group
+ * still exists, or clear it so the row degrades to an unsaved live row.
+ */
+export function planStaleLifecycleBindingHeal({
+  snapshotTabId = '',
+  snapshotGroups = [],
+  candidateSnapshotGroupId = '',
+} = {}) {
+  const rowId = String(snapshotTabId || '').trim();
+  if (rowId) {
+    const groups = Array.isArray(snapshotGroups) ? snapshotGroups : [];
+    const owners = groups.filter((group) => (
+      (group.tabs || []).some((tab) => String(tab?.snapshotTabId || '').trim() === rowId)
+    ));
+    if (owners.length === 1) {
+      return { action: 'keep', snapshotGroupId: String(owners[0].snapshotGroupId || '').trim() };
+    }
+    const candidateId = String(candidateSnapshotGroupId || '').trim();
+    if (candidateId && groups.some((group) => String(group.snapshotGroupId || '').trim() === candidateId)) {
+      return { action: 'heal', snapshotGroupId: candidateId };
+    }
+  }
+  return { action: 'clear', snapshotGroupId: '' };
 }

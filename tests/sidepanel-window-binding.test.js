@@ -121,24 +121,23 @@ test('window-derived user mutations explicitly scope reads, browser commands, an
     'renameTab',
     'duplicateTab',
     'renameGroup',
-    'renameFolderGroup',
+    'createEmptyGroupNode',
     'groupSelectedTabs',
     'closeTab',
     'removeDormantTab',
     'updateSavedTabUrl',
     'moveTabsToSpace',
     'moveGroupToSpace',
-    'moveFolderGroupToSpace',
     'deleteGroup',
-    'deleteFolderGroup',
+    'deleteHierarchyNode',
     'deleteGroupsAndTabs',
-    'toggleFolder',
     'toggleGroup',
-    'moveGroupBlockIntoContext',
-    'moveGroupBlockBesideContext',
+    'applyHierarchyDrop',
+    'materializeEmptyNodeWithTab',
     'reorderTab',
-    'tidyTabNames',
-    'autoGroupTabs',
+    'runTidy',
+    'applyTidyGroupingPhase',
+    'applyTidyNamingPhase',
     'undoLastOperation',
     'exportSpaceData',
     'restoreSpaceData',
@@ -196,24 +195,33 @@ test('new and saved tab creation stop compensation at the durable commit boundar
   assert.match(cleanupSource, /result\.closedTabIds\.length > 0[\s\S]*saveState\(\{ persistWindowState: false \}\)/);
 });
 
-test('Command Palette tools and group delete buttons keep their gesture-time binding', () => {
+test('Command Palette tools and group header buttons keep their gesture-time binding', () => {
   const palette = functions.get('runSelectedCommandPaletteItem');
   assert.ok(palette);
   const paletteSource = source.slice(palette.start, palette.end);
-  assert.match(paletteSource, /openAskPage\(\{ windowBinding \}\)/);
-  assert.match(paletteSource, /tidyTabNames\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
-  assert.match(paletteSource, /autoGroupTabs\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
-  assert.match(paletteSource, /openWorkbench\(\{ view: 'settings', windowBinding \}\)/);
+  assert.match(paletteSource, /activateSpace\(item\.spaceId, \{ windowBinding \}\)/);
+  assert.match(paletteSource, /runTidy\(\{ \.\.\.\(prepared\.organizationRequest \|\| \{\}\), windowBinding \}\)/);
+  assert.match(paletteSource, /item\.action === 'settings'[\s\S]*activeView = 'settings';[\s\S]*render\(\)/);
   assert.match(paletteSource, /isCurrentPanelWindowBinding\(windowBinding\)/);
 
-  for (const name of ['createGroupCard', 'createFolderTabs']) {
+  for (const name of ['createGroupCard']) {
     const fn = functions.get(name);
     assert.ok(fn, `missing ${name}`);
     const fnSource = source.slice(fn.start, fn.end);
     assert.match(
       fnSource,
-      /actionButton\('\u00d7', 'Delete group', \(windowBinding\) => \([\s\S]*deleteGroup\(group, \{ windowBinding \}\)/,
+      /actionButton\('✎', 'Rename group', \(windowBinding\) => renameGroup\(group, \{ windowBinding \}\)/,
       `${name} must forward actionButton's gesture-time binding`,
+    );
+    assert.match(
+      fnSource,
+      /actionButton\('×', 'Delete group', \(windowBinding\) => deleteGroup\(group, \{ windowBinding \}\)/,
+      `${name} must preserve the binding when deleting a group`,
+    );
+    assert.match(
+      fnSource,
+      /header\.addEventListener\('click', \(event\) => \{[\s\S]*handleGroupHeaderClick\(event, group\)/,
+      `${name} must keep collapse/expand wired to close/open at gesture time`,
     );
   }
 });
@@ -260,7 +268,7 @@ test('Chrome-group rollback can finish in the original window after the host mov
   assert.match(undoRollbackSource, /allowStaleWindowBinding: Boolean\(options\.windowBinding\)/);
   assert.match(undoRollbackSource, /isCurrentPanelWindowBinding\(options\.windowBinding\)[\s\S]*refreshTabs/);
 
-  const autoGroup = functions.get('autoGroupTabs');
+  const autoGroup = functions.get('applyTidyGroupingPhase');
   const autoGroupSource = source.slice(autoGroup.start, autoGroup.end);
   assert.match(
     autoGroupSource,

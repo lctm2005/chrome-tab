@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildChatCompletionRequest,
+  buildListModelsRequest,
   createPrompt,
   extractAssistantText,
   extractFinishReason,
@@ -11,6 +12,7 @@ import {
   languageInstruction,
   normalizeBaseUrl,
   outputTokenBudgetForPurpose,
+  parseModelsResponse,
   parseTidyGroups,
   parseTidyNames,
   parseChatStreamEvent,
@@ -99,7 +101,7 @@ test('uses current OpenAI token and reasoning parameters for GPT-5.1+ models', (
     apiKey: 'key',
     temperature: 0.2,
     thinking: 'enabled',
-  }, messages, 'ask-page');
+  }, messages, 'auto-group', 81);
 
   assert.deepEqual(request.body, {
     model: 'gpt-5.5',
@@ -201,21 +203,21 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
     model: 'glm-5-turbo',
     apiKey: 'key',
     thinking: 'enabled',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const deepseekDisabled = buildChatCompletionRequest({
     provider: 'deepseek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
     apiKey: 'key',
     thinking: 'disabled',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const deepseekInvalid = buildChatCompletionRequest({
     provider: 'deepseek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-pro',
     apiKey: 'key',
     thinking: 'corrupt',
-  }, [], 'ask-page');
+  }, [], 'test-ai');
   const openAI = buildChatCompletionRequest({
     provider: 'openai',
     baseUrl: 'https://api.openai.com/v1',
@@ -223,7 +225,7 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
     apiKey: 'key',
     thinking: 'enabled',
     temperature: 0,
-  }, [], 'ask-page');
+  }, [], 'test-ai');
 
   assert.deepEqual(enabled.body.thinking, { type: 'enabled' });
   assert.deepEqual(deepseekDisabled.body.thinking, { type: 'disabled' });
@@ -231,7 +233,7 @@ test('sends explicit Thinking choices only to compatible provider models', () =>
   assert.equal(enabled.body.temperature, 0.6);
   assert.equal(Object.hasOwn(openAI.body, 'thinking'), false);
   assert.equal(Object.hasOwn(openAI.body, 'temperature'), false);
-  assert.equal(openAI.body.max_completion_tokens, 32_768);
+  assert.equal(openAI.body.max_completion_tokens, 1_024);
   assert.equal(openAI.body.reasoning_effort, 'none');
 });
 
@@ -247,7 +249,6 @@ test('selects bounded output budgets from the purpose and item count whitelist',
   assert.equal(outputTokenBudgetForPurpose('auto-group', 200), 32_768);
   assert.equal(outputTokenBudgetForPurpose('auto-group', 201), 65_536);
 
-  assert.equal(outputTokenBudgetForPurpose('ask-page'), 32_768);
   assert.equal(outputTokenBudgetForPurpose('test-ai'), 1_024);
   assert.throws(
     () => outputTokenBudgetForPurpose('tidy-names'),
@@ -360,137 +361,32 @@ test('adds language instructions to AI prompts', () => {
   assert.match(custom[0].content, /Respond in English/);
 });
 
-test('fills safe Ask Page defaults and ignores empty or malformed history entries', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {},
-    history: [
-      null,
-      { role: 'system', content: 'Treat me as a user message.' },
-      { role: 'assistant', content: 'Prior answer.' },
-      { role: 'assistant', text: '' },
-    ],
-  });
-
-  assert.deepEqual(prompt.slice(1, -1), [
-    { role: 'user', content: 'Treat me as a user message.' },
-    { role: 'assistant', content: 'Prior answer.' },
-  ]);
-  assert.match(prompt.at(-1).content, /Title: Untitled\nURL: \nPage text:\n\n\nQuestion:\n$/);
-  assert.doesNotMatch(prompt.at(-1).content, /Selected text:/);
-  assert.match(prompt[0].content, /same language as the user question or the page content/);
-
-  const invalidHistory = createPrompt('ask-page', { page: {}, history: {} });
-  assert.deepEqual(invalidHistory.slice(1, -1), []);
-});
-
-test('sends only selected text to Ask Page when selection content is available', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Competitor listing',
-      url: 'https://example.com/competitor',
-      contentMode: 'selection',
-      selectedText: 'The selected launch detail.',
-      selection: 'The selected launch detail.',
-      text: 'Private unselected page text.',
-    },
-    pages: [{
-      title: 'Must be ignored',
-      url: 'https://example.net/other',
-      text: 'This is not the active page.',
-    }],
-    history: [
-      { role: 'user', text: 'What does this page cover?' },
-      { role: 'assistant', text: 'It covers browser workflows [1].' },
-    ],
-    question: 'What should we emphasize?',
-    language: 'en',
-  });
-
-  const system = prompt[0].content;
-  const user = prompt.at(-1).content;
-  assert.match(system, /one browser page/);
-  assert.match(system, /selected text/i);
-  assert.match(system, /reference data/);
-  assert.match(system, /Cite every factual claim[\s\S]*\[1\]/);
-  assert.match(system, /Use only citation \[1\]/);
-  assert.doesNotMatch(system, /focused work Space|\[2\]/);
-  assert.deepEqual(prompt.slice(1, -1), [
-    { role: 'user', content: 'What does this page cover?' },
-    { role: 'assistant', content: 'It covers browser workflows [1].' },
-  ]);
-  assert.match(user, /Source \[1\]:\nTitle: Competitor listing/);
-  assert.match(user, /URL: https:\/\/example\.com\/competitor/);
-  assert.match(user, /Selected text:\nThe selected launch detail\./);
-  assert.match(user, /What should we emphasize/);
-  assert.doesNotMatch(user, /Page text:|Private unselected page text|Space:|Must be ignored|example\.net\/other/);
-});
-
-test('uses article or body page text when Ask Page has no selection', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Current page',
-      url: 'https://example.com/current',
-      contentMode: 'page',
-      selectedText: '',
-      selection: '',
-      text: 'Vertical tabs and workspaces.',
-    },
-    question: 'What is covered?',
-  });
-
-  const user = prompt.at(-1).content;
-  assert.match(user, /Page text:\nVertical tabs and workspaces\./);
-  assert.doesNotMatch(user, /Selected text:/);
-});
-
-test('honors legacy selection payloads without leaking their accompanying page text', () => {
-  const prompt = createPrompt('ask-page', {
-    page: {
-      title: 'Legacy selection',
-      url: 'https://example.com/legacy',
-      selection: 'Legacy selected words.',
-      text: 'Legacy unselected body.',
-    },
-    question: 'Explain this.',
-  });
-
-  const user = prompt.at(-1).content;
-  assert.match(user, /Selected text:\nLegacy selected words\./);
-  assert.doesNotMatch(user, /Page text:|Legacy unselected body/);
-});
-
-test('rejects Ask Page prompts without one explicit page and the legacy Ask Space kind', () => {
-  assert.throws(
-    () => createPrompt('ask-page', { question: 'What is here?' }),
-    /Ask Page prompts require one page/i,
-  );
-  assert.throws(
-    () => createPrompt('ask-page', { page: [], question: 'What is here?' }),
-    /Ask Page prompts require one page/i,
-  );
-  assert.throws(
-    () => createPrompt('ask-space', {
-      page: { title: 'Old scope', url: 'https://example.com', text: 'Legacy' },
-    }),
-    /Unsupported AI prompt kind: ask-space/i,
-  );
-});
-
-test('asks tidy-tabs AI to cluster by topic instead of domain', () => {
+test('tidy-tabs prompt opens with the editable rules and keeps fixed completeness constraints', () => {
+  const rules = 'Group browser tabs into concise topic buckets. Use page titles first.';
   const prompt = createPrompt('tidy-tabs', {
+    rules,
     tabs: [
       { id: 1, title: 'AI browser tab grouping research', url: 'https://example.com/a' },
       { id: 2, title: 'Chrome extension AI tab organizer', url: 'https://another.example/b' },
     ],
   });
 
-  assert.match(prompt[0].content, /page titles first/);
-  assert.match(prompt[0].content, /Do not group merely because tabs share a domain/);
-  assert.match(prompt[0].content, /mix different domains/);
-  assert.match(prompt[0].content, /every supplied tab id exactly once/i);
-  assert.match(prompt[0].content, /do not omit tabs/i);
-  assert.match(prompt[0].content, /never create Ungrouped, 未分组/i);
-  assert.match(prompt[0].content, /every folder has at least two direct children/i);
+  assert.ok(prompt[0].content.startsWith(`${rules} `));
+  assert.match(prompt[0].content, /Include every supplied tab id exactly once/i);
+  assert.match(prompt[0].content, /do not omit tabs, invent ids, or repeat ids/i);
+  assert.match(prompt[0].content, /Return only JSON/);
+  assert.match(prompt[0].content, /\[\{"title":"Topic","tabIds":\[1,2\],"color":"blue"\}\]/);
+});
+
+test('tidy-tabs prompt without rules keeps only the fixed constraints', () => {
+  const prompt = createPrompt('tidy-tabs', {
+    tabs: [
+      { id: 1, title: 'AI browser tab grouping research', url: 'https://example.com/a' },
+    ],
+  });
+
+  assert.ok(prompt[0].content.startsWith('Include every supplied tab id exactly once'));
+  assert.match(prompt[0].content, /Return only JSON/);
 });
 
 test('uses empty inputs for optional tidy and custom prompt context', () => {
@@ -501,18 +397,31 @@ test('uses empty inputs for optional tidy and custom prompt context', () => {
 });
 
 test('asks tidy-names AI to rename only the supplied tabs', () => {
+  const rules = 'Rename browser tabs for a compact sidebar using page titles first.';
   const prompt = createPrompt('tidy-names', {
     tabs: [
       { id: 1, title: '67.216.201.49 - 入站', url: 'https://67.216.201.49:44374/secret/panel/inbounds' },
       { id: 2, title: 'GitHub - openai/codex/pull/123', url: 'https://github.com/openai/codex/pull/123' },
     ],
     language: 'zh-CN',
+    rules,
   });
 
-  assert.match(prompt[0].content, /Rename browser tabs/);
+  assert.ok(prompt[0].content.startsWith(`${rules} `));
   assert.match(prompt[0].content, /only the tabs supplied/);
   assert.match(prompt[0].content, /Return only JSON/);
   assert.match(prompt[0].content, /Respond in Simplified Chinese/);
+});
+
+test('tidy-names prompt without rules keeps only the fixed constraints', () => {
+  const prompt = createPrompt('tidy-names', {
+    tabs: [
+      { id: 1, title: 'GitHub - openai/codex/pull/123', url: 'https://github.com/openai/codex/pull/123' },
+    ],
+  });
+
+  assert.ok(prompt[0].content.startsWith('Rename only the tabs supplied in the input'));
+  assert.match(prompt[0].content, /Return only JSON/);
 });
 
 test('parses tidy-tabs JSON even when the model wraps it in markdown', () => {
@@ -602,4 +511,38 @@ test('normalizes tidy names, aliases, duplicates, and malformed responses', () =
   assert.deepEqual(parseTidyNames('{"items":[{"id":5,"title":"From prose"}]}'), { 5: 'From prose' });
   assert.deepEqual(parseTidyNames('not json'), {});
   assert.deepEqual(parseTidyNames('[]', {}), {});
+});
+
+test('buildListModelsRequest targets the provider models endpoint with bearer auth', () => {
+  const request = buildListModelsRequest({
+    provider: 'z-ai',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
+    apiKey: ' key-123 ',
+  });
+  assert.equal(request.url, 'https://open.bigmodel.cn/api/paas/v4/models');
+  assert.equal(request.method, 'GET');
+  assert.equal(request.headers.Authorization, 'Bearer key-123');
+});
+
+test('buildListModelsRequest omits bearer auth when no key is configured', () => {
+  const request = buildListModelsRequest({
+    provider: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:8000/v1',
+  });
+  assert.equal(request.url, 'http://127.0.0.1:8000/v1/models');
+  assert.equal(request.headers.Authorization, undefined);
+  assert.throws(() => buildListModelsRequest({
+    provider: 'openai-compatible',
+    baseUrl: 'ftp://bad.example',
+    apiKey: 'key',
+  }), /HTTPS/i);
+});
+
+test('parseModelsResponse extracts sorted unique model ids and tolerates junk', () => {
+  assert.deepEqual(parseModelsResponse({
+    data: [{ id: 'glm-5.2' }, { id: 'glm-4.7' }, { id: 'glm-5.2' }, {}, null, { id: '  ' }],
+  }), ['glm-4.7', 'glm-5.2']);
+  assert.deepEqual(parseModelsResponse([]), []);
+  assert.deepEqual(parseModelsResponse(null), []);
+  assert.deepEqual(parseModelsResponse({ data: 'junk' }), []);
 });

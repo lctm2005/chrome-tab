@@ -34,10 +34,10 @@ Free release:
 - Spaces, folders, tab groups, and dormant saved tabs.
 - Portable local backup and restore.
 - Panel shortcuts.
-- Tidy Names and Auto Group actions that generate one final preview, require Apply before changing tabs or Tags, and support Undo.
-- BYOK Ask Page grounded in the current HTTP(S) page, with provider, page,
-  character-count, and conversation-context disclosure, plus streaming, Stop,
-  and a clickable single-source citation.
+- One Tidy action shows a single reviewable preview (grouping, renaming, duplicate merging, duplicate-URL closing) and supports Undo.
+- BYOK AI organization: Tidy discloses the tab metadata
+  they send, go directly to the user-configured provider, and change tabs or
+  Tags only after preview confirmation, with Undo.
 
 Future Pro tier:
 
@@ -46,10 +46,6 @@ Future Pro tier:
 - Advanced AI synthesis, planning, and workspace cleanup.
 - Shareable export packs for research sessions.
 - Team-shared Space templates and onboarding packs.
-
-Multi-page Ask Space remains deferred until its use case, source-selection
-model, and user experience are defined. It is not part of the free release or a
-committed Pro feature.
 
 ## Pricing Hypotheses
 

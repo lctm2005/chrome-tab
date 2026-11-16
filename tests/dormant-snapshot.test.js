@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   dormantSnapshotGroupIndexFromKey,
   dormantSnapshotGroupKey,
+  findDormantSnapshotGroupIndex,
   projectSnapshotGroupOrder,
   projectSnapshotTabOrder,
   projectDormantSnapshotGroupRemoval,
@@ -52,6 +53,47 @@ function durableSnapshot(overrides = {}) {
     ...overrides,
   };
 }
+
+test('removal resolves duplicate stable ids through the rendered key index hint', () => {
+  const duplicateId = 'duplicated-id';
+  const snapshot = durableSnapshot({
+    groups: [
+      group(duplicateId, 'First', 'blue', [tab('tab-a', 'First page', 'https://example.test/first')]),
+      group(duplicateId, 'Second', 'red', [tab('tab-b', 'Second page', 'https://example.test/second')]),
+    ],
+  });
+  const reference = {
+    snapshotGroupId: duplicateId,
+    key: dormantSnapshotGroupKey(1, { snapshotGroupId: duplicateId }, 'space-1'),
+  };
+
+  const removed = projectDormantSnapshotGroupRemoval(snapshot, reference, fixedNow);
+  assert.deepEqual(removed.groups.map((item) => item.title), ['First']);
+  assert.equal(findDormantSnapshotGroupIndex(snapshot, reference), 1);
+});
+
+test('removal refuses to guess between duplicate stable ids without a usable key hint', () => {
+  const duplicateId = 'duplicated-id';
+  const snapshot = durableSnapshot({
+    groups: [
+      group(duplicateId, 'First', 'blue', [tab('tab-a', 'First page', 'https://example.test/first')]),
+      group(duplicateId, 'Second', 'red', [tab('tab-b', 'Second page', 'https://example.test/second')]),
+    ],
+  });
+
+  assert.strictEqual(
+    projectDormantSnapshotGroupRemoval(snapshot, { snapshotGroupId: duplicateId }, fixedNow),
+    snapshot,
+  );
+  assert.equal(findDormantSnapshotGroupIndex(snapshot, { snapshotGroupId: duplicateId }), -1);
+});
+
+test('findDormantSnapshotGroupIndex locates unique stable ids and rejects unknown rows', () => {
+  const snapshot = durableSnapshot();
+  assert.equal(findDormantSnapshotGroupIndex(snapshot, { snapshotGroupId: 'group-b' }), 1);
+  assert.equal(findDormantSnapshotGroupIndex(snapshot, { snapshotGroupId: 'missing' }), -1);
+  assert.equal(findDormantSnapshotGroupIndex(null, { snapshotGroupId: 'group-b' }), -1);
+});
 
 test('dormant snapshot keys parse safe indexes and preserve the rendered identity', () => {
   for (const [key, expected] of [

@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import {
   activeSpaceForStorage,
   activeSpaceForWindow,
+  BROWSER_SESSION_CARRYOVER_STORAGE_KEY,
   createDefaultState,
   forgetActiveSpaceForWindow,
   mergeStoredState,
   normalizeWindowSpaceState,
+  pickBrowserSessionId,
   reassignDeletedSpaceWindows,
   rememberActiveSpaceForWindow,
   resetChromeSessionBindings,
@@ -17,6 +19,108 @@ import {
   STORAGE_KEY,
   WINDOW_STATE_KEY,
 } from '../src/shared/state.js';
+
+test('merges groupParents and emptyNodes per space and sanitizes chrome-id links on session reset', () => {
+  const defaults = createDefaultState({ browserSessionId: 'session-one' });
+  const stored = mergeStoredState({
+    version: 9,
+    groupParents: {
+      work: { 'group:9': 'group:7', 'tag:1': 'node:2', 'node:3': 'group:9' },
+      broken: 'not-a-map',
+    },
+    emptyNodes: { work: { 'node:2': { title: 'New Group', color: 'blue' } } },
+  }, defaults);
+  assert.deepEqual(stored.groupParents.work, {
+    'group:9': 'group:7',
+    'tag:1': 'node:2',
+    'node:3': 'group:9',
+  });
+  assert.equal(stored.groupParents.broken, undefined);
+  assert.deepEqual(stored.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
+
+  const empty = mergeStoredState({ version: 9 }, createDefaultState({ browserSessionId: 'session-one' }));
+  assert.deepEqual(empty.groupParents, {});
+  assert.deepEqual(empty.emptyNodes, {});
+  assert.deepEqual(empty.folderPaths, {});
+
+  const arrayStored = mergeStoredState({
+    version: 9,
+    groupParents: ['not', 'a', 'map'],
+    emptyNodes: ['not', 'a', 'map'],
+  }, defaults);
+  assert.deepEqual(arrayStored.groupParents, {});
+  assert.deepEqual(arrayStored.emptyNodes, {});
+
+  const reset = resetChromeSessionBindings(stored, 'session-two');
+  // chrome 组 id 重启后可能被复用：没有 tabLifecycle 桥（groupId→snapshotGroupId）
+  // 时派生边无法转成持久身份，只能清除；稳定键（snapshot/node）保留。
+  assert.deepEqual(reset.groupParents.work, { 'tag:1': 'node:2' });
+  assert.equal(reset.groupParents.broken, undefined);
+  assert.deepEqual(reset.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
+
+  // 有 tabLifecycle 桥时，live↔live 嵌套跨会话轮换转成 sgid anchor 存活。
+  // snapshotsBySpace 里的快照身份让 snapshot 裸键解析出 sgid；空端点被丢弃。
+  const bridged = resetChromeSessionBindings(mergeStoredState({
+    version: 9,
+    browserSessionId: 'session-one',
+    tabLifecycle: {
+      11: { tabId: 11, groupId: 9, snapshotGroupId: 'group:child-uuid' },
+      12: { tabId: 12, groupId: 9, snapshotGroupId: 'group:child-uuid' },
+      13: { tabId: 13, groupId: 7, snapshotGroupId: 'group:parent-uuid' },
+      14: { tabId: 14, groupId: 0, snapshotGroupId: '' },
+    },
+    spaceSnapshots: {
+      work: { groups: [{ snapshotGroupId: 'group:saved-uuid', title: 'Saved', tabs: [] }] },
+    },
+    groupParents: {
+      work: {
+        'group:9': 'group:7',
+        'snapshot:2:work:group:saved-uuid': 'group:7',
+        'node:3': 'group:9',
+        'vgroup:vg1': 'group:7',
+        'sgid:group:already-anchored': 'group:7',
+        'snapshot:4:work:group:ghost': 'group:7',
+        'group:8': 'group:8',
+        '': 'group:7',
+      },
+    },
+  }, defaults), 'session-two');
+  assert.deepEqual(bridged.groupParents.work, {
+    'sgid:group:child-uuid': 'sgid:group:parent-uuid',
+    'sgid:group:saved-uuid': 'sgid:group:parent-uuid',
+    'node:3': 'sgid:group:child-uuid',
+    'vgroup:vg1': 'sgid:group:parent-uuid',
+    'sgid:group:already-anchored': 'sgid:group:parent-uuid',
+    'snapshot:4:work:group:ghost': 'sgid:group:parent-uuid',
+  });
+
+  const invalidReset = resetChromeSessionBindings(
+    mergeStoredState({ version: 9, groupParents: 'garbage' }, defaults),
+    'session-three',
+  );
+  assert.deepEqual(invalidReset.groupParents, {});
+
+  // 显式 null 的 tabLifecycle / spaceSnapshots → 桥与身份集为空；快照缺 groups
+  // / null 快照 / null 生命周期行都被跳过。
+  const nullInputs = resetChromeSessionBindings(mergeStoredState({
+    version: 9,
+    browserSessionId: 'session-one',
+    tabLifecycle: { 15: null },
+    spaceSnapshots: { work: { title: 'no groups key' }, gone: null },
+    groupParents: { work: { 'group:9': 'group:7' } },
+  }, defaults), 'session-two');
+  // 全部端点无法转成持久身份 → 该 Space 的层级整表清除
+  assert.equal(nullInputs.groupParents.work, undefined);
+
+  // 显式 null（不经 merge 默认值）：桥与身份集直接走空分支，边清除。
+  const explicitNull = resetChromeSessionBindings({
+    browserSessionId: 'session-one',
+    tabLifecycle: null,
+    spaceSnapshots: null,
+    groupParents: { work: { 'group:9': 'group:7' } },
+  }, 'session-two');
+  assert.equal(explicitNull.groupParents.work, undefined);
+});
 
 test('keeps the durable browser fallback independent from per-window active Spaces', () => {
   const spaces = [
@@ -81,6 +185,54 @@ test('keeps the exact state object when the normalized browser session is unchan
   assert.deepEqual(resetWithoutHistory.operationHistory, []);
 });
 
+test('pickBrowserSessionId reuses the live session value when storage still has one', () => {
+  const picked = pickBrowserSessionId({
+    sessionValue: ' live-session ',
+    carryoverValue: 'stale-carryover',
+    randomId: 'fresh-uuid',
+  });
+  assert.deepEqual(picked, { sessionId: 'live-session', source: 'session' });
+});
+
+test('pickBrowserSessionId recovers the carryover id after an extension reload', () => {
+  const picked = pickBrowserSessionId({
+    sessionValue: '',
+    carryoverValue: ' carried-over-session ',
+    randomId: 'fresh-uuid',
+  });
+  assert.deepEqual(picked, { sessionId: 'carried-over-session', source: 'carryover' });
+});
+
+test('pickBrowserSessionId generates a new session only when both stores are empty', () => {
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '', carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: undefined, carryoverValue: null, randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+});
+
+test('pickBrowserSessionId treats unsafe ids as absent', () => {
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '__proto__', carryoverValue: 'safe-carryover', randomId: 'fresh-uuid' }),
+    { sessionId: 'safe-carryover', source: 'carryover' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: 'bad\u0000session', carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: 'a'.repeat(201), carryoverValue: '', randomId: 'fresh-uuid' }),
+    { sessionId: 'fresh-uuid', source: 'new' },
+  );
+  assert.deepEqual(
+    pickBrowserSessionId({ sessionValue: '', carryoverValue: '', randomId: '  ' }),
+    { sessionId: '', source: 'new' },
+  );
+});
+
 test('clears only Chrome-session bindings and live-id undo after the browser session changes', () => {
   const tidyOperation = {
     id: 'tidy-1',
@@ -122,8 +274,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     collapsedSpaceGroups: { 'work:Docs': true },
     spaceContexts: { work: '# Keep this context' },
     spaceSnapshots: { work: { version: 1, groups: [{ title: 'Docs', tabs: [{ url: 'https://example.com' }] }] } },
-    askSessions: { 'space:work': { messages: [{ role: 'user', content: 'Keep this chat' }] } },
-    activeAskSessionKey: 'space:work',
     lastArcImport: { spaceIds: ['work'], importedAt: 123 },
     operationHistory: [tidyOperation, restoreOperation, autoGroupOperation, portableOperation],
     ai: { provider: 'openai-compatible', baseUrl: 'https://llm.example/v1', model: 'model', apiKey: 'secret' },
@@ -149,7 +299,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     'spaces',
     'spaceSnapshots',
     'spaceContexts',
-    'askSessions',
     'ai',
     'collapsedSpaceGroups',
     'lastArcImport',
@@ -157,7 +306,6 @@ test('clears only Chrome-session bindings and live-id undo after the browser ses
     assert.strictEqual(reset[portableKey], state[portableKey]);
   }
   assert.equal(reset.activeSpaceId, 'work');
-  assert.equal(reset.activeAskSessionKey, 'space:work');
   assert.deepEqual(state.groupSpaces, { 7: 'work' }, 'the pure reset must not mutate its input');
   assert.equal(state.browserSessionId, 'old-session');
 });
@@ -269,14 +417,12 @@ test('creates a single fallback Space with blank BYOK AI settings', () => {
   assert.deepEqual(state.tabOrder, {});
   assert.deepEqual(state.collapsedGroups, {});
   assert.deepEqual(state.collapsedSpaceGroups, {});
-  assert.deepEqual(state.askSessions, {});
   assert.deepEqual(state.spaceContexts, {});
   assert.deepEqual(state.onboarding, { version: 2, completed: false, stage: 'choose' });
   assert.equal(state.lastArcImport, null);
   assert.deepEqual(state.operationHistory, []);
-  assert.equal(state.shortcuts.askSubmit, 'Primary+Enter');
-  assert.equal(state.shortcuts.askAbort, 'Escape');
   assert.equal(state.shortcuts.togglePanel, 'Alt+S');
+  assert.equal(state.shortcuts.tidyNames, 'Control+Alt+T');
   assert.equal(state.ai.model, '');
   assert.equal(state.ai.baseUrl, '');
   assert.equal(state.ai.apiKey, '');
@@ -582,12 +728,10 @@ test('migrates the old Cmd+S toggle shortcut to avoid Chrome Save Page', () => {
     version: 3,
     shortcuts: {
       togglePanel: 'Meta+S',
-      askSubmit: 'Control+Enter',
     },
   }, createDefaultState());
 
   assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
 });
 
 test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () => {
@@ -595,40 +739,10 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
     version: 4,
     shortcuts: {
       togglePanel: 'Meta+S',
-      askSubmit: 'Control+Enter',
     },
   }, createDefaultState());
 
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
-});
-
-test('migrates the old Mac-only Ask default while preserving an explicit current binding', () => {
-  const migrated = mergeStoredState({
-    version: 8,
-    shortcuts: { askSubmit: 'Meta+Enter' },
-  }, createDefaultState());
-  assert.equal(migrated.shortcuts.askSubmit, 'Primary+Enter');
-
-  const current = mergeStoredState({
-    version: 9,
-    shortcuts: { askSubmit: 'Meta+Enter' },
-  }, createDefaultState());
-  assert.equal(current.shortcuts.askSubmit, 'Meta+Enter');
-});
-
-test('migrates the old Ctrl+C Ask abort default without breaking intentional current bindings', () => {
-  const migrated = mergeStoredState({
-    version: 9,
-    shortcuts: { askAbort: 'Control+C' },
-  }, createDefaultState());
-  assert.equal(migrated.shortcuts.askAbort, 'Escape');
-
-  const current = mergeStoredState({
-    version: 10,
-    shortcuts: { askAbort: 'Control+C' },
-  }, createDefaultState());
-  assert.equal(current.shortcuts.askAbort, 'Control+C');
 });
 
 test('migrates v4 Space ownership into v12 without resetting shortcuts', () => {
@@ -775,14 +889,22 @@ test('preserves empty current shortcuts as disabled actions', () => {
   const merged = mergeStoredState({
     version: 4,
     shortcuts: {
-      openAsk: '',
-      askSubmit: 'Control+Enter',
+      addSpace: '',
+      nextSpace: 'Control+Alt+J',
     },
   }, createDefaultState());
 
-  assert.equal(merged.shortcuts.openAsk, '');
-  assert.equal(merged.shortcuts.askSubmit, 'Control+Enter');
-  assert.equal(merged.shortcuts.askAbort, 'Escape');
+  assert.equal(merged.shortcuts.addSpace, '');
+  assert.equal(merged.shortcuts.nextSpace, 'Control+Alt+J');
+  assert.equal(merged.shortcuts.previousSpace, 'Control+Alt+ArrowLeft');
+});
+
+test('stored empty folder paths survive a state merge', () => {
+  const merged = mergeStoredState({
+    folderPaths: { custom: ['Research', 'Research / Memory'] },
+  }, createDefaultState());
+
+  assert.deepEqual(merged.folderPaths.custom, ['Research', 'Research / Memory']);
 });
 
 test('merges stored state without dropping new defaults', () => {
@@ -798,9 +920,10 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.ai.model, 'glm-5');
   assert.equal(merged.ai.provider, 'openai-compatible');
   assert.equal(merged.ai.language, 'zh-CN');
-  assert.equal(merged.shortcuts.askSubmit, 'Primary+Enter');
+  assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal(merged.collapsedSpaceGroups.custom, true);
+  assert.deepEqual(merged.folderPaths, {});
 });
 
 test('preserves populated legacy Spaces during migration and drops obsolete fields', () => {

@@ -16,7 +16,6 @@ import {
   SPACE_BACKUP_FORMAT,
   transferSnapshotGroupsBetweenSpaces,
 } from '../src/shared/space-transfer.js';
-import { ASK_SESSION_LIMITS, adoptPortableAskSession } from '../src/shared/ask-session.js';
 import { sanitizeSnapshotWithLifecycleIds } from '../src/shared/tab-lifecycle.js';
 
 test('measures UTF-8 storage bytes and rejects oversized workspace state before persistence', () => {
@@ -140,14 +139,6 @@ test('exports portable Space data without AI settings, secrets, or live tab ids'
       spaceId: 'launch',
     },
   };
-  state.askSessions = {
-    'space:launch': {
-      key: 'space:launch',
-      spaceId: 'launch',
-      title: 'Launch',
-      messages: [{ id: 'm1', role: 'user', text: 'What is next?', createdAt: 10 }],
-    },
-  };
   state.ai.apiKey = 'secret';
   state.ai.baseUrl = 'https://llm.example.com/v1';
 
@@ -190,7 +181,6 @@ test('restores portable Space data while preserving local AI and shortcut settin
     spaces: [{ id: 'launch', name: 'Launch', icon: 'L', color: 'green' }],
     spaceContexts: { launch: '# Launch plan' },
     spaceSnapshots: {},
-    askSessions: {},
     collapsedSpaceGroups: { launch: true },
   }, 100);
 
@@ -206,97 +196,7 @@ test('restores portable Space data while preserving local AI and shortcut settin
   assert.deepEqual(target.tabSpaces, {});
   assert.deepEqual(target.tabLifecycle, {});
   assert.equal(target.lastArcImport, null);
-  assert.deepEqual(summary, { spaces: 1, contexts: 1, savedTabs: 0, askConversations: 0 });
-});
-
-test('exports real tab-scoped Ask Page history without stale tab ids and restores every conversation', () => {
-  const source = createDefaultState();
-  source.askSessions = {
-    'tab:41:https://example.com/brief': {
-      key: 'tab:41:https://example.com/brief',
-      tabId: 41,
-      title: 'Launch brief',
-      url: 'https://example.com/brief',
-      createdAt: 10,
-      updatedAt: 20,
-      messages: [
-        { id: 'm1', role: 'user', text: 'What changed?', createdAt: 10 },
-        { id: 'm2', role: 'assistant', text: 'The launch moved to Tuesday.', createdAt: 20 },
-      ],
-    },
-    'tab:77:https://example.com/brief': {
-      key: 'tab:77:https://example.com/brief',
-      tabId: 77,
-      title: 'Second conversation',
-      url: 'https://example.com/brief',
-      createdAt: 30,
-      updatedAt: 40,
-      messages: [{ id: 'm3', role: 'user', text: 'Who owns it?', createdAt: 30 }],
-    },
-    'tab:88:chrome://settings/': {
-      key: 'tab:88:chrome://settings/',
-      tabId: 88,
-      title: 'Restricted page',
-      url: 'chrome://settings/',
-      messages: [{ id: 'm4', role: 'user', text: 'Never readable', createdAt: 50 }],
-    },
-  };
-
-  const backup = createSpaceBackup(source, 100);
-  const serialized = JSON.stringify(backup);
-  const pageSessions = Object.entries(backup.askSessions)
-    .filter(([key]) => key.startsWith('page:'));
-
-  assert.equal(pageSessions.length, 2, 'two separate conversations for the same page must both survive');
-  assert.ok(pageSessions.every(([key, session]) => (
-    /^page:[0-9a-f]{8}:\d+$/.test(key) && session.tabId === undefined
-  )), 'portable history must not retain ephemeral Chrome tab ids');
-  assert.equal(serialized.includes('tab:41:'), false);
-  assert.equal(serialized.includes('"tabId":41'), false);
-  assert.ok(pageSessions.every(([, session]) => session.url === 'https://example.com/brief'));
-  assert.equal(serialized.includes('Never readable'), false, 'restricted-page placeholders are not Ask Page history');
-
-  const target = createDefaultState();
-  const summary = restoreSpaceBackup(target, JSON.stringify(backup));
-  assert.deepEqual(target.askSessions, backup.askSessions);
-  assert.deepEqual(summary, { spaces: 1, contexts: 0, savedTabs: 0, askConversations: 2 });
-});
-
-test('portable Ask backup keeps SPA hash routes isolated through restore and adoption', () => {
-  const source = createDefaultState();
-  source.askSessions = {
-    'tab:1:https://app.example/#/customer/1': {
-      key: 'tab:1:https://app.example/#/customer/1',
-      tabId: 1,
-      title: 'Customer one',
-      url: 'https://app.example/#/customer/1',
-      updatedAt: 10,
-      messages: [{ id: 'one', role: 'user', text: 'History one', createdAt: 1 }],
-    },
-    'tab:1:https://app.example/#/customer/2': {
-      key: 'tab:1:https://app.example/#/customer/2',
-      tabId: 1,
-      title: 'Customer two',
-      url: 'https://app.example/#/customer/2',
-      updatedAt: 20,
-      messages: [{ id: 'two', role: 'user', text: 'History two', createdAt: 2 }],
-    },
-  };
-
-  const target = createDefaultState();
-  restoreSpaceBackup(target, JSON.stringify(createSpaceBackup(source, 100)));
-  const routeOne = adoptPortableAskSession(target.askSessions, {
-    id: 11,
-    url: 'https://app.example/#/customer/1',
-  });
-  const routeTwo = adoptPortableAskSession(target.askSessions, {
-    id: 12,
-    url: 'https://app.example/#/customer/2',
-  });
-
-  assert.equal(routeOne.messages[0].text, 'History one');
-  assert.equal(routeTwo.messages[0].text, 'History two');
-  assert.notEqual(routeOne.key, routeTwo.key);
+  assert.deepEqual(summary, { spaces: 1, contexts: 1, savedTabs: 0 });
 });
 
 test('portable round trip preserves historical Tags without persisting empty Ungrouped', () => {
@@ -336,7 +236,7 @@ test('portable round trip preserves historical Tags without persisting empty Ung
     },
   ]);
   assert.deepEqual(target.spaceSnapshots, parsed.spaceSnapshots);
-  assert.deepEqual(summary, { spaces: 1, contexts: 0, savedTabs: 1, askConversations: 0 });
+  assert.deepEqual(summary, { spaces: 1, contexts: 0, savedTabs: 1 });
 });
 
 test('portable backup round trip preserves intentional duplicate URLs without exporting local identities', () => {
@@ -733,17 +633,6 @@ test('portable workspace fingerprints detect restored user content changes', () 
       }],
     },
   };
-  state.askSessions = {
-    'space:launch': {
-      key: 'space:launch',
-      spaceId: 'launch',
-      title: 'Launch',
-      createdAt: 10,
-      updatedAt: 20,
-      messages: [{ id: 'm1', role: 'user', text: 'What ships next?', createdAt: 10 }],
-    },
-  };
-
   const original = fingerprintPortableWorkspaceContent(state);
   assert.match(original, /^portable-workspace-v1-[0-9a-f]{8}$/);
 
@@ -752,7 +641,6 @@ test('portable workspace fingerprints detect restored user content changes', () 
   viewOnlyChange.collapsedSpaceGroups = { launch: true };
   viewOnlyChange.spaceSnapshots.launch.updatedAt = 999;
   viewOnlyChange.spaceSnapshots.launch.groups[0].collapsed = true;
-  viewOnlyChange.askSessions['space:launch'].updatedAt = 999;
   assert.equal(fingerprintPortableWorkspaceContent(viewOnlyChange), original);
 
   for (const mutate of [
@@ -760,7 +648,6 @@ test('portable workspace fingerprints detect restored user content changes', () 
     (next) => { next.spaceContexts.launch = '# Revised plan'; },
     (next) => { next.spaceSnapshots.launch.groups[0].title = 'Decisions'; },
     (next) => { next.spaceSnapshots.launch.groups[0].tabs[0].url += '?v=2'; },
-    (next) => { next.askSessions['space:launch'].messages[0].text = 'What changed?'; },
   ]) {
     const changed = structuredClone(state);
     mutate(changed);
@@ -791,27 +678,9 @@ test('per-Space portable fingerprints isolate Arc import content', () => {
   unrelated.spaceContexts.default = '# Unrelated';
   assert.equal(fingerprintPortableSpaceContent(unrelated, 'arc-work'), original);
 
-  const emptyAskView = structuredClone(state);
-  emptyAskView.askSessions['space:arc-work'] = {
-    key: 'space:arc-work',
-    spaceId: 'arc-work',
-    title: 'Arc Work',
-    messages: [],
-  };
-  assert.equal(fingerprintPortableSpaceContent(emptyAskView, 'arc-work'), original);
-
   const renamed = structuredClone(state);
   renamed.spaces.find((space) => space.id === 'arc-work').name = 'Edited Arc Work';
   assert.notEqual(fingerprintPortableSpaceContent(renamed, 'arc-work'), original);
-
-  const asked = structuredClone(state);
-  asked.askSessions['space:arc-work'] = {
-    key: 'space:arc-work',
-    spaceId: 'arc-work',
-    title: 'Arc Work',
-    messages: [{ id: 'm1', role: 'user', text: 'New question', createdAt: 1 }],
-  };
-  assert.notEqual(fingerprintPortableSpaceContent(asked, 'arc-work'), original);
 
   const deleted = structuredClone(state);
   deleted.spaces = deleted.spaces.filter((space) => space.id !== 'arc-work');
@@ -889,7 +758,6 @@ test('normalizes hostile and partial portable state without leaking invalid reco
         ],
       },
     },
-    askSessions: null,
     collapsedSpaceGroups: { safe: 1, missing: true },
   }, 0);
 
@@ -923,137 +791,10 @@ test('normalizes hostile and partial portable state without leaking invalid reco
     spaces: [{ id: 'minimal', name: 'Minimal' }],
     spaceContexts: null,
     spaceSnapshots: null,
-    askSessions: null,
     collapsedSpaceGroups: null,
   }, 1);
   assert.deepEqual(withoutOptionalMaps.spaceContexts, {});
   assert.deepEqual(withoutOptionalMaps.spaceSnapshots, {});
-  assert.deepEqual(withoutOptionalMaps.askSessions, {});
-});
-
-test('portable Ask history is bounded, deterministic, sanitized, and fingerprinted', () => {
-  const state = createDefaultState();
-  const retainedMessages = Array.from({ length: ASK_SESSION_LIMITS.maxMessagesPerSession + 3 }, (_, index) => {
-    if (index === 7) return null;
-    return {
-      ...(index === 3 ? {} : { id: `m-${index}` }),
-      role: index % 2 === 0 ? 'user' : 'tool',
-      text: index === 4 ? '' : index === 5 ? 'x'.repeat(ASK_SESSION_LIMITS.maxMessageChars + 20) : `message-${index}`,
-      createdAt: index === 6 ? undefined : index,
-      ...(index === 8 ? { updatedAt: 99 } : {}),
-    };
-  });
-  state.askSessions = {
-    'space:default': {
-      key: 'space:default',
-      spaceId: 'default',
-      title: '',
-      createdAt: undefined,
-      updatedAt: undefined,
-      messages: null,
-    },
-    'tab:1:https://example.com/special#section': {
-      title: '',
-      url: 'https://example.com/special#section',
-      createdAt: 1,
-      updatedAt: 100,
-      messages: retainedMessages,
-    },
-    ...Object.fromEntries(Array.from({ length: ASK_SESSION_LIMITS.maxSessions + 1 }, (_, index) => [
-      `tab:${index + 2}:https://example.com/page-${index}`,
-      {
-        title: `Page ${index}`,
-        url: index === 0 ? 'https://example.com/special' : `https://example.com/page-${index}`,
-        createdAt: index,
-        updatedAt: index + 1,
-        messages: [{ role: 'user', text: `question-${index}`, createdAt: index }],
-      },
-    ])),
-    'tab:null': null,
-    'tab:bad-url': { url: 'not a url', messages: [{ role: 'user', text: 'drop malformed' }] },
-    'page:file': { url: 'file:///tmp/private', messages: [{ role: 'user', text: 'drop file' }] },
-    'page:empty': { url: 'https://example.com/empty', messages: [] },
-    unrelated: { url: 'https://example.com/ignored', messages: [{ role: 'user', text: 'drop key' }] },
-  };
-
-  const backup = createSpaceBackup(state, 500);
-  const pageSessions = Object.entries(backup.askSessions).filter(([key]) => key.startsWith('page:'));
-  assert.equal(pageSessions.length, ASK_SESSION_LIMITS.maxSessions);
-  assert.ok(pageSessions.every(([key]) => /^page:[0-9a-f]{8}:\d+$/.test(key)));
-  assert.equal(JSON.stringify(backup).includes('drop malformed'), false);
-  assert.equal(JSON.stringify(backup).includes('drop file'), false);
-  assert.equal(JSON.stringify(backup).includes('drop key'), false);
-
-  const special = pageSessions.find(([, session]) => session.url === 'https://example.com/special#section');
-  assert.ok(special);
-  assert.equal(special[1].title, 'Current page');
-  assert.ok(special[1].messages.length <= ASK_SESSION_LIMITS.maxMessagesPerSession);
-  assert.ok(special[1].messages.some((message) => message.id === '0-0' || /^\d+-0$/.test(message.id)));
-  assert.ok(special[1].messages.some((message) => message.text.length === ASK_SESSION_LIMITS.maxMessageChars));
-  assert.ok(special[1].messages.some((message) => message.updatedAt === 99));
-  assert.ok(special[1].messages.some((message) => message.role === 'assistant'));
-  assert.ok(
-    special[1].messages.reduce((total, message) => total + message.text.length, 0)
-      <= ASK_SESSION_LIMITS.maxSessionChars,
-    'portable page history must obey the same total character budget as live history',
-  );
-
-  const reparsed = parseSpaceBackup(JSON.stringify(backup));
-  assert.deepEqual(reparsed.askSessions, backup.askSessions);
-  const originalFingerprint = fingerprintPortableWorkspaceContent(state);
-  const timestampOnly = structuredClone(state);
-  timestampOnly.askSessions['tab:1:https://example.com/special#section'].updatedAt = 9999;
-  assert.equal(fingerprintPortableWorkspaceContent(timestampOnly), originalFingerprint);
-  const edited = structuredClone(state);
-  edited.askSessions['tab:1:https://example.com/special#section'].messages.at(-1).text = 'edited';
-  assert.notEqual(fingerprintPortableWorkspaceContent(edited), originalFingerprint);
-});
-
-test('portable Space and Page histories retain the latest complete turn within the session budget', () => {
-  const state = createDefaultState();
-  const oversizedMessages = Array.from({ length: ASK_SESSION_LIMITS.maxMessagesPerSession }, (_, index) => ({
-    id: `message-${index}`,
-    role: index % 2 === 0 ? 'user' : 'assistant',
-    text: `${index}:`.padEnd(ASK_SESSION_LIMITS.maxMessageChars, 'x'),
-    createdAt: index,
-  }));
-  state.askSessions = {
-    'space:default': {
-      key: 'space:default',
-      spaceId: 'default',
-      title: 'Default',
-      createdAt: 1,
-      updatedAt: 2,
-      messages: oversizedMessages,
-    },
-    'tab:7:https://example.com/large': {
-      title: 'Large page',
-      url: 'https://example.com/large',
-      createdAt: 1,
-      updatedAt: 3,
-      messages: oversizedMessages,
-    },
-  };
-
-  const backup = createSpaceBackup(state, 500);
-  const pageSession = Object.values(backup.askSessions)
-    .find((session) => session.url === 'https://example.com/large');
-  for (const session of [backup.askSessions['space:default'], pageSession]) {
-    assert.ok(session);
-    assert.equal(session.messages.length, 2);
-    assert.deepEqual(session.messages.map((message) => message.id), [
-      `message-${ASK_SESSION_LIMITS.maxMessagesPerSession - 2}`,
-      `message-${ASK_SESSION_LIMITS.maxMessagesPerSession - 1}`,
-    ]);
-    assert.deepEqual(session.messages.map((message) => message.role), ['user', 'assistant']);
-    assert.ok(
-      session.messages.reduce((total, message) => total + message.text.length, 0)
-        <= ASK_SESSION_LIMITS.maxSessionChars,
-    );
-  }
-
-  const reparsed = parseSpaceBackup(JSON.stringify(backup));
-  assert.deepEqual(reparsed.askSessions, backup.askSessions);
 });
 
 test('restore activates legacy Space history and clears every live-browser mapping', () => {
@@ -1062,14 +803,6 @@ test('restore activates legacy Space history and clears every live-browser mappi
     spaces: [{ id: 'restored', name: 'Restored' }],
     spaceContexts: { restored: '', ignored: 'drop' },
     spaceSnapshots: {},
-    askSessions: {
-      'space:restored': {
-        key: 'space:restored',
-        spaceId: 'restored',
-        title: '',
-        messages: [{ role: 'assistant', text: 'Recovered answer', createdAt: 1 }],
-      },
-    },
   }, 10);
   const target = {
     ai: { apiKey: 'keep' },
@@ -1087,9 +820,7 @@ test('restore activates legacy Space history and clears every live-browser mappi
 
   const summary = restoreSpaceBackup(target, backup);
 
-  assert.equal(target.activeAskSessionKey, 'space:restored');
-  assert.equal(target.askSessions['space:restored'].title, 'Space');
-  assert.deepEqual(summary, { spaces: 1, contexts: 0, savedTabs: 0, askConversations: 1 });
+  assert.deepEqual(summary, { spaces: 1, contexts: 0, savedTabs: 0 });
   for (const key of [
     'groupSpaces',
     'tabSpaces',

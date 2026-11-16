@@ -1392,6 +1392,32 @@ test('cleans stale virtual mappings from grouped live tabs', () => {
   assert.deepEqual(state.virtualGroups, {});
 });
 
+test('restore can skip the Chrome group ids a concurrent delete is removing', () => {
+  const state = {
+    groupSpaces: {},
+    tabSpaces: {},
+    groupOrder: {},
+    spaceSnapshots: {
+      work: {
+        groups: [{
+          title: 'Docs',
+          color: 'blue',
+          tabs: [{ title: 'Spec', url: 'https://example.com/spec' }],
+        }],
+      },
+    },
+  };
+  const docsGroup = { id: 9, title: 'Docs', color: 'blue' };
+  const otherGroup = { id: 10, title: 'Missing Snapshot', color: 'red' };
+
+  restoreSnapshotOwnership(state, [
+    { id: 41, groupId: 9, url: 'https://example.com/spec' },
+  ], [docsGroup, otherGroup], { skipGroupIds: [9] });
+
+  assert.deepEqual(state.groupSpaces, {});
+  assert.equal(state.groupOrder.work, undefined);
+});
+
 test('treats missing snapshots as a no-op and repairs damaged ownership maps before restore', () => {
   assert.deepEqual(restoreSnapshotOwnership(null), {
     groupTitles: {},
@@ -1629,8 +1655,12 @@ test('cleanup and Space deletion tolerate missing optional ownership collections
     groupOrder: {},
     tabOrder: {},
     spaceSnapshots: {},
-    activeAskSessionKey: 'space:other',
   }, 'missing'));
+  const folderState = {
+    folderPaths: { gone: ['Research'], kept: ['Archive'] },
+  };
+  removeSpaceReferences(folderState, 'gone');
+  assert.deepEqual(folderState.folderPaths, { kept: ['Archive'] });
 });
 
 test('invalid entity ids cannot masquerade as Chrome group or tab id zero', () => {
@@ -2851,11 +2881,6 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
     tabOrder: { default: { ungrouped: [4] }, focus: { ungrouped: [5] } },
     spaceSnapshots: { default: { groups: [] }, focus: { groups: [] } },
     spaceContexts: { default: '# Delete me', focus: '# Keep me' },
-    askSessions: {
-      'space:default': { key: 'space:default' },
-      'space:focus': { key: 'space:focus' },
-    },
-    activeAskSessionKey: 'space:default',
     tabLifecycle: {
       4: { snapshotTabId: 'row-default', spaceId: 'default' },
       5: { snapshotTabId: 'row-focus', spaceId: 'focus' },
@@ -2897,9 +2922,6 @@ test('removes Space ownership, ordering, and snapshots when deleting a Space', (
   assert.equal(state.spaceSnapshots.default, undefined);
   assert.equal(state.spaceContexts.default, undefined);
   assert.equal(state.spaceContexts.focus, '# Keep me');
-  assert.equal(state.askSessions['space:default'], undefined);
-  assert.deepEqual(state.askSessions['space:focus'], { key: 'space:focus' });
-  assert.equal(state.activeAskSessionKey, '');
   assert.deepEqual(state.virtualGroups, {
     'vgroup:live': { title: 'Live', spaceId: 'focus' },
   });

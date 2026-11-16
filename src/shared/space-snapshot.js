@@ -60,14 +60,32 @@ export function uniqueSnapshotGroupForTabId(groups = [], snapshotTabId = '') {
 export function snapshotGroupShouldPersist(snapshot = {}, group = {}) {
   return (group.tabs || []).length > 0 || Boolean(
     snapshot?.preserveGroups && !isUngroupedSnapshotGroup(group)
-  );
+  ) || snapshotEmptyTagIsMergeCandidate(snapshot, group);
 }
 
 export function snapshotHasPersistentContent(snapshot = {}) {
   return snapshotTabCount(snapshot) > 0 || Boolean(
     snapshot?.preserveGroups &&
     (snapshot.groups || []).some((group) => !isUngroupedSnapshotGroup(group))
-  );
+  ) || (snapshot?.groups || []).some((group) => snapshotEmptyTagIsMergeCandidate(snapshot, group));
+}
+
+/**
+ * An emptied saved Tag has nothing to restore, so it only earns persistence
+ * while its title still collides with another Tag: those rows are exactly the
+ * duplicates the local Tidy merge can clean up. A uniquely named empty Tag is
+ * unremovable residue, which is what makes stale preserveGroups flags noisy.
+ */
+export function snapshotEmptyTagIsMergeCandidate(snapshot, group = {}) {
+  if ((group.tabs || []).length > 0) return false;
+  if (isUngroupedSnapshotGroup(group)) return false;
+  const title = groupTitleKey(group?.title);
+  if (!title) return false;
+  const groups = snapshot?.groups || [];
+  return groups.filter((candidate) => (
+    !isUngroupedSnapshotGroup(candidate) &&
+    groupTitleKey(candidate?.title) === title
+  )).length > 1;
 }
 
 /**
@@ -549,7 +567,7 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
     if (group.tabs.length > 0) mergedGroups.push(group);
   }
 
-  return {
+  const mergedSnapshot = {
     // A snapshot is a portable record and may contain metadata written by a
     // newer version or an importer. Refreshing its live rows must not silently
     // strip those top-level extension fields during a Space round trip.
@@ -561,9 +579,11 @@ export function mergeSpaceSnapshot(liveSnapshot, storedSnapshot) {
       ? { identityVersion: liveSnapshot.identityVersion || storedSnapshot.identityVersion }
       : {}),
     ...(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups ? { preserveGroups: true } : {}),
-    groups: mergedGroups.filter((group) => snapshotGroupShouldPersist({
-      preserveGroups: Boolean(liveSnapshot.preserveGroups || storedSnapshot.preserveGroups),
-    }, group)),
+    groups: mergedGroups,
+  };
+  return {
+    ...mergedSnapshot,
+    groups: mergedGroups.filter((group) => snapshotGroupShouldPersist(mergedSnapshot, group)),
   };
 }
 
@@ -702,6 +722,9 @@ function liveGroupMatchByChromeTitle(
   ));
   if (matches.length !== 1) return null;
   const [key, group] = matches[0];
+  const storedGroupId = String(storedGroup.snapshotGroupId || '').trim();
+  const liveGroupId = String(group.snapshotGroupId || '').trim();
+  if (storedGroupId && liveGroupId && storedGroupId !== liveGroupId) return null;
   return { key, group };
 }
 
@@ -967,4 +990,16 @@ function snapshotGroupKey(group = {}) {
 
 function isTemporaryUngroupedSnapshotGroup(group = {}) {
   return isUngroupedSnapshotGroup(group) && group.restorable !== true;
+}
+
+/**
+ * True when any row of this snapshot group is still bound to a live tab via
+ * tabLifecycle. Purge paths must keep such groups: deleting them orphans the
+ * live rows' saved identity and later Auto Group checkpoints roll back.
+ */
+export function snapshotGroupHasLiveBoundRows(group = {}, liveBoundSnapshotTabIds = new Set()) {
+  if (!(liveBoundSnapshotTabIds instanceof Set) || liveBoundSnapshotTabIds.size === 0) return false;
+  return (group?.tabs || []).some((tab) => (
+    liveBoundSnapshotTabIds.has(String(tab?.snapshotTabId || '').trim())
+  ));
 }

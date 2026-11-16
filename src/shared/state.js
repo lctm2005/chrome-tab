@@ -1,15 +1,15 @@
 import { normalizeAIProviderSettings } from './ai-providers.js';
 import { normalizeArcImportToken } from './action-safety.js';
+import { normalizeTidyRuleSettings } from './tidy-rules.js';
 import { mergeShortcuts, normalizeShortcut } from './shortcuts.js';
 
 export const STORAGE_KEY = 'spaceTabsState';
 export const SECRET_STORAGE_KEY = 'spaceTabsSecrets';
 export const WINDOW_STATE_KEY = 'spaceTabsWindowState';
 export const BROWSER_SESSION_STORAGE_KEY = 'spaceTabsBrowserSession';
+export const BROWSER_SESSION_CARRYOVER_STORAGE_KEY = 'spaceTabsBrowserSessionCarryover';
 export const SHARED_STATE_LOCK_NAME = 'space-tabs-shared-state';
 const LEGACY_TOGGLE_PANEL_SHORTCUT = 'Meta+S';
-const LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT = 'Meta+Enter';
-const LEGACY_DEFAULT_ASK_ABORT_SHORTCUT = 'Control+C';
 const LEGACY_DEFAULT_AI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 const DOMESTIC_CODING_AI_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
 const LEGACY_DEFAULT_AI_MODEL = 'glm-5.1';
@@ -43,10 +43,12 @@ export function createDefaultState(localConfig = {}) {
     tabOrder: {},
     collapsedGroups: {},
     collapsedSpaceGroups: {},
-    askSessions: {},
-    activeAskSessionKey: '',
+    folderPaths: {},
+    groupParents: {},
+    emptyNodes: {},
     spaceContexts: {},
     spaceSnapshots: {},
+    tidyRules: normalizeTidyRuleSettings(),
     onboarding: {
       version: 2,
       completed: false,
@@ -91,9 +93,118 @@ export function resetChromeSessionBindings(state, sessionId) {
     groupOrder: {},
     tabOrder: {},
     collapsedGroups: {},
+    // Chrome group ids can be reused after a restart, so parent links derived
+    // from them cannot survive as raw ids. Anchor-domain endpoints (sgid:,
+    // node:, vgroup:) survive untouched; raw chrome-keyed endpoints are
+    // CONVERTED to their snapshot identity via the not-yet-wiped tabLifecycle
+    // bridge, so live↔live nesting survives the restart. Only endpoints that
+    // carry no durable identity are dropped.
+    groupParents: sanitizeGroupParentsForNewSession(state.groupParents, {
+      tabLifecycle: state.tabLifecycle,
+      snapshotsBySpace: state.spaceSnapshots,
+    }),
+    emptyNodes: state.emptyNodes || {},
     operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
       .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
   };
+}
+
+const CHROME_GROUP_KEY_PATTERN = /^group:(\d+)$/;
+const SNAPSHOT_GROUP_KEY_PATTERN = /^snapshot:(\d+):([^:]*):([\s\S]+)$/;
+
+function normalizeGroupParentsMap(groupParents) {
+  const next = {};
+  for (const [spaceId, parents] of Object.entries(groupParents)) {
+    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
+    next[spaceId] = { ...parents };
+  }
+  return next;
+}
+
+// groupId → snapshotGroupId bridge from the lifecycle rows that are about to
+// be wiped. Rows without a durable identity are skipped.
+function chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle) {
+  const bridge = new Map();
+  const bindings = tabLifecycle ? Object.values(tabLifecycle) : [];
+  for (const binding of bindings) {
+    const groupId = Number(binding?.groupId);
+    const snapshotGroupId = String(binding?.snapshotGroupId || '').trim();
+    if (Number.isSafeInteger(groupId) && groupId > 0 && snapshotGroupId && !bridge.has(groupId)) {
+      bridge.set(groupId, snapshotGroupId);
+    }
+  }
+  return bridge;
+}
+
+function knownSnapshotGroupIds(snapshotsBySpace) {
+  const ids = new Set();
+  const snapshots = snapshotsBySpace ? Object.values(snapshotsBySpace) : [];
+  for (const snapshot of snapshots) {
+    const groups = (snapshot && Array.isArray(snapshot.groups)) ? snapshot.groups : [];
+    for (const group of groups) {
+      const snapshotGroupId = String(group?.snapshotGroupId || '').trim();
+      if (snapshotGroupId) ids.add(snapshotGroupId);
+    }
+  }
+  return ids;
+}
+
+// Converts one raw view-key endpoint to its durable anchor for the new
+// session. Returns '' when the endpoint references nothing durable.
+function anchorForNewSession(endpoint, bridge, knownSnapshotGroupIds) {
+  const raw = String(endpoint || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('sgid:') || raw.startsWith('node:') || raw.startsWith('vgroup:')) return raw;
+  const chromeMatch = CHROME_GROUP_KEY_PATTERN.exec(raw);
+  if (chromeMatch) {
+    const snapshotGroupId = bridge.get(Number(chromeMatch[1]));
+    return snapshotGroupId ? `sgid:${snapshotGroupId}` : '';
+  }
+  const snapshotMatch = SNAPSHOT_GROUP_KEY_PATTERN.exec(raw);
+  if (snapshotMatch) {
+    const identity = snapshotMatch[3];
+    return knownSnapshotGroupIds.has(identity) ? `sgid:${identity}` : raw;
+  }
+  return raw;
+}
+
+function sanitizeGroupParentsForNewSession(groupParents, { tabLifecycle, snapshotsBySpace } = {}) {
+  if (!groupParents || typeof groupParents !== 'object' || Array.isArray(groupParents)) return {};
+  const bridge = chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle);
+  const knownIds = knownSnapshotGroupIds(snapshotsBySpace);
+  const next = {};
+  for (const [spaceId, parents] of Object.entries(groupParents)) {
+    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
+    const kept = {};
+    for (const [childKey, parentKey] of Object.entries(parents)) {
+      const childAnchor = anchorForNewSession(childKey, bridge, knownIds);
+      const parentAnchor = anchorForNewSession(parentKey, bridge, knownIds);
+      if (!childAnchor || !parentAnchor || childAnchor === parentAnchor) continue;
+      kept[childAnchor] = parentAnchor;
+    }
+    if (Object.keys(kept).length > 0) next[spaceId] = kept;
+  }
+  return next;
+}
+
+/**
+ * Resolves the current browser session id without treating an extension
+ * reload as a browser restart.
+ *
+ * Chrome tab and group ids survive extension updates and manual reloads, so
+ * the volatile chrome.storage.session id must be recoverable. The carryover
+ * copy in chrome.storage.local provides that recovery. Only a genuine browser
+ * restart may rotate the id: the background clears the carryover on
+ * `chrome.runtime.onStartup`, which always fires before a panel can open.
+ */
+export function pickBrowserSessionId({ sessionValue = '', carryoverValue = '', randomId = '' } = {}) {
+  const sessionId = normalizeBrowserSessionId(sessionValue);
+  if (sessionId) return { sessionId, source: 'session' };
+
+  const carryoverId = normalizeBrowserSessionId(carryoverValue);
+  if (carryoverId) return { sessionId: carryoverId, source: 'carryover' };
+
+  return { sessionId: normalizeBrowserSessionId(randomId), source: 'new' };
 }
 
 export function normalizeWindowSpaceState(value, spaces = []) {
@@ -235,10 +346,16 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     tabOrder: compatibleSpaceModel ? { ...defaults.tabOrder, ...(stored.tabOrder || {}) } : defaults.tabOrder,
     collapsedGroups: compatibleSpaceModel ? { ...defaults.collapsedGroups, ...(stored.collapsedGroups || {}) } : defaults.collapsedGroups,
     collapsedSpaceGroups: { ...defaults.collapsedSpaceGroups, ...(stored.collapsedSpaceGroups || {}) },
-    askSessions: { ...defaults.askSessions, ...(stored.askSessions || {}) },
-    activeAskSessionKey: stored.activeAskSessionKey || defaults.activeAskSessionKey,
+    folderPaths: { ...defaults.folderPaths, ...(stored.folderPaths || {}) },
+    groupParents: compatibleSpaceModel && stored.groupParents && typeof stored.groupParents === 'object' && !Array.isArray(stored.groupParents)
+      ? normalizeGroupParentsMap(stored.groupParents)
+      : defaults.groupParents,
+    emptyNodes: compatibleSpaceModel && stored.emptyNodes && typeof stored.emptyNodes === 'object' && !Array.isArray(stored.emptyNodes)
+      ? { ...defaults.emptyNodes, ...stored.emptyNodes }
+      : defaults.emptyNodes,
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
+    tidyRules: normalizeTidyRuleSettings(stored.tidyRules),
     onboarding: normalizeOnboarding(stored.onboarding, hasExistingWorkspace(stored)
       ? { version: 2, completed: true, stage: 'done' }
       : defaults.onboarding),
@@ -395,20 +512,6 @@ function migrateShortcuts(storedShortcuts = {}, defaultShortcuts = {}, storedVer
     normalizeShortcut(storedShortcuts.togglePanel) === LEGACY_TOGGLE_PANEL_SHORTCUT
   ) {
     shortcuts.togglePanel = defaultShortcuts.togglePanel;
-  }
-  if (
-    Number(storedVersion) < 9 &&
-    Number(currentVersion) >= 9 &&
-    normalizeShortcut(storedShortcuts.askSubmit) === LEGACY_DEFAULT_ASK_SUBMIT_SHORTCUT
-  ) {
-    shortcuts.askSubmit = defaultShortcuts.askSubmit;
-  }
-  if (
-    Number(storedVersion) < 10 &&
-    Number(currentVersion) >= 10 &&
-    normalizeShortcut(storedShortcuts.askAbort) === LEGACY_DEFAULT_ASK_ABORT_SHORTCUT
-  ) {
-    shortcuts.askAbort = defaultShortcuts.askAbort;
   }
   return shortcuts;
 }

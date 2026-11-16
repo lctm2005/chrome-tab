@@ -14,7 +14,7 @@ const SPACE_DELETION_INTENT_VERSION = 1;
  * Live rows are removed from the saved snapshot projection because
  * snapshotOpenSpace() may persist those same rows during the deletion
  * checkpoint. This keeps the fingerprint stable across that bookkeeping while
- * still protecting every saved-only row, Context, Ask message, source Space,
+ * still protecting every saved-only row, Context, source Space,
  * fallback Space, and physical page that the confirmed action affects.
  */
 export function spaceDeletionIntentFingerprint({
@@ -28,8 +28,6 @@ export function spaceDeletionIntentFingerprint({
   const deletingSpace = spaces.find((space) => String(space?.id || '') === spaceId) || null;
   const fallbackSpace = spaceDeletionFallback(spaces, spaceId);
   const liveTabs = normalizedDeletionIntentTabs(plan);
-  const askSession = source.askSessions?.[`space:${spaceId}`];
-
   return `space-deletion-intent-v${SPACE_DELETION_INTENT_VERSION}:${JSON.stringify({
     deletingSpace: deletionSpaceIdentity(deletingSpace),
     fallbackSpace: deletionSpaceIdentity(fallbackSpace),
@@ -39,7 +37,6 @@ export function spaceDeletionIntentFingerprint({
       liveTabs.map((tab) => tab.sourceTab),
     ),
     context: String(source.spaceContexts?.[spaceId] || ''),
-    askSession: deletionAskSessionContent(askSession),
   })}`;
 }
 
@@ -477,22 +474,6 @@ function deletionSavedTabContent(tab = {}) {
     title: String(tab.title),
     url: String(tab.url).trim(),
     ...(panelTitle ? { panelTitle } : {}),
-  };
-}
-
-function deletionAskSessionContent(session) {
-  if (!session || !Array.isArray(session.messages)) return null;
-  const messages = session.messages
-    .map((message) => ({
-      role: message?.role === 'user' ? 'user' : 'assistant',
-      text: String(message?.text || ''),
-    }))
-    .filter((message) => message.text);
-  if (messages.length === 0) return null;
-  return {
-    title: String(session.title || ''),
-    url: String(session.url || ''),
-    messages,
   };
 }
 

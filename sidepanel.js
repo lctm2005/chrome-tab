@@ -14,33 +14,14 @@ import {
   providerSupportsThinking,
 } from './src/shared/ai-providers.js';
 import {
+  aiAuthScope,
   assertSafeAIAuthTransport,
   createScopedAIAuth,
   persistScopedAIConfiguration,
+  reconcileScopedAIKey,
   scopedAIKey,
 } from './src/shared/ai-auth.js';
 import { createAIAuthVault } from './src/shared/ai-vault.js';
-import {
-  adoptPortableAskSession,
-  appendAskSessionMessage,
-  askSessionTabFromKey,
-  createAskSession,
-  materializeAskSessionForTurn,
-  normalizeSessionUrl,
-  projectAskSessionForTab,
-  pruneAskSessions,
-  replayAskSessionTabReplacements,
-  sessionKeyForTab,
-  updateAskSessionMessage,
-} from './src/shared/ask-session.js';
-import {
-  appendAskSourceLink,
-  askHistoryMessageText,
-} from './src/shared/ask-sources.js';
-import {
-  askSessionRevision,
-  markAskStreamPending,
-} from './src/shared/ask-stream.js';
 import {
   appendArcImportPlan,
   createArcImportPlan,
@@ -69,11 +50,17 @@ import {
   createPanelFocusController,
 } from './src/shared/panel-focus.js';
 import {
-  createFolderTree,
-  folderTitleParts,
-  movedGroupTitleForFolderDrop,
-  renamedFolderGroupTitle,
-} from './src/shared/folder-tree.js';
+  buildGroupTree,
+  descendantKeysOf,
+  hierarchyAnchorForNode,
+  nodeDepth,
+  parseTitlePath,
+  planHierarchyDrop,
+  planLegacyTitlePathMigration,
+  remapGroupParents,
+  resolveHierarchyKeyParents,
+  upgradeHierarchyParentAnchors,
+} from './src/shared/group-tree.js';
 import {
   chromeGroupTitle,
   chromeGroupTitleKey,
@@ -81,27 +68,23 @@ import {
   normalizeGroupTitle,
   resolveChromeGroupTitleMatch,
 } from './src/shared/group-title.js';
-import { renderMarkdown } from './src/shared/markdown.js';
 import { createPanelKeyboardController } from './src/shared/panel-keyboard.js';
 import { createPanelPortController } from './src/shared/panel-port.js';
 import {
   createPanelCommandMessage,
-  createEligibleTabActivationController,
   createPanelWindowBindingController,
   confirmPanelWindowBindingAfterInitialization,
-  mergeTabActivationCache,
   resolvePanelHostBinding,
   runPanelWindowRefreshTransaction,
-  selectEligibleTabSource,
 } from './src/shared/panel-routing.js';
 import {
-  askMessagesRenderSignature,
   groupsRenderSignature,
   spacesRenderSignature,
 } from './src/shared/panel-render-signatures.js';
 import {
   dormantSnapshotGroupIndexFromKey as snapshotGroupIndexFromKey,
   dormantSnapshotGroupKey,
+  findDormantSnapshotGroupIndex,
   projectDormantSnapshotGroupRemoval,
   projectDormantSnapshotGroupRename,
   projectOpenedDormantTabRemoval,
@@ -114,6 +97,12 @@ import {
   resolveOpenedDormantRecordForLiveTab,
   resolveSnapshotTabRemovalMatch,
 } from './src/shared/dormant-snapshot.js';
+import {
+  normalizeTidyRuleSettings,
+  tidyRuleEnabled,
+  tidyRulePrompt,
+  TIDY_RULES,
+} from './src/shared/tidy-rules.js';
 import {
   applyOrganizationPlanToSnapshot,
   buildOrganizationCandidates,
@@ -145,10 +134,12 @@ import {
 import {
   activeSpaceForStorage,
   activeSpaceForWindow,
+  BROWSER_SESSION_CARRYOVER_STORAGE_KEY,
   BROWSER_SESSION_STORAGE_KEY,
   createDefaultState,
   mergeStoredState,
   normalizeWindowSpaceState,
+  pickBrowserSessionId,
   reassignDeletedSpaceWindows,
   rememberActiveSpaceForWindow,
   resetChromeSessionBindings,
@@ -194,6 +185,7 @@ import {
   bindLiveTabsToSnapshot,
   claimViewSnapshotLifecycleId,
   ensureSnapshotLifecycleIds,
+  planStaleLifecycleBindingHeal,
   remapTabLifecycleGroupReferences,
   reduceTabLifecycleEvent,
   resolveViewSnapshotGroupId,
@@ -211,6 +203,8 @@ import {
   removeSnapshotTabs,
   retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
+  snapshotEmptyTagIsMergeCandidate,
+  snapshotGroupHasLiveBoundRows,
   snapshotGroupShouldPersist,
   snapshotHasPersistentContent,
   snapshotTabCount,
@@ -284,15 +278,25 @@ const extensionRuntime = isExtensionRuntime(window);
 let aiAuthStorageError = '';
 const aiAuthVault = createAIAuthVault({
   readLegacy: async () => {
-    if (extensionRuntime) return chrome.storage.session.get(SECRET_STORAGE_KEY);
+    if (extensionRuntime) {
+      const local = await chrome.storage.local.get(SECRET_STORAGE_KEY);
+      if (Object.hasOwn(local, SECRET_STORAGE_KEY)) return local;
+      return chrome.storage.session.get(SECRET_STORAGE_KEY);
+    }
     try {
-      return JSON.parse(sessionStorage.getItem(SECRET_STORAGE_KEY) || '{}');
+      return JSON.parse(localStorage.getItem(SECRET_STORAGE_KEY) ||
+        sessionStorage.getItem(SECRET_STORAGE_KEY) || '{}');
     } catch {
       return {};
     }
   },
   removeLegacy: async () => {
-    if (extensionRuntime) return chrome.storage.session.remove(SECRET_STORAGE_KEY);
+    if (extensionRuntime) {
+      await chrome.storage.local.remove(SECRET_STORAGE_KEY);
+      await chrome.storage.session.remove(SECRET_STORAGE_KEY);
+      return;
+    }
+    localStorage.removeItem(SECRET_STORAGE_KEY);
     sessionStorage.removeItem(SECRET_STORAGE_KEY);
   },
 });
@@ -303,20 +307,14 @@ const layoutMode = pageParams.get('layout') === 'workbench'
 const workbenchMode = layoutMode === 'workbench';
 document.documentElement.dataset.layout = layoutMode;
 const previewSend = createPreviewCommandHandler();
-const CUSTOM_MODEL_VALUE = '__custom__';
+// Model ids returned by the provider's /models endpoint during this session.
+let detectedModelIds = [];
 const GROUP_PREVIEW_OPEN_DELAY_MS = 2000;
 const GROUP_PREVIEW_CLOSE_DELAY_MS = 140;
 const OPERATION_UNDO_VISIBLE_MS = 10_000;
 const LIFECYCLE_CLEANUP_GRACE_MS = 500;
 const TIDY_NAMES_ICON = `
   <span class="tidy-icon" aria-hidden="true">🧹</span>
-`;
-const AUTO_GROUP_ICON = `
-  <svg class="archive-icon" viewBox="0 0 24 24" aria-hidden="true">
-    <path d="M5.5 8.5h13l1.4 4.2v4.8a1.5 1.5 0 0 1-1.5 1.5H5.6a1.5 1.5 0 0 1-1.5-1.5v-4.8L5.5 8.5Z"></path>
-    <path d="M7.4 5.5h9.2a1.4 1.4 0 0 1 1.3.9l.8 2.1H5.3l.8-2.1a1.4 1.4 0 0 1 1.3-.9Z"></path>
-    <path d="M9 12.7h6"></path>
-  </svg>
 `;
 
 let state = createDefaultState(localConfig);
@@ -329,11 +327,12 @@ let dormantSpaceView = [];
 let dormantSpaceViewSpaceId = '';
 let snapshotLifecycleIdSequence = 0;
 let lifecycleCleanupObservations = {};
+// Space ids with an Auto Group plan currently applying. Their snapshots keep
+// preserveGroups until the plan settles; see sanitizeStoredSpaceSnapshot.
+const inFlightOrganizationPlanSpaceIds = new Set();
 const syntheticPlaceholderTabIds = new Set();
 let activeView = workbenchMode && pageParams.get('view') === 'settings'
   ? 'settings'
-  : workbenchMode
-  ? 'ask'
   : 'space';
 let dragState = null;
 let activeAIRequestId = '';
@@ -352,17 +351,18 @@ let pendingArcImportText = '';
 let pendingArcImportPlan = null;
 let arcImportSelectionGeneration = 0;
 let pendingSpaceBackup = null;
-let pendingOnboardingArcPlan = null;
-let pendingOnboardingArcText = '';
-let onboardingArcSelectionGeneration = 0;
-let onboardingStep = 0;
-let onboardingPath = '';
-let onboardingResult = '';
+// Counts restore-review lifecycles (one increment at entry and one at exit of
+// each restoreSpaceData run). Queued restore gestures compare this counter to
+// detect that another review already started or finished since their enqueue,
+// so a queued duplicate never re-opens a fresh confirmation after the first
+// review resolves (including a stale rejection).
+let restoreSpaceDataReviewTransitions = 0;
 let renderedGroupContexts = new Map();
+let renderedHierarchyKeyParents = new Map();
 let renderedGroupDragContexts = new Map();
+const HIERARCHY_MAX_DEPTH = 3;
 let lastGroupDragEndedAt = 0;
 let lastRenderedGroupsSignature = '';
-let lastRenderedAskSignature = '';
 let lastRenderedSpacesSignature = '';
 let recentlyOpenedDormantTabs = [];
 const logicalChromeGroupTitles = new Map();
@@ -380,41 +380,17 @@ let activeTaskCount = 0;
 let taskQueue = Promise.resolve();
 let tabReplacementQueue = Promise.resolve();
 let sharedRefreshRunning = false;
-let lastActivatedAskPageTab = null;
-// The selected Ask conversation belongs to this panel. Shared storage can be
-// refreshed by another Chrome window while an answer is still streaming here.
-let activeAskSessionKey = '';
-const activeAskStreams = new Map();
-const askPageActivationController = createEligibleTabActivationController({
-  getTab: ({ tabId }) => chrome.tabs.get(Number(tabId)),
-  isEligible: isEligibleAskPageTab,
-  onObserve: (tab, _activeInfo, activation) => observeAskPageTab(tab, activation.activatedAt),
-  onActivate: (tab, _activeInfo, activation) => {
-    rememberAskPageTab(tab, activation.activatedAt);
-  },
-});
-
 
 const els = {
   activeSpaceName: document.querySelector('#activeSpaceName'),
   syncStatus: document.querySelector('#syncStatus'),
   settingsButton: document.querySelector('#settingsButton'),
   commandPaletteButton: document.querySelector('#commandPaletteButton'),
-  openWorkbenchButton: document.querySelector('#openWorkbenchButton'),
   collapseGroupsButton: document.querySelector('#collapseGroupsButton'),
   tidyNamesButton: document.querySelector('#tidyNamesButton'),
-  autoGroupButton: document.querySelector('#autoGroupButton'),
   groupsList: document.querySelector('#groupsList'),
-  askPageView: document.querySelector('#askPageView'),
-  askScope: document.querySelector('#askScope'),
-  askProvider: document.querySelector('#askProvider'),
-  askSourceSummary: document.querySelector('#askSourceSummary'),
-  askSourceHint: document.querySelector('#askSourceHint'),
-  askSourceList: document.querySelector('#askSourceList'),
-  askMessages: document.querySelector('#askMessages'),
-  askPagePrompt: document.querySelector('#askPagePrompt'),
-  askAIButton: document.querySelector('#askAIButton'),
   testAIButton: document.querySelector('#testAIButton'),
+  detectModelsButton: document.querySelector('#detectModelsButton'),
   settingsStatus: document.querySelector('#settingsStatus'),
   arcImportInput: document.querySelector('#arcImportInput'),
   arcImportChooseButton: document.querySelector('#arcImportChooseButton'),
@@ -440,44 +416,17 @@ const els = {
   actionDialogClose: document.querySelector('#actionDialogClose'),
   actionDialogCancel: document.querySelector('#actionDialogCancel'),
   actionDialogConfirm: document.querySelector('#actionDialogConfirm'),
-  settingsDialog: document.querySelector('#settingsDialog'),
-  runOnboardingButton: document.querySelector('#runOnboardingButton'),
-  settingsOpenWorkbenchButton: document.querySelector('#settingsOpenWorkbenchButton'),
-  onboardingDialog: document.querySelector('#onboardingDialog'),
-  onboardingProgress: document.querySelector('#onboardingProgress'),
-  onboardingStepLabel: document.querySelector('#onboardingStepLabel'),
-  onboardingChooseStep: document.querySelector('#onboardingChooseStep'),
-  onboardingFreshStep: document.querySelector('#onboardingFreshStep'),
-  onboardingArcStep: document.querySelector('#onboardingArcStep'),
-  onboardingFinishStep: document.querySelector('#onboardingFinishStep'),
-  onboardingFooter: document.querySelector('#onboardingFooter'),
-  onboardingSpaceNameInput: document.querySelector('#onboardingSpaceNameInput'),
-  onboardingArcInput: document.querySelector('#onboardingArcInput'),
-  onboardingArcChooseButton: document.querySelector('#onboardingArcChooseButton'),
-  onboardingArcStatus: document.querySelector('#onboardingArcStatus'),
-  onboardingArcSpaces: document.querySelector('#onboardingArcSpaces'),
-  onboardingFinishMessage: document.querySelector('#onboardingFinishMessage'),
-  onboardingProviderInput: document.querySelector('#onboardingProviderInput'),
-  onboardingBaseUrlInput: document.querySelector('#onboardingBaseUrlInput'),
-  onboardingModelInput: document.querySelector('#onboardingModelInput'),
-  onboardingCustomModelLabel: document.querySelector('#onboardingCustomModelLabel'),
-  onboardingCustomModelInput: document.querySelector('#onboardingCustomModelInput'),
-  onboardingLanguageInput: document.querySelector('#onboardingLanguageInput'),
-  onboardingApiKeyInput: document.querySelector('#onboardingApiKeyInput'),
-  onboardingThinkingLabel: document.querySelector('#onboardingThinkingLabel'),
-  onboardingThinkingInput: document.querySelector('#onboardingThinkingInput'),
-  onboardingThinkingHint: document.querySelector('#onboardingThinkingHint'),
-  onboardingTestAIButton: document.querySelector('#onboardingTestAIButton'),
-  onboardingAIStatus: document.querySelector('#onboardingAIStatus'),
-  onboardingBackButton: document.querySelector('#onboardingBackButton'),
-  onboardingNextButton: document.querySelector('#onboardingNextButton'),
-  skipOnboardingButton: document.querySelector('#skipOnboardingButton'),
-  onboardingOpenWorkbenchButton: document.querySelector('#onboardingOpenWorkbenchButton'),
+  settingsView: document.querySelector('#settingsView'),
+  settingsNav: document.querySelector('#settingsNav'),
+  settingsCloseButton: document.querySelector('#settingsCloseButton'),
+  tidyRulesList: document.querySelector('#tidyRulesList'),
+  tidyGroupPromptInput: document.querySelector('#tidyGroupPromptInput'),
+  tidyRenamePromptInput: document.querySelector('#tidyRenamePromptInput'),
+  resetTidyRulesButton: document.querySelector('#resetTidyRulesButton'),
   providerInput: document.querySelector('#providerInput'),
   baseUrlInput: document.querySelector('#baseUrlInput'),
   modelInput: document.querySelector('#modelInput'),
-  customModelLabel: document.querySelector('#customModelLabel'),
-  customModelInput: document.querySelector('#customModelInput'),
+  modelOptions: document.querySelector('#modelOptions'),
   languageInput: document.querySelector('#languageInput'),
   apiKeyInput: document.querySelector('#apiKeyInput'),
   apiKeyStatus: document.querySelector('#apiKeyStatus'),
@@ -508,11 +457,9 @@ const panelPortController = createPanelPortController({
 const panelFocusController = createPanelFocusController({
   windowTarget: window,
   documentTarget: document,
-  getTarget: () => activeView === 'ask'
-    ? els.askPagePrompt
-    : activeView === 'space'
-      ? els.groupsList
-      : null,
+  getTarget: () => activeView === 'space'
+    ? els.groupsList
+    : null,
   requestBackgroundFocus: () => extensionRuntime && Number.isSafeInteger(panelWindowId)
     ? chrome.runtime.sendMessage({ type: 'panel:focus', windowId: panelWindowId })
     : null,
@@ -525,9 +472,12 @@ const commandPaletteController = createCommandPaletteController({
   results: els.commandPaletteResults,
   document,
   getData: () => ({ spaces: state.spaces, spaceView: commandPaletteSpaceView() }),
-  canOpen: () => !els.onboardingDialog.open && !els.actionDialog.open,
+  canOpen: () => !els.actionDialog.open,
   beforeOpen: () => {
-    if (els.settingsDialog.open && !workbenchMode) els.settingsDialog.close();
+    if (activeView === 'settings') {
+      activeView = 'space';
+      render();
+    }
   },
   prepareSelection: prepareCommandPaletteSelectionFromUserGesture,
   onSelect: (prepared) => void runTask((windowBinding) => runSelectedCommandPaletteItem({
@@ -548,7 +498,6 @@ const panelKeyboardController = createPanelKeyboardController({
   getSelection: () => window.getSelection?.(),
   openCommandPalette: commandPaletteController.open,
   abortActiveAIRequest: () => void abortActiveAIRequest(),
-  submitAsk: startAskFromUserGesture,
   dispatchShortcutAction: (action) => {
     const organizationRequest = prepareOrganizationRequestForAction(action);
     void runTask((windowBinding) => runShortcutAction(action, organizationRequest, {
@@ -557,7 +506,6 @@ const panelKeyboardController = createPanelKeyboardController({
   },
 });
 
-if (workbenchMode) document.querySelector('.shell').append(els.settingsDialog);
 
 init();
 
@@ -595,9 +543,15 @@ async function init() {
     // reverting a newer attach event.
     await confirmPanelHostBindingAfterInit();
     bindEvents();
+    try {
+      await migrateSpaceHierarchy(state.activeSpaceId, {
+        windowBinding: panelWindowBindingController.current(),
+      });
+    } catch (migrationError) {
+      console.error(migrationError);
+    }
     document.documentElement.dataset.initialized = 'true';
     renderSettings();
-    await maybeShowOnboarding();
     if (extensionRuntime) setInterval(() => void refreshSharedState(), 2500);
   } catch (error) {
     document.documentElement.dataset.initialized = 'failed';
@@ -720,14 +674,22 @@ async function syncStateFromStorage(options = {}) {
     };
     nextState.ai.apiKey = scopedAIKey(createScopedAIAuth(localConfig.ai), nextState.ai);
   } else {
-    nextState.ai.apiKey = scopedAIKey(secrets[SECRET_STORAGE_KEY]?.ai, nextState.ai);
+    const reconciled = reconcileScopedAIKey(secrets[SECRET_STORAGE_KEY]?.ai, nextState.ai);
+    nextState.ai.apiKey = reconciled?.apiKey || '';
+    if (reconciled?.drifted) {
+      // Endpoint migrations can rename a base URL while the stored key stays
+      // valid for the same provider. Rewrite the stored scope so the key is
+      // never stranded behind a scope mismatch (and later destroyed by a save).
+      void secretSet({
+        [SECRET_STORAGE_KEY]: {
+          ai: { apiKey: reconciled.apiKey, ...aiAuthScope(nextState.ai) },
+        },
+      }).catch(() => undefined);
+    }
   }
 
   if (tempTheme) nextState.tempTheme = tempTheme;
   state = nextState;
-  // This field remains a backwards-compatible storage mirror; it is never read
-  // back as the source of truth for the current panel.
-  state.activeAskSessionKey = activeAskSessionKey;
   applyTheme(state.tempTheme || state.theme);
   sanitizeStoredSpaceSnapshots();
   if (
@@ -744,55 +706,56 @@ async function syncStateFromStorage(options = {}) {
 }
 
 async function saveState({ persistWindowState = true, windowBinding = null } = {}) {
-  if (!persistWindowState) {
-    return commitWindowBoundWrite({
-      isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
-      write: () => persistStorageStep({
-        key: STORAGE_KEY,
-        value: stateForStorage(),
-        get: storageGet,
-        set: storageSet,
-        remove: storageRemove,
-      }),
+  // The panel writes the whole workspace key, so every save must be serialized
+  // against background journal drains. Taking the lock here (re-entrantly)
+  // protects all call sites instead of relying on each caller to remember it.
+  return withSharedStateLock(async () => {
+    if (!persistWindowState) {
+      return commitWindowBoundWrite({
+        isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
+        write: () => persistStorageStep({
+          key: STORAGE_KEY,
+          value: stateForStorage(),
+          get: storageGet,
+          set: storageSet,
+          remove: storageRemove,
+        }),
+      });
+    }
+    if (!isCurrentPanelWindowBinding(windowBinding)) return false;
+    const workspaceState = stateForStorage();
+    const nextWindowSpaceState = rememberActiveSpaceForWindow(
+      windowSpaceState,
+      windowBinding ? windowBinding.windowId : panelWindowId,
+      state.activeSpaceId,
+      state.spaces,
+    );
+    await persistStoragePair({
+      key: WINDOW_STATE_KEY,
+      value: nextWindowSpaceState,
+      get: windowStateGet,
+      set: windowStateSet,
+      remove: windowStateRemove,
+    }, {
+      key: STORAGE_KEY,
+      value: workspaceState,
+      get: storageGet,
+      set: storageSet,
+      remove: storageRemove,
     });
-  }
-  if (!isCurrentPanelWindowBinding(windowBinding)) return false;
-  const workspaceState = stateForStorage();
-  const nextWindowSpaceState = rememberActiveSpaceForWindow(
-    windowSpaceState,
-    windowBinding ? windowBinding.windowId : panelWindowId,
-    state.activeSpaceId,
-    state.spaces,
-  );
-  await persistStoragePair({
-    key: WINDOW_STATE_KEY,
-    value: nextWindowSpaceState,
-    get: windowStateGet,
-    set: windowStateSet,
-    remove: windowStateRemove,
-  }, {
-    key: STORAGE_KEY,
-    value: workspaceState,
-    get: storageGet,
-    set: storageSet,
-    remove: storageRemove,
+    // A resolved pair write is durable even if the Workbench moved while the
+    // browser was replying. Only the pre-write guard above may report `false`;
+    // callers can therefore distinguish a no-op from a committed stale view.
+    if (isCurrentPanelWindowBinding(windowBinding)) {
+      windowSpaceState = nextWindowSpaceState;
+    }
+    return true;
   });
-  // A resolved pair write is durable even if the Workbench moved while the
-  // browser was replying. Only the pre-write guard above may report `false`;
-  // callers can therefore distinguish a no-op from a committed stale view.
-  if (isCurrentPanelWindowBinding(windowBinding)) {
-    windowSpaceState = nextWindowSpaceState;
-  }
-  return true;
 }
 
 function bindEvents() {
   bindPanelWindowEvents();
-  if (extensionRuntime && chrome.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener(handleRuntimeEvent);
-  }
-  if (extensionRuntime && chrome.tabs?.onActivated) {
-    chrome.tabs.onActivated.addListener(handleChromeTabActivated);
+  if (extensionRuntime && chrome.tabs?.onUpdated) {
     chrome.tabs.onUpdated.addListener(handleChromeTabUpdated);
     chrome.tabs.onRemoved.addListener(handleChromeTabRemoved);
     chrome.tabs.onDetached?.addListener(handleChromeTabDetached);
@@ -807,9 +770,9 @@ function bindEvents() {
   document.addEventListener('visibilitychange', panelFocusController.handleVisibilityChange);
   window.addEventListener('blur', panelFocusController.handleWindowBlur);
   window.addEventListener('pagehide', panelFocusController.handleWindowBlur);
-  els.settingsButton.addEventListener('click', () => runTask(async (windowBinding) => {
-    if (!workbenchMode) {
-      await openWorkbench({ view: 'settings', windowBinding });
+  els.settingsButton.addEventListener('click', () => runTask(async () => {
+    if (activeView === 'settings') {
+      exitSettingsView();
       return;
     }
     state.tempTheme = state.theme || 'purple';
@@ -817,30 +780,17 @@ function bindEvents() {
     activeView = 'settings';
     render();
   }));
-  els.openWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    openWorkbench({ windowBinding })
-  )));
   els.commandPaletteButton.addEventListener('click', commandPaletteController.open);
   els.undoOrganizationButton.addEventListener('click', () => {
     const operationId = els.undoOrganizationButton.dataset.operationId || '';
     runTask((windowBinding) => undoLastOperation(operationId, { windowBinding }));
   });
-  els.settingsOpenWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    openWorkbench({ windowBinding })
-  )));
-  els.runOnboardingButton.addEventListener('click', () => {
-    els.settingsDialog.close();
-    activeView = workbenchMode ? 'ask' : 'space';
-    render();
-    openOnboarding({ restart: true });
-  });
   els.tidyNamesButton.addEventListener('click', startTidyNamesFromUserGesture);
-  els.autoGroupButton.addEventListener('click', startAutoGroupFromUserGesture);
   els.collapseGroupsButton.addEventListener('click', () => runTask((windowBinding) => (
     toggleSpaceGroups({ windowBinding })
   )));
-  els.askAIButton.addEventListener('click', startAskFromUserGesture);
   els.testAIButton.addEventListener('click', () => startTestAIFromUserGesture(settingsAIControls()));
+  els.detectModelsButton.addEventListener('click', () => runTask((windowBinding) => detectProviderModels(settingsAIControls(), { windowBinding })));
   els.clearApiKeyButton.addEventListener('click', () => {
     const authTarget = structuredClone(settingsBaseline?.auth || null);
     runTask((windowBinding) => clearApiKey(authTarget, { windowBinding }));
@@ -849,90 +799,56 @@ function bindEvents() {
   els.baseUrlInput.addEventListener('input', () => clearAIKeyAfterEndpointEdit(settingsAIControls()));
   els.modelInput.addEventListener('change', () => {
     const controls = settingsAIControls();
-    updateCustomModelVisibility(controls);
     updateAIThinkingControl(controls);
   });
-  els.customModelInput.addEventListener('input', () => updateAIThinkingControl(settingsAIControls()));
   els.arcImportInput.addEventListener('change', () => runTask((windowBinding) => (
     previewArcImportFile(null, { windowBinding })
   )));
   els.arcImportInput.addEventListener('cancel', (event) => event.stopPropagation());
   els.arcImportChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('settings'));
-  els.importArcButton.addEventListener('click', () => runTask((windowBinding) => (
-    importArcFile({ windowBinding })
-  )));
+  els.importArcButton.addEventListener('click', () => runTask(async (windowBinding) => {
+    if (!pendingArcImportText) {
+      els.arcImportChooseButton.click();
+      return;
+    }
+    await importArcFile({ windowBinding });
+  }));
   els.undoArcImportButton.addEventListener('click', () => runTask((windowBinding) => (
     undoLastArcImport({ windowBinding })
   )));
   els.exportSpaceDataButton.addEventListener('click', () => runTask((windowBinding) => (
     exportSpaceData({ windowBinding })
   )));
-  els.spaceBackupInput.addEventListener('change', () => runTask((windowBinding) => (
-    previewSpaceBackupFile({ windowBinding })
-  )));
-  els.restoreSpaceDataButton.addEventListener('click', () => runTask((windowBinding) => (
-    restoreSpaceData({ windowBinding })
-  )));
+  // Selecting a backup automatically opens its restore confirmation, so a
+  // Restore Backup click can race that review through the serialized task
+  // queue. Each enqueue records the review transition counter and a queued
+  // call is dropped when another review started or finished since; otherwise
+  // the queued duplicate would re-open a fresh confirmation dialog after the
+  // first review resolved (including a stale rejection).
+  const enqueueRestoreSpaceDataReview = () => {
+    const seenTransitions = restoreSpaceDataReviewTransitions;
+    return runTask(async (windowBinding) => {
+      if (restoreSpaceDataReviewTransitions !== seenTransitions) return;
+      await restoreSpaceData({ windowBinding });
+    });
+  };
+  els.spaceBackupInput.addEventListener('change', () => runTask(async (windowBinding) => {
+    await previewSpaceBackupFile({ windowBinding });
+    if (pendingSpaceBackup) await restoreSpaceData({ windowBinding });
+  }));
+  els.restoreSpaceDataButton.addEventListener('click', () => {
+    if (!pendingSpaceBackup) {
+      runTask(async () => {
+        els.spaceBackupInput.click();
+      });
+      return;
+    }
+    enqueueRestoreSpaceDataReview();
+  });
   els.saveSettingsButton.addEventListener('click', (event) => {
     event.preventDefault();
     runTask((windowBinding) => saveSettings({ windowBinding }));
   });
-  els.onboardingSpaceNameInput.addEventListener('input', renderOnboarding);
-  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
-    button.addEventListener('click', () => chooseOnboardingPath(button.dataset.onboardingPath));
-  }
-  els.onboardingArcInput.addEventListener('change', () => runTask((windowBinding) => (
-    previewOnboardingArcFile(null, { windowBinding })
-  )));
-  els.onboardingArcInput.addEventListener('cancel', (event) => event.stopPropagation());
-  els.onboardingArcChooseButton.addEventListener('click', () => startArcFileSelectionFromUserGesture('onboarding'));
-  els.onboardingArcSpaces.addEventListener('change', renderOnboarding);
-  els.onboardingProviderInput.addEventListener('change', () => {
-    if (!els.onboardingProviderInput.value) {
-      renderOnboardingAISettings({ selectNoProvider: true });
-      renderOnboarding();
-      return;
-    }
-    handleAIProviderChange(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingModelInput.addEventListener('change', () => {
-    const controls = onboardingAIControls();
-    updateCustomModelVisibility(controls);
-    updateAIThinkingControl(controls);
-    renderOnboarding();
-  });
-  els.onboardingCustomModelInput.addEventListener('input', () => {
-    updateAIThinkingControl(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingBaseUrlInput.addEventListener('input', () => {
-    clearAIKeyAfterEndpointEdit(onboardingAIControls());
-    renderOnboarding();
-  });
-  els.onboardingLanguageInput.addEventListener('change', renderOnboarding);
-  els.onboardingApiKeyInput.addEventListener('input', renderOnboarding);
-  els.onboardingThinkingInput.addEventListener('change', renderOnboarding);
-  els.onboardingTestAIButton.addEventListener('click', () => startTestAIFromUserGesture(onboardingAIControls()));
-  els.onboardingBackButton.addEventListener('click', goBackOnboarding);
-  els.onboardingNextButton.addEventListener('click', () => runTask((windowBinding) => (
-    continueOnboarding({ windowBinding })
-  )));
-  els.skipOnboardingButton.addEventListener('click', () => runTask((windowBinding) => (
-    finishOnboarding(false, { windowBinding })
-  )));
-  els.onboardingOpenWorkbenchButton.addEventListener('click', () => runTask((windowBinding) => (
-    saveOnboardingAIAndFinish({ windowBinding })
-  )));
-  els.onboardingDialog.addEventListener('cancel', (event) => {
-    if (event.target !== event.currentTarget) return;
-    event.preventDefault();
-    clearOnboardingArcSelection();
-    els.onboardingApiKeyInput.value = '';
-    els.onboardingDialog.close();
-    render();
-  });
-
   els.themeOptions.addEventListener('click', (event) => {
     const btn = event.target.closest('.theme-option');
     if (!btn) return;
@@ -943,19 +859,12 @@ function bindEvents() {
     }
   });
 
-  els.settingsDialog.addEventListener('close', () => {
-    clearSettingsArcSelection();
-    if (state.tempTheme) {
-      applyTheme(state.theme);
-      delete state.tempTheme;
-    }
-    if (workbenchMode && activeView === 'settings') {
-      activeView = 'ask';
-      const url = new URL(window.location.href);
-      url.searchParams.delete('view');
-      window.history.replaceState(null, '', url);
-      render();
-    }
+  els.settingsCloseButton.addEventListener('click', () => runTask(() => exitSettingsView()));
+
+  els.settingsNav.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-settings-panel]');
+    if (!button) return;
+    showSettingsPanel(button.dataset.settingsPanel);
   });
 
   els.commandPaletteInput.addEventListener('input', commandPaletteController.handleInput);
@@ -966,6 +875,31 @@ function bindEvents() {
   window.addEventListener('contextmenu', handleGroupHeaderContextMenu, { capture: true });
   window.addEventListener('mousedown', handleGroupHeaderMouseDown, { capture: true });
   els.groupsList.addEventListener('scroll', () => positionGroupPreview(), { passive: true });
+  // 根区投放：拖到面板空白处（不在任何卡片上）= 回到顶层。
+  els.groupsList.addEventListener('dragover', (event) => {
+    if (dragState?.type !== 'group' || dragState.sourceSpaceId !== state.activeSpaceId) return;
+    if (event.target.closest('.group-card, .ungrouped-section')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    els.groupsList.classList.add('root-drop-hover');
+  });
+  els.groupsList.addEventListener('dragleave', (event) => {
+    if (event.target === els.groupsList) els.groupsList.classList.remove('root-drop-hover');
+  });
+  els.groupsList.addEventListener('drop', (event) => {
+    els.groupsList.classList.remove('root-drop-hover');
+    if (dragState?.type !== 'group') return;
+    if (event.target.closest('.group-card, .ungrouped-section')) return;
+    dropGroup(event, { key: '' });
+  });
+  els.groupsList.addEventListener('contextmenu', (event) => {
+    if (event.target.closest('.group-card, .ungrouped-section, .tab-row')) return;
+    if (dragState) return;
+    event.preventDefault();
+    showContextMenu(event, [
+      menuAction('New Group', (windowBinding) => createEmptyGroupNode('', { windowBinding })),
+    ]);
+  });
   window.addEventListener('resize', hideGroupPreview);
   document.addEventListener('click', () => {
     hideContextMenu();
@@ -982,22 +916,28 @@ function bindPanelWindowEvents() {
   chrome.tabs.onMoved?.addListener(handleChromeHostTabMoved);
 }
 
-function handleRuntimeEvent(message) {
-  if (message?.type !== 'ai:stream' || !message.requestId) return;
-  const stream = activeAskStreams.get(message.requestId);
-  if (!stream || stream.finished) return;
-  stream.text = String(message.text || '');
-  void updateAskMessage(stream.messageRef, stream.text || 'Thinking...', { persist: false });
+function exitSettingsView({ restoreTheme = true } = {}) {
+  clearSettingsArcSelection();
+  if (restoreTheme && state.tempTheme) {
+    applyTheme(state.theme);
+    delete state.tempTheme;
+  }
+  if (activeView === 'settings') {
+    activeView = 'space';
+    const url = new URL(window.location.href);
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
+    render();
+  }
 }
 
 function hasBlockingDialogOpen() {
   return [...document.querySelectorAll('dialog[open]')]
-    .some((dialog) => !workbenchMode || dialog !== els.settingsDialog);
+    .some(Boolean);
 }
 
 function prepareOrganizationRequestForAction(action) {
-  if (action === 'tidy' || action === 'tidyNames') return prepareTidyNamesRequestFromUserGesture();
-  if (action === 'auto-group' || action === 'autoGroup') return prepareAutoGroupRequestFromUserGesture();
+  if (action === 'tidy' || action === 'tidyNames') return prepareTidyRequestFromUserGesture();
   return null;
 }
 
@@ -1027,22 +967,17 @@ async function runSelectedCommandPaletteItem(prepared = {}) {
     );
     return;
   }
-  if (item.action === 'ask') await openAskPage({ windowBinding });
-  else if (item.action === 'tidy') {
-    await tidyTabNames({ ...(prepared.organizationRequest || {}), windowBinding });
-  }
-  else if (item.action === 'auto-group') {
-    await autoGroupTabs({ ...(prepared.organizationRequest || {}), windowBinding });
+  if (item.action === 'tidy') {
+    await runTidy({ ...(prepared.organizationRequest || {}), windowBinding });
   }
   else if (item.action === 'settings') {
-    if (!workbenchMode) await openWorkbench({ view: 'settings', windowBinding });
-    else {
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        throw new Error('This Workbench moved to another Chrome window before Settings could open.');
-      }
-      activeView = 'settings';
-      render();
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      throw new Error('This panel moved to another Chrome window before Settings could open.');
     }
+    state.tempTheme = state.theme || 'purple';
+    renderSettings();
+    activeView = 'settings';
+    render();
   }
 }
 
@@ -1146,16 +1081,8 @@ async function runSelectedCommandPaletteTab(reference, preparedWindowBinding = n
 
 async function runShortcutAction(action, organizationRequest = null, options = {}) {
   const windowBinding = options.windowBinding;
-  if (action === 'openAsk') {
-    await openAskPage({ windowBinding });
-    return;
-  }
   if (action === 'tidyNames') {
-    await tidyTabNames({ ...(organizationRequest || {}), windowBinding });
-    return;
-  }
-  if (action === 'autoGroup') {
-    await autoGroupTabs({ ...(organizationRequest || {}), windowBinding });
+    await runTidy({ ...(organizationRequest || {}), windowBinding });
     return;
   }
   if (action === 'addSpace') {
@@ -1246,6 +1173,7 @@ async function loadTabs({
   adopt = false,
   adoptGroups = false,
   skipSnapshotCleanupForTabIds = [],
+  skipOwnershipRestoreGroupIds = [],
   windowBinding = null,
   allowStaleWindowBinding = false,
 } = {}) {
@@ -1300,6 +1228,7 @@ async function loadTabs({
     state,
     allContentTabs,
     response.allGroups || groups,
+    { skipGroupIds: skipOwnershipRestoreGroupIds },
   );
   for (const [groupId, logicalTitle] of Object.entries(ownershipMetadata.groupTitles || {})) {
     logicalChromeGroupTitles.set(Number(groupId), logicalTitle);
@@ -1473,7 +1402,6 @@ async function loadDormantSpaceView(spaceId, options = {}) {
 }
 
 function render() {
-  if (workbenchMode && activeView === 'space') activeView = 'ask';
   const activeSpace = currentSpace();
   const liveSpaceView = buildSpaceView({
     activeSpaceId: state.activeSpaceId,
@@ -1498,28 +1426,19 @@ function render() {
   syncSelectedTabsToVisibleSpace();
 
   const isSpaceView = activeView === 'space';
-  const isAskView = activeView === 'ask';
   const isSettingsView = activeView === 'settings';
-  const showSources = workbenchMode || isSpaceView;
+  const showSources = (workbenchMode || isSpaceView) && !isSettingsView;
   const groupsCollapsed = showSources && isSpaceGroupsCollapsed();
   els.activeSpaceName.textContent = activeSpace.name;
   els.syncStatus.textContent = activePanelAction
     ? panelActionStatus(activePanelAction)
-    : isAskView
-    ? activeAskPageStatus()
     : '';
   els.groupsList.hidden = !showSources;
-  els.askPageView.hidden = !isAskView;
   if (!showSources) hideGroupPreview();
   els.tidyNamesButton.hidden = !showSources;
-  els.autoGroupButton.hidden = !showSources;
   els.collapseGroupsButton.hidden = !showSources;
-  els.openWorkbenchButton.hidden = workbenchMode;
   els.settingsButton.classList.toggle('active', isSettingsView);
-  if (workbenchMode) {
-    if (isSettingsView && !els.settingsDialog.open) els.settingsDialog.show();
-    if (!isSettingsView && els.settingsDialog.open) els.settingsDialog.close();
-  }
+  els.settingsView.hidden = !isSettingsView;
   els.collapseGroupsButton.innerHTML = groupsCollapsed
     ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`
     : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
@@ -1529,7 +1448,6 @@ function render() {
   els.groupsList.classList.toggle('groups-collapsed', groupsCollapsed);
 
   renderGroups();
-  if (isAskView) refreshAskPageTargetUI();
   renderSpaces();
   renderOperationRecord();
   updateAIRequestUI();
@@ -1540,16 +1458,11 @@ function render() {
 function updateOrganizationActionDisclosures() {
   const provider = providerById(state.ai.provider);
   const hasAI = hasUsableAISettings(state.ai);
-  const tidyDisclosure = hasAI
-    ? `Tidy Names with ${provider.label}: sends eligible live tab titles, simplified URLs, and domains. It also merges duplicate Tags locally. If the provider is unavailable, it falls back to local naming. One preview opens before applying.`
-    : 'Tidy Names uses local naming and merges duplicate Tags locally: no tab metadata is sent. One preview opens before applying.';
-  els.tidyNamesButton.title = tidyDisclosure;
-  els.tidyNamesButton.setAttribute('aria-label', tidyDisclosure);
   const disclosure = hasAI
-    ? `Auto Group with ${provider.label}: sends eligible tab titles, simplified URLs, domains, current Tags, and live/saved status. It also merges duplicate Tags locally, then opens one preview before applying.`
-    : 'Auto Group needs a configured AI provider to regroup tabs, so no tab metadata is sent. If this Space has only duplicate Tags to clean up, they can still be merged locally after one preview.';
-  els.autoGroupButton.title = disclosure;
-  els.autoGroupButton.setAttribute('aria-label', disclosure);
+    ? `Tidy with ${provider.label}: merges duplicate Tags, regroups tabs by topic, and renames tabs per your Tidy rules. Sends only the disclosed tab titles, simplified URLs, and domains, then opens one preview before applying. Script rules and local naming still run when AI is unavailable. Undo is available afterward.`
+    : 'Tidy merges duplicate Tags locally and renames tabs with local rules without sending tab metadata. Topic grouping needs a configured AI provider. One preview opens before anything applies, and Undo is available afterward.';
+  els.tidyNamesButton.title = disclosure;
+  els.tidyNamesButton.setAttribute('aria-label', disclosure);
 }
 
 function hasUsableAISettings(settings = {}) {
@@ -1907,7 +1820,7 @@ async function assertOperationUndoIsFresh(operation, options = {}) {
       throw new Error('This restore record does not contain the safety data required for Undo.');
     }
     if (fingerprintPortableWorkspaceContent(state) !== expectedFingerprint) {
-      throw new Error('Portable Space data changed after this backup was restored. Undo was stopped to preserve the newer Spaces, Tags, saved pages, context, or Ask history.');
+      throw new Error('Portable Space data changed after this backup was restored. Undo was stopped to preserve the newer Spaces, Tags, saved pages, or context.');
     }
     return;
   }
@@ -2140,7 +2053,6 @@ async function undoLastOperation(expectedOperationId = '', options = {}) {
         );
         dormantSpaceViewSpaceId = '';
         lastRenderedGroupsSignature = '';
-        lastRenderedAskSignature = '';
         lastRenderedSpacesSignature = '';
         operation.status = 'undone';
         operation.undoneAt = Date.now();
@@ -2218,67 +2130,22 @@ function operationUndoTargetMessage(status) {
   return 'That Undo record is no longer available. Nothing was changed.';
 }
 
-function currentAskPageTab() {
-  // onActivated can arrive before the next tabs:list refresh includes a newly
-  // created page. The remembered source stays authoritative until an explicit
-  // removal/update invalidates it, while Workbench pages are never selected as
-  // the user's Ask source.
-  return selectEligibleTabSource(tabs, lastActivatedAskPageTab, isEligibleAskPageTab);
-}
-
-async function handleChromeTabActivated(activeInfo = {}) {
-  if (Number.isFinite(panelWindowId) && Number(activeInfo.windowId) !== Number(panelWindowId)) return;
-  await askPageActivationController.handle(activeInfo);
-}
-
 function handleChromeTabUpdated(tabId, changeInfo, tab) {
   if (!changeInfo.url && !changeInfo.title && !changeInfo.status) return;
-  const wasCurrentSource = Number(tabId) === Number(currentAskPageTab()?.id);
   const tabIndex = tabs.findIndex((candidate) => Number(candidate.id) === Number(tabId));
   if (tabIndex >= 0) tabs[tabIndex] = { ...tabs[tabIndex], ...tab };
-  const isRememberedSource = Number(tabId) === Number(lastActivatedAskPageTab?.id);
-  const isEligible = isEligibleAskPageTab(tab);
-  if (changeInfo.url || !isEligible) askPageActivationController.invalidate(tabId);
-  if (!isRememberedSource) {
-    if (isEligible && tab.active) {
-      askPageActivationController.commitFresh(tab, {
-        tabId: Number(tabId),
-        windowId: Number(tab.windowId),
-      });
-      return;
-    }
-    if (wasCurrentSource) refreshAskPageTargetUI();
-    return;
-  }
-  if (!isEligible) {
-    lastActivatedAskPageTab = null;
-    tabs = tabs.filter((candidate) => Number(candidate.id) !== Number(tabId));
-    refreshAskPageTargetUI();
-    return;
-  }
-  rememberAskPageTab(tab);
 }
 
 function handleChromeTabRemoved(tabId, removeInfo = {}) {
   if (Number.isFinite(panelWindowId) && Number.isFinite(Number(removeInfo.windowId)) &&
       Number(removeInfo.windowId) !== Number(panelWindowId)) return;
-  const wasCurrentSource = Number(tabId) === Number(currentAskPageTab()?.id);
-  const wasRememberedSource = Number(tabId) === Number(lastActivatedAskPageTab?.id);
-  askPageActivationController.invalidate(tabId);
   tabs = tabs.filter((tab) => Number(tab.id) !== Number(tabId));
-  if (wasRememberedSource) lastActivatedAskPageTab = null;
-  if (wasCurrentSource || wasRememberedSource) refreshAskPageTargetUI();
 }
 
 function handleChromeTabDetached(tabId, detachInfo = {}) {
   if (Number.isFinite(panelWindowId) &&
       Number(detachInfo.oldWindowId) !== Number(panelWindowId)) return;
-  askPageActivationController.invalidate(tabId);
   tabs = tabs.filter((tab) => Number(tab.id) !== Number(tabId));
-  if (Number(tabId) === Number(lastActivatedAskPageTab?.id)) {
-    lastActivatedAskPageTab = null;
-  }
-  refreshAskPageTargetUI();
 }
 
 function handleChromeTabAttached(tabId, attachInfo = {}) {
@@ -2319,7 +2186,6 @@ function isCurrentPanelWindowRebind(transition) {
 }
 
 function handleChromeTabReplaced(addedTabId, removedTabId) {
-  askPageActivationController.invalidate(removedTabId);
   const immediateTab = { id: Number(addedTabId) };
   state = reduceTabLifecycleEvent({
     state,
@@ -2364,13 +2230,7 @@ async function reconcileChromeTabReplacement(addedTabId, removedTabId) {
       },
       now: Date.now(),
     });
-    // syncStateFromStorage can legitimately load the last durable "Thinking..."
-    // while a provider stream is already further ahead in this panel. Reapply
-    // every in-flight stream from its cumulative text before checkpointing so
-    // neither the worker journal nor this eager replacement save loses partial
-    // output. The final Ask save remains idempotent on the same message id.
     applyPanelTabIdReplacement(added, removed, replacementTab);
-    restoreInFlightAskMessages();
     // A replacement is global lifecycle metadata. Never let a host-window move
     // turn this eager checkpoint into a write to another window's Space map;
     // the background journal remains the authoritative retry if this epoch is
@@ -2378,21 +2238,6 @@ async function reconcileChromeTabReplacement(addedTabId, removedTabId) {
     await saveState({ persistWindowState: false, windowBinding });
   });
   if (!isCurrentPanelWindowBinding(windowBinding)) return;
-  refreshAskPageTargetUI();
-  if (activeView === 'ask') renderAskMessages();
-}
-
-function restoreInFlightAskMessages() {
-  for (const stream of activeAskStreams.values()) {
-    // A finished stream is formatting and durably saving its authoritative
-    // answer (Sources appendix, truncation notice, or failure/Stop note). Its
-    // raw provider text must never overwrite that final representation.
-    if (stream?.finished) continue;
-    const ref = stream?.messageRef;
-    if (!ref?.sessionKey || !ref.messageId) continue;
-    const session = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-    updateAskSessionMessage(session, ref.messageId, stream.text || 'Thinking...');
-  }
 }
 
 function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {}) {
@@ -2401,12 +2246,8 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
     foreignLiveTabs,
     selectedTabIds,
     selectionAnchorTabId,
-    askSessions: state.askSessions,
-    activeAskSessionKey,
-    lastActivatedAskPageTab,
     recentlyOpenedDormantTabs,
     syntheticPlaceholderTabIds,
-    activeAskStreams,
     dragState,
   }, { addedTabId, removedTabId, replacementTab });
   if (!migrated.replacementApplied) return;
@@ -2415,18 +2256,10 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
   foreignLiveTabs = migrated.foreignLiveTabs;
   selectedTabIds = new Set(migrated.selectedTabIds);
   selectionAnchorTabId = migrated.selectionAnchorTabId;
-  state.askSessions = migrated.askSessions;
-  activeAskSessionKey = migrated.activeAskSessionKey;
-  state.activeAskSessionKey = activeAskSessionKey;
-  lastActivatedAskPageTab = migrated.lastActivatedAskPageTab;
   recentlyOpenedDormantTabs = migrated.recentlyOpenedDormantTabs;
   syntheticPlaceholderTabIds.clear();
   for (const tabId of migrated.syntheticPlaceholderTabIds) {
     syntheticPlaceholderTabIds.add(tabId);
-  }
-  activeAskStreams.clear();
-  for (const [requestId, stream] of migrated.activeAskStreams) {
-    activeAskStreams.set(requestId, stream);
   }
 
   if (migrated.dragInvalidated) {
@@ -2434,95 +2267,7 @@ function applyPanelTabIdReplacement(addedTabId, removedTabId, replacementTab = {
     setStatus('The dragged tab changed in Chrome. Try the drag again.');
   }
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   if (migrated.visibleTabsChanged) render();
-}
-
-function cacheAskPageTab(tab = {}, fallbackLastAccessed = Date.now(), options = {}) {
-  const url = String(tab.pendingUrl || tab.url || '');
-  if (!isEligibleAskPageTab({ ...tab, url })) return;
-  const authoritative = options.authoritative === true;
-  const chromeLastAccessed = Number(tab.lastAccessed);
-  const observedLastAccessed = Number(fallbackLastAccessed);
-  const tabIndex = tabs.findIndex((candidate) => Number(candidate.id) === Number(tab.id));
-  const lastAccessed = Math.max(
-    0,
-    Number.isFinite(chromeLastAccessed) ? chromeLastAccessed : 0,
-    Number.isFinite(observedLastAccessed) ? observedLastAccessed : 0,
-    Number(tabs[tabIndex]?.lastAccessed) || 0,
-  );
-  const observed = decorateTabs([{ ...tab, url, active: Boolean(tab.active), lastAccessed }], state)[0];
-  const merged = mergeTabActivationCache(tabs, observed, { authoritative });
-  tabs = merged.tabs;
-  return merged.tab;
-}
-
-function observeAskPageTab(tab = {}, observedAt = Date.now()) {
-  const previousSource = currentAskPageTab();
-  const observed = cacheAskPageTab(tab, observedAt);
-  const nextSource = currentAskPageTab();
-  if (observed && (
-    (previousSource?.id ?? null) !== (nextSource?.id ?? null) ||
-    String(previousSource?.url || '') !== String(nextSource?.url || '')
-  )) refreshAskPageTargetUI();
-}
-
-function rememberAskPageTab(tab = {}, fallbackLastAccessed = Date.now()) {
-  const remembered = cacheAskPageTab(tab, fallbackLastAccessed, { authoritative: true });
-  if (!remembered) return;
-  lastActivatedAskPageTab = remembered;
-  refreshAskPageTargetUI();
-}
-
-function isEligibleAskPageTab(tab = {}) {
-  const url = String(tab.pendingUrl || tab.url || '');
-  const ownExtensionPrefix = extensionRuntime ? chrome.runtime.getURL('') : '';
-  if (!url || (ownExtensionPrefix && url.startsWith(ownExtensionPrefix))) return false;
-  if (!Number.isFinite(panelWindowId)) return true;
-  return Number.isFinite(Number(tab.windowId)) &&
-    Number(tab.windowId) === Number(panelWindowId);
-}
-
-function refreshAskPageTargetUI() {
-  if (activeView !== 'ask') return;
-  const sourceTab = currentAskPageTab();
-  els.askScope.textContent = sourceTab
-    ? `${sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page'} · sent when you ask`
-    : 'Current page · sent when you ask';
-  renderAskDisclosure();
-  renderAskMessages();
-}
-
-function readableAskPageTab() {
-  const tab = currentAskPageTab();
-  return tab && isPageShortcutCapableUrl(tab.url) ? tab : null;
-}
-
-function activeAskPageStatus() {
-  return readableAskPageTab() ? 'Current page' : 'Switch to http(s)';
-}
-
-function renderAskDisclosure() {
-  const tab = currentAskPageTab();
-  const readableTab = readableAskPageTab();
-  const provider = providerById(state.ai.provider);
-  els.askProvider.textContent = [provider.label, state.ai.model].filter(Boolean).join(' · ');
-  els.askSourceSummary.textContent = readableTab ? 'Current page' : 'No readable page';
-  els.askSourceHint.textContent = readableTab
-    ? 'Ask Page sends the current page and recent conversation context directly to your configured provider.'
-    : 'Switch to an http or https page before using Ask Page.';
-  const chips = tab ? [tab].map((sourceTab) => {
-    const chip = document.createElement('span');
-    chip.className = 'ask-source-chip';
-    chip.title = sourceTab.url;
-    const number = document.createElement('small');
-    number.textContent = '[1]';
-    const title = document.createElement('b');
-    title.textContent = sourceTab.displayTitle || sourceTab.title || sourceTab.url || 'Current page';
-    chip.append(number, title);
-    return chip;
-  }) : [];
-  els.askSourceList.replaceChildren(...chips);
 }
 
 function mergeDormantSpaceView(liveView, dormantView) {
@@ -2565,6 +2310,9 @@ function snapshotUrlIdentity(url) {
 }
 
 function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId) {
+  // Emptied saved Tags are filtered AFTER mapping: the row key embeds the
+  // snapshot array index, and filtering first would shift the indexes so
+  // mutations would resolve to the wrong Tag.
   return (snapshot?.groups || [])
     .map((group, groupIndex) => {
       const title = Object.hasOwn(group, 'title') ? String(group.title ?? '') : 'Ungrouped';
@@ -2603,31 +2351,46 @@ function dormantGroupsFromSnapshot(snapshot = {}, spaceId = state.activeSpaceId)
           };
         }),
       };
-    });
+    })
+    // An emptied saved Tag is unremovable noise unless its title still
+    // collides with another Tag, which makes it a candidate the user can
+    // merge with the local Tidy. Keep those visible; drop the rest.
+    .filter((entry) => (
+      entry.tabs.length > 0 ||
+      snapshotEmptyTagIsMergeCandidate(snapshot, { title: entry.title })
+    ));
 }
 
 function renderGroups() {
   const ungrouped = spaceView.find((group) => group.key === 'ungrouped') || null;
-  const tabGroups = isSpaceGroupsCollapsed()
-    ? []
-    : spaceView.filter((group) => group.key !== 'ungrouped');
-  const tree = createFolderTree(tabGroups, { activeSpaceId: state.activeSpaceId });
+  const { nodes, parents } = visibleHierarchyNodes();
+  const collapsedAll = isSpaceGroupsCollapsed();
+  // 树始终按层级构建：顶部折叠按钮只收起显示（仅渲染根节点且强制折叠），
+  // 不把子组拍平到根级——之前 collapsedAll 时用扁平 nodes 渲染，子组全部
+  // 变成根级卡片（层级"消失"）。
+  const tree = buildGroupTree(nodes, parents);
   const signature = groupsRenderSignature({
     activeSpaceId: state.activeSpaceId,
     fileSchemeAccessAllowed,
-    spaceGroupsCollapsed: isSpaceGroupsCollapsed(),
+    spaceGroupsCollapsed: collapsedAll,
     collapsedGroups: state.collapsedGroups,
     selectedTabIds,
-    groups: [...tabGroups, ungrouped],
-    folderTree: tree,
+    groups: [...nodes, ungrouped],
+    hierarchy: parents,
   });
   if (signature === lastRenderedGroupsSignature) return;
   lastRenderedGroupsSignature = signature;
   hideGroupPreview();
-  renderedGroupContexts = new Map();
-  renderedGroupDragContexts = new Map();
+  renderedHierarchyKeyParents = parents;
+  renderedGroupContexts = new Map(nodes.map((node) => [node.key, node]));
+  renderedGroupDragContexts = new Map(nodes.map((node) => [node.key, {
+    type: 'group',
+    key: node.key,
+    dormant: Boolean(node.dormant),
+    groupKeys: [node.key, ...descendantKeysOf(node.key, parents)],
+  }]));
 
-  if (tabGroups.length === 0 && !ungrouped) {
+  if (nodes.length === 0 && !ungrouped) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'No tabs in this Space. Move tabs here from a tab menu, or switch Spaces from the bottom dock.';
@@ -2635,76 +2398,107 @@ function renderGroups() {
     return;
   }
 
-  renderedGroupContexts = groupContextsFromFolderTree(tree);
-  renderedGroupDragContexts = groupDragContextsFromFolderTree(tree);
-  for (const context of renderedGroupDragContexts.values()) {
-    context.fingerprint = folderGroupContextFingerprint(context, renderedGroupContexts);
-  }
-  const nodes = tree.map(createFolderTreeNode);
-  if (ungrouped) nodes.push(createUngroupedSection(ungrouped));
-  els.groupsList.replaceChildren(...nodes);
+  const cards = tree.map((root) => createGroupCard(
+    collapsedAll ? { ...root, collapsed: true, children: [] } : root,
+    0,
+  ));
+  if (ungrouped) cards.push(createUngroupedSection(ungrouped));
+  els.groupsList.replaceChildren(...cards);
 }
 
-function groupContextsFromFolderTree(nodes) {
-  const contexts = new Map();
+function hierarchyParentsForSpace(spaceId = state.activeSpaceId) {
+  const parents = state.groupParents?.[spaceId];
+  return parents && typeof parents === 'object' && !Array.isArray(parents) ? parents : {};
+}
+
+// --- 层级 anchor 域 ----------------------------------------------------------
+// 层级边持久化为 anchor（sgid:<snapshotGroupId> / node:* / vgroup:* / 裸键兜底），
+// 不直接引用易变视图键（chrome 组 id、快照索引）。键再生点（折叠/恢复/快照重
+// 索引/会话轮换）因此无需各自重映射层级；读路径统一投影回当前视图键。
+
+// 当前 Space 视图（spaceView + 空节点）的 key → anchor 映射。
+function hierarchyAnchorMapForSpace(spaceId = state.activeSpaceId) {
+  const anchorByKey = new Map();
+  for (const group of spaceView) {
+    if (group.key === 'ungrouped') continue;
+    anchorByKey.set(group.key, hierarchyAnchorForNode(group));
+  }
+  for (const [key, node] of Object.entries(state.emptyNodes?.[spaceId] || {})) {
+    anchorByKey.set(key, hierarchyAnchorForNode({ key, ...node }));
+  }
+  return anchorByKey;
+}
+
+// sgid → 当前视图键。同一身份出现多张卡（live/dormant 未合并）时保留最后一张。
+function hierarchyBySnapshotGroupIdForNodes(nodes) {
+  const bySnapshotGroupId = new Map();
   for (const node of nodes) {
-    if (node.type === 'folder') {
-      for (const [key, group] of groupContextsFromFolderTree(node.children)) {
-        contexts.set(key, group);
-      }
-      continue;
-    }
-    if (node.group?.key) contexts.set(node.group.key, node.group);
+    const snapshotGroupId = String(node?.snapshotGroupId || '').trim();
+    if (snapshotGroupId) bySnapshotGroupId.set(snapshotGroupId, node.key);
   }
-  return contexts;
+  return bySnapshotGroupId;
 }
 
-function groupDragContextsFromFolderTree(nodes) {
-  const contexts = new Map();
-  for (const node of nodes) {
-    if (node.type === 'folder') {
-      const childContexts = groupDragContextsFromFolderTree(node.children);
-      const groupKeys = [];
-      for (const [key, context] of childContexts) {
-        contexts.set(key, context);
-        groupKeys.push(...context.groupKeys);
-      }
-      contexts.set(node.key, {
-        type: 'folder',
-        key: node.key,
-        path: node.path,
-        groupKeys: uniqueKeys(groupKeys),
-      });
-      continue;
-    }
-    if (node.group?.key) {
-      contexts.set(node.group.key, {
-        type: 'group',
-        key: node.group.key,
-        path: folderTitleParts(node.group.title),
-        dormant: Boolean(node.group.dormant),
-        groupKeys: [node.group.key],
-      });
+// 键域 parents → anchor 域（所有层级写路径的收口）。
+function anchorizeHierarchyParents(parents, spaceId = state.activeSpaceId) {
+  const anchorByKey = hierarchyAnchorMapForSpace(spaceId);
+  const next = {};
+  for (const [childKey, parentKey] of Object.entries(parents || {})) {
+    const childAnchor = anchorByKey.get(childKey) || childKey;
+    const parentAnchor = anchorByKey.get(parentKey) || parentKey;
+    if (childAnchor && parentAnchor && childAnchor !== parentAnchor) {
+      next[childAnchor] = parentAnchor;
     }
   }
-  return contexts;
+  return next;
 }
 
-function folderGroupContextFingerprint(context, groupContexts = renderedGroupContexts) {
-  return JSON.stringify((context?.groupKeys || []).map((key) => {
-    const group = groupContexts.get(key);
-    return group ? groupMutationFingerprint(group) : `missing:${key}`;
+// Flattens the current Space view plus empty placeholder nodes into the
+// render-ready node list, ordered by the persisted DFS groupOrder.
+function visibleHierarchyNodes(spaceId = state.activeSpaceId) {
+  const emptyNodes = state.emptyNodes?.[spaceId] || {};
+  const synthetic = Object.entries(emptyNodes).map(([key, node]) => ({
+    key,
+    id: key,
+    title: node.title || 'Group',
+    displayTitle: node.title || 'Group',
+    color: node.color || 'blue',
+    collapsed: Boolean(state.collapsedGroups[key]),
+    dormant: false,
+    emptyNode: true,
+    tabs: [],
+    spaceId,
   }));
+  const nodes = [
+    ...spaceView.filter((group) => group.key !== 'ungrouped'),
+    ...synthetic,
+  ];
+  const order = state.groupOrder?.[spaceId] || [];
+  nodes.sort((left, right) => orderIndexForNode(order, left.key) - orderIndexForNode(order, right.key));
+  // anchor 域投影 + 每 render 自愈：裸键边升级为 sgid anchor（幂等，随下一次
+  // 保存持久化），再投影回视图键供树构建/拖拽规划消费。
+  const storedParents = hierarchyParentsForSpace(spaceId);
+  const upgraded = upgradeHierarchyParentAnchors(
+    storedParents,
+    new Map(nodes.map((node) => [node.key, hierarchyAnchorForNode(node)])),
+  );
+  if (upgraded.changed) state.groupParents[spaceId] = upgraded.parents;
+  return {
+    nodes,
+    parents: resolveHierarchyKeyParents(
+      upgraded.parents,
+      hierarchyBySnapshotGroupIdForNodes(nodes),
+    ),
+  };
+}
+
+function orderIndexForNode(order, key) {
+  const index = order.indexOf(key);
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
 }
 
 function uniqueKeys(keys) {
   return [...new Set(keys.filter(Boolean))];
-}
-
-function createFolderTreeNode(node) {
-  if (node.type === 'folder') return createFolderSection(node);
-  if (node.type === 'folder-tabs') return createFolderTabs(node.group);
-  return createGroupCard(node.group);
 }
 
 function handleGroupHeaderContextMenu(event) {
@@ -2717,9 +2511,7 @@ function handleGroupHeaderContextMenu(event) {
     showGroupContextMenu(event, group);
     return;
   }
-  const folder = folderContextFromHeader(header);
-  if (folder) showFolderContextMenu(event, folder);
-  else hideContextMenu();
+  hideContextMenu();
 }
 
 function handleGroupHeaderMouseDown(event) {
@@ -2734,7 +2526,7 @@ function handleGroupHeaderMouseDown(event) {
 
 function groupHeaderFromEvent(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-  const header = target?.closest?.('.group-header, .folder-header');
+  const header = target?.closest?.('.group-header');
   if (!header || !els.groupsList.contains(header)) return null;
   return header;
 }
@@ -2747,106 +2539,18 @@ function groupContextFromHeader(header) {
   return group;
 }
 
-function folderContextFromHeader(header) {
-  if (!header.classList.contains('folder-header')) return null;
-  const key = header.dataset.folderKey ||
-    header.dataset.dragKey ||
-    header.closest('[data-folder-key]')?.dataset.folderKey;
-  const context = key ? renderedGroupDragContexts.get(key) : null;
-  return context?.type === 'folder' ? context : null;
-}
-
-function createFolderSection(folder) {
-  const collapsed = Boolean(state.collapsedGroups[folder.key]);
-  const dragContext = renderedGroupDragContexts.get(folder.key);
-  const canDragFolder = Boolean(
-    dragContext?.groupKeys?.length && !folderContextHasForeignLiveTabs(dragContext)
-  );
-  const section = document.createElement('section');
-  section.className = `folder-section${collapsed ? ' collapsed' : ''}`;
-  section.dataset.folderKey = folder.key;
-  section.style.setProperty('--folder-depth', String(Math.max(0, folder.path.length - 1)));
-
-  const header = document.createElement('button');
-  header.className = 'folder-header';
-  header.type = 'button';
-  header.draggable = canDragFolder;
-  header.dataset.folderKey = folder.key;
-  header.dataset.dragKey = folder.key;
-  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (canDragFolder) {
-    header.addEventListener('dragstart', (event) => startFolderDrag(event, folder));
-    header.addEventListener('dragend', clearDragState);
-    header.addEventListener('dragover', (event) => acceptFolderDrop(event, folder));
-    header.addEventListener('dragleave', () => header.classList.remove('drag-over'));
-    header.addEventListener('drop', (event) => dropFolder(event, folder));
-  }
-
-  const folderSvg = collapsed
-    ? folderIconSvg('folder-svg-icon')
-    : folderOpenIconSvg('folder-svg-icon');
-
-  header.innerHTML = `
-    <span class="folder-caret" aria-hidden="true"></span>
-    <span class="folder-icon">${folderSvg}</span>
-    <strong>${escapeHtml(folder.title)}</strong>
-  `;
-  header.addEventListener('click', (event) => handleFolderHeaderClick(event, folder));
-  header.addEventListener('keydown', (event) => {
-    if (!isContextMenuKey(event)) return;
-    showFolderContextMenu(event, dragContext);
-  });
-  bindGroupPreview(header, groupPreviewGroupForFolder(folder, collapsed));
-
-  const children = document.createElement('div');
-  children.className = 'folder-children';
-  if (!collapsed) children.replaceChildren(...folder.children.map(createFolderTreeNode));
-
-  section.append(header, children);
-  return section;
-}
-
-async function toggleFolder(folderKey, options = {}) {
-  const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
-    try {
-      return await withFreshSpaceStateMutation(() => {
-        if (!renderedGroupDragContexts.has(folderKey)) {
-          throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-        }
-        return toggleFolder(folderKey, {
-          stateLocked: true,
-          focusRestoreToken: options.focusRestoreToken,
-          windowBinding,
-        });
-      }, { windowBinding });
-    } catch (error) {
-      restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-      throw error;
-    }
-  }
-  const rollback = captureChromeGroupMutationRollback();
-  try {
-    state.collapsedGroups[folderKey] = !state.collapsedGroups[folderKey];
-    await saveState({ persistWindowState: false, windowBinding });
-  } catch (error) {
-    restoreChromeGroupMutationMemory(rollback);
-    render();
-    restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-    throw error;
-  }
-  lastRenderedGroupsSignature = '';
-  render();
-  restoreDisclosureFocus('folder', folderKey, options.focusRestoreToken);
-}
-
-function createGroupCard(group) {
+function createGroupCard(node, depth = 0) {
+  const group = node;
+  const childNodes = Array.isArray(node.children) ? node.children : [];
   const hasForeignLiveTabs = groupHasForeignLiveTabs(group);
   const canDragGroup = Boolean(group.key && group.key !== 'ungrouped' && !hasForeignLiveTabs);
   const card = document.createElement('section');
-  card.className = `group-card${group.collapsed ? ' collapsed' : ''}`;
+  card.className = `group-card${group.collapsed ? ' collapsed' : ''}${group.emptyNode ? ' empty-node' : ''}`;
   card.dataset.groupKey = group.key;
-  if (canDragGroup) {
+  card.style.setProperty('--group-depth', String(depth));
+  // Chrome-style color band: the Tag's color tints the whole card.
+  card.style.setProperty('--group-color', groupColor(group.color));
+  if (canDragGroup || group.emptyNode) {
     card.addEventListener('dragover', (event) => acceptGroupOrTabDrop(event, group));
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
     card.addEventListener('drop', (event) => dropGroupOrTab(event, group));
@@ -2862,18 +2566,20 @@ function createGroupCard(group) {
     header.addEventListener('dragend', clearDragState);
   }
   const toggle = createGroupToggle(group, group.displayTitle || group.title);
+  const chevron = document.createElement('span');
+  chevron.className = 'group-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
   const actions = document.createElement('div');
   actions.className = 'group-actions';
-  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => (
-    deleteGroup(group, { windowBinding })
-  ));
-  if (hasForeignLiveTabs) {
-    deleteButton.disabled = true;
-    deleteButton.title = 'Open this Space in the other window to edit or delete this group.';
-    deleteButton.setAttribute('aria-label', deleteButton.title);
-  }
-  actions.append(deleteButton);
-  header.append(toggle, actions);
+  const renameButton = actionButton('✎', 'Rename group', (windowBinding) => renameGroup(group, { windowBinding }));
+  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => deleteGroup(group, { windowBinding }));
+  actions.append(renameButton, deleteButton);
+  header.append(toggle, actions, chevron);
+  header.addEventListener('click', (event) => {
+    if (event.target.closest('.group-actions')) return;
+    handleGroupHeaderClick(event, group);
+  });
   bindGroupPreview(header, group);
 
   const list = document.createElement('div');
@@ -2887,56 +2593,13 @@ function createGroupCard(group) {
   if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
 
   card.append(header, list);
+  if (!group.collapsed && childNodes.length > 0) {
+    const children = document.createElement('div');
+    children.className = 'group-children';
+    children.replaceChildren(...childNodes.map((child) => createGroupCard(child, depth + 1)));
+    card.append(children);
+  }
   return card;
-}
-
-function createFolderTabs(group) {
-  const hasForeignLiveTabs = groupHasForeignLiveTabs(group);
-  const canDragGroup = Boolean(group.key && group.key !== 'ungrouped' && !hasForeignLiveTabs);
-  const section = document.createElement('section');
-  section.className = `folder-direct-group${group.collapsed ? ' collapsed' : ''}`;
-  section.dataset.groupKey = group.key;
-  if (canDragGroup) {
-    section.addEventListener('dragover', (event) => acceptGroupOrTabDrop(event, group));
-    section.addEventListener('dragleave', () => section.classList.remove('drag-over'));
-    section.addEventListener('drop', (event) => dropGroupOrTab(event, group));
-  }
-
-  const header = document.createElement('div');
-  header.className = 'group-header folder-direct-header';
-  header.dataset.groupKey = group.key;
-  header.dataset.dragKey = group.key;
-  header.draggable = canDragGroup;
-  if (canDragGroup) {
-    header.addEventListener('dragstart', (event) => startGroupDrag(event, group));
-    header.addEventListener('dragend', clearDragState);
-  }
-  const toggle = createGroupToggle(group, group.displayTitle || 'Tabs');
-  const actions = document.createElement('div');
-  actions.className = 'group-actions';
-  const deleteButton = actionButton('×', 'Delete group', (windowBinding) => (
-    deleteGroup(group, { windowBinding })
-  ));
-  if (hasForeignLiveTabs) {
-    deleteButton.disabled = true;
-    deleteButton.title = 'Open this Space in the other window to edit or delete this group.';
-    deleteButton.setAttribute('aria-label', deleteButton.title);
-  }
-  actions.append(deleteButton);
-  header.append(toggle, actions);
-  bindGroupPreview(header, group);
-
-  const list = document.createElement('div');
-  list.className = 'tab-list folder-direct-list';
-  configureTabListAccessibility(list, `${group.displayTitle || group.title || 'Group'} tabs`);
-  list.dataset.groupKey = group.key;
-  if (!group.dormant && !hasForeignLiveTabs) {
-    list.addEventListener('dragover', (event) => acceptTabDrop(event));
-    list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
-  }
-  if (!group.collapsed) list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
-  section.append(header, list);
-  return section;
 }
 
 function createGroupToggle(group, title) {
@@ -2948,7 +2611,6 @@ function createGroupToggle(group, title) {
     ${groupFolderIcon(group.color, group.collapsed)}
     <h2>${escapeHtml(title || 'Group')}</h2>
   `;
-  toggle.addEventListener('click', (event) => handleGroupHeaderClick(event, group));
   toggle.addEventListener('keydown', (event) => {
     if (!isContextMenuKey(event)) return;
     showGroupContextMenu(event, group);
@@ -2960,43 +2622,10 @@ function groupHasForeignLiveTabs(group) {
   return (group?.tabs || []).some((tab) => isForeignWindowTab(tab));
 }
 
-function folderContextHasForeignLiveTabs(folderContext) {
-  return (folderContext?.groupKeys || []).some((key) => (
-    groupHasForeignLiveTabs(renderedGroupContexts.get(key))
-  ));
-}
-
 function assertGroupActionsAreLocal(groups = []) {
   if (groups.some((group) => groupHasForeignLiveTabs(group))) {
     throw new Error('This group is open in another window. Open Space Tabs in that window to rename, move, or delete it.');
   }
-}
-
-function groupPreviewGroupForFolder(folder, collapsed = false) {
-  const tabs = tabsForFolderPreview(folder.children || []);
-  return {
-    key: folder.key,
-    title: folder.title,
-    displayTitle: folder.title,
-    collapsed: Boolean(collapsed),
-    color: 'grey',
-    tabs,
-  };
-}
-
-function tabsForFolderPreview(nodes = []) {
-  const previewTabs = [];
-  for (const node of nodes) {
-    if (node.type === 'folder') {
-      previewTabs.push(...tabsForFolderPreview(node.children || []));
-      continue;
-    }
-    const group = node.group;
-    for (const tab of group?.tabs || []) {
-      previewTabs.push({ ...tab, previewGroupKey: group.key });
-    }
-  }
-  return previewTabs;
 }
 
 function bindGroupPreview(anchor, group) {
@@ -3316,6 +2945,17 @@ function createUngroupedSection(group) {
     const windowBinding = capturePanelWindowBinding();
     runTask(() => newTabInActiveSpace({ windowBinding }));
   });
+  const newGroupButton = document.createElement('button');
+  newGroupButton.className = 'new-tab-row new-group-row';
+  newGroupButton.type = 'button';
+  newGroupButton.innerHTML = '<span>+</span><strong>New Group</strong>';
+  newGroupButton.addEventListener('click', () => {
+    const windowBinding = capturePanelWindowBinding();
+    runTask((binding) => createEmptyGroupNode('', { windowBinding: binding }));
+  });
+  const ungroupedActions = document.createElement('div');
+  ungroupedActions.className = 'ungrouped-actions';
+  ungroupedActions.append(newTabButton, newGroupButton);
 
   const list = document.createElement('div');
   list.className = 'tab-list ungrouped-list';
@@ -3325,7 +2965,7 @@ function createUngroupedSection(group) {
   list.addEventListener('drop', (event) => dropTabAtEnd(event, group));
   list.replaceChildren(...group.tabs.map((tab) => createTabRow(tab, group.key)));
 
-  section.append(divider, newTabButton, list);
+  section.append(divider, ungroupedActions, list);
   return section;
 }
 
@@ -3556,31 +3196,6 @@ function renderSpaces() {
     return button;
   });
 
-  const askButton = document.createElement('button');
-  askButton.className = `space ask-page${activeView === 'ask' ? ' active' : ''}`;
-  askButton.type = 'button';
-  askButton.title = 'Ask Page';
-  askButton.setAttribute('aria-label', 'Ask Page');
-  askButton.innerHTML = `<svg class="brain-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v14"/><path d="M12 12h6"/><path d="M12 12H6"/></svg>`;
-  askButton.querySelector('svg').classList.add('space-mark');
-  askButton.append(spaceButtonLabel('Ask Page'));
-  askButton.addEventListener('click', () => runTask((windowBinding) => (
-    openAskPage({ windowBinding })
-  )));
-
-  const setupButton = document.createElement('button');
-  setupButton.className = 'space setup-space';
-  setupButton.type = 'button';
-  setupButton.title = 'Finish setup';
-  setupButton.setAttribute('aria-label', 'Finish setup');
-  setupButton.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4"></path><path d="M12 17v4"></path><path d="M3 12h4"></path><path d="M17 12h4"></path><circle cx="12" cy="12" r="4"></circle></svg>`;
-  setupButton.querySelector('svg').classList.add('space-mark');
-  setupButton.append(spaceButtonLabel('Finish setup'));
-  setupButton.addEventListener('click', () => runTask(async (windowBinding) => {
-    if (workbenchMode) openOnboarding();
-    else await openWorkbench({ windowBinding });
-  }));
-
   const addButton = document.createElement('button');
   addButton.className = 'space add-space';
   addButton.type = 'button';
@@ -3598,12 +3213,7 @@ function renderSpaces() {
   spacesGroup.setAttribute('aria-label', 'Spaces');
   spacesGroup.replaceChildren(...spaceButtons, addButton);
 
-  const toolsGroup = document.createElement('div');
-  toolsGroup.className = 'dock-group dock-tools';
-  toolsGroup.setAttribute('aria-label', 'Space tools');
-  toolsGroup.replaceChildren(...(state.onboarding?.completed ? [] : [setupButton]), askButton);
-
-  els.spacesList.replaceChildren(spacesGroup, toolsGroup);
+  els.spacesList.replaceChildren(spacesGroup);
 }
 
 function spaceButtonLabel(text) {
@@ -3613,295 +3223,13 @@ function spaceButtonLabel(text) {
   return label;
 }
 
-async function openWorkbench(options = {}) {
-  if (els.settingsDialog.open) els.settingsDialog.close();
-  if (workbenchMode) return;
-
-  const url = extensionRuntime
-    ? new URL(chrome.runtime.getURL('sidepanel.html'))
-    : new URL(window.location.href);
-  url.searchParams.set('layout', 'workbench');
-  if (options.view) url.searchParams.set('view', options.view);
-  else url.searchParams.delete('view');
-
-  if (extensionRuntime) {
-    await send('tabs:openUnique', {
-      url: url.toString(),
-      matchUrl: `${chrome.runtime.getURL('sidepanel.html')}?layout=workbench`,
-      }, { windowBinding: options.windowBinding });
-  } else {
-    window.open(url.toString(), 'space-workbench');
-  }
-}
-
-async function maybeShowOnboarding() {
-  const forcedPreview = new URLSearchParams(window.location.search).get('onboarding') === '1';
-  if (!extensionRuntime && !forcedPreview) return;
-  if (state.onboarding?.completed) return;
-  if (extensionRuntime && !workbenchMode) {
-    await openWorkbench();
-    return;
-  }
-  openOnboarding();
-}
-
-function startArcFileSelectionFromUserGesture(target) {
-  const input = target === 'onboarding' ? els.onboardingArcInput : els.arcImportInput;
+function startArcFileSelectionFromUserGesture() {
+  const input = els.arcImportInput;
   // File System Access API pickers reject Arc's file under macOS ~/Library as
   // a sensitive system location. A native file input can read the exact file
   // the user explicitly chooses, so Arc import must always use this path.
   input.value = '';
   input.click();
-}
-
-function clearOnboardingArcSelection({ preserveStatus = false } = {}) {
-  onboardingArcSelectionGeneration += 1;
-  pendingOnboardingArcPlan = null;
-  pendingOnboardingArcText = '';
-  els.onboardingArcInput.value = '';
-  els.onboardingArcChooseButton.textContent = 'Choose Arc file';
-  els.onboardingArcSpaces.replaceChildren();
-  if (!preserveStatus) els.onboardingArcStatus.textContent = 'No Arc file selected.';
-}
-
-function openOnboarding(options = {}) {
-  const resumeAI = options.restart !== true &&
-    !state.onboarding?.completed && state.onboarding?.stage === 'ai';
-  onboardingStep = resumeAI ? 2 : 0;
-  onboardingPath = '';
-  onboardingResult = resumeAI ? 'Your workspace is ready.' : '';
-  clearOnboardingArcSelection();
-  els.onboardingSpaceNameInput.value = currentSpace()?.id === 'default' ? 'Default' : 'New Space';
-  renderOnboardingAISettings();
-  renderOnboarding();
-  if (!els.onboardingDialog.open) els.onboardingDialog.showModal();
-}
-
-function chooseOnboardingPath(path) {
-  if (path !== 'fresh' && path !== 'arc') return;
-  if (path === 'fresh') clearOnboardingArcSelection();
-  onboardingPath = path;
-  renderOnboarding();
-}
-
-function goBackOnboarding() {
-  if (onboardingStep <= 0) return;
-  if (onboardingStep === 1 && onboardingPath === 'arc') clearOnboardingArcSelection();
-  onboardingStep -= 1;
-  if (onboardingStep === 0) onboardingPath = '';
-  renderOnboarding();
-}
-
-function renderOnboarding() {
-  const isChoose = onboardingStep === 0;
-  const isSetup = onboardingStep === 1;
-  const isFinish = onboardingStep === 2;
-  els.onboardingChooseStep.hidden = !isChoose;
-  els.onboardingFreshStep.hidden = !(isSetup && onboardingPath === 'fresh');
-  els.onboardingArcStep.hidden = !(isSetup && onboardingPath === 'arc');
-  els.onboardingFinishStep.hidden = !isFinish;
-  els.onboardingFooter.hidden = isFinish;
-  els.onboardingFooter.classList.toggle('no-back', isChoose);
-  els.onboardingBackButton.hidden = isChoose;
-  els.skipOnboardingButton.hidden = isFinish;
-  const visibleStep = isFinish ? 1 : 0;
-  els.onboardingStepLabel.textContent = `Step ${visibleStep + 1} of 2`;
-  els.onboardingFinishMessage.textContent = onboardingResult || 'Your first Space is ready.';
-
-  const progress = [...els.onboardingProgress.querySelectorAll('span')];
-  progress.forEach((item, index) => {
-    item.classList.toggle('active', index === visibleStep);
-    item.classList.toggle('complete', index < visibleStep);
-  });
-  for (const button of els.onboardingDialog.querySelectorAll('[data-onboarding-path]')) {
-    button.classList.toggle('selected', button.dataset.onboardingPath === onboardingPath);
-  }
-
-  if (isChoose) {
-    els.onboardingNextButton.textContent = 'Continue';
-    els.onboardingNextButton.disabled = !onboardingPath;
-  } else if (onboardingPath === 'fresh') {
-    els.onboardingNextButton.textContent = 'Create Space';
-    els.onboardingNextButton.disabled = !els.onboardingSpaceNameInput.value.trim();
-  } else {
-    els.onboardingNextButton.textContent = 'Import selected Spaces';
-    els.onboardingNextButton.disabled = selectedOnboardingArcSpaceIds().length === 0;
-  }
-  if (isFinish) updateOnboardingAIActionState();
-}
-
-async function continueOnboarding(options = {}) {
-  if (onboardingStep === 0) {
-    if (!onboardingPath) return;
-    onboardingStep = 1;
-    renderOnboarding();
-    requestAnimationFrame(() => {
-      if (onboardingPath === 'fresh') els.onboardingSpaceNameInput.focus();
-      else els.onboardingArcChooseButton.focus();
-    });
-    return;
-  }
-  if (onboardingStep !== 1) return;
-  const applied = onboardingPath === 'fresh'
-    ? await applyFreshOnboarding(options)
-    : await applyArcOnboarding(options);
-  if (applied !== true) return;
-  onboardingStep = 2;
-  renderOnboardingAISettings();
-  renderOnboarding();
-}
-
-async function applyFreshOnboarding(options = {}) {
-  const name = els.onboardingSpaceNameInput.value.trim();
-  if (!name) return false;
-  return withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) {
-      throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-    }
-    return applyFreshOnboardingFromCurrentState(name, options);
-  });
-}
-
-async function applyFreshOnboardingFromCurrentState(name, options = {}) {
-  const checkpoint = captureWorkspaceMemoryCheckpoint();
-  let targetSpace = currentSpace();
-  const canReuseDefault = state.spaces.length === 1 && targetSpace?.id === 'default';
-  try {
-    if (canReuseDefault) {
-      targetSpace.name = name;
-      targetSpace.icon = name.slice(0, 1).toUpperCase();
-    } else {
-      targetSpace = {
-        id: uniqueSpaceId(name),
-        name,
-        icon: name.slice(0, 1).toUpperCase(),
-        color: nextSpaceColor(),
-      };
-      state.spaces.push(targetSpace);
-    }
-    if (canReuseDefault) state.activeSpaceId = targetSpace.id;
-    state.onboarding = { version: 2, completed: false, stage: 'ai' };
-    activeView = workbenchMode ? 'ask' : 'space';
-    lastRenderedSpacesSignature = '';
-
-    if (canReuseDefault) {
-      const saved = await saveState({ windowBinding: options.windowBinding });
-      if (saved !== true || !isCurrentPanelWindowBinding(options.windowBinding)) {
-        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-      }
-    } else {
-      const switched = await switchSpace(targetSpace.id, {
-        rollbackCheckpoint: checkpoint,
-        windowBinding: options.windowBinding,
-      });
-      if (switched !== true) {
-        throw new Error('This Workbench moved to another Chrome window before the Space could be created.');
-      }
-    }
-  } catch (error) {
-    restoreWorkspaceMemoryCheckpoint(checkpoint);
-    throw error;
-  }
-  const committedCheckpoint = captureWorkspaceMemoryCheckpoint();
-  try {
-    const refreshed = await refreshTabs({
-      adopt: true,
-      reloadDormant: true,
-      windowBinding: options.windowBinding,
-    });
-    if (refreshed === false || !isCurrentPanelWindowBinding(options.windowBinding)) {
-      throw new Error('The onboarding view moved before it could refresh.');
-    }
-  } catch (error) {
-    restoreWorkspaceMemoryCheckpoint(committedCheckpoint, { renderView: true });
-    onboardingResult = `${name} was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.`;
-    console.error(error);
-    return true;
-  }
-  onboardingResult = `${name} is ready.`;
-  return true;
-}
-
-async function previewOnboardingArcFile(selectedFile = null, options = {}) {
-  const selectionGeneration = ++onboardingArcSelectionGeneration;
-  pendingOnboardingArcPlan = null;
-  pendingOnboardingArcText = '';
-  els.onboardingArcSpaces.replaceChildren();
-  const file = selectedFile || els.onboardingArcInput.files?.[0];
-  if (!file) {
-    els.onboardingArcStatus.textContent = 'No Arc file selected.';
-    renderOnboarding();
-    return;
-  }
-  if (file.size > 20 * 1024 * 1024) {
-    els.onboardingArcInput.value = '';
-    els.onboardingArcStatus.textContent = 'This Arc file is too large to import safely.';
-    renderOnboarding();
-    return;
-  }
-
-  els.onboardingArcStatus.textContent = `Reading ${file.name || 'StorableSidebar.json'}...`;
-  renderOnboarding();
-
-  try {
-    const text = await file.text();
-    if (
-      !isCurrentPanelWindowBinding(options.windowBinding) ||
-      selectionGeneration !== onboardingArcSelectionGeneration ||
-      onboardingStep !== 1 || onboardingPath !== 'arc'
-    ) return;
-    const plan = createArcImportPlan(text, { existingSpaces: state.spaces });
-    pendingOnboardingArcText = text;
-    pendingOnboardingArcPlan = plan;
-    els.onboardingArcChooseButton.textContent = 'Choose another Arc file';
-    els.onboardingArcStatus.textContent = `${file.name || 'StorableSidebar.json'} · ${formatArcImportSummary(plan.summary, 'Preview')}${formatArcConflictSummary(plan)}`;
-    renderOnboardingArcSpaces(plan);
-  } catch (error) {
-    if (selectionGeneration !== onboardingArcSelectionGeneration) return;
-    clearOnboardingArcSelection();
-    els.onboardingArcStatus.textContent = `Cannot read Arc file: ${error.message || String(error)}`;
-    renderOnboarding();
-    return;
-  }
-  renderOnboarding();
-}
-
-function renderOnboardingArcSpaces(plan) {
-  const previewsBySpaceId = new Map((plan?.spacePreviews || []).map((preview) => [preview.spaceId, preview]));
-  const rows = (plan?.spaces || []).map((space) => {
-    const label = document.createElement('label');
-    label.className = 'onboarding-space-option';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = true;
-    checkbox.dataset.arcSpaceId = space.id;
-    const icon = document.createElement('span');
-    icon.className = 'onboarding-space-icon';
-    icon.textContent = space.icon || space.name.slice(0, 1).toUpperCase();
-    const name = document.createElement('strong');
-    name.textContent = space.name;
-    const preview = previewsBySpaceId.get(space.id);
-    const count = document.createElement('small');
-    const conflictText = (preview?.conflicts || []).length
-      ? ` · ${preview.conflicts.map((conflict) => `${conflict.original} → ${conflict.resolved}`).join(', ')}`
-      : '';
-    count.textContent = `${preview?.folders ?? 0} folders · ${preview?.tabs ?? snapshotTabCount(plan.spaceSnapshots?.[space.id])} tabs${conflictText}`;
-    count.classList.toggle('conflict', Boolean(conflictText));
-    label.append(checkbox, icon, name, count);
-    return label;
-  });
-  els.onboardingArcSpaces.replaceChildren(...rows);
-}
-
-function selectedOnboardingArcSpaceIds() {
-  return [...els.onboardingArcSpaces.querySelectorAll('input[data-arc-space-id]:checked')]
-    .map((input) => input.dataset.arcSpaceId)
-    .filter(Boolean);
-}
-
-function selectedOnboardingArcPlan() {
-  return selectArcImportPlan(pendingOnboardingArcPlan, selectedOnboardingArcSpaceIds());
 }
 
 function arcPlanResolutionSignature(plan) {
@@ -3910,178 +3238,6 @@ function arcPlanResolutionSignature(plan) {
     preview.resolvedId,
     preview.resolvedName,
   ]));
-}
-
-async function applyArcOnboarding(options = {}) {
-  const windowBinding = options.windowBinding;
-  const previewPlan = selectedOnboardingArcPlan();
-  if (previewPlan.spaces.length === 0) throw new Error('Select at least one Arc Space to import.');
-  const selectedSourceIds = new Set((previewPlan.spacePreviews || []).map((preview) => preview.sourceSpaceId));
-  let result;
-  let committed = false;
-  let postCommitWarning = '';
-  try {
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) throw new Error('This panel moved to another Chrome window before the import could begin.');
-      const latestPlan = createArcImportPlan(pendingOnboardingArcText, { existingSpaces: state.spaces });
-      const latestResolvedIds = (latestPlan.spacePreviews || [])
-        .filter((preview) => selectedSourceIds.has(preview.sourceSpaceId))
-        .map((preview) => preview.spaceId);
-      const plan = selectArcImportPlan(latestPlan, latestResolvedIds);
-      if (arcPlanResolutionSignature(previewPlan) !== arcPlanResolutionSignature(plan)) {
-        throw new Error('Spaces changed after this preview. Choose the Arc file again to review the updated conflict names.');
-      }
-      const beforeImport = captureWorkspaceMemoryCheckpoint();
-      const transaction = await runDurableCommitBoundary({
-        mutate: async () => {
-          result = appendArcImportPlan(state, plan);
-          rememberArcImport(result.importedSpaceIds);
-          state.onboarding = { version: 2, completed: false, stage: 'ai' };
-          assertCurrentStateFitsStorage();
-          lastRenderedSpacesSignature = '';
-          return {
-            result,
-            committedMemory: captureWorkspaceMemoryCheckpoint(),
-          };
-        },
-        commit: async () => {
-          if (!isCurrentPanelWindowBinding(windowBinding)) {
-            throw new Error('This panel moved to another Chrome window before the import could be saved.');
-          }
-          await saveState({ persistWindowState: false });
-        },
-        rollbackBeforeCommit: () => (
-          restoreWorkspaceMemoryCheckpoint(beforeImport, { renderView: true })
-        ),
-        afterCommit: async () => {
-          render();
-          renderSettings();
-        },
-        restoreCommittedMemory: ({ committedMemory }) => (
-          restoreWorkspaceMemoryCheckpoint(committedMemory)
-        ),
-      });
-      committed = transaction.committed;
-      result = transaction.value.result;
-      if (transaction.postCommitError) {
-        postCommitWarning = `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. The import was saved, but this view could not refresh; reopen Space Tabs to continue.`;
-        if (transaction.recoveryError) console.error(transaction.recoveryError);
-      }
-    });
-    onboardingResult = postCommitWarning ||
-      `Imported ${result.importedSpaces} Arc Spaces and ${result.importedTabs} saved tabs. Your current Space stayed open.`;
-  } catch (error) {
-    if (committed) {
-      onboardingResult = postCommitWarning || 'The Arc import was saved, but this view could not refresh. Reopen Space Tabs to continue onboarding.';
-      console.error(error);
-      return true;
-    }
-    els.onboardingArcStatus.textContent = `Import stopped: ${error.message || String(error)}`;
-    els.onboardingArcChooseButton.textContent = 'Choose Arc file';
-    throw error;
-  } finally {
-    // The imported snapshot is now in extension state. Do not retain the raw
-    // Arc sidebar export (which can be large and sensitive) in memory or input.
-    try {
-      clearOnboardingArcSelection({ preserveStatus: true });
-      renderOnboarding();
-    } catch (error) {
-      console.error(error);
-    }
-  }
-  return true;
-}
-
-async function finishOnboarding(openWorkbenchAfter, options = {}) {
-  const windowBinding = options.windowBinding;
-  const committed = await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding });
-    if (synchronized === false) return false;
-    const checkpoint = captureWorkspaceMemoryCheckpoint();
-    try {
-      if (options.clearAI) {
-        state.ai = normalizeAIProviderSettings({
-          ...state.ai,
-          provider: CUSTOM_AI_PROVIDER_ID,
-          baseUrl: '',
-          model: '',
-          apiKey: '',
-        });
-      }
-      state.onboarding = { version: 2, completed: true, stage: 'done' };
-      const saved = await commitWindowBoundWrite({
-        isCurrent: () => isCurrentPanelWindowBinding(windowBinding),
-        write: () => (
-          options.clearAI
-            ? persistCurrentAIConfiguration()
-            : persistStorageStep({
-            key: STORAGE_KEY,
-            value: stateForStorage(),
-            get: storageGet,
-            set: storageSet,
-            remove: storageRemove,
-            })
-        ),
-      });
-      if (!saved) {
-        throw new Error('This Workbench moved to another Chrome window before onboarding could be finished.');
-      }
-    } catch (error) {
-      restoreWorkspaceMemoryCheckpoint(checkpoint);
-      throw error;
-    }
-    return true;
-  });
-  if (!committed) {
-    throw new Error('This Workbench moved to another Chrome window before onboarding could be finished.');
-  }
-  clearOnboardingArcSelection();
-  els.onboardingApiKeyInput.value = '';
-  if (els.onboardingDialog.open) els.onboardingDialog.close();
-  render();
-  if (openWorkbenchAfter) await openWorkbench({ windowBinding });
-}
-
-async function saveOnboardingAIAndFinish(options = {}) {
-  if (!onboardingAIControls().providerInput.value) {
-    await finishOnboarding(true, { ...options, clearAI: true });
-    return;
-  }
-  let aiSettings;
-  try {
-    aiSettings = currentAISettingsFromControls(onboardingAIControls());
-    if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-      throw new Error('Add an API key, or choose No provider.');
-    }
-  } catch (error) {
-    setAIControlsStatus(onboardingAIControls(), error.message || String(error));
-    return;
-  }
-
-  const committed = await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) return false;
-    const checkpoint = captureWorkspaceMemoryCheckpoint();
-    try {
-      state.ai = aiSettings;
-      state.onboarding = { version: 2, completed: true, stage: 'done' };
-      await persistCurrentAIConfiguration();
-    } catch (error) {
-      restoreWorkspaceMemoryCheckpoint(checkpoint);
-      throw error;
-    }
-    return true;
-  });
-  if (!committed) {
-    throw new Error('This Workbench moved to another Chrome window before the AI setup could be saved.');
-  }
-  clearOnboardingArcSelection();
-  els.onboardingApiKeyInput.value = '';
-  if (els.onboardingDialog.open) els.onboardingDialog.close();
-  renderSettings();
-  render();
-  await openWorkbench({ windowBinding: options.windowBinding });
 }
 
 async function addSpace(options = {}) {
@@ -4713,13 +3869,17 @@ function destructiveGroupDeletionStatus(title, result = {}) {
   const deletedCount = Number(result.deletedTabCount) || 0;
   const skippedCount = Number(result.skippedTabCount) || 0;
   const remainingGroups = Number(result.remainingTargetGroups) || 0;
+  const unresolvedSavedGroups = Number(result.unresolvedSavedGroupCount) || 0;
   const skipped = skippedCount > 0
     ? ` Skipped ${formatCount(skippedCount, 'tab')} that changed after review.`
     : '';
+  const unresolved = unresolvedSavedGroups > 0
+    ? ` ${formatCount(unresolvedSavedGroups, 'saved group')} could not be removed from saved state; reopen the Space and delete again.`
+    : '';
   if (remainingGroups > 0) {
-    return `Deleted ${formatCount(deletedCount, 'tab')} from "${cleanTitle}", but the group remains.${skipped}`;
+    return `Deleted ${formatCount(deletedCount, 'tab')} from "${cleanTitle}", but the group remains.${skipped}${unresolved}`;
   }
-  return `Deleted group "${cleanTitle}" and ${formatCount(deletedCount, 'tab')}.${skipped}`;
+  return `Deleted group "${cleanTitle}" and ${formatCount(deletedCount, 'tab')}.${skipped}${unresolved}`;
 }
 
 function handleTabClick(event, tab) {
@@ -5003,55 +4163,6 @@ async function renameGroup(group, options = {}) {
       rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
     });
     await refreshTabs({ windowBinding });
-  }, { windowBinding });
-}
-
-async function renameFolderGroup(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
-
-  const sourcePath = folderContext.path || [];
-  const currentName = sourcePath.at(-1) || 'Group';
-  const nextName = await askText({
-    title: 'Rename Group',
-    label: 'Group title',
-    value: currentName,
-    confirmText: 'Save',
-  });
-  if (nextName === null) return;
-  const clean = nextName.trim();
-  if (!clean) return;
-
-  await withFreshSpaceStateMutation(async () => {
-    const currentContext = renderedGroupDragContexts.get(folderContext.key);
-    if (
-      !currentContext ||
-      JSON.stringify(currentContext.path || []) !== JSON.stringify(sourcePath) ||
-      currentContext.fingerprint !== folderContext.fingerprint
-    ) {
-      throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-    }
-    const currentGroups = groupsForFolderContext(currentContext);
-    assertGroupActionsAreLocal(currentGroups);
-    const rollback = captureChromeGroupMutationRollback();
-    await runChromeGroupMutationTransaction({
-      apply: async () => {
-        const replacements = new Map();
-        const visibleKeys = spaceView.map((group) => group.key);
-        for (const group of currentGroups) {
-          rememberChromeGroupTitleRollback(rollback, group);
-          const title = renamedFolderGroupTitle(group, sourcePath, clean);
-          const nextKey = await retitleGroupWithoutSaving(group, title, { windowBinding });
-          if (nextKey) replacements.set(group.key, nextKey);
-        }
-        replaceGroupOrderKeys(replacements, visibleKeys);
-      },
-      checkpoint: () => saveState({ persistWindowState: false }),
-      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
-    });
-    await refreshTabs({ windowBinding });
-    setStatus(`Renamed group "${currentName}" to "${clean}".`);
   }, { windowBinding });
 }
 
@@ -5566,34 +4677,18 @@ async function moveGroupToSpace(group, spaceId, options = {}) {
       { stateLocked: true, windowBinding },
     ), { windowBinding });
   }
-  assertGroupActionsAreLocal([group]);
-  await checkpointMovedGroupsToSpace([group], spaceId, { windowBinding });
+  const subtreeGroups = subtreeGroupsForMove(group);
+  assertGroupActionsAreLocal(subtreeGroups);
+  await checkpointMovedGroupsToSpace(subtreeGroups, spaceId, { windowBinding });
   reportMoveSuccess(`Moved group to ${spaceName(spaceId)}.`);
 }
 
-async function moveFolderGroupToSpace(folderContext, spaceId, options = {}) {
-  const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
-    return withFreshSpaceStateMutation(() => {
-      const currentContext = renderedGroupDragContexts.get(folderContext.key);
-      if (
-        !currentContext ||
-        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
-        currentContext.fingerprint !== folderContext.fingerprint
-      ) {
-        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-      }
-      return moveFolderGroupToSpace(currentContext, spaceId, {
-        stateLocked: true,
-        windowBinding,
-      });
-    }, { windowBinding });
-  }
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
-  assertGroupActionsAreLocal(groups);
-  await checkpointMovedGroupsToSpace(groups, spaceId, { windowBinding });
-  reportMoveSuccess(`Moved group to ${spaceName(spaceId)}.`);
+function subtreeGroupsForMove(group) {
+  const subtreeKeys = [group.key, ...descendantKeysOf(group.key, renderedHierarchyKeyParents)];
+  const groups = subtreeKeys
+    .map((key) => renderedGroupContexts.get(key) || spaceView.find((item) => item.key === key))
+    .filter(Boolean);
+  return groups.length > 0 ? groups : [group];
 }
 
 async function checkpointMovedGroupsToSpace(groups, spaceId, options = {}) {
@@ -5634,11 +4729,216 @@ async function finishMoveToSpace(spaceId, options = {}) {
   await refreshTabs({ adopt: false, reloadDormant: true, windowBinding: options.windowBinding });
 }
 
+async function closeGroupToSaved(group, options = {}) {
+  const windowBinding = options.windowBinding;
+  if (!options.stateLocked) {
+    if (!group || group.id === 'ungrouped' || group.dormant) return;
+    assertGroupActionsAreLocal([group]);
+    return withFreshSpaceStateMutation(() => closeGroupToSaved(currentGroupForMutation(group), {
+      stateLocked: true,
+      windowBinding,
+    }), { windowBinding });
+  }
+  if (!group || group.id === 'ungrouped' || group.dormant) return;
+  assertGroupActionsAreLocal([group]);
+  const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
+  if (liveTabs.length === 0) return;
+  if (liveTabs.some((tab) => tab.pinned || !isRestorableSnapshotTab(tab))) {
+    throw new Error('This group contains a pinned or unsavable tab. Keep it open or remove that tab first.');
+  }
+
+  const targetSpaceId = state.activeSpaceId;
+  const checkpointCreatedTabIds = [];
+  const checkpointCreatedTabs = [];
+  const reviewedTargets = new Map();
+  let checkpointState = null;
+  const result = await runGuardedDestructiveTabClose({
+    tabIds: liveTabs.map((tab) => Number(tab.id)),
+    checkpoint: async () => {
+      const beforeCheckpointState = structuredClone(state);
+      let storageMayBeDirty = false;
+      try {
+        await withCreatedTabCheckpointRollback(checkpointCreatedTabIds, async () => {
+          if (!isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error('This panel moved before the group could be closed.');
+          }
+          await ensureActiveSpaceHasOpenTabAfterClosing(
+            liveTabs.map((tab) => Number(tab.id)),
+            checkpointCreatedTabIds,
+            checkpointCreatedTabs,
+            { windowBinding },
+          );
+          snapshotOpenSpace(targetSpaceId);
+          const mapTabsToSavedGroups = () => {
+            const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+            return liveTabs.map((tab) => {
+              const snapshotTabId = state.tabLifecycle?.[tab.id]?.snapshotTabId;
+              return uniqueSnapshotGroupForTabId(snapshotGroups, snapshotTabId);
+            });
+          };
+          let savedGroups = mapTabsToSavedGroups();
+          if (
+            !savedGroups[0] || isUngroupedSnapshotGroup(savedGroups[0]) ||
+            savedGroups.some((savedGroup) => savedGroup !== savedGroups[0])
+          ) {
+            // A mixed Tag can hold rows saved under duplicate same-name Tags
+            // (an older activation joined them into one chrome group). Fold
+            // the saved duplicates into one identity — the same merge a Tidy
+            // dedupe performs — and retry before refusing to close.
+            convergeDuplicateSavedTags();
+            savedGroups = mapTabsToSavedGroups();
+          }
+          if (
+            !savedGroups[0] || isUngroupedSnapshotGroup(savedGroups[0]) ||
+            savedGroups.some((savedGroup) => savedGroup !== savedGroups[0])
+          ) {
+            throw new Error('This group could not be saved as one Tag. No tabs were closed.');
+          }
+          for (const tab of liveTabs) {
+            reviewedTargets.set(Number(tab.id), captureReviewedTabCloseTarget(
+              tab, targetSpaceId, group.key,
+            ));
+          }
+          storageMayBeDirty = true;
+          const saved = await saveState({ persistWindowState: false, windowBinding });
+          if (saved !== true || !isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error('This panel moved before the saved group could be checkpointed.');
+          }
+          checkpointState = structuredClone(state);
+        }, { windowBinding });
+      } catch (error) {
+        state = beforeCheckpointState;
+        if (storageMayBeDirty) await saveState({ persistWindowState: false });
+        throw error;
+      }
+    },
+    inspectTab: (tabId, transaction) => {
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(transaction.closedTabIds.length === 0
+          ? 'This panel moved before the group could be closed.'
+          : 'This panel moved while the group was closing. Already closed pages remain saved.');
+      }
+      return liveReviewedTabCloseMismatch(reviewedTargets.get(Number(tabId)), { windowBinding });
+    },
+    closeTab: (tabId) => {
+      return guardedReviewedTabClose(
+        reviewedTargets.get(Number(tabId)),
+        { windowBinding },
+      );
+    },
+    commit: async ({ closedTabIds }) => {
+      const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
+      await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
+      await loadTabs({
+        adopt: false,
+        skipSnapshotCleanupForTabIds: closedTabIds,
+        windowBinding,
+        allowStaleWindowBinding,
+      });
+      await closeUnneededDestructiveKeepalives({
+        createdTabs: checkpointCreatedTabs,
+        targetSpaceId,
+        closedTabIds,
+        windowBinding,
+        allowStaleWindowBinding,
+      });
+      for (const tabId of closedTabIds) {
+        forgetClosedTabMetadata(reviewedTargets.get(Number(tabId))?.tab);
+      }
+      await saveState({ persistWindowState: false });
+    },
+    reconcile: async ({ closedTabIds }) => {
+      state = structuredClone(checkpointState);
+      for (const tabId of closedTabIds) {
+        forgetClosedTabMetadata(reviewedTargets.get(Number(tabId))?.tab);
+      }
+      await saveState({ persistWindowState: false });
+      if (isCurrentPanelWindowBinding(windowBinding)) {
+        await refreshTabs({
+          reloadDormant: true,
+          skipSnapshotCleanupForTabIds: closedTabIds,
+          windowBinding,
+        });
+      }
+    },
+  });
+  await refreshTabs({ reloadDormant: true, windowBinding });
+  // 存档后 dormant 卡的 snapshot 键替换原 live 键在 groupOrder 中的位置，
+  // 否则新键不在 order 里会被渲染排到列表底部。
+  // 层级（groupParents）存 anchor 域：存档只换视图键，anchor（sgid 身份）不变，
+  // 父子关系无需重映射；但 order 替换必须落库，否则下一次 sync 会回滚排序。
+  // 存档后 dormant Tag 沿用原 live 组标题（唯一同名 Tag 已在 close 前收敛）
+  const snapshotGroupsAfterClose = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+  const savedGroupId = snapshotGroupsAfterClose.find((candidate) => (
+    candidate.snapshotGroupId && candidate.title === group.title
+  ))?.snapshotGroupId ?? null;
+  if (savedGroupId) {
+    const snapshotGroups = state.spaceSnapshots?.[targetSpaceId]?.groups || [];
+    const savedIndex = snapshotGroups.findIndex((candidate) => candidate.snapshotGroupId === savedGroupId);
+    if (savedIndex >= 0) {
+      const savedKey = snapshotGroupKey(savedIndex, snapshotGroups[savedIndex], targetSpaceId);
+      replaceGroupOrderKeys(new Map([[group.key, savedKey]]), state.groupOrder[targetSpaceId] || []);
+      delete state.collapsedGroups[group.key];
+    }
+  }
+  await saveState({ persistWindowState: false });
+  const closed = result.closedTabIds.length;
+  const skipped = result.skippedTabs.length;
+  setStatus(`Closed ${formatCount(closed, 'tab')} in "${group.displayTitle || group.title}"; the Tag remains saved.` +
+    (skipped > 0 ? ` Skipped ${formatCount(skipped, 'changed tab')}.` : ''));
+  // The card is now a folded dormant Tag under a new key; keep keyboard focus
+  // on its header so collapse-bound close remains reachable from the keyboard.
+  [...document.querySelectorAll('.group-card .group-toggle')]
+    .find((item) => item.querySelector('h2')?.textContent === (group.displayTitle || group.title))
+    ?.focus();
+}
+
+async function openDormantGroup(group, options = {}) {
+  if (!group?.dormant) return;
+  const windowBinding = options.windowBinding;
+  const savedTabs = (group.tabs || []).filter((tab) => tab.dormant);
+  let opened = 0;
+  let restoredLiveKey = '';
+  for (const tab of savedTabs) {
+    await openDormantTab(tab, group.key, { windowBinding });
+    const binding = state.tabLifecycle?.[Number(tab.id)];
+    if (Number.isFinite(Number(binding?.groupId)) && Number(binding.groupId) > 0) {
+      restoredLiveKey = `group:${binding.groupId}`;
+    }
+    opened += 1;
+  }
+  // 展开后新 live 组的键替换原 snapshot 键在 groupOrder 中的位置，
+  // 否则新键不在 order 里会被渲染排到列表底部（顺序"变化"）。
+  // 层级（groupParents）存 anchor 域：恢复只是换视图键，anchor（sgid 身份）
+  // 不变，父子关系无需重映射；order 替换必须落库，否则下一次 sync 会回滚。
+  if (restoredLiveKey) {
+    replaceGroupOrderKeys(new Map([[group.key, restoredLiveKey]]), state.groupOrder[state.activeSpaceId] || []);
+    delete state.collapsedGroups[group.key];
+    lastRenderedGroupsSignature = '';
+  }
+  await saveState({ persistWindowState: false, windowBinding });
+  setStatus(`Opened ${formatCount(opened, 'tab')} in "${group.displayTitle || group.title}".`);
+  // The restored Tag is an expanded live card; keep keyboard focus on its
+  // header so collapse-bound close stays reachable.
+  [...document.querySelectorAll('.group-card .group-toggle')]
+    .find((item) => item.querySelector('h2')?.textContent === (group.displayTitle || group.title))
+    ?.focus();
+}
+
 async function deleteGroup(group, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     if (!group || group.id === 'ungrouped') return;
-    assertGroupActionsAreLocal([group]);
+    if (!group.emptyNode) assertGroupActionsAreLocal([group]);
+    if (group.emptyNode) {
+            return withFreshSpaceStateMutation(() => {
+                const current = renderedGroupContexts.get(group.key);
+        if (!current?.emptyNode) {
+          throw new Error('This group changed in another Space Tabs view. Try the action again.');
+        }
+        return deleteGroup(current, { stateLocked: true, windowBinding });
+      }, { windowBinding });
+    }
     const confirmed = await confirmGroupDeletion(
       [group],
       group.displayTitle || group.title || 'Group',
@@ -5650,11 +4950,16 @@ async function deleteGroup(group, options = {}) {
     }), { windowBinding });
   }
   if (!group || group.id === 'ungrouped') return;
+    if (group.emptyNode) return deleteHierarchyNode(group, { windowBinding });
   assertGroupActionsAreLocal([group]);
   if (group.dormant) {
     const checkpoint = captureWorkspaceMemoryCheckpoint();
     try {
-      deleteDormantSnapshotGroup(group);
+      const removed = deleteDormantSnapshotGroup(group);
+      if (!removed) {
+        throw new Error(`Saved group "${group.displayTitle || group.title}" is no longer in this Space's saved state. Refresh and try again.`);
+      }
+      clearHierarchyEntriesForKeys([group.key], state.activeSpaceId, [hierarchyAnchorForNode(group)]);
       await persistDormantSnapshotMutation({
         windowBinding,
         staleMessage: 'This panel moved to another Chrome window before the saved group could be deleted.',
@@ -5670,6 +4975,7 @@ async function deleteGroup(group, options = {}) {
     return;
   }
   const deletion = await deleteGroupsAndTabs([group], { windowBinding });
+  clearHierarchyEntriesForKeys([group.key], state.activeSpaceId, [hierarchyAnchorForNode(group)]);
   await refreshTabs({ reloadDormant: true, windowBinding });
   const message = destructiveGroupDeletionStatus(
     group.displayTitle || group.title,
@@ -5679,40 +4985,56 @@ async function deleteGroup(group, options = {}) {
   showStatusToast(message, deletion.skippedTabCount > 0 ? 'info' : 'success');
 }
 
-async function deleteFolderGroup(folderContext, options = {}) {
-  const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
-    const groups = groupsForFolderContext(folderContext);
-    if (groups.length === 0) return;
-    assertGroupActionsAreLocal(groups);
-    const confirmed = await confirmGroupDeletion(
-      groups,
-      folderContext.path?.at(-1) || 'Group',
-    );
-    if (!confirmed) return;
-    return withFreshSpaceStateMutation(() => {
-      const currentContext = renderedGroupDragContexts.get(folderContext.key);
-      if (
-        !currentContext ||
-        JSON.stringify(currentContext.path || []) !== JSON.stringify(folderContext.path || []) ||
-        currentContext.fingerprint !== folderContext.fingerprint
-      ) {
-        throw new Error('This folder changed in another Space Tabs view. Try the action again.');
-      }
-      return deleteFolderGroup(currentContext, { stateLocked: true, windowBinding });
-    }, { windowBinding });
-  }
-  const groups = groupsForFolderContext(folderContext);
-  if (groups.length === 0) return;
-  assertGroupActionsAreLocal(groups);
-  const deletion = await deleteGroupsAndTabs(groups, { windowBinding });
-  await refreshTabs({ reloadDormant: true, windowBinding });
-  const message = destructiveGroupDeletionStatus(
-    folderContext.path?.at(-1) || 'Group',
-    deletion,
+// 删除空组节点（非破坏性）：该节点的空节点后代一并移除；真实子组升到被删
+// 节点的父级（根），不会连带删除任何 tab。子树用键域投影计算，落盘按 anchor。
+async function deleteHierarchyNode(node, options = {}) {
+    const spaceId = state.activeSpaceId;
+  const storedParents = hierarchyParentsForSpace(spaceId);
+  const anchorByKey = hierarchyAnchorMapForSpace(spaceId);
+  const resolvedParents = resolveHierarchyKeyParents(
+    storedParents,
+    hierarchyBySnapshotGroupIdForNodes(spaceView.filter((group) => group.key !== 'ungrouped')),
   );
+  const removedSet = new Set([
+    node.key,
+    ...[...descendantKeysOf(node.key, resolvedParents)].filter((key) => String(key).startsWith('node:')),
+  ]);
+  const removedAnchors = new Set([...removedSet].map((key) => anchorByKey.get(key) || key));
+  const nodeAnchor = anchorByKey.get(node.key) || node.key;
+  const nodeParentAnchor = storedParents[nodeAnchor] || '';
+  const nextParents = {};
+  for (const [childAnchor, parentAnchor] of Object.entries(storedParents)) {
+    if (removedAnchors.has(childAnchor)) continue;
+    const nextParentAnchor = removedAnchors.has(parentAnchor) ? nodeParentAnchor : parentAnchor;
+    if (!nextParentAnchor || nextParentAnchor === childAnchor) continue;
+    nextParents[childAnchor] = nextParentAnchor;
+  }
+  state.groupParents[spaceId] = nextParents;
+  const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
+  for (const key of removedSet) delete nodes[key];
+  if (Object.keys(nodes).length === 0) delete state.emptyNodes[spaceId];
+  else state.emptyNodes[spaceId] = nodes;
+  state.groupOrder[spaceId] = (state.groupOrder[spaceId] || [])
+    .filter((key) => !removedSet.has(key));
+  delete state.collapsedGroups[node.key];
+    await saveState({ persistWindowState: false, windowBinding: options.windowBinding });
+    lastRenderedGroupsSignature = '';
+  render();
+    const message = `Deleted group "${node.displayTitle || node.title}".`;
   setStatus(message);
-  showStatusToast(message, deletion.skippedTabCount > 0 ? 'info' : 'success');
+  showStatusToast(message, 'success');
+}
+
+function clearHierarchyEntriesForKeys(removedKeys, spaceId = state.activeSpaceId, removedAnchors = []) {
+  const parents = state.groupParents?.[spaceId];
+  if (!parents || typeof parents !== 'object') return;
+  const removed = new Set([...removedKeys, ...removedAnchors]);
+  const nextParents = {};
+  for (const [childAnchor, parentAnchor] of Object.entries(parents)) {
+    if (removed.has(childAnchor) || removed.has(parentAnchor)) continue;
+    nextParents[childAnchor] = parentAnchor;
+  }
+  state.groupParents[spaceId] = nextParents;
 }
 
 async function confirmGroupDeletion(groups, title) {
@@ -5741,37 +5063,6 @@ function groupDeletionTabCount(groups = []) {
     }
   }
   return liveTabIds.size + dormantTabs;
-}
-
-function groupsForFolderContext(folderContext) {
-  const seen = new Set();
-  return (folderContext?.groupKeys || [])
-    .map((key) => renderedGroupContexts.get(key))
-    .filter((group) => {
-      if (!group?.key || group.id === 'ungrouped' || seen.has(group.key)) return false;
-      seen.add(group.key);
-      return true;
-    });
-}
-
-async function retitleGroupWithoutSaving(group, title, options = {}) {
-  if (!group || group.id === 'ungrouped') return '';
-  if (group.dormant) {
-    renameDormantSnapshotGroup(group, title);
-    return group.key;
-  }
-  if (isVirtualGroupKey(group.key)) {
-    state.virtualGroups[group.key] = {
-      ...(state.virtualGroups[group.key] || {}),
-      id: group.key,
-      title,
-      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
-      spaceId: state.activeSpaceId,
-      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-    };
-    return group.key;
-  }
-  return retitleGroupForNestedMove(group, title, options);
 }
 
 function moveGroupsWithoutSaving(groups, spaceId) {
@@ -5842,6 +5133,16 @@ function moveGroupsWithoutSaving(groups, spaceId) {
       };
       for (const tab of group.tabs || []) state.tabSpaces[tab.id] = spaceId;
       addGroupOrderKey(spaceId, group.key);
+    } else if (String(group.key).startsWith('node:')) {
+      // Empty placeholder node: move its registration across Spaces.
+      const sourceNodes = state.emptyNodes?.[sourceSpaceId] || {};
+      const nodeEntry = sourceNodes[group.key];
+      if (nodeEntry) {
+        delete sourceNodes[group.key];
+        if (Object.keys(sourceNodes).length === 0) delete state.emptyNodes[sourceSpaceId];
+        state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), [group.key]: nodeEntry };
+        addGroupOrderKey(spaceId, group.key);
+      }
     } else {
       state.groupSpaces[group.id] = spaceId;
       addGroupOrderKey(spaceId, group.key);
@@ -5853,6 +5154,31 @@ function moveGroupsWithoutSaving(groups, spaceId) {
   }
   state.groupOrder[sourceSpaceId] = (state.groupOrder[sourceSpaceId] || [])
     .filter((key) => !removedKeys.has(key));
+  moveHierarchyEntriesBetweenSpaces(removedKeys, sourceSpaceId, spaceId);
+}
+
+// 父子关系随子树一起搬：父也被搬走的子级保留关系；父留下的子级在目标空间升根。
+// movedKeys 是视图键；落盘的边是 anchor 域，先换算成 anchor 再搬家。
+function moveHierarchyEntriesBetweenSpaces(movedKeys, sourceSpaceId, targetSpaceId) {
+  if (!state.groupParents || typeof state.groupParents !== 'object') state.groupParents = {};
+  const anchorByKey = hierarchyAnchorMapForSpace(sourceSpaceId);
+  const movedAnchors = new Set([...movedKeys].map((key) => anchorByKey.get(key) || key));
+  const sourceParents = { ...(state.groupParents[sourceSpaceId] || {}) };
+  const nextSourceParents = {};
+  const movedEntries = [];
+  for (const [childAnchor, parentAnchor] of Object.entries(sourceParents)) {
+    if (!movedAnchors.has(childAnchor)) {
+      nextSourceParents[childAnchor] = parentAnchor;
+    } else {
+      movedEntries.push([childAnchor, parentAnchor]);
+    }
+  }
+  state.groupParents[sourceSpaceId] = nextSourceParents;
+  const nextTargetParents = { ...(state.groupParents[targetSpaceId] || {}) };
+  for (const [childAnchor, parentAnchor] of movedEntries) {
+    if (movedAnchors.has(parentAnchor)) nextTargetParents[childAnchor] = parentAnchor;
+  }
+  state.groupParents[targetSpaceId] = nextTargetParents;
 }
 
 async function deleteGroupsAndTabs(groups, options = {}) {
@@ -5872,6 +5198,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
   const reviewedTargets = new Map();
   const targetSpaceId = state.activeSpaceId;
   let remainingTargetGroups = 0;
+  let unresolvedSavedGroupCount = 0;
   const result = await runGuardedDestructiveTabClose({
     tabIds: liveTabIds,
     checkpoint: async () => {
@@ -5925,10 +5252,17 @@ async function deleteGroupsAndTabs(groups, options = {}) {
     ),
     commit: async ({ closedTabIds }) => {
       const allowStaleWindowBinding = !isCurrentPanelWindowBinding(windowBinding);
+      // Ownership restore must not re-bind the groups this transaction is
+      // deleting, or the cleanup below would see them as owned elsewhere.
+      const deletedGroupIds = groups
+        .filter((group) => group && group.id !== 'ungrouped' && !isVirtualGroupKey(group.key))
+        .map((group) => Number(group.id))
+        .filter(Number.isSafeInteger);
       await syncStateFromStorage({ windowBinding, allowStaleWindowBinding });
       await loadTabs({
         adopt: false,
         skipSnapshotCleanupForTabIds: closedTabIds,
+        skipOwnershipRestoreGroupIds: deletedGroupIds,
         windowBinding,
         allowStaleWindowBinding,
       });
@@ -5943,6 +5277,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
         await loadTabs({
           adopt: false,
           skipSnapshotCleanupForTabIds: closedTabIds,
+          skipOwnershipRestoreGroupIds: deletedGroupIds,
           windowBinding,
           allowStaleWindowBinding,
         });
@@ -5959,10 +5294,11 @@ async function deleteGroupsAndTabs(groups, options = {}) {
         )))
         .map((group) => group.key));
       const removedGroups = groups.filter((group) => !survivingGroupKeys.has(group.key));
-      deleteDormantSnapshotGroups(removedGroups.filter((group) => group.dormant));
-      for (const group of removedGroups.filter((item) => !item.dormant)) {
-        deleteDormantSnapshotGroup(group);
-      }
+      const unresolvedSavedGroups = [
+        ...deleteDormantSnapshotGroups(removedGroups.filter((group) => group.dormant)),
+        ...removedGroups.filter((item) => !item.dormant && !deleteDormantSnapshotGroup(item)),
+      ];
+      unresolvedSavedGroupCount = unresolvedSavedGroups.length;
       for (const group of groups.filter((item) => survivingGroupKeys.has(item.key))) {
         removeTabsFromSpaceSnapshot(targetSpaceId, (group.tabs || []).filter((tab) => (
           tab.dormant || closedIds.has(Number(tab.id))
@@ -6016,6 +5352,7 @@ async function deleteGroupsAndTabs(groups, options = {}) {
     deletedTabCount: result.closedTabIds.length + dormantTabCount,
     skippedTabCount: result.skippedTabs.length,
     remainingTargetGroups,
+    unresolvedSavedGroupCount,
   };
 }
 
@@ -6050,22 +5387,34 @@ async function ensureActiveSpaceHasOpenTabAfterClosing(
 }
 
 function deleteDormantSnapshotGroups(groups) {
-  if (!groups.length) return;
+  if (!groups.length) return [];
   const snapshot = activeSpaceSnapshot();
-  if (!snapshot) return;
+  if (!snapshot) return [...groups];
   const records = snapshotGroupRecords(snapshot);
   const snapshotGroupIds = new Set(groups
     .map((group) => String(group?.snapshotGroupId || ''))
     .filter(Boolean));
   const indexes = new Set(groups.map((group) => snapshotGroupIndexFromKey(group.key)).filter((index) => index >= 0));
-  if (snapshotGroupIds.size === 0 && indexes.size === 0) return;
+  if (snapshotGroupIds.size === 0 && indexes.size === 0) return [...groups];
+  const matchedIds = new Set();
+  const matchedIndexes = new Set();
   replaceActiveSpaceSnapshotGroups(records
-    .filter((record) => (
-      record.group.snapshotGroupId
-        ? !snapshotGroupIds.has(String(record.group.snapshotGroupId))
-        : !indexes.has(record.index)
-    ))
+    .filter((record) => {
+      const matched = record.group.snapshotGroupId
+        ? snapshotGroupIds.has(String(record.group.snapshotGroupId))
+        : indexes.has(record.index);
+      if (matched) {
+        if (record.group.snapshotGroupId) matchedIds.add(String(record.group.snapshotGroupId));
+        else matchedIndexes.add(record.index);
+      }
+      return !matched;
+    })
     .map((record) => record.group));
+  return groups.filter((group) => {
+    const snapshotGroupId = String(group?.snapshotGroupId || '');
+    if (snapshotGroupId) return !matchedIds.has(snapshotGroupId);
+    return !matchedIndexes.has(snapshotGroupIndexFromKey(group.key));
+  });
 }
 
 function replaceGroupOrderKeys(replacements, fallbackOrder = []) {
@@ -6121,15 +5470,15 @@ async function openDormantTab(tab, groupKey, options = {}) {
 
       const dormantGroup = dormantGroupForTabReference(tab, groupKey);
       let chromeGroupId = -1;
+      let dormantTarget = null;
       if (!dormantGroup || isUngroupedSnapshotGroup(dormantGroup)) {
         state.tabSpaces[tabId] = state.activeSpaceId;
       } else {
-        const existing = chromeGroupForSnapshotIdentity(dormantGroup, state.activeSpaceId) ||
-          await chromeGroupForTitle(dormantGroup.title, state.activeSpaceId, { windowBinding });
+        dormantTarget = await resolveDormantChromeGroupTarget(dormantGroup, tab, { windowBinding });
         if (!isCurrentPanelWindowBinding(windowBinding)) throw new Error(staleMessage);
-        if (existing) {
+        if (dormantTarget) {
           chromeGroupId = await addTabsToChromeGroup(
-            existing.id,
+            dormantTarget.group.id,
             [tabId],
             state.activeSpaceId,
             { windowBinding },
@@ -6154,10 +5503,14 @@ async function openDormantTab(tab, groupKey, options = {}) {
       state.tabLifecycle[tabId] = {
         tabId,
         snapshotTabId: tab.snapshotTabId,
-        snapshotGroupId: tab.snapshotGroupId || dormantGroup?.snapshotGroupId,
+        snapshotGroupId: dormantTarget?.snapshotGroupId ||
+          tab.snapshotGroupId || dormantGroup?.snapshotGroupId,
         spaceId: state.activeSpaceId,
         url: String(created.tab?.url || url),
-        title: String(created.tab?.title || tab.title || url),
+        // A freshly created tab reports its pending URL as the Chrome title.
+        // Seed the binding with the saved page title so the panel can bridge
+        // the loading window instead of flashing the URL on every open.
+        title: String(tab.title || created.tab?.title || url),
         panelTitle: cleanPanelName(tab.panelTitle),
         windowId: Number.isFinite(Number(created.tab?.windowId))
           ? Number(created.tab.windowId)
@@ -6368,8 +5721,12 @@ async function switchSpace(spaceId, options = {}) {
       allowStaleWindowBinding: true,
     });
     await loadDormantSpaceView(spaceId, { force: true });
-    if (isCurrentPanelWindowBinding(windowBinding)) render();
-    else postCommitWarnings.push('This panel moved before its switched view could refresh.');
+    if (isCurrentPanelWindowBinding(windowBinding)) {
+      render();
+      await migrateSpaceHierarchy(spaceId, { windowBinding });
+    } else {
+      postCommitWarnings.push('This panel moved before its switched view could refresh.');
+    }
   } catch (error) {
     console.error(error);
     postCommitWarnings.push('The switched tab list could not refresh yet.');
@@ -7245,9 +6602,16 @@ function sanitizeStoredSpaceSnapshots() {
 
 function sanitizeStoredSpaceSnapshot(spaceId) {
   if (!state.spaceSnapshots || typeof state.spaceSnapshots !== 'object') return null;
+  const storedSnapshot = state.spaceSnapshots[spaceId];
+  // preserveGroups only scaffolds an in-flight Auto Group plan. Left sticky it
+  // keeps emptied Tags alive forever, so drop the flag (and let the sanitize
+  // pass purge the emptied rows) unless the plan is running right now.
+  if (storedSnapshot?.preserveGroups && !inFlightOrganizationPlanSpaceIds.has(spaceId)) {
+    delete storedSnapshot.preserveGroups;
+  }
   const snapshot = dropTemporarySnapshotGroups(
     sanitizeSnapshotWithLifecycleIds(
-      state.spaceSnapshots[spaceId],
+      storedSnapshot,
       createSnapshotLifecycleId,
     ),
   );
@@ -7281,11 +6645,13 @@ function renameDormantSnapshotGroup(group, title) {
 function deleteDormantSnapshotGroup(group) {
   const spaceId = state.activeSpaceId;
   const snapshot = state.spaceSnapshots?.[spaceId];
+  if (findDormantSnapshotGroupIndex(snapshot, group) < 0) return false;
   commitDormantSnapshotProjection(
     spaceId,
     snapshot,
     projectDormantSnapshotGroupRemoval(snapshot, group, Date.now()),
   );
+  return true;
 }
 
 function removeOpenedDormantTabFromSnapshot(tab, dormantGroup) {
@@ -7373,7 +6739,7 @@ async function toggleGroup(group, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     try {
-      return await withFreshSpaceStateMutation(() => toggleGroup(currentGroupForMutation(group), {
+      return await withFreshSpaceStateMutation(() => toggleGroup(currentGroupForDisplayToggle(group), {
         stateLocked: true,
         focusRestoreToken: options.focusRestoreToken,
         windowBinding,
@@ -7515,21 +6881,32 @@ async function refreshMissingChromeGroupView(options = {}) {
   });
 }
 
-function handleFolderHeaderClick(event, folder) {
-  if (shouldSuppressHeaderClickAfterDrag(event)) return;
-  const focusRestoreToken = disclosureFocusGuard.capture(
-    document.activeElement === event.currentTarget,
-  );
-  runTask((windowBinding) => toggleFolder(folder.key, {
-    focusRestoreToken,
-    windowBinding,
-  }));
-}
-
 function handleGroupHeaderClick(event, group) {
   if (shouldSuppressHeaderClickAfterDrag(event)) return;
+  // 折叠/展开 = 纯显示状态切换（Chrome 原生 collapsed），tab 保持打开。
+  // close-to-saved 改由右键菜单 "Close & Save" 显式触发。
+  if (group.dormant && group.collapsed) {
+    // 折叠的 dormant（已存档）组头点击 = 展开恢复 tabs（openDormantGroup）。
+    const rowsOpenInOtherWindows = (group.tabs || []).some((tab) => (
+      tab.dormant && Number.isFinite(Number(tab.foreignWindowTabId))
+    ));
+    if (rowsOpenInOtherWindows) {
+      runTask((windowBinding) => toggleGroup(group, { windowBinding }));
+      return;
+    }
+    const focusRestoreToken = disclosureFocusGuard.capture(
+      document.activeElement === event.currentTarget,
+    );
+    runTask((windowBinding) => openDormantGroup(group, {
+      focusRestoreToken,
+      windowBinding,
+    }));
+    return;
+  }
+  // 键盘 Enter 激活的是 .group-toggle（header 的子按钮），currentTarget 是 header；
+  // 折叠渲染会重建卡片，令牌用于把焦点还原到新卡片的 toggle 上。
   const focusRestoreToken = disclosureFocusGuard.capture(
-    document.activeElement === event.currentTarget,
+    event.currentTarget.contains(document.activeElement),
   );
   runTask((windowBinding) => toggleGroup(group, {
     focusRestoreToken,
@@ -7548,12 +6925,9 @@ function currentDisclosureGroupKey(reference = {}) {
 
 function restoreDisclosureFocus(kind, key, focusRestoreToken) {
   if (!focusRestoreToken || !key) return false;
-  const selector = kind === 'folder'
-    ? `.folder-header[data-folder-key="${CSS.escape(key)}"]`
-    : [
-      `.group-card[data-group-key="${CSS.escape(key)}"] .group-toggle`,
-      `.folder-direct-group[data-group-key="${CSS.escape(key)}"] .group-toggle`,
-    ].join(', ');
+  const selector = [
+    `.group-card[data-group-key="${CSS.escape(key)}"] .group-toggle`,
+  ].join(', ');
   const target = document.querySelector(selector);
   if (!target) return false;
   return disclosureFocusGuard.restore(focusRestoreToken, () => {
@@ -7576,33 +6950,19 @@ function startGroupDrag(event, group) {
     type: 'group',
     key: context.key,
     groupKeys: context.groupKeys,
-    sourceContext: context,
+    sourceRootKeys: [context.key],
     sourceSpaceId: state.activeSpaceId,
     organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
   };
-  event.dataTransfer.effectAllowed = 'move';
-  event.dataTransfer.setData('text/plain', context.key);
-}
-
-function startFolderDrag(event, folder) {
-  if (isInteractiveDragTarget(event.target)) return;
-  const context = dragContextForTarget(folder);
-  if (!context?.groupKeys?.length) return;
-  dragState = {
-    type: 'group',
-    key: context.key,
-    groupKeys: context.groupKeys,
-    sourceContext: context,
-    sourceSpaceId: state.activeSpaceId,
-    organizationFingerprint: organizationForCurrentSpaceState(state.activeSpaceId).fingerprint,
-  };
+  document.body.classList.add('hierarchy-dragging');
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', context.key);
 }
 
 function acceptGroupDrop(event, target) {
-  const targetContext = dragContextForTarget(target);
-  if (!canDropGroupContext(targetContext)) return;
+  if (dragState?.type !== 'group') return;
+  if (dragState.sourceSpaceId !== state.activeSpaceId) return;
+  if (target?.key === 'ungrouped') return;
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
   event.currentTarget.classList.add('drag-over');
@@ -7616,32 +6976,31 @@ function acceptGroupOrTabDrop(event, targetGroup) {
   acceptGroupDrop(event, targetGroup);
 }
 
-function acceptFolderDrop(event, folder) {
-  if (dragState?.type === 'tab') {
-    acceptTabDrop(event);
-    return;
-  }
-  acceptGroupDrop(event, folder);
-}
-
 function dropGroup(event, target) {
-  const targetContext = dragContextForTarget(target);
-  if (!canDropGroupContext(targetContext)) return;
-  const sourceKeys = [...dragState.groupKeys];
+    if (dragState?.type !== 'group') return;
+  const targetKey = target?.key && target.key !== 'ungrouped' ? target.key : '';
   const moveOptions = {
-    sourceContext: dragState.sourceContext,
     sourceSpaceId: dragState.sourceSpaceId,
     expectedFingerprint: dragState.organizationFingerprint,
   };
-  const intent = groupDropIntent(event);
+  const plan = planHierarchyDrop({
+    parents: renderedHierarchyKeyParents,
+    order: state.groupOrder[state.activeSpaceId] || [],
+    maxDepth: HIERARCHY_MAX_DEPTH,
+    sourceRootKeys: dragState.sourceRootKeys,
+    sourceAllKeys: dragState.groupKeys,
+    targetKey,
+    intent: targetKey ? groupDropIntent(event) : 'root',
+  });
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.classList.remove('drag-over');
-  runTask((windowBinding) => (
-    intent === 'inside'
-      ? moveGroupBlockIntoContext(sourceKeys, targetContext, { ...moveOptions, windowBinding })
-      : moveGroupBlockBesideContext(sourceKeys, targetContext, intent, { ...moveOptions, windowBinding })
-  ));
+  clearDragState();
+  if (plan.error) {
+    if (plan.error !== 'no-op') setStatus(plan.message);
+    return;
+  }
+    runTask((windowBinding) => applyHierarchyDrop(plan, { ...moveOptions, windowBinding }));
 }
 
 function dropGroupOrTab(event, targetGroup) {
@@ -7652,30 +7011,17 @@ function dropGroupOrTab(event, targetGroup) {
   dropGroup(event, targetGroup);
 }
 
-function dropFolder(event, folder) {
-  if (dragState?.type === 'tab') {
-    dropTabAtEnd(event, groupForFolderTabDrop(folder));
-    return;
-  }
-  dropGroup(event, folder);
-}
-
 function groupDropIntent(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-  const header = target?.closest?.('.group-header, .folder-header');
+  const header = target?.closest?.('.group-header');
   const dropElement = header && event.currentTarget?.contains?.(header) ? header : event.currentTarget;
   const rect = dropElement?.getBoundingClientRect?.();
   if (!rect?.height) return 'inside';
+  // 头部中部（25%-75%）= 放入该组；上下边缘 = 与兄弟组排序。
   const ratio = (event.clientY - rect.top) / rect.height;
   if (ratio < 0.25) return 'before';
   if (ratio > 0.75) return 'after';
   return 'inside';
-}
-
-function canDropGroupContext(targetContext) {
-  if (dragState?.type !== 'group' || !targetContext?.groupKeys?.length) return false;
-  const sourceKeySet = new Set(dragState.groupKeys);
-  return targetContext.groupKeys.some((key) => !sourceKeySet.has(key));
 }
 
 function dragContextForTarget(target) {
@@ -7685,195 +7031,100 @@ function dragContextForTarget(target) {
 
 function isInteractiveDragTarget(target) {
   const element = target instanceof Element ? target : target?.parentElement;
-  return Boolean(element?.closest?.('.tab-row, button:not(.folder-header):not(.group-toggle), .group-actions'));
+  return Boolean(element?.closest?.('.tab-row, button:not(.group-toggle), .group-actions'));
 }
 
-async function moveGroupBlockIntoContext(sourceKeys, targetContext, options = {}) {
+// 拖拽落点 = 纯状态事务：apply 只写内存（Chrome 侧零写入），checkpoint 落库。
+// 折叠键按节点键稳定存在，不需要重命名；回滚只是内存恢复。
+async function applyHierarchyDrop(plan, options = {}) {
   const windowBinding = options.windowBinding;
-  if (!options.stateLocked) {
+    if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
-      assertFreshOrganizationDrag(options);
-      const currentTarget = dragContextForTarget(targetContext?.key);
-      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
-      return moveGroupBlockIntoContext(sourceKeys, currentTarget, { ...options, stateLocked: true });
+            assertFreshOrganizationDrag(options);
+            // 排队期间状态可能已变：用最新 parents/order 重算同一个拖放意图。
+      const freshPlan = planHierarchyDrop({
+        parents: renderedHierarchyKeyParents,
+        order: state.groupOrder[state.activeSpaceId] || [],
+        maxDepth: HIERARCHY_MAX_DEPTH,
+        sourceRootKeys: plan.sourceRootKeys,
+        sourceAllKeys: plan.sourceAllKeys,
+        targetKey: plan.targetKey,
+        intent: plan.intent,
+      });
+      if (freshPlan.error) {
+                if (freshPlan.error !== 'no-op') setStatus(freshPlan.message);
+        return undefined;
+      }
+            return applyHierarchyDrop(freshPlan, { ...options, stateLocked: true });
     }, { windowBinding });
   }
-  const targetPath = targetContext?.path || [];
-  if (!targetPath.length) return;
-
-  const sourceContext = options.sourceContext;
-  const visibleKeys = spaceView.map((group) => group.key);
-  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
-  if (sourceBlock.length === 0) return;
-
+  const spaceId = state.activeSpaceId;
   const rollback = captureChromeGroupMutationRollback();
   let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      const nextKeys = [];
-      const dormantMoves = [];
-      const referenceOverrides = new Map();
-      for (const sourceKey of sourceBlock) {
-        const group = spaceView.find((item) => item.key === sourceKey);
-        if (!group) continue;
-        const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
-        if (!nextTitle) continue;
-        let nextKey;
-        if (group.dormant) {
-          dormantMoves.push({ key: group.key, title: nextTitle });
-          nextKey = group.key;
-        } else {
-          rememberChromeGroupTitleRollback(rollback, group);
-          nextKey = await retitleGroupForNestedMove(group, nextTitle, { windowBinding });
-        }
-        nextKeys.push(nextKey);
-        referenceOverrides.set(nextKey, group);
-      }
-      if (nextKeys.length === 0) return;
-
-      state.groupOrder[state.activeSpaceId] = groupOrderAfterNestedMove(
-        visibleKeys,
-        sourceKeys,
-        targetContext,
-        nextKeys,
-      );
-      if (dormantMoves.length) {
-        moveDormantSnapshotGroupsToOrder(
-          dormantMoves,
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      } else {
-        reorderDormantSnapshotGroups(
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      }
+      // plan 在键域计算，落盘前转 anchor 域（键再生不再影响层级）。
+      state.groupParents[spaceId] = anchorizeHierarchyParents(plan.parents, spaceId);
+      state.groupOrder[spaceId] = plan.order;
       changed = true;
-    },
-    checkpoint: () => changed ? saveState({ persistWindowState: false }) : undefined,
+          },
+    checkpoint: () => (changed ? saveState({ persistWindowState: false, windowBinding }) : undefined),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
-  if (!changed) return;
+    if (!changed) return;
   await refreshTabs({ windowBinding });
 }
 
-async function moveGroupBlockBesideContext(sourceKeys, targetContext, placement = 'before', options = {}) {
+// 拖 tab 进空组节点：物化为 Chrome 组并把 tab 落进去（键 node:* → group:*，
+// 由 createChromeGroup 的 sourceKey → transferGroupLocalState 完成登记迁移）。
+async function materializeEmptyNodeWithTab(tabId, node, options = {}) {
   const windowBinding = options.windowBinding;
   if (!options.stateLocked) {
     return withFreshSpaceStateMutation(() => {
       assertFreshOrganizationDrag(options);
-      const currentTarget = dragContextForTarget(targetContext?.key);
-      if (!currentTarget) throw new Error('The target group changed in another Space Tabs view. Try the drag again.');
-      return moveGroupBlockBesideContext(sourceKeys, currentTarget, placement, { ...options, stateLocked: true });
+      const current = tabs.find((tab) => Number(tab.id) === Number(tabId));
+      if (!current || (options.expectedUrl && current.url !== options.expectedUrl)) {
+        throw new Error('This tab changed in another Space Tabs view. Try the drag again.');
+      }
+      return materializeEmptyNodeWithTab(tabId, node, { ...options, stateLocked: true });
     }, { windowBinding });
   }
-  const targetPath = targetPathForSiblingMove(targetContext);
-  const sourceContext = options.sourceContext;
-  const visibleKeys = spaceView.map((group) => group.key);
-  const sourceBlock = sourceKeys.filter((key) => visibleKeys.includes(key));
-  if (sourceBlock.length === 0) return;
-
+  const spaceId = state.activeSpaceId;
+  const entry = state.emptyNodes?.[spaceId]?.[node.key];
+  if (!entry) throw new Error('This empty group no longer exists. Try the drag again.');
   const rollback = captureChromeGroupMutationRollback();
-  let changed = false;
   await runChromeGroupMutationTransaction({
     apply: async () => {
-      const nextKeys = [];
-      const dormantMoves = [];
-      const referenceOverrides = new Map();
-      for (const sourceKey of sourceBlock) {
-        const group = spaceView.find((item) => item.key === sourceKey);
-        if (!group) continue;
-        const nextTitle = groupTitleForNestedMove(group, sourceContext, targetPath);
-        if (!nextTitle) continue;
-        let nextKey;
-        if (group.dormant) {
-          dormantMoves.push({ key: group.key, title: nextTitle });
-          nextKey = group.key;
-        } else {
-          rememberChromeGroupTitleRollback(rollback, group);
-          nextKey = await retitleGroupForNestedMove(group, nextTitle, { windowBinding });
-        }
-        nextKeys.push(nextKey);
-        referenceOverrides.set(nextKey, group);
+      const groupId = await createChromeGroup([Number(tabId)], {
+        title: entry.title,
+        color: entry.color || nextGroupColor(),
+        spaceId,
+        sourceKey: node.key,
+        windowBinding,
+      });
+      if (groupId === null) throw new Error('Chrome could not create the group.');
+      // 空节点的父子引用全部改挂到物化组的稳定身份（binding 身份优先 →
+      // sgid anchor；无身份先落裸键，由每 render 自愈升级）：node 作为
+      // child 的条目重挂到 newHid 的父上；node 作为 parent 的条目（已拖
+      // 进去的子组）改挂到 newHid。漏掉任一侧都会让物化后 node 键消失、
+      // 整层子树掉回顶层。读路径（visibleHierarchyNodes）会投影 sgid anchor。
+      const parents = { ...(state.groupParents?.[spaceId] || {}) };
+      const binding = state.tabLifecycle?.[Number(tabId)];
+      const newHid = binding?.snapshotGroupId
+        ? `sgid:${binding.snapshotGroupId}`
+        : `group:${groupId}`;
+      const parentHid = parents[node.key];
+      delete parents[node.key];
+      if (parentHid && newHid !== parentHid) parents[newHid] = parentHid;
+      for (const [childHid, parentHid] of Object.entries(parents)) {
+        if (parentHid === node.key) parents[childHid] = newHid;
       }
-      if (nextKeys.length === 0) return;
-
-      state.groupOrder[state.activeSpaceId] = groupOrderAfterSiblingMove(
-        visibleKeys,
-        sourceKeys,
-        targetContext,
-        nextKeys,
-        placement,
-      );
-      if (dormantMoves.length) {
-        moveDormantSnapshotGroupsToOrder(
-          dormantMoves,
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      } else {
-        reorderDormantSnapshotGroups(
-          state.groupOrder[state.activeSpaceId],
-          referenceOverrides,
-        );
-      }
-      changed = true;
+      state.groupParents[spaceId] = parents;
     },
-    checkpoint: () => changed ? saveState({ persistWindowState: false }) : undefined,
+    checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
     rollback: () => restoreChromeGroupMutationAfterFailure(rollback, { windowBinding }),
   });
-  if (!changed) return;
   await refreshTabs({ windowBinding });
-}
-
-function targetPathForSiblingMove(targetContext) {
-  return Array.isArray(targetContext?.path) ? targetContext.path.slice(0, -1) : [];
-}
-
-function groupTitleForNestedMove(group, sourceContext, targetPath) {
-  return movedGroupTitleForFolderDrop(
-    group.title || group.displayTitle || 'Group',
-    sourceContext,
-    targetPath,
-  );
-}
-
-async function retitleGroupForNestedMove(group, title, options = {}) {
-  if (isVirtualGroupKey(group.key)) {
-    const logicalTitle = normalizeGroupTitle(title, 'Group');
-    retitleActiveSpaceSnapshotGroup(group, logicalTitle);
-    state.virtualGroups[group.key] = {
-      ...(state.virtualGroups[group.key] || {}),
-      id: group.key,
-      title: logicalTitle,
-      color: group.color || state.virtualGroups[group.key]?.color || 'blue',
-      spaceId: state.activeSpaceId,
-      collapsed: Boolean(state.collapsedGroups[group.key] ?? group.collapsed),
-    };
-    return group.key;
-  }
-
-  const groupId = groupIdFromKey(group.key);
-  if (groupId !== null) {
-    const result = await send('groups:update', {
-      groupId,
-      update: { title },
-    }, { windowBinding: options.windowBinding });
-    if (!result.group) throw new Error(`Chrome group ${groupId} no longer exists.`);
-    logicalChromeGroupTitles.set(groupId, normalizeGroupTitle(title, 'Group'));
-    retitleActiveSpaceSnapshotGroup(group, normalizeGroupTitle(title, 'Group'));
-    bindChromeGroup(groupId, state.activeSpaceId);
-    return group.key;
-  }
-
-  const groupKey = createVirtualGroup({ title, color: group.color || nextGroupColor() });
-  state.collapsedGroups[groupKey] = Boolean(state.collapsedGroups[group.key] ?? group.collapsed);
-  for (const tab of group.tabs || []) {
-    state.tabSpaces[tab.id] = state.activeSpaceId;
-    state.tabGroups[tab.id] = groupKey;
-  }
-  return groupKey;
 }
 
 function retitleActiveSpaceSnapshotGroup(group, title) {
@@ -7894,30 +7145,6 @@ function retitleActiveSpaceSnapshotGroup(group, title) {
   replaceGroupOrderKeys(replacements);
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-}
-
-function reorderDormantSnapshotGroups(orderedKeys, referenceOverrides = new Map()) {
-  const snapshot = activeSpaceSnapshot();
-  if (!snapshot) return;
-  const visibleGroupsByKey = new Map(spaceView.map((group) => [group.key, group]));
-  const references = (orderedKeys || [])
-    .map((key) => referenceOverrides.get(key) || visibleGroupsByKey.get(key))
-    .filter(Boolean);
-  const nextSnapshot = projectSnapshotGroupOrder(snapshot, references, Date.now());
-  if (nextSnapshot === snapshot) return;
-  replaceActiveSpaceSnapshotGroups(nextSnapshot.groups);
-}
-
-function moveDormantSnapshotGroupsToOrder(
-  moves,
-  orderedKeys,
-  referenceOverrides = new Map(),
-) {
-  for (const move of moves) {
-    const group = spaceView.find((item) => item.key === move.key);
-    if (group) renameDormantSnapshotGroup(group, move.title);
-  }
-  reorderDormantSnapshotGroups(orderedKeys, referenceOverrides);
 }
 
 function activeSpaceSnapshot() {
@@ -7945,7 +7172,17 @@ function replaceActiveSpaceSnapshotGroups(groups, snapshotUpdates = null) {
   const nextSnapshot = {
     ...baseSnapshot,
     updatedAt: Date.now(),
-    groups: groups.filter((group) => snapshotGroupShouldPersist(baseSnapshot, group)),
+    groups: (() => {
+      // 快照组若仍有 tabLifecycle 行绑定则不得整组清退：删掉会让保存行身份
+      // 失联（保存数据丢失），并让 Auto Group checkpoint 回滚。
+      const liveBoundRows = new Set(Object.values(state.tabLifecycle || {})
+        .map((binding) => String(binding?.snapshotTabId || '').trim())
+        .filter(Boolean));
+      return groups.filter((group) => (
+        snapshotGroupShouldPersist(baseSnapshot, group) ||
+        snapshotGroupHasLiveBoundRows(group, liveBoundRows)
+      ));
+    })(),
   };
   const persistedSnapshot = snapshotHasPersistentContent(nextSnapshot) ? nextSnapshot : null;
   const remapped = remapSnapshotGroupIndexedState({
@@ -7965,30 +7202,6 @@ function replaceActiveSpaceSnapshotGroups(groups, snapshotUpdates = null) {
   else state.spaceSnapshots[state.activeSpaceId] = persistedSnapshot;
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-}
-
-function groupOrderAfterNestedMove(visibleKeys, sourceKeys, targetContext, nextKeys) {
-  const sourceKeySet = new Set(sourceKeys);
-  const nextKeySet = new Set(nextKeys);
-  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
-  const targetKeys = (targetContext.groupKeys || []).filter((key) => !sourceKeySet.has(key) && base.includes(key));
-  const targetIndex = targetKeys.length ? base.indexOf(targetKeys.at(-1)) + 1 : base.length;
-  base.splice(targetIndex, 0, ...uniqueKeys(nextKeys));
-  return base;
-}
-
-function groupOrderAfterSiblingMove(visibleKeys, sourceKeys, targetContext, nextKeys, placement = 'before') {
-  const sourceKeySet = new Set(sourceKeys);
-  const nextKeySet = new Set(nextKeys);
-  const base = visibleKeys.filter((key) => !sourceKeySet.has(key) && !nextKeySet.has(key));
-  const targetKeys = (targetContext?.groupKeys || [])
-    .filter((key) => !sourceKeySet.has(key) && base.includes(key));
-  const targetKey = placement === 'after' ? targetKeys.at(-1) : targetKeys[0];
-  if (!targetKey) return visibleKeys;
-  const targetIndex = base.indexOf(targetKey);
-  const insertAt = placement === 'after' ? targetIndex + 1 : targetIndex;
-  base.splice(insertAt, 0, ...uniqueKeys(nextKeys));
-  return base;
 }
 
 function assertFreshOrganizationDrag(options = {}) {
@@ -8050,6 +7263,23 @@ function dropTabBefore(event, targetTab, targetGroupKey) {
 function dropTabAtEnd(event, targetGroup) {
   const targetRow = event.target.closest('.tab-row');
   if (dragState?.type !== 'tab' || (targetRow && !targetRow.classList.contains('dormant'))) return;
+  if (targetGroup?.emptyNode) {
+    const tabId = dragState.tabId;
+    const tabUrl = dragState.tabUrl;
+    const sourceSpaceId = dragState.sourceSpaceId;
+    const expectedFingerprint = dragState.organizationFingerprint;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.classList.remove('drag-over');
+    clearDragState();
+    runTask((windowBinding) => materializeEmptyNodeWithTab(tabId, targetGroup, {
+      expectedUrl: tabUrl,
+      sourceSpaceId,
+      expectedFingerprint,
+      windowBinding,
+    }));
+    return;
+  }
   const tabId = dragState.tabId;
   const moveOptions = {
     targetGroup,
@@ -8219,25 +7449,6 @@ async function ensureTabDropChromeGroup(targetGroup, tabId, options = {}) {
     sourceKey: targetGroup.key,
     windowBinding: options.windowBinding,
   });
-}
-
-function groupForFolderTabDrop(folder) {
-  const title = (folder?.path || []).join(' / ');
-  const existing = spaceView.find((group) => (
-    group.key !== 'ungrouped' &&
-    folderTitleParts(group.title).join(' / ') === title
-  ));
-  if (existing) return existing;
-  return {
-    id: `folder-drop:${folder?.key || title}`,
-    key: `folder-drop:${folder?.key || title}`,
-    title: title || folder?.title || 'Group',
-    displayTitle: folder?.title || title || 'Group',
-    color: 'blue',
-    collapsed: false,
-    dormant: false,
-    tabs: [],
-  };
 }
 
 function liveTabsForOrdering(group) {
@@ -8444,6 +7655,8 @@ function clearDragState(event) {
   event?.currentTarget?.classList?.remove('drag-over');
   if (dragState?.type === 'group') lastGroupDragEndedAt = Date.now();
   dragState = null;
+  document.body.classList.remove('hierarchy-dragging');
+  els.groupsList?.classList.remove('root-drop-hover');
   document.querySelectorAll('.drag-over').forEach((node) => node.classList.remove('drag-over'));
 }
 
@@ -8473,380 +7686,10 @@ function hasCurrentTidyNamesAICandidates() {
   )));
 }
 
-function prepareTidyNamesRequestFromUserGesture() {
-  return prepareOrganizationAIRequestFromUserGesture(hasCurrentTidyNamesAICandidates);
-}
-
-function startTidyNamesFromUserGesture() {
-  const request = prepareTidyNamesRequestFromUserGesture();
-  void runTask((windowBinding) => tidyTabNames({ ...request, windowBinding }));
-}
-
-async function tidyTabNames(options = {}) {
-  const windowBinding = options.windowBinding;
-  const startedAt = performance.now();
-  const aiSettings = options.aiSettings || structuredClone(state.ai);
-  const permissionRequest = options.permissionRequest || Promise.resolve(true);
-  const permissionRequested = options.permissionRequested === true;
-  beginPanelAction('tidyNames');
-  try {
-    const refreshed = await refreshOrganizationActionState({
-      adopt: false,
-      windowBinding,
-    });
-    if (refreshed === false) return;
-    const sourceSpaceId = state.activeSpaceId;
-    snapshotOpenSpace(sourceSpaceId);
-    const sourceSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-      version: 1,
-      updatedAt: Date.now(),
-      groups: [],
-    });
-    const duplicateTagPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
-    const duplicateLiveBuckets = duplicateActiveGroupBuckets();
-    const duplicateLiveGroupCount = duplicateLiveBuckets
-      .reduce((sum, bucket) => sum + bucket.length - 1, 0);
-    const duplicateTagSummary = combineDuplicateTagMergePlans(
-      duplicateTagPlan.merges,
-      duplicateLiveBuckets.map((bucket) => ({
-        title: bucket[0]?.title,
-        mergedCount: bucket.length - 1,
-      })),
-    );
-    const duplicateTagCount = duplicateTagSummary.mergedCount;
-    const duplicateTagFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
-    const visibleTabs = spaceView
-      .flatMap((group) => group.tabs)
-      .filter((tab) => (
-        !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
-      ));
-    if (visibleTabs.length === 0 && duplicateTagCount === 0) {
-      setStatus('No tabs or duplicate Tags in this Space to tidy.');
-      return;
-    }
-
-    const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
-    if (renameableTabs.length === 0 && duplicateTagCount === 0) {
-      setStatus('No unpinned tabs in this Space to rename.');
-      return;
-    }
-
-    const aiCandidates = renameableTabs.filter((tab) => !hasManualPanelName(tab.id));
-    const useAI = aiCandidates.length > 0 && hasUsableAISettings(aiSettings);
-    if (useAI) {
-      const provider = providerById(aiSettings.provider);
-      setStatus(`Generating Tidy Names preview with ${provider.label} for ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'}...`);
-    }
-
-    const localNames = planTidyTabNames(renameableTabs, {
-      existingNames: state.renamedTabs,
-      preserveExisting: true,
-    });
-    const namingResult = useAI
-      ? await tidyTabNamesWithAI(aiCandidates, {
-        permissionRequest: permissionRequested ? permissionRequest : null,
-        settings: aiSettings,
-        windowBinding,
-      })
-      : { names: {}, sourceLabel: 'Local naming' };
-    if (!isCurrentPanelWindowBinding(windowBinding)) {
-      throw new Error(
-        'This panel moved to another Chrome window before Tidy Names could create a preview. ' +
-        'Nothing was changed; run Tidy Names again in the current window.',
-      );
-    }
-    const plannedNames = { ...localNames, ...namingResult.names };
-    const renameItems = renameableTabs
-      .map((tab) => ({
-        id: Number(tab.id),
-        title: tab.displayTitle || tab.title || 'Untitled',
-        result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
-        meta: tab.domain,
-      }))
-      .filter((item) => item.title !== item.result);
-    const untouchedItems = visibleTabs
-      .filter((tab) => !renameItems.some((item) => item.id === Number(tab.id)))
-      .map((tab) => ({
-        title: tab.displayTitle || tab.title || 'Untitled',
-        result: 'Unchanged',
-        meta: tab.domain,
-      }));
-    if (renameItems.length === 0 && duplicateTagCount === 0) {
-      setStatus('Tidy Names found no changes to apply.');
-      return;
-    }
-    const previewTargetIds = new Set(renameItems.map((item) => item.id));
-    const previewTargetFingerprint = fingerprintTidyNameTargets(
-      visibleTabs.filter((tab) => previewTargetIds.has(Number(tab.id))),
-      state.renamedTabs,
-    );
-
-    const previewSections = [];
-    if (renameItems.length > 0) {
-      previewSections.push({ title: 'Rename in panel', items: renameItems });
-    }
-    if (duplicateTagCount > 0) {
-      const mergeItems = duplicateTagSummary.merges.map((merge) => ({
-        title: merge.title || 'Tag',
-        result: 'Merge into first Tag',
-        meta: merge.snapshotMergedCount > 0
-          ? `${merge.mergedCount + 1} Tags · ${merge.appendedRowCount} ${merge.appendedRowCount === 1 ? 'saved row' : 'saved rows'} appended`
-          : `${merge.liveMergedCount + 1} live Tags`,
-      }));
-      previewSections.push({ title: 'Merge duplicate Tags', items: mergeItems });
-    }
-    if (renameItems.length > 0 && untouchedItems.length > 0) {
-      previewSections.push({ title: 'Remain untouched', items: untouchedItems });
-    }
-    const previewSummary = [];
-    if (renameItems.length > 0) {
-      previewSummary.push(`${renameItems.length} ${renameItems.length === 1 ? 'name' : 'names'}`);
-      previewSummary.push(namingResult.sourceLabel);
-    }
-    if (duplicateTagCount > 0) {
-      previewSummary.push(`${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'} merged`);
-    }
-    previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
-    const confirmed = await showPlanPreview({
-      title: 'Preview Tidy Names',
-      message: previewSummary.join(' · '),
-      confirmText: 'Apply tidy',
-      sections: previewSections,
-    });
-    if (!confirmed) return;
-
-    let committed = false;
-    let postCommitWarning = '';
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) {
-        throw new Error(
-          'This panel moved before Tidy Names could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      if (state.activeSpaceId !== sourceSpaceId) {
-        throw new Error('The active Space changed while Tidy Names was open. Run it again in the current Space.');
-      }
-      const rollback = captureChromeGroupMutationRollback();
-      const loaded = await loadTabs({ adopt: false, windowBinding });
-      if (loaded === false) {
-        throw new Error(
-          'This panel moved before Tidy Names could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      snapshotOpenSpace(sourceSpaceId);
-      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-        version: 1,
-        updatedAt: Date.now(),
-        groups: [],
-      });
-      const targetIds = new Set(renameItems.map((item) => item.id));
-      const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-      if (
-        currentTargets.length !== renameItems.length ||
-        currentTargets.some((tab) => tab.pinned) ||
-        fingerprintTidyNameTargets(currentTargets, state.renamedTabs) !== previewTargetFingerprint
-      ) {
-        throw new Error('Tabs changed while Tidy Names was open. Review a fresh preview before applying names.');
-      }
-      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateTagFingerprint) {
-        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
-      }
-      const currentDuplicateTagPlan = mergeDuplicateSnapshotTags(currentSnapshot);
-      if (
-        currentDuplicateTagPlan.mergedCount !== duplicateTagPlan.mergedCount ||
-        countDuplicateActiveGroups() !== duplicateLiveGroupCount
-      ) {
-        throw new Error('Duplicate Tags changed while Tidy Names was open. Review a fresh preview before applying.');
-      }
-      const beforeNames = Object.fromEntries(renameItems.map((item) => [
-        item.id,
-        Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
-      ]));
-      const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
-      const beforeSnapshot = structuredClone(currentSnapshot);
-      const beforeLive = captureLiveOrganization(sourceSpaceId);
-      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
-      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
-        currentDuplicateTagPlan.snapshotGroupIdReplacements,
-      );
-      rollback.membership = captureTabGroupMembership(
-        tabs,
-        groups,
-        beforeLive.tabs.map((tab) => tab.tabId),
-      );
-      await runChromeGroupMutationTransaction({
-        apply: async () => {
-          if (currentDuplicateTagPlan.mergedCount > 0) {
-            replaceActiveSpaceSnapshotGroups(currentDuplicateTagPlan.snapshot.groups);
-          }
-          // Select and merge the canonical physical Tag while each live group
-          // still carries its original saved identity. If references are
-          // remapped first, both groups appear canonical and display order can
-          // incorrectly preserve the duplicate's Chrome group and metadata.
-          await mergeDuplicateGroupsInActiveSpace({
-            windowBinding,
-            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
-          });
-          remapMergedSnapshotGroupReferences(
-            currentDuplicateTagPlan.snapshotGroupIdReplacements,
-          );
-          // Merge the saved Tag records before writing names. Otherwise the
-          // pre-preview merged clone can overwrite a just-written panelTitle,
-          // which is especially visible for opened saved-target rows that are
-          // intentionally excluded from passive snapshot refreshes.
-          for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
-          const refreshed = await refreshTabsView({
-            reloadDormant: true,
-            render: false,
-            windowBinding,
-          });
-          if (refreshed === false) {
-            throw new Error('This panel moved before Tidy Names could verify the merged Tags.');
-          }
-          const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
-          if (refreshedTargets.length !== renameItems.length) {
-            throw new Error('Tabs changed while Tidy Names was being applied. The change was rolled back.');
-          }
-          if (
-            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
-            countDuplicateActiveGroups() > 0
-          ) {
-            throw new Error('Tidy Names could not finish merging duplicate Tags. The change was rolled back.');
-          }
-          const summaryParts = [];
-          if (renameItems.length > 0) {
-            summaryParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`);
-          }
-          if (duplicateTagCount > 0) {
-            summaryParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
-          }
-          const appliedOrganization = duplicateTagCount > 0
-            ? organizationForCurrentSpaceState(sourceSpaceId)
-            : null;
-          recordOperation({
-            type: 'tidy-names',
-            spaceId: sourceSpaceId,
-            summary: `Tidy Names ${summaryParts.join(' and ')}`,
-            before: {
-              renamedTabs: beforeNames,
-              ...(duplicateTagCount > 0 ? {
-                tagMerge: true,
-                snapshot: beforeSnapshot,
-                live: beforeLive,
-                snapshotGroupReferences: beforeSnapshotGroupReferences,
-              } : {}),
-            },
-            after: {
-              renamedTabs: afterNames,
-              ...(renameItems.length > 0 ? {
-                targetFingerprint: fingerprintTidyNameTargets(
-                  refreshedTargets,
-                  state.renamedTabs,
-                ),
-              } : {}),
-              ...(duplicateTagCount > 0 ? {
-                organizationFingerprint: appliedOrganization.fingerprint,
-                organizationFingerprintParts: appliedOrganization.fingerprintParts,
-              } : {}),
-            },
-          });
-        },
-        checkpoint: async () => {
-          const saved = await saveState({ persistWindowState: false, windowBinding });
-          if (saved !== true) {
-            throw new Error('This panel moved before Tidy Names could save the merged Tags.');
-          }
-        },
-        rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
-          windowBinding,
-          persistRestoredState: true,
-        }),
-      });
-      committed = true;
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        postCommitWarning = 'Tidy Names was saved, but this panel moved before its view could refresh.';
-      } else {
-        try {
-          render();
-          renderOperationRecord();
-        } catch (error) {
-          console.error(error);
-          postCommitWarning =
-            'Tidy Names was saved, but this view could not refresh. Reopen Space Tabs to see the saved result.';
-        }
-      }
-    });
-    if (!committed) {
-      throw new Error('Tidy Names stopped before its reviewed changes could be committed. Nothing was changed.');
-    }
-    if (postCommitWarning) {
-      setStatus(postCommitWarning);
-      showStatusToast(postCommitWarning, 'info');
-      return;
-    }
-    const statusParts = [];
-    if (renameItems.length > 0) {
-      statusParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel`);
-    }
-    if (duplicateTagCount > 0) {
-      statusParts.push(`merged ${duplicateTagCount} duplicate ${duplicateTagCount === 1 ? 'Tag' : 'Tags'}`);
-    }
-    setStatus(`Tidy ${statusParts.join(' and ')}${renameItems.length > 0 ? ` · ${namingResult.sourceLabel}` : ''}.`);
-  } finally {
-    endPanelAction();
-  }
-}
-
-async function tidyTabNamesWithAI(candidates, options = {}) {
-  const settings = options.settings || structuredClone(state.ai);
-  if (!hasUsableAISettings(settings) || candidates.length === 0) {
-    return { names: {}, sourceLabel: 'Local naming' };
-  }
-
-  try {
-    await (options.permissionRequest || ensureAIHostPermission(settings));
-    const response = await send('ai:chat', {
-      settings,
-      purpose: 'tidy-names',
-      itemCount: candidates.length,
-      messages: createPrompt('tidy-names', {
-        tabs: candidates.map(compactTabForAI),
-        language: settings.language,
-      }),
-    }, { windowBinding: options.windowBinding });
-    if (response.finishReason === 'length') {
-      throw new Error('The provider reached the Tidy Names output limit before returning a complete list.');
-    }
-    const names = parseTidyNames(response.text, candidates);
-    if (Object.keys(names).length === 0) {
-      throw new Error('AI returned no usable names.');
-    }
-    return {
-      names,
-      sourceLabel: `AI: ${providerById(settings.provider).label}`,
-    };
-  } catch (error) {
-    const reason = formatAIError(error);
-    setStatus(`${reason} Using local naming instead.`);
-    return {
-      names: {},
-      sourceLabel: `Local fallback (AI unavailable: ${reason})`,
-    };
-  }
-}
-
-function hasManualPanelName(tabId) {
-  return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
-}
-
-function prepareAutoGroupRequestFromUserGesture() {
-  return prepareOrganizationAIRequestFromUserGesture(hasCurrentAutoGroupAICandidates);
-}
-
-function hasCurrentAutoGroupAICandidates() {
+function hasCurrentTidyRunCandidates() {
+  // Duplicate Tags and saved-row merges can act even without live tabs, and
+  // grouping/naming candidates cover the AI paths, so ask both questions.
+  if (hasCurrentTidyNamesAICandidates()) return true;
   try {
     const sourceSpaceId = state.activeSpaceId;
     const snapshot = state.spaceSnapshots?.[sourceSpaceId] || { version: 1, groups: [] };
@@ -8859,30 +7702,38 @@ function hasCurrentAutoGroupAICandidates() {
       !foreignCandidateIds.has(Number(tab.id)) &&
       !tab.pinned &&
       isPageShortcutCapableUrl(tab.url)
-    ));
+    )) || fingerprintTidyDuplicateTags(snapshot) !== '';
   } catch {
     // Requesting up front is safer than losing the click gesture when local state is malformed.
     return true;
   }
 }
 
-function startAutoGroupFromUserGesture() {
-  const request = prepareAutoGroupRequestFromUserGesture();
-  void runTask((windowBinding) => autoGroupTabs({ ...request, windowBinding }));
+function prepareTidyRequestFromUserGesture() {
+  return prepareOrganizationAIRequestFromUserGesture(hasCurrentTidyRunCandidates);
 }
 
-async function autoGroupTabs(options = {}) {
+function startTidyNamesFromUserGesture() {
+  const request = prepareTidyRequestFromUserGesture();
+  void runTask((windowBinding) => runTidy({ ...request, windowBinding }));
+}
+
+async function runTidy(options = {}) {
   const windowBinding = options.windowBinding;
   const startedAt = performance.now();
   const aiSettings = options.aiSettings || structuredClone(state.ai);
   const permissionRequest = options.permissionRequest || Promise.resolve(true);
   const permissionRequested = options.permissionRequested === true;
-  beginPanelAction('autoGroup');
+  const rules = normalizeTidyRuleSettings(state.tidyRules);
+  const groupTopicEnabled = tidyRuleEnabled(rules, 'group-by-topic');
+  const groupDomainEnabled = tidyRuleEnabled(rules, 'group-by-domain');
+  const renameEnabled = tidyRuleEnabled(rules, 'rename-tabs');
+  const dedupeUrlsEnabled = tidyRuleEnabled(rules, 'dedupe-urls');
+  const groupRuleText = tidyRulePrompt(rules, 'group-by-topic');
+  const renameRuleText = tidyRulePrompt(rules, 'rename-tabs');
+  beginPanelAction('tidyNames');
   try {
-    const refreshed = await refreshOrganizationActionState({
-      adopt: true,
-      windowBinding,
-    });
+    const refreshed = await refreshOrganizationActionState({ adopt: true, windowBinding });
     if (refreshed === false) return;
     const sourceSpaceId = state.activeSpaceId;
     snapshotOpenSpace(sourceSpaceId);
@@ -8901,10 +7752,7 @@ async function autoGroupTabs(options = {}) {
       !tab.pinned &&
       isPageShortcutCapableUrl(tab.url)
     ));
-    const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(
-      sourceSnapshot,
-      sourceSnapshot.updatedAt,
-    );
+    const duplicateSnapshotPlan = mergeDuplicateSnapshotTags(sourceSnapshot, sourceSnapshot.updatedAt);
     const duplicateLiveBuckets = duplicateActiveGroupBuckets();
     const duplicateLiveGroupCount = duplicateLiveBuckets
       .reduce((sum, bucket) => sum + bucket.length - 1, 0);
@@ -8917,56 +7765,89 @@ async function autoGroupTabs(options = {}) {
     );
     const duplicateGroupCount = duplicateTagSummary.mergedCount;
     const duplicateGroupFingerprint = fingerprintTidyDuplicateTags(sourceSnapshot);
-    if (candidates.length === 0 && duplicateGroupCount === 0) {
-      const message = foreignCandidateIds.size > 0
-        ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
-        : 'No live or saved http(s) tabs are available to organize in this Space.';
-      setStatus(message);
-      showStatusToast(message, 'error');
-      return;
+    const visibleTabs = spaceView
+      .flatMap((group) => group.tabs)
+      .filter((tab) => (
+        !tab.dormant && Number.isFinite(Number(tab.id)) && isPageShortcutCapableUrl(tab.url)
+      ));
+
+    const renameableTabs = visibleTabs.filter((tab) => !tab.pinned);
+    const aiCandidates = renameableTabs.filter((tab) => !hasManualPanelName(tab.id));
+    const useRenameAI = renameEnabled && aiCandidates.length > 0 && hasUsableAISettings(aiSettings);
+    const localNames = planTidyTabNames(renameableTabs, {
+      existingNames: state.renamedTabs,
+      preserveExisting: true,
+    });
+    let namingResult = { names: {}, sourceLabel: 'Local naming' };
+    if (useRenameAI) {
+      const provider = providerById(aiSettings.provider);
+      setStatus(`Tidying ${aiCandidates.length} ${aiCandidates.length === 1 ? 'tab' : 'tabs'} with ${provider.label}...`);
+      namingResult = await tidyTabNamesWithAI(aiCandidates, {
+        permissionRequest: permissionRequested ? permissionRequest : null,
+        settings: aiSettings,
+        windowBinding,
+        rules: renameRuleText,
+      });
+      if (!isCurrentPanelWindowBinding(windowBinding)) {
+        throw new Error(
+          'This panel moved to another Chrome window before Tidy could apply. ' +
+          'Nothing was changed; run Tidy again in the current window.',
+        );
+      }
     }
-    if (extensionRuntime && candidates.length > 0 && !hasUsableAISettings(aiSettings)) {
-      const message = 'Auto Group needs a configured AI provider. Add your API key in Settings.';
-      setStatus(message);
-      showStatusToast(message, 'error');
-      return;
-    }
+    const plannedNames = { ...localNames, ...namingResult.names };
+    const renameItems = renameEnabled
+      ? renameableTabs
+        .map((tab) => ({
+          id: Number(tab.id),
+          title: tab.displayTitle || tab.title || 'Untitled',
+          result: plannedNames[tab.id] || tab.displayTitle || tab.title || 'Untitled',
+          meta: tab.domain,
+        }))
+        .filter((item) => item.title !== item.result)
+      : [];
+
     let plannedGroups = [];
-    if (candidates.length > 0) {
-      try {
-        const provider = providerById(aiSettings.provider);
-        setStatus(`Generating Auto Group preview with ${provider.label} for ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}...`);
-        if (permissionRequested) await permissionRequest;
-        else await ensureAIHostPermission(aiSettings);
-        const response = await send('ai:chat', {
-          settings: aiSettings,
-          purpose: 'auto-group',
-          itemCount: candidates.length,
-          messages: createPrompt('tidy-tabs', {
-            tabs: candidates.map((candidate) => ({
-              ...compactTabForAI(candidate),
-              currentGroup: isUngroupedSnapshotGroup(candidate.currentGroup)
-                ? null
-                : candidate.currentGroup?.title || null,
-              status: candidate.dormant ? 'saved' : 'live',
-            })),
-          }),
-        }, { windowBinding });
-        if (!isCurrentPanelWindowBinding(windowBinding)) {
-          throw new Error(
-            'This panel moved to another Chrome window before Auto Group could create a preview.',
-          );
+    let skippedTopicNotice = '';
+    if (groupTopicEnabled && candidates.length > 0) {
+      if (!hasUsableAISettings(aiSettings)) {
+        skippedTopicNotice =
+          'Topic grouping needs a configured AI provider. Add your API key in Settings to group by topic.';
+      } else {
+        try {
+          const provider = providerById(aiSettings.provider);
+          setStatus(`Generating Tidy grouping preview with ${provider.label} for ${candidates.length} ${candidates.length === 1 ? 'tab' : 'tabs'}...`);
+          if (permissionRequested) await permissionRequest;
+          else await ensureAIHostPermission(aiSettings);
+          const response = await send('ai:chat', {
+            settings: aiSettings,
+            purpose: 'auto-group',
+            itemCount: candidates.length,
+            messages: createPrompt('tidy-tabs', {
+              rules: groupRuleText,
+              tabs: candidates.map((candidate) => ({
+                ...compactTabForAI(candidate),
+                currentGroup: candidate.currentGroup?.title || 'Ungrouped',
+                status: candidate.dormant ? 'saved' : 'live',
+              })),
+            }),
+          }, { windowBinding });
+          if (!isCurrentPanelWindowBinding(windowBinding)) {
+            throw new Error(
+              'This panel moved to another Chrome window before Tidy could create a preview.',
+            );
+          }
+          if (response.finishReason === 'length') {
+            throw new Error('The provider reached the Tidy output limit. No groups were changed; try again with fewer tabs.');
+          }
+          plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
+          if (plannedGroups.length === 0) {
+            throw new Error('AI returned no valid groups. Check the configured model and try again.');
+          }
+          assertCompleteAutoGroupPlan(plannedGroups, candidates);
+        } catch (error) {
+          throw new Error(`${formatAIError(error)} Tidy stopped without making changes.`);
         }
-        if (response.finishReason === 'length') {
-          throw new Error('The provider reached the Auto Group output limit. No groups were changed; try again with fewer tabs.');
-        }
-        plannedGroups = sanitizeTidyGroups(parseTidyGroups(response.text), candidates);
-        if (plannedGroups.length === 0) {
-          throw new Error('AI returned no valid groups. Check the configured model and try again.');
-        }
-        assertCompleteAutoGroupPlan(plannedGroups, candidates);
-      } catch (error) {
-        throw new Error(`${formatAIError(error)} Auto Group stopped without making changes.`);
       }
     }
 
@@ -8975,33 +7856,108 @@ async function autoGroupTabs(options = {}) {
       candidates,
       existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
     });
-    const previewGroups = resolvedPlan.previewGroups;
+    // The preview renders a per-tab diff: tabs the resolution marked unchanged
+    // already sit in their target Tag and must read as "already there", not as
+    // moves. The domain rule may re-resolve the plan below, so both stay
+    // mutable and refresh with the final plan.
+    let previewGroups = resolvedPlan.previewGroups;
     plannedGroups = resolvedPlan.plannedGroups;
-    if (plannedGroups.length === 0 && duplicateGroupCount === 0) {
-      const message = 'Auto Group proposed no changes. These tabs are already organized.';
+    let unchangedPlannedIds = new Set(resolvedPlan.unchangedCandidateIds);
+
+    // The local domain rule only buckets tabs the topic plan left untouched.
+    const topicPlannedIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
+    if (groupDomainEnabled) {
+      const domainCandidates = candidates.filter((candidate) => !topicPlannedIds.has(Number(candidate.id)));
+      const domainPlan = planTidyGroups(domainCandidates);
+      const combined = [...plannedGroups];
+      for (const domainGroup of domainPlan) {
+        const existing = combined.find((group) => (
+          groupTitleKey(group.title) === groupTitleKey(domainGroup.title)
+        ));
+        if (existing) {
+          for (const tabId of domainGroup.tabIds) {
+            if (!existing.tabIds.map(Number).includes(Number(tabId))) existing.tabIds.push(tabId);
+          }
+        } else {
+          combined.push(domainGroup);
+        }
+      }
+      if (combined.length > plannedGroups.length || combined.some((group, index) => group !== plannedGroups[index])) {
+        const domainResolved = resolveOrganizationPlanChanges({
+          plannedGroups: combined,
+          candidates,
+          existingGroups: organizationTargetGroups(sourceSpaceId, sourceSnapshot),
+        });
+        plannedGroups = domainResolved.plannedGroups;
+        previewGroups = domainResolved.previewGroups;
+        unchangedPlannedIds = new Set(domainResolved.unchangedCandidateIds);
+      }
+    }
+
+    const urlCloseIds = dedupeUrlsEnabled ? planDuplicateUrlClosures(visibleTabs) : [];
+
+    if (
+      plannedGroups.length === 0 &&
+      renameItems.length === 0 &&
+      urlCloseIds.length === 0 &&
+      duplicateGroupCount === 0
+    ) {
+      const message = skippedTopicNotice ||
+        (foreignCandidateIds.size > 0 && candidates.length === 0
+          ? 'Tabs open in another window are left unchanged. Open Space Tabs in that window to organize them.'
+          : 'Tidy found no changes to apply. These tabs are already organized.');
       setStatus(message);
-      showStatusToast(message, 'success');
+      showStatusToast(message, skippedTopicNotice ? 'info' : 'success');
       return;
     }
+
     const regroupedTabIds = new Set(plannedGroups.flatMap((group) => group.tabIds.map(Number)));
     const regroupedCount = regroupedTabIds.size;
     const tabsById = new Map(candidates.map((tab) => [Number(tab.id), tab]));
-    let groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const groupedCount = plannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
     const previewGroupedCount = previewGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
-    const previewSections = previewGroups.map((group) => ({
+    const previewSections = [];
+    if (urlCloseIds.length > 0) {
+      const closeById = new Map(visibleTabs.map((tab) => [Number(tab.id), tab]));
+      previewSections.push({
+        title: 'Close duplicate tabs',
+        color: 'red',
+        kind: 'notice',
+        countLabel: `${urlCloseIds.length} ${urlCloseIds.length === 1 ? 'tab' : 'tabs'}`,
+        items: urlCloseIds.map((tabId) => {
+          const tab = closeById.get(Number(tabId));
+          return {
+            title: tab?.displayTitle || tab?.title || 'Untitled',
+            meta: 'Same URL is already open; this copy closes',
+            badge: 'Duplicate',
+          };
+        }),
+      });
+    }
+    previewSections.push(...previewGroups.map((group) => ({
       title: group.title,
       color: group.color,
       kind: 'group',
       items: group.tabIds.map((tabId) => {
         const tab = tabsById.get(Number(tabId));
+        const fromTitle = tab?.currentGroup?.title || 'Ungrouped';
+        if (unchangedPlannedIds.has(Number(tabId))) {
+          return {
+            title: tab?.displayTitle || tab?.title || 'Untitled',
+            meta: domainFromUrl(tab?.url || ''),
+            badge: tab?.dormant ? 'Saved' : 'Live',
+            unchanged: true,
+            source: fromTitle,
+          };
+        }
         return {
           title: tab?.displayTitle || tab?.title || 'Untitled',
           meta: domainFromUrl(tab?.url || ''),
-          source: tab?.currentGroup?.title || 'Current group',
           badge: tab?.dormant ? 'Saved' : 'Live',
+          diff: { from: fromTitle, to: group.title },
         };
       }),
-    }));
+    })));
     const candidateIds = new Set(candidates.map((candidate) => Number(candidate.id)));
     const notSentCandidates = organization.candidates.filter((candidate) => !candidateIds.has(Number(candidate.id)));
     const plannedTargetTitleKeys = new Set(plannedGroups.map((group) => groupTitleKey(group.title)));
@@ -9054,6 +8010,19 @@ async function autoGroupTabs(options = {}) {
         })),
       });
     }
+    if (renameItems.length > 0) {
+      previewSections.push({
+        title: 'Rename tabs',
+        color: 'cyan',
+        kind: 'notice',
+        countLabel: `${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
+        items: renameItems.map((item) => ({
+          title: item.title,
+          meta: item.meta || 'no domain',
+          rename: { from: item.title, to: item.result },
+        })),
+      });
+    }
     const previewSummary = [];
     if (plannedGroups.length > 0) {
       previewSummary.push(`${previewGroupedCount} ${previewGroupedCount === 1 ? 'tab' : 'tabs'} → ${previewGroups.length} ${previewGroups.length === 1 ? 'group' : 'groups'}`);
@@ -9062,299 +8031,495 @@ async function autoGroupTabs(options = {}) {
     if (duplicateGroupCount > 0) {
       previewSummary.push(`${duplicateGroupCount} ${duplicateGroupCount === 1 ? 'merge' : 'merges'}`);
     }
+    if (renameItems.length > 0) {
+      previewSummary.push(`${renameItems.length} ${renameItems.length === 1 ? 'rename' : 'renames'}`);
+    }
+    if (urlCloseIds.length > 0) {
+      previewSummary.push(`${urlCloseIds.length} duplicate ${urlCloseIds.length === 1 ? 'tab' : 'tabs'} closing`);
+    }
     previewSummary.push(formatPreviewDuration(performance.now() - startedAt));
     const confirmed = await showPlanPreview({
-      title: 'Auto Group Preview',
+      title: 'Tidy Preview',
       message: previewSummary.join(' · '),
-      confirmText: 'Apply groups',
+      confirmText: 'Apply tidy',
       sections: previewSections,
       variant: 'groups',
     });
     if (!confirmed) return;
 
-    let committed = false;
     let createdGroups = 0;
     let mergedGroups = 0;
     let postCommitWarning = '';
-    await withSharedStateLock(async () => {
-      const synchronized = await syncStateFromStorage({ windowBinding });
-      if (synchronized === false) {
-        throw new Error(
-          'This panel moved before Auto Group could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      if (state.activeSpaceId !== sourceSpaceId) {
-        throw new Error('The active Space changed while Auto Group was open. Run it again in the current Space.');
-      }
-      // `loadTabs({ adopt: true })` and `snapshotOpenSpace` intentionally stage
-      // ownership/lifecycle refreshes for a successful commit. A failed Apply
-      // must still be a durable no-op, so capture storage-backed memory before
-      // either of those preparatory mutations runs. Physical Chrome membership
-      // is captured separately after the authoritative tab refresh below.
-      const rollback = captureChromeGroupMutationRollback();
-      const loaded = await loadTabs({ adopt: true, windowBinding });
-      if (loaded === false) {
-        throw new Error(
-          'This panel moved before Auto Group could apply the reviewed changes. ' +
-          'Nothing was changed; review a fresh preview in the current window.',
-        );
-      }
-      snapshotOpenSpace(sourceSpaceId);
-      const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
-        version: 1,
-        updatedAt: Date.now(),
-        groups: [],
-      });
-      const currentOrganization = buildOrganizationCandidates({
-        liveGroups: buildSpaceViewForSpace(sourceSpaceId),
-        snapshot: currentSnapshot,
-      });
-      if (fingerprintTidyDuplicateTags(currentSnapshot) !== duplicateGroupFingerprint) {
-        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
-      }
-      const currentDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(currentSnapshot);
-      if (
-        currentDuplicateSnapshotPlan.mergedCount !== duplicateSnapshotPlan.mergedCount ||
-        countDuplicateActiveGroups() !== duplicateLiveGroupCount
-      ) {
-        throw new Error('Duplicate Tags changed while Auto Group was open. Review a fresh preview before applying groups.');
-      }
-      const rebasedPreviewGroups = rebaseOrganizationPlan({
-        previewCandidates: organization.candidates,
-        currentCandidates: currentOrganization.candidates,
-        plannedGroups: previewGroups,
-      });
-      const currentResolvedPlan = resolveOrganizationPlanChanges({
-        plannedGroups: rebasedPreviewGroups,
-        candidates: currentOrganization.candidates,
-        existingGroups: organizationTargetGroups(sourceSpaceId, currentSnapshot),
-      });
-      if (JSON.stringify(currentResolvedPlan.previewGroups) !== JSON.stringify(rebasedPreviewGroups)) {
-        throw new Error('An Auto Group target changed while the preview was open. Review a fresh preview before applying groups.');
-      }
-      const rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
-      groupedCount = rebasedPlannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
-      const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds(
-        currentOrganization,
+    if (plannedGroups.length > 0 || duplicateGroupCount > 0) {
+      await applyTidyGroupingPhase({
         sourceSpaceId,
-      );
-      if (rebasedPreviewGroups.some((group) => (
-        group.tabIds.some((candidateId) => currentForeignCandidateIds.has(Number(candidateId)))
-      ))) {
-        throw new Error(
-          'An Auto Group target is now open in another window. ' +
-          'Open Space Tabs there or review a fresh preview before applying groups.',
-        );
-      }
-      const currentEligibleCandidateIds = new Set(currentOrganization.candidates
-        .filter((candidate) => (
-          !currentForeignCandidateIds.has(Number(candidate.id)) &&
-          !candidate.pinned &&
-          isPageShortcutCapableUrl(candidate.url)
-        ))
-        .map((candidate) => Number(candidate.id)));
-      const rebasedCandidateIds = rebasedPreviewGroups
-        .flatMap((group) => group.tabIds.map(Number));
-      const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
-      if (
-        rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
-        rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
-        rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
-        [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId))
-      ) {
-        throw new Error(
-          'The eligible tabs changed while Auto Group was open. ' +
-          'Review a fresh preview before applying groups.',
-        );
-      }
-
-      const beforeSnapshot = structuredClone(currentSnapshot);
-      const beforeLive = captureLiveOrganization(sourceSpaceId);
-      const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
-      const organizedSnapshot = applyOrganizationPlanToSnapshot({
-        snapshot: currentSnapshot,
-        candidates: currentOrganization.candidates,
-        plannedGroups: rebasedPlannedGroups,
-      });
-      // Auto Group can create a new saved target (including when Chrome's
-      // compact physical title differs from the logical saved Tag title).
-      // Give every new target a durable identity before lifecycle bindings are
-      // checkpointed and before duplicate Tags are merged.
-      const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds(
-        organizedSnapshot,
-        createSnapshotLifecycleId,
-      );
-      const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(
-        identifiedOrganizedSnapshot,
-      );
-      const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
-        appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
-      );
-      rollback.membership = captureTabGroupMembership(
-        tabs,
-        groups,
-        beforeLive.tabs.map((tab) => tab.tabId),
-      );
-      const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
-      const livePlannedGroups = rebasedPlannedGroups
-        .map((group) => ({
-          ...group,
-          tabIds: group.tabIds
-            .map((candidateId) => Number(candidateById.get(Number(candidateId))?.source?.live?.tabId))
-            .filter(Number.isFinite),
-        }))
-        .filter((group) => group.tabIds.length > 0);
-
-      await runChromeGroupMutationTransaction({
-        apply: async () => {
-          replaceActiveSpaceSnapshotGroups(
-            appliedDuplicateSnapshotPlan.snapshot.groups,
-            appliedDuplicateSnapshotPlan.snapshot,
-          );
-          dormantSpaceViewSpaceId = '';
-
-          // Preserve the physical Tag whose live tabs still own the canonical
-          // snapshot identity. Remapping every duplicate reference first would
-          // erase that distinction and let incidental display order win.
-          mergedGroups = await mergeDuplicateGroupsInActiveSpace({
-            windowBinding,
-            canonicalGroupIdsByTitle: canonicalLiveGroupIds,
-          });
-          remapMergedSnapshotGroupReferences(
-            appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
-          );
-          if (mergedGroups) {
-            const reloaded = await loadTabs({ adopt: false, windowBinding });
-            if (reloaded === false) {
-              throw new Error('This panel moved before duplicate groups could finish merging.');
-            }
-          }
-          const existingGroupsByTitle = activeChromeGroupsByTitle();
-          for (const group of livePlannedGroups) {
-            const titleKey = groupTitleKey(group.title);
-            let groupId = existingGroupsByTitle.get(titleKey)?.id;
-            if (Number.isFinite(Number(groupId))) {
-              const nextGroupId = await addTabsToChromeGroup(
-                groupId,
-                group.tabIds,
-                state.activeSpaceId,
-                { windowBinding },
-              );
-              if (nextGroupId === null) {
-                throw new Error(`Chrome could not apply the proposed group "${group.title}".`);
-              }
-              groupId = nextGroupId;
-            } else {
-              groupId = await createChromeGroup(group.tabIds, {
-                title: group.title,
-                color: group.color || nextGroupColor(),
-                collapsed: Boolean(group.collapsed),
-                windowBinding,
-              });
-              if (groupId === null) {
-                throw new Error(`Chrome could not create the proposed group "${group.title}".`);
-              }
-              existingGroupsByTitle.set(titleKey, {
-                id: groupId,
-                title: group.title,
-                color: group.color,
-              });
-              createdGroups += 1;
-            }
-          }
-
-          mergedGroups += await mergeDuplicateGroupsInActiveSpace({ windowBinding });
-          const loadedAfterGrouping = await loadTabs({ adopt: false, windowBinding });
-          if (loadedAfterGrouping === false) {
-            throw new Error('This panel moved before Auto Group could verify the Chrome groups.');
-          }
-          checkpointAutoGroupLifecycleBindings(
-            rebasedPlannedGroups,
-            candidateById,
-            sourceSpaceId,
-          );
-          const refreshed = await refreshTabsView({
-            reloadDormant: true,
-            render: false,
-            windowBinding,
-          });
-          if (refreshed === false) {
-            throw new Error('This panel moved before Auto Group could verify the saved Space view.');
-          }
-          if (
-            mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
-            countDuplicateActiveGroups() > 0
-          ) {
-            throw new Error('Auto Group could not finish merging duplicate Tags. The change was rolled back.');
-          }
-          assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
-
-          const operationSummary = groupedCount > 0
-            ? `Auto Group organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}` +
-              (duplicateGroupCount > 0
-                ? ` and merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`
-                : '')
-            : `Auto Group merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`;
-          recordOperation({
-            type: 'auto-group',
-            spaceId: sourceSpaceId,
-            summary: operationSummary,
-            before: {
-              snapshot: beforeSnapshot,
-              live: beforeLive,
-              snapshotGroupReferences: beforeSnapshotGroupReferences,
-            },
-            after: {
-              organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
-            },
-          });
+        sourceSnapshot,
+        organization,
+        foreignCandidateIds,
+        duplicateSnapshotPlan,
+        duplicateLiveGroupCount,
+        duplicateGroupCount,
+        duplicateGroupFingerprint,
+        previewGroups,
+        plannedGroups,
+        aiSettings,
+        windowBinding,
+        onProgress: (created, merged) => {
+          createdGroups = created;
+          mergedGroups = merged;
         },
-        checkpoint: async () => {
-          const saved = await saveState({ persistWindowState: false, windowBinding });
-          if (saved !== true) {
-            throw new Error('This panel moved before Auto Group could save its workspace checkpoint.');
-          }
+        onWarning: (message) => {
+          postCommitWarning = message;
         },
-        rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
-          windowBinding,
-          persistRestoredState: true,
-        }),
       });
-      committed = true;
-      if (!isCurrentPanelWindowBinding(windowBinding)) {
-        postCommitWarning =
-          'Auto Group was saved, but this panel moved before its view could refresh.';
-      } else {
-        try {
-          render();
-        } catch (error) {
-          console.error(error);
-          postCommitWarning =
-            'Auto Group was saved, but this view could not refresh. Reopen Space Tabs to see the saved groups.';
-        }
-      }
-    });
-    if (!committed) {
-      throw new Error('Auto Group stopped before its reviewed changes could be committed. Nothing was changed.');
     }
+    if (renameItems.length > 0) {
+      await applyTidyNamingPhase({
+        sourceSpaceId,
+        renameItems,
+        namingResult,
+        windowBinding,
+        onWarning: (message) => {
+          postCommitWarning = postCommitWarning || message;
+        },
+      });
+    }
+
+    if (urlCloseIds.length > 0) {
+      // Close each duplicate by id through the reviewed single-tab close so
+      // snapshot rows, saved order, and lifecycle metadata stay consistent.
+      const closeById = new Map(tabs.map((tab) => [Number(tab.id), tab]));
+      for (const tabId of urlCloseIds) {
+        const tab = closeById.get(Number(tabId));
+        if (!tab) continue;
+        const hostGroup = spaceView.find((group) => (group.tabs || []).some((candidate) => (
+          Number(candidate.id) === Number(tabId)
+        )));
+        await closeTab(tab, hostGroup?.key || '', { windowBinding });
+      }
+    }
+
+    const statusParts = [];
+    if (groupedCount > 0) statusParts.push(`grouped ${groupedCount} tabs`);
+    if (createdGroups) statusParts.push(`created ${createdGroups}`);
+    if (duplicateGroupCount > 0) {
+      statusParts.push(`merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`);
+    }
+    if (renameItems.length > 0) {
+      statusParts.push(`renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'} in the panel`);
+    }
+    if (urlCloseIds.length > 0) {
+      statusParts.push(`closed ${urlCloseIds.length} duplicate ${urlCloseIds.length === 1 ? 'tab' : 'tabs'}`);
+    }
+    setStatus(`Tidy updated ${currentSpace().name}: ${statusParts.join(', ') || 'nothing changed'}.`);
     if (postCommitWarning) {
-      setStatus(postCommitWarning);
       showStatusToast(postCommitWarning, 'info');
-      return;
+    } else if (skippedTopicNotice) {
+      showStatusToast(skippedTopicNotice, 'info');
     }
-    const parts = [];
-    if (createdGroups) parts.push(`created ${createdGroups}`);
-    if (groupedCount) parts.push(`grouped ${groupedCount} tabs`);
-    if (duplicateGroupCount) {
-      parts.push(
-        `merged ${duplicateGroupCount} duplicate ${duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`,
-      );
-    }
-    setStatus(`Auto group updated ${currentSpace().name}: ${parts.join(', ') || 'nothing changed'}.`);
   } finally {
     endPanelAction();
   }
+}
+
+async function applyTidyGroupingPhase(plan = {}, options = {}) {
+  const sourceSpaceId = plan.sourceSpaceId;
+  const windowBinding = options.windowBinding;
+  let committed = false;
+  let createdGroups = 0;
+  let mergedGroups = 0;
+  await withSharedStateLock(async () => {
+    const synchronized = await syncStateFromStorage({ windowBinding });
+    if (synchronized === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the reviewed changes. ' +
+        'Nothing was changed; review a fresh preview in the current window.',
+      );
+    }
+    if (state.activeSpaceId !== sourceSpaceId) {
+      throw new Error('The active Space changed while Tidy was open. Run it again in the current Space.');
+    }
+    const rollback = captureChromeGroupMutationRollback();
+    const loaded = await loadTabs({ adopt: true, windowBinding });
+    if (loaded === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the reviewed changes. ' +
+        'Nothing was changed; review a fresh preview in the current window.',
+      );
+    }
+    snapshotOpenSpace(sourceSpaceId);
+    const currentSnapshot = structuredClone(state.spaceSnapshots?.[sourceSpaceId] || {
+      version: 1,
+      updatedAt: Date.now(),
+      groups: [],
+    });
+    const currentOrganization = buildOrganizationCandidates({
+      liveGroups: buildSpaceViewForSpace(sourceSpaceId),
+      snapshot: currentSnapshot,
+    });
+    if (fingerprintTidyDuplicateTags(currentSnapshot) !== plan.duplicateGroupFingerprint) {
+      throw new Error('Duplicate Tags changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const currentDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(currentSnapshot);
+    if (
+      currentDuplicateSnapshotPlan.mergedCount !== plan.duplicateSnapshotPlan.mergedCount ||
+      countDuplicateActiveGroups() !== plan.duplicateLiveGroupCount
+    ) {
+      throw new Error('Duplicate Tags changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const rebasedPreviewGroups = rebaseOrganizationPlan({
+      previewCandidates: plan.organization.candidates,
+      currentCandidates: currentOrganization.candidates,
+      plannedGroups: plan.previewGroups,
+    });
+    const currentResolvedPlan = resolveOrganizationPlanChanges({
+      plannedGroups: rebasedPreviewGroups,
+      candidates: currentOrganization.candidates,
+      existingGroups: organizationTargetGroups(sourceSpaceId, currentSnapshot),
+    });
+    if (JSON.stringify(currentResolvedPlan.previewGroups) !== JSON.stringify(rebasedPreviewGroups)) {
+      throw new Error('A Tidy target changed while the preview was open. Review a fresh preview before applying.');
+    }
+    const rebasedPlannedGroups = currentResolvedPlan.plannedGroups;
+    const groupedCount = rebasedPlannedGroups.reduce((sum, group) => sum + group.tabIds.length, 0);
+    const currentForeignCandidateIds = foreignOpenOrganizationCandidateIds(
+      currentOrganization,
+      sourceSpaceId,
+    );
+    if (rebasedPreviewGroups.some((group) => (
+      group.tabIds.some((candidateId) => currentForeignCandidateIds.has(Number(candidateId)))
+    ))) {
+      throw new Error(
+        'A Tidy target is now open in another window. ' +
+        'Open Space Tabs there or review a fresh preview before applying.',
+      );
+    }
+    const currentEligibleCandidateIds = new Set(currentOrganization.candidates
+      .filter((candidate) => (
+        !currentForeignCandidateIds.has(Number(candidate.id)) &&
+        !candidate.pinned &&
+        isPageShortcutCapableUrl(candidate.url)
+      ))
+      .map((candidate) => Number(candidate.id)));
+    const rebasedCandidateIds = rebasedPreviewGroups
+      .flatMap((group) => group.tabIds.map(Number));
+    const rebasedCandidateIdSet = new Set(rebasedCandidateIds);
+    // A reviewed plan that groups tabs must still cover exactly the eligible
+    // set. Merge-only or rename-only plans legitimately group nothing, so the
+    // duplicate-Tag fingerprints above remain their freshness guard.
+    if (
+      rebasedPreviewGroups.length > 0 &&
+      (rebasedCandidateIds.length !== currentEligibleCandidateIds.size ||
+      rebasedCandidateIdSet.size !== rebasedCandidateIds.length ||
+      rebasedCandidateIds.some((candidateId) => !currentEligibleCandidateIds.has(candidateId)) ||
+      [...currentEligibleCandidateIds].some((candidateId) => !rebasedCandidateIdSet.has(candidateId)))
+    ) {
+      throw new Error(
+        'The eligible tabs changed while the preview was open. ' +
+        'Review a fresh preview before applying.',
+      );
+    }
+
+    const beforeSnapshot = structuredClone(currentSnapshot);
+    const beforeLive = captureLiveOrganization(sourceSpaceId);
+    const canonicalLiveGroupIds = canonicalLiveChromeGroupIdsByTitle(currentSnapshot);
+    const organizedSnapshot = applyOrganizationPlanToSnapshot({
+      snapshot: currentSnapshot,
+      candidates: currentOrganization.candidates,
+      plannedGroups: rebasedPlannedGroups,
+    });
+    const identifiedOrganizedSnapshot = ensureSnapshotLifecycleIds(
+      organizedSnapshot,
+      createSnapshotLifecycleId,
+    );
+    const appliedDuplicateSnapshotPlan = mergeDuplicateSnapshotTags(
+      identifiedOrganizedSnapshot,
+    );
+    const beforeSnapshotGroupReferences = captureMergedSnapshotGroupReferences(
+      appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+    );
+    rollback.membership = captureTabGroupMembership(
+      tabs,
+      groups,
+      beforeLive.tabs.map((tab) => tab.tabId),
+    );
+    const candidateById = new Map(currentOrganization.candidates.map((candidate) => [Number(candidate.id), candidate]));
+    const livePlannedGroups = rebasedPlannedGroups
+      .map((group) => ({
+        ...group,
+        tabIds: group.tabIds
+          .map((candidateId) => Number(candidateById.get(Number(candidateId))?.source?.live?.tabId))
+          .filter(Number.isFinite),
+      }))
+      .filter((group) => group.tabIds.length > 0);
+
+    const runPlanInFlight = async (transaction) => {
+      inFlightOrganizationPlanSpaceIds.add(sourceSpaceId);
+      try {
+        return await transaction();
+      } finally {
+        inFlightOrganizationPlanSpaceIds.delete(sourceSpaceId);
+      }
+    };
+    await runPlanInFlight(() => runChromeGroupMutationTransaction({
+      apply: async () => {
+        replaceActiveSpaceSnapshotGroups(
+          appliedDuplicateSnapshotPlan.snapshot.groups,
+          appliedDuplicateSnapshotPlan.snapshot,
+        );
+        dormantSpaceViewSpaceId = '';
+
+        mergedGroups = await mergeDuplicateGroupsInActiveSpace({
+          windowBinding,
+          canonicalGroupIdsByTitle: canonicalLiveGroupIds,
+        });
+        remapMergedSnapshotGroupReferences(
+          appliedDuplicateSnapshotPlan.snapshotGroupIdReplacements,
+        );
+        if (mergedGroups) {
+          const reloaded = await loadTabs({ adopt: false, windowBinding });
+          if (reloaded === false) {
+            throw new Error('This panel moved before duplicate groups could finish merging.');
+          }
+        }
+        const existingGroupsByTitle = activeChromeGroupsByTitle();
+        for (const group of livePlannedGroups) {
+          const titleKey = groupTitleKey(group.title);
+          let groupId = existingGroupsByTitle.get(titleKey)?.id;
+          if (Number.isFinite(Number(groupId))) {
+            const nextGroupId = await addTabsToChromeGroup(
+              groupId,
+              group.tabIds,
+              state.activeSpaceId,
+              { windowBinding },
+            );
+            if (nextGroupId === null) {
+              throw new Error(`Chrome could not apply the proposed group "${group.title}".`);
+            }
+            groupId = nextGroupId;
+          } else {
+            groupId = await createChromeGroup(group.tabIds, {
+              title: group.title,
+              color: group.color || nextGroupColor(),
+              collapsed: Boolean(group.collapsed),
+              windowBinding,
+            });
+            if (groupId === null) {
+              throw new Error(`Chrome could not create the proposed group "${group.title}".`);
+            }
+            existingGroupsByTitle.set(titleKey, {
+              id: groupId,
+              title: group.title,
+              color: group.color,
+            });
+            createdGroups += 1;
+          }
+        }
+
+        mergedGroups += await mergeDuplicateGroupsInActiveSpace({ windowBinding });
+        const loadedAfterGrouping = await loadTabs({ adopt: false, windowBinding });
+        if (loadedAfterGrouping === false) {
+          throw new Error('This panel moved before Tidy could verify the Chrome groups.');
+        }
+        checkpointAutoGroupLifecycleBindings(
+          rebasedPlannedGroups,
+          candidateById,
+          sourceSpaceId,
+        );
+        const refreshed = await refreshTabsView({
+          reloadDormant: true,
+          render: false,
+          windowBinding,
+        });
+        if (refreshed === false) {
+          throw new Error('This panel moved before Tidy could verify the saved Space view.');
+        }
+        if (
+          mergeDuplicateSnapshotTags(state.spaceSnapshots?.[sourceSpaceId]).mergedCount > 0 ||
+          countDuplicateActiveGroups() > 0
+        ) {
+          throw new Error('Tidy could not finish merging duplicate Tags. The change was rolled back.');
+        }
+        assertLivePlannedGroupsApplied(livePlannedGroups, sourceSpaceId);
+
+        const operationSummary = groupedCount > 0
+          ? `Tidy organized ${groupedCount} ${groupedCount === 1 ? 'tab' : 'tabs'}` +
+            (plan.duplicateGroupCount > 0
+              ? ` and merged ${plan.duplicateGroupCount} duplicate ${plan.duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`
+              : '')
+          : `Tidy merged ${plan.duplicateGroupCount} duplicate ${plan.duplicateGroupCount === 1 ? 'Tag' : 'Tags'}`;
+        recordOperation({
+          type: 'auto-group',
+          spaceId: sourceSpaceId,
+          summary: operationSummary,
+          before: {
+            snapshot: beforeSnapshot,
+            live: beforeLive,
+            snapshotGroupReferences: beforeSnapshotGroupReferences,
+          },
+          after: {
+            organizationFingerprint: organizationForCurrentSpaceState(sourceSpaceId).fingerprint,
+          },
+        });
+      },
+      checkpoint: async () => {
+        const saved = await saveState({ persistWindowState: false, windowBinding });
+        if (saved !== true) {
+          throw new Error('This panel moved before Tidy could save its workspace checkpoint.');
+        }
+      },
+      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
+        windowBinding,
+        persistRestoredState: true,
+      }),
+    }));
+    const settledSnapshot = state.spaceSnapshots?.[sourceSpaceId];
+    if (settledSnapshot?.preserveGroups) delete settledSnapshot.preserveGroups;
+    committed = true;
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      options.onWarning('Tidy was saved, but this panel moved before its view could refresh.');
+    } else {
+      try {
+        render();
+      } catch (error) {
+        console.error(error);
+        options.onWarning('Tidy was saved, but this view could not refresh. Reopen Space Tabs to see the saved groups.');
+      }
+    }
+    if (options.onProgress) options.onProgress(createdGroups, mergedGroups);
+    if (!committed) {
+      throw new Error('Tidy stopped before its reviewed changes could be committed. Nothing was changed.');
+    }
+  });
+}
+
+async function applyTidyNamingPhase(plan = {}, options = {}) {
+  const windowBinding = options.windowBinding;
+  let committed = false;
+  await withSharedStateLock(async () => {
+    const synchronized = await syncStateFromStorage({ windowBinding });
+    if (synchronized === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the planned renames. ' +
+        'Nothing was changed; run Tidy again in the current window.',
+      );
+    }
+    if (state.activeSpaceId !== plan.sourceSpaceId) {
+      throw new Error('The active Space changed while Tidy was running. Run it again in the current Space.');
+    }
+    const rollback = captureChromeGroupMutationRollback();
+    const loaded = await loadTabs({ adopt: false, windowBinding });
+    if (loaded === false) {
+      throw new Error(
+        'This panel moved before Tidy could apply the planned renames. ' +
+        'Nothing was changed; run Tidy again in the current window.',
+      );
+    }
+    snapshotOpenSpace(plan.sourceSpaceId);
+    const renameItems = plan.renameItems;
+    const targetIds = new Set(renameItems.map((item) => item.id));
+    const currentTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+    if (currentTargets.length !== renameItems.length) {
+      throw new Error('Tabs changed while Tidy was running. Run it again before applying names.');
+    }
+    const beforeNames = Object.fromEntries(renameItems.map((item) => [
+      item.id,
+      Object.hasOwn(state.renamedTabs, item.id) ? state.renamedTabs[item.id] : null,
+    ]));
+    const afterNames = Object.fromEntries(renameItems.map((item) => [item.id, item.result]));
+    await runChromeGroupMutationTransaction({
+      apply: async () => {
+        for (const item of renameItems) setLiveTabPanelTitle(state, item.id, item.result);
+        const refreshed = await refreshTabsView({
+          reloadDormant: true,
+          render: false,
+          windowBinding,
+        });
+        if (refreshed === false) {
+          throw new Error('This panel moved before Tidy could verify the renamed tabs.');
+        }
+        const refreshedTargets = tabs.filter((tab) => targetIds.has(Number(tab.id)));
+        if (refreshedTargets.length !== renameItems.length) {
+          throw new Error('Tabs changed while Tidy was applying names. The change was rolled back.');
+        }
+        recordOperation({
+          type: 'tidy-names',
+          spaceId: plan.sourceSpaceId,
+          summary: `Tidy renamed ${renameItems.length} ${renameItems.length === 1 ? 'tab' : 'tabs'}`,
+          before: { renamedTabs: beforeNames },
+          after: {
+            renamedTabs: afterNames,
+            targetFingerprint: fingerprintTidyNameTargets(
+              refreshedTargets,
+              state.renamedTabs,
+            ),
+          },
+        });
+      },
+      checkpoint: async () => {
+        const saved = await saveState({ persistWindowState: false, windowBinding });
+        if (saved !== true) {
+          throw new Error('This panel moved before Tidy could save the renamed tabs.');
+        }
+      },
+      rollback: () => restoreChromeGroupMutationAfterFailure(rollback, {
+        windowBinding,
+        persistRestoredState: true,
+      }),
+    });
+    committed = true;
+    if (!isCurrentPanelWindowBinding(windowBinding)) {
+      options.onWarning('Tidy was saved, but this panel moved before its view could refresh.');
+    } else {
+      render();
+    }
+  });
+  if (!committed) {
+    throw new Error('Tidy stopped before its planned renames could be committed. Nothing was changed.');
+  }
+}
+
+async function tidyTabNamesWithAI(candidates, options = {}) {
+  const settings = options.settings || structuredClone(state.ai);
+  if (!hasUsableAISettings(settings) || candidates.length === 0) {
+    return { names: {}, sourceLabel: 'Local naming' };
+  }
+
+  try {
+    await (options.permissionRequest || ensureAIHostPermission(settings));
+    const response = await send('ai:chat', {
+      settings,
+      purpose: 'tidy-names',
+      itemCount: candidates.length,
+      messages: createPrompt('tidy-names', {
+        tabs: candidates.map(compactTabForAI),
+        language: settings.language,
+        ...(options.rules ? { rules: options.rules } : {}),
+      }),
+    }, { windowBinding: options.windowBinding });
+    if (response.finishReason === 'length') {
+      throw new Error('The provider reached the Tidy Names output limit before returning a complete list.');
+    }
+    const names = parseTidyNames(response.text, candidates);
+    if (Object.keys(names).length === 0) {
+      throw new Error('AI returned no usable names.');
+    }
+    return {
+      names,
+      sourceLabel: `AI: ${providerById(settings.provider).label}`,
+    };
+  } catch (error) {
+    const reason = formatAIError(error);
+    setStatus(`${reason} Using local naming instead.`);
+    return {
+      names: {},
+      sourceLabel: `Local fallback (AI unavailable: ${reason})`,
+    };
+  }
+}
+
+function hasManualPanelName(tabId) {
+  return String(state.renamedTabs?.[tabId] || '').trim().length > 0;
 }
 
 function foreignOpenOrganizationCandidateIds(organization, spaceId) {
@@ -9562,6 +8727,17 @@ function remapMergedSnapshotGroupReferences(snapshotGroupIds) {
   state.tabLifecycle = remapTabLifecycleGroupReferences(state.tabLifecycle, {
     snapshotGroupIds,
   });
+  // 身份合并（重复同名 Tag 收敛）会替换 snapshotGroupId：层级边的 anchor
+  // 端点同步跟随，否则合并后的边失联（子组掉回顶层）。
+  for (const spaceId of Object.keys(state.groupParents || {})) {
+    const replacements = new Map();
+    for (const [oldId, newId] of Object.entries(snapshotGroupIds)) {
+      replacements.set(`sgid:${oldId}`, `sgid:${newId}`);
+    }
+    if (replacements.size > 0) {
+      state.groupParents[spaceId] = remapGroupParents(state.groupParents[spaceId], replacements);
+    }
+  }
   for (const virtualGroup of Object.values(state.virtualGroups || {})) {
     const snapshotGroupId = String(virtualGroup?.snapshotGroupId || '').trim();
     if (Object.hasOwn(snapshotGroupIds, snapshotGroupId)) {
@@ -9817,17 +8993,7 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
       const snapshotTabId = validSnapshotLifecycleId(
         candidate?.source?.snapshot?.snapshotTabId || binding?.snapshotTabId,
       );
-      const matchingSnapshotGroup = uniqueSnapshotGroupForTabId(
-        snapshotGroups,
-        snapshotTabId,
-      );
-      const targetSnapshotGroupId = matchingSnapshotGroup
-        ? validSnapshotLifecycleId(matchingSnapshotGroup.snapshotGroupId)
-        : '';
-      if (
-        !currentTab || !isGroupedTab(currentTab) || !binding ||
-        !snapshotTabId || !targetSnapshotGroupId
-      ) {
+      if (!currentTab || !isGroupedTab(currentTab) || !binding) {
         const stableMatchCount = snapshotGroups.filter((group) => (
           (group?.tabs || []).some((tab) => (
             validSnapshotLifecycleId(tab?.snapshotTabId) === snapshotTabId
@@ -9837,9 +9003,30 @@ function checkpointAutoGroupLifecycleBindings(plannedGroups, candidateById, spac
           `The stable saved row for "${plannedGroup.title || 'Tabs'}" could not be checkpointed ` +
           `(row ${snapshotTabId || 'missing'}, matches ${stableMatchCount}, ` +
           `live ${Boolean(currentTab)}, grouped ${Boolean(currentTab && isGroupedTab(currentTab))}, ` +
-          `binding ${Boolean(binding)}, target ${targetSnapshotGroupId || 'missing'}). ` +
+          `binding ${Boolean(binding)}). ` +
           'The Auto Group change was rolled back.',
         );
+      }
+      if (!snapshotTabId) continue;
+      // 行身份可能已被上游快照重建/清退摘除；优先治愈而不是回滚整个变更。
+      const heal = planStaleLifecycleBindingHeal({
+        snapshotTabId,
+        snapshotGroups,
+        candidateSnapshotGroupId: binding.snapshotGroupId,
+      });
+      const targetSnapshotGroupId = validSnapshotLifecycleId(heal.snapshotGroupId);
+      if (heal.action === 'clear' || !targetSnapshotGroupId) {
+        console.warn(
+          `Healed stale saved-row binding by clear: row ${snapshotTabId} of "${plannedGroup.title || 'Tabs'}" no longer matches any saved Tag.`,
+        );
+        state.tabLifecycle[liveTabId] = {
+          ...binding,
+          tabId: liveTabId,
+          snapshotTabId: '',
+          snapshotGroupId: '',
+          provisional: true,
+        };
+        continue;
       }
       state.tabLifecycle[liveTabId] = {
         ...binding,
@@ -9888,8 +9075,7 @@ function endPanelAction() {
 }
 
 function panelActionStatus(action) {
-  if (action === 'tidyNames') return 'Tidying tab names...';
-  if (action === 'autoGroup') return 'Auto grouping tabs...';
+  if (action === 'tidyNames') return 'Tidying tabs...';
   return 'Working...';
 }
 
@@ -9901,349 +9087,49 @@ function formatPreviewDuration(milliseconds) {
 
 function updatePanelActionUI() {
   const tidyBusy = activePanelAction === 'tidyNames';
-  const groupBusy = activePanelAction === 'autoGroup';
   const busy = Boolean(activePanelAction);
 
   els.tidyNamesButton.disabled = busy;
-  els.autoGroupButton.disabled = busy;
   els.collapseGroupsButton.disabled = busy;
   els.tidyNamesButton.innerHTML = tidyBusy ? '...' : TIDY_NAMES_ICON;
-  els.autoGroupButton.innerHTML = groupBusy ? '...' : AUTO_GROUP_ICON;
   els.tidyNamesButton.classList.toggle('busy', tidyBusy);
-  els.autoGroupButton.classList.toggle('busy', groupBusy);
 }
 
 function focusPanelForShortcuts() {
-  const target = activeView === 'ask'
-    ? els.askPagePrompt
-    : els.groupsList;
+  const target = els.groupsList;
   if (!target || target.hidden) return;
   if (target === els.groupsList) target.tabIndex = -1;
   panelFocusController.request();
 }
 
-async function openAskPage(options = {}) {
-  await withSharedStateLock(async () => {
-    const synchronized = await syncStateFromStorage({ windowBinding: options.windowBinding });
-    if (synchronized === false) return;
-    activeView = 'ask';
-    ensureCurrentAskSession();
-    await saveState({
-      persistWindowState: false,
+async function detectProviderModels(controls = settingsAIControls(), options = {}) {
+  const settings = currentAISettingsFromControls(controls);
+  if (!String(settings.baseUrl || '').trim()) {
+    setAIControlsStatus(controls, 'Enter a Base URL before detecting models.');
+    return;
+  }
+  setStatus('Detecting models from the provider...');
+  try {
+    await ensureAIHostPermission(settings);
+    const { models } = await send('ai:listModels', { settings }, {
       windowBinding: options.windowBinding,
     });
-  });
-  render();
-  els.askPagePrompt.focus();
-}
-
-function startAskFromUserGesture() {
-  if (activeAIRequestId) {
-    void abortActiveAIRequest();
-    return;
-  }
-  const prompt = els.askPagePrompt.value.trim();
-  if (!prompt) return;
-  const currentTab = currentAskPageTab();
-  if (!currentTab || !isPageShortcutCapableUrl(currentTab.url)) {
-    reportAskStartError('Switch to an http or https page before using Ask Page.');
-    return;
-  }
-  const sourceTab = {
-    id: Number(currentTab.id),
-    title: currentTab.displayTitle || currentTab.title || currentTab.url || 'Current page',
-    url: currentTab.url,
-  };
-  const aiSettings = structuredClone(state.ai);
-  if (providerRequiresApiKey(aiSettings) && !aiSettings.apiKey) {
-    reportAskStartError('AI API key is missing. Add it in Settings before reading the current page.');
-    return;
-  }
-  let permissionRequest;
-  try {
-    permissionRequest = requestAskPermissionsFromUserGesture(sourceTab, aiSettings);
+    detectedModelIds = Array.isArray(models) ? models : [];
+    renderSettingsAISection();
+    const current = currentAISettingsFromControls(controls).model;
+    if (!current && detectedModelIds.length > 0) {
+      controls.modelInput.value = detectedModelIds[0];
+    }
+    setAIControlsStatus(controls, `Detected ${formatCount(detectedModelIds.length, 'model')} from ${providerById(state.ai.provider).label}. Pick one from the suggestions or keep yours.`);
   } catch (error) {
-    reportAskStartError(formatAIError(error));
-    return;
+    detectedModelIds = [];
+    renderModelOptions(providerById(state.ai.provider), '', controls);
+    setAIControlsStatus(controls, `${formatAIError(error)} Enter the model manually.`);
   }
-  void runTask(() => askCustomPrompt({
-    prompt,
-    sourceTab,
-    aiSettings,
-    permissionRequest,
-  }));
-}
-
-function requestAskPermissionsFromUserGesture(sourceTab, aiSettings = state.ai) {
-  if (!extensionRuntime) return Promise.resolve(true);
-  if (!sourceTab || !isPageShortcutCapableUrl(sourceTab.url)) {
-    throw new Error('Switch to an http or https page before using Ask Page.');
-  }
-  const origins = [...new Set([
-    getOriginPattern(sourceTab.url),
-    getOriginPattern(aiSettings.baseUrl),
-  ])];
-  return chrome.permissions.request({ origins }).then((granted) => {
-    if (!granted) {
-      throw new Error('Ask Page permission was not granted. No page content was read or sent.');
-    }
-    return true;
-  });
-}
-
-function reportAskStartError(message) {
-  setStatus(message);
-  showStatusToast(message, 'error');
-}
-
-async function askCustomPrompt({
-  prompt,
-  sourceTab,
-  aiSettings,
-  permissionRequest,
-} = {}) {
-  activeView = 'ask';
-  render();
-  const sessionKey = sessionKeyForTab(sourceTab);
-  const session = projectAskSessionForTab(state.askSessions, sourceTab);
-  const preparedSessionRevision = askSessionRevision(session);
-  const history = recentAskHistory(session.messages);
-  const requestId = beginAIRequest();
-  let statusMessage = null;
-  try {
-    await permissionRequest;
-    assertAIRequestActive(requestId);
-    const extraction = await send('pages:extract', {
-      tabIds: [sourceTab.id],
-      options: { maxCharsPerPage: 12000, maxTotalChars: 12000 },
-    });
-    assertAIRequestActive(requestId);
-    const pages = extraction.pages || [];
-    const failures = extraction.failures || [];
-    if (pages.length + failures.length !== 1) {
-      throw new Error('Ask Page could not account for the current page. No content was sent.');
-    }
-    if (pages.length === 0) {
-      const detail = failures[0]?.error;
-      throw new Error(detail || 'The current page could not be read. Reload it and try again.');
-    }
-    const page = pages[0];
-    if (
-      Number(page.tabId) !== Number(sourceTab.id) ||
-      normalizeSessionUrl(page.url) !== normalizeSessionUrl(sourceTab.url)
-    ) {
-      throw new Error('The current page changed while Ask Page was preparing it. Nothing was sent; try again.');
-    }
-    // Permission and extraction are asynchronous. Revalidate the frozen source
-    // before creating the durable turn and dispatching it to the provider.
-    assertAIRequestActive(requestId);
-    await assertPreparedAskPageStillCurrent(page, sourceTab);
-    assertAIRequestActive(requestId);
-    statusMessage = await beginAskTurn(
-      sessionKey,
-      prompt,
-      sourceTab,
-      session,
-      preparedSessionRevision,
-      requestId,
-    );
-    activeAskStreams.set(requestId, { messageRef: statusMessage, page, text: '', finished: false });
-    assertAIRequestActive(requestId);
-    const { text, finishReason, askPersisted, askStatus } = await send('ai:chat', {
-      settings: aiSettings,
-      requestId,
-      stream: true,
-      purpose: 'ask-page',
-      askStream: { ...statusMessage, requestId },
-      messages: createPrompt('ask-page', {
-        question: prompt,
-        page,
-        history,
-        language: aiSettings.language,
-      }),
-    });
-    if (!askPersisted) assertAIRequestActive(requestId);
-    const completedStream = activeAskStreams.get(requestId);
-    if (completedStream) completedStream.finished = true;
-    const answerText = finishReason === 'length'
-      ? `${text || 'No AI text returned.'}\n\n_The provider stopped at the Ask Page output limit; the answer may be incomplete._`
-      : text || 'No AI text returned.';
-    const answer = appendAskSourceLink(answerText, page);
-    if (askPersisted) {
-      if (askStatus === 'complete') els.askPagePrompt.value = '';
-      await refreshPersistedAskMessage();
-    } else {
-      els.askPagePrompt.value = '';
-      await persistAskMessage(statusMessage, answer);
-    }
-  } catch (error) {
-    const message = formatAIError(error);
-    const stream = activeAskStreams.get(requestId);
-    if (stream) stream.finished = true;
-    const partial = stream?.text || '';
-    if (statusMessage) {
-      const stopped = Boolean(stream?.aborted) || /request was stopped|ask stopped/i.test(message);
-      const answer = partial
-        ? appendAskSourceLink(`${partial}\n\n_${stopped ? 'Request stopped before completion.' : `Request failed before completion: ${message}`}_`, stream?.page)
-        : message;
-      await persistAskMessage(statusMessage, answer);
-    }
-    else {
-      setStatus(message);
-      showStatusToast(message, 'error');
-    }
-  } finally {
-    activeAskStreams.delete(requestId);
-    endAIRequest(requestId);
-  }
-}
-
-async function assertPreparedAskPageStillCurrent(page, sourceTab) {
-  const response = await send('tabs:listAll');
-  const current = (response.tabs || []).find((tab) => Number(tab.id) === Number(sourceTab.id));
-  if (
-    !current ||
-    normalizeSessionUrl(current.pendingUrl || current.url) !== normalizeSessionUrl(page.url)
-  ) {
-    throw new Error('The current page changed before Ask Page could send it. Nothing was sent; try again.');
-  }
-}
-
-function recentAskHistory(messages = []) {
-  return (messages || []).slice(-8).map((message) => ({
-    role: message.role,
-    text: askHistoryMessageText(message),
-  })).filter((message) => message.text.trim());
-}
-
-async function beginAskTurn(
-  sessionKey,
-  prompt,
-  sourceTab,
-  projectedSession,
-  preparedSessionRevision,
-  requestId,
-) {
-  if (extensionRuntime) {
-    const started = await send('ask:begin', {
-      askTurn: {
-        sessionKey,
-        prompt,
-        sourceTab,
-        projectedSession,
-        preparedSessionRevision,
-        requestId,
-        pruneOptions: currentAskSessionPruneOptions(sessionKey),
-      },
-    });
-    setActiveAskSessionKey(started.sessionKey);
-    // Ask conversations are global to the workspace. Refresh only that slice:
-    // a Workbench host can move windows while the background begins the turn,
-    // and a late full-state read must not replace the newly rebound window UI.
-    await withSharedStateLock(() => syncAskSessionsFromStorage());
-    renderAskMessages();
-    return {
-      sessionKey: started.sessionKey,
-      messageId: started.messageId,
-      sourceTab,
-    };
-  }
-
-  let assistantRef;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    const latestSession = materializeAskSessionForTurn(
-      state.askSessions,
-      sourceTab,
-      projectedSession,
-    );
-    if (latestSession.key !== sessionKey) {
-      throw new Error('The prepared Ask conversation no longer matches the current page. Nothing was sent; try again.');
-    }
-    if (askSessionRevision(latestSession) !== preparedSessionRevision) {
-      throw new Error('The Ask conversation changed before it could be sent. Nothing was sent; try again.');
-    }
-    setActiveAskSessionKey(latestSession.key);
-    appendAskSessionMessage(latestSession, 'user', prompt);
-    const assistant = appendAskSessionMessage(latestSession, 'assistant', 'Thinking...');
-    markAskStreamPending(assistant, requestId);
-    assistantRef = { sessionKey: latestSession.key, messageId: assistant.id, sourceTab };
-    pruneCurrentAskSessions(latestSession.key);
-    await saveState({ persistWindowState: false });
-  });
-  renderAskMessages();
-  return assistantRef;
-}
-
-async function persistAskMessage(ref, text) {
-  if (!ref) return;
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    replayAskMessageTabReplacements(ref);
-    const latestSession = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-    const updated = updateAskSessionMessage(latestSession, ref.messageId, text);
-    if (updated) delete updated.askStream;
-    if (!updated) appendAskSessionMessage(latestSession, 'assistant', text);
-    pruneCurrentAskSessions(activeAskSessionKey);
-    // This fallback is allowed to finish after the Workbench moved A → B.
-    // It owns global Ask data, not either window's active Space mapping.
-    await saveState({ persistWindowState: false });
-  });
-  if (ref.sessionKey === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-}
-
-async function refreshPersistedAskMessage() {
-  try {
-    await withSharedStateLock(() => syncAskSessionsFromStorage());
-    if (activeView === 'ask') renderAskMessages();
-    return true;
-  } catch (error) {
-    setStatus(`The provider response was saved, but this view could not refresh: ${formatAIError(error)}`);
-    return false;
-  }
-}
-
-async function syncAskSessionsFromStorage() {
-  const stored = await storageGet();
-  const workspace = mergeStoredState(stored[STORAGE_KEY], createDefaultState(localConfig));
-  state.askSessions = workspace.askSessions;
-  state.activeAskSessionKey = activeAskSessionKey;
-  return state.askSessions;
-}
-
-function replayAskMessageTabReplacements(ref) {
-  const replayed = replayAskSessionTabReplacements(
-    state.askSessions,
-    activeAskSessionKey,
-    ref?.tabReplacements,
-  );
-  state.askSessions = replayed.sessions;
-  activeAskSessionKey = replayed.activeKey;
-  state.activeAskSessionKey = activeAskSessionKey;
-}
-
-function assertAIRequestActive(requestId) {
-  if (activeAIRequestId !== requestId) throw new Error('AI request was stopped.');
 }
 
 function startTestAIFromUserGesture(controls = settingsAIControls()) {
-  if (activeAIRequestId) {
-    void abortActiveAIRequest();
-    return;
-  }
-  let settings;
-  let permissionRequest;
-  try {
-    settings = currentAISettingsFromControls(controls);
-    if (providerRequiresApiKey(settings) && !settings.apiKey) {
-      throw new Error('AI API key is missing. Add it in Settings.');
-    }
-    permissionRequest = requestAIHostPermissionFromUserGesture(settings);
-  } catch (error) {
-    setAIControlsStatus(controls, formatAIError(error));
-    return;
-  }
-  void runTask(() => testAI({ settings, permissionRequest, controls }));
+  void runTask(() => testAI({ controls }));
 }
 
 async function testAI({ settings = currentAISettingsFromForm(), permissionRequest, controls = settingsAIControls() } = {}) {
@@ -10268,7 +9154,6 @@ async function testAI({ settings = currentAISettingsFromForm(), permissionReques
     setAIControlsStatus(controls, message);
   } finally {
     endAIRequest(requestId);
-    updateOnboardingAIActionState();
   }
 }
 
@@ -10322,6 +9207,15 @@ async function previewSpaceBackupFile(options = {}) {
 
 async function restoreSpaceData(options = {}) {
   const windowBinding = options.windowBinding;
+  restoreSpaceDataReviewTransitions += 1;
+  try {
+    await runRestoreSpaceData(windowBinding);
+  } finally {
+    restoreSpaceDataReviewTransitions += 1;
+  }
+}
+
+async function runRestoreSpaceData(windowBinding) {
   if (!pendingSpaceBackup) {
     setSpaceBackupStatus('Choose a Space backup first.');
     return;
@@ -10497,12 +9391,11 @@ async function restoreSpaceData(options = {}) {
     dormantSpaceView = [];
     dormantSpaceViewSpaceId = '';
     lastRenderedGroupsSignature = '';
-    lastRenderedAskSignature = '';
-    lastRenderedSpacesSignature = '';
+      lastRenderedSpacesSignature = '';
     pendingSpaceBackup = null;
     els.spaceBackupInput.value = '';
     els.restoreSpaceDataButton.disabled = true;
-    els.settingsDialog.close();
+    exitSettingsView();
     render();
   } catch (error) {
     postCommitWarning ||= 'The backup restore was saved, but this view could not finish refreshing. Reopen Space Tabs to see the restored data.';
@@ -10551,19 +9444,13 @@ function formatSpaceBackupSummary(backup) {
   const savedTabs = Object.values(backup.spaceSnapshots || {}).reduce((total, snapshot) => (
     total + (snapshot?.groups || []).reduce((sum, group) => sum + (group.tabs || []).length, 0)
   ), 0);
-  const askConversations = Object.values(backup.askSessions || {})
-    .filter((session) => (session?.messages || []).length > 0)
-    .length;
-  return `${formatCount(backup.spaces.length, 'Space')}${askConversations > 0 ? ',' : ' and'} ` +
-    `${formatCount(savedTabs, 'saved tab')}` +
-    `${askConversations > 0 ? `, and ${formatCount(askConversations, 'Ask conversation')}` : ''}.`;
+  return `${formatCount(backup.spaces.length, 'Space')} and ` +
+    `${formatCount(savedTabs, 'saved tab')}.`;
 }
 
 function formatRestoredSpaceDataSummary(summary = {}) {
-  const askConversations = Number(summary.askConversations || 0);
-  return `${formatCount(summary.spaces, 'Space')}${askConversations > 0 ? ',' : ' and'} ` +
-    `${formatCount(summary.savedTabs, 'saved tab')}` +
-    `${askConversations > 0 ? `, and ${formatCount(askConversations, 'Ask conversation')}` : ''}`;
+  return `${formatCount(summary.spaces, 'Space')} and ` +
+    `${formatCount(summary.savedTabs, 'saved tab')}`;
 }
 
 function formatCount(value, singular) {
@@ -10840,7 +9727,7 @@ async function undoLastArcImport(options = {}) {
         });
       }
       state.lastArcImport = null;
-      activeView = workbenchMode ? 'ask' : 'space';
+      activeView = 'space';
       dormantSpaceView = [];
       dormantSpaceViewSpaceId = '';
       lastRenderedGroupsSignature = '';
@@ -10950,27 +9837,22 @@ function showGroupContextMenu(event, group) {
     showContextMenu(event, [menuNotice('Open this Space in the other window to edit this group.')]);
     return;
   }
+  // The header already covers open/close (click) and delete (×), so the menu
+  // keeps only Rename, New Subgroup, and Move to.
+  const groupDepth = nodeDepth(group.key, renderedHierarchyKeyParents);
+  const liveTabs = (group.tabs || []).filter((tab) => !tab.dormant);
+  const canCloseToSaved = !group.dormant && liveTabs.length > 0
+    && liveTabs.every((tab) => !tab.pinned && isRestorableSnapshotTab(tab));
   showContextMenu(event, [
     menuAction('Rename', (windowBinding) => renameGroup(group, { windowBinding })),
-    menuAction('Delete Group', (windowBinding) => deleteGroup(group, { windowBinding })),
+    ...(canCloseToSaved
+      ? [menuAction('Close & Save', (windowBinding) => closeGroupToSaved(group, { windowBinding }))]
+      : []),
+    ...(groupDepth < HIERARCHY_MAX_DEPTH
+      ? [menuAction('New Subgroup', (windowBinding) => createEmptyGroupNode(group.key, { windowBinding }))]
+      : []),
     ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
       moveGroupToSpace(group, space.id, { windowBinding })
-    ))),
-  ]);
-}
-
-function showFolderContextMenu(event, folderContext) {
-  event.preventDefault();
-  event.stopPropagation();
-  if (folderContextHasForeignLiveTabs(folderContext)) {
-    showContextMenu(event, [menuNotice('Open this Space in the other window to edit this folder group.')]);
-    return;
-  }
-  showContextMenu(event, [
-    menuAction('Rename', (windowBinding) => renameFolderGroup(folderContext, { windowBinding })),
-    menuAction('Delete Group', (windowBinding) => deleteFolderGroup(folderContext, { windowBinding })),
-    ...menuSection(moveToSpaceSubmenu((space, windowBinding) => (
-      moveFolderGroupToSpace(folderContext, space.id, { windowBinding })
     ))),
   ]);
 }
@@ -10982,6 +9864,145 @@ function showSpaceContextMenu(event, space) {
     menuAction('Rename Space', (windowBinding) => renameSpace(space, { windowBinding })),
     menuAction('Delete Space', (windowBinding) => deleteSpace(space, { windowBinding })),
   ]);
+}
+
+// Empty subgroups are explicit folder placeholders stored per Space. The
+// title-derived folder tree cannot represent a folder with no member groups,
+// and an empty Tag would be purged as residue, so these paths are the only
+// way to prepare a destination before dragging groups under it.
+function storedFolderPathsForSpace(spaceId = state.activeSpaceId) {
+  if (!state.folderPaths || typeof state.folderPaths !== 'object') state.folderPaths = {};
+  const stored = state.folderPaths[spaceId];
+  return (Array.isArray(stored) ? stored : [])
+    .map((path) => String(path || '').trim())
+    .filter(Boolean);
+}
+
+function setStoredFolderPathsForSpace(spaceId, paths) {
+  if (!state.folderPaths || typeof state.folderPaths !== 'object') state.folderPaths = {};
+  state.folderPaths[spaceId] = paths;
+}
+
+function createHierarchyNodeId() {
+  return `node:${crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+// 独立建组（根级）或在某个组下建子组：先落一个稳定键的空节点占位，
+// 之后拖 tab 进来物化为 Chrome 组，拖组进来成为它的子组。
+async function createEmptyGroupNode(parentKey = '', options = {}) {
+  const windowBinding = options.windowBinding || capturePanelWindowBinding();
+  const name = await askText({
+    title: parentKey ? 'New Subgroup' : 'New Group',
+    label: 'Group title',
+    value: 'New Group',
+    confirmText: 'Create',
+  });
+  if (name === null) return;
+  const clean = String(name).trim();
+  if (!clean) return;
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const spaceId = state.activeSpaceId;
+  const key = createHierarchyNodeId();
+  state.emptyNodes[spaceId] = {
+    ...(state.emptyNodes[spaceId] || {}),
+    [key]: { title: clean, color: nextGroupColor() },
+  };
+  if (parentKey) {
+    if (nodeDepth(parentKey, renderedHierarchyKeyParents) >= HIERARCHY_MAX_DEPTH) {
+      setStatus(`Groups can nest at most ${HIERARCHY_MAX_DEPTH} levels.`);
+      return;
+    }
+    state.groupParents[spaceId] = anchorizeHierarchyParents({
+      ...(state.groupParents[spaceId] || {}),
+      [key]: parentKey,
+    }, spaceId);
+  }
+  addGroupOrderKey(spaceId, key);
+  await saveState({ persistWindowState: false, windowBinding });
+  lastRenderedGroupsSignature = '';
+  render();
+  setStatus(`Created group "${clean}".`);
+}
+
+// One-time per-Space migration: legacy " / " title paths and stored empty
+// folder paths become state-backed parent links + stable empty nodes, and the
+// affected tags are retitled to their leaf segment. Idempotent: a migrated
+// Space produces an empty plan and exits without writing anything.
+async function migrateSpaceHierarchy(spaceId = state.activeSpaceId, options = {}) {
+  const windowBinding = options.windowBinding || capturePanelWindowBinding();
+  if (!isCurrentPanelWindowBinding(windowBinding)) return;
+  const groupsToMigrate = spaceView.filter((group) => group.key !== 'ungrouped');
+  const hasNestedTitles = groupsToMigrate.some((group) => (
+    parseTitlePath(group.title || group.displayTitle || '').length > 1
+  ));
+  const storedPaths = storedFolderPathsForSpace(spaceId);
+  if (!hasNestedTitles && storedPaths.length === 0) return;
+  let plan;
+  try {
+    plan = planLegacyTitlePathMigration({
+      folderPathsBySpace: { [spaceId]: storedPaths },
+      groupsBySpace: { [spaceId]: groupsToMigrate },
+      idFactory: createHierarchyNodeId,
+    });
+  } catch (error) {
+    console.error('Hierarchy migration planning failed; leaving titles as-is.', error);
+    return;
+  }
+  const rollback = captureWorkspaceMemoryCheckpoint();
+  try {
+    await runChromeGroupMutationTransaction({
+      apply: async () => {
+        const nodeEntries = plan.emptyNodesBySpace[spaceId] || {};
+        state.emptyNodes[spaceId] = { ...(state.emptyNodes[spaceId] || {}), ...nodeEntries };
+        state.groupParents[spaceId] = anchorizeHierarchyParents({
+          ...(state.groupParents[spaceId] || {}),
+          ...(plan.parentsBySpace[spaceId] || {}),
+        }, spaceId);
+        for (const { key, nextTitle } of plan.renamesBySpace[spaceId] || []) {
+          const group = spaceView.find((item) => item.key === key);
+          if (!group) continue;
+          if (group.dormant) {
+            renameDormantSnapshotGroup(group, nextTitle);
+          } else if (isVirtualGroupKey(group.key)) {
+            retitleActiveSpaceSnapshotGroup(group, nextTitle);
+            state.virtualGroups[group.key] = {
+              ...(state.virtualGroups[group.key] || {}),
+              id: group.key,
+              title: nextTitle,
+              color: group.color || 'blue',
+              spaceId,
+            };
+          } else {
+            const groupId = groupIdFromKey(group.key);
+            if (groupId === null) continue;
+            const result = await send('groups:update', {
+              groupId,
+              update: { title: nextTitle },
+            }, { windowBinding });
+            if (!result.group) continue;
+            logicalChromeGroupTitles.set(groupId, normalizeGroupTitle(nextTitle, 'Group'));
+            retitleActiveSpaceSnapshotGroup(group, nextTitle);
+            bindChromeGroup(groupId, spaceId);
+          }
+        }
+        // 节点按创建顺序追加：父段先于子段，天然满足 DFS 序不变量。
+        for (const nodeKey of Object.keys(nodeEntries)) {
+          addGroupOrderKey(spaceId, nodeKey);
+        }
+        setStoredFolderPathsForSpace(spaceId, []);
+      },
+      checkpoint: () => saveState({ persistWindowState: false, windowBinding }),
+      rollback: () => restoreWorkspaceMemoryCheckpoint(rollback),
+    });
+    lastRenderedGroupsSignature = '';
+    render();
+    setStatus('Migrated " / " group titles into nested groups.');
+  } catch (error) {
+    restoreWorkspaceMemoryCheckpoint(rollback, { renderView: true });
+    console.error('Hierarchy migration failed; leaving titles as-is.', error);
+  }
 }
 
 function showContextMenu(event, items) {
@@ -11348,11 +10369,41 @@ function renderActionDialogPreview(sections = [], variant = 'changes') {
         badge.textContent = item.badge;
         before.append(badge);
       }
-      if (item.source) {
-        const source = document.createElement('div');
-        source.className = 'group-plan-source';
-        source.textContent = `From ${item.source}`;
-        before.append(source);
+      // Diff lines make the proposal readable as before → after: movers show
+      // the source and target Tag, renames show the arrow to the new panel
+      // name, and tabs that already sit in their target Tag render dimmed
+      // instead of pretending to move.
+      if (item.rename) {
+        const renameDiff = document.createElement('div');
+        renameDiff.className = 'action-preview-diff action-preview-diff-rename';
+        const renameArrow = document.createElement('span');
+        renameArrow.className = 'action-preview-arrow';
+        renameArrow.textContent = '\u2192';
+        const renameTo = document.createElement('span');
+        renameTo.className = 'action-preview-diff-to';
+        renameTo.textContent = item.rename.to || '';
+        renameDiff.append(renameArrow, renameTo);
+        before.append(renameDiff);
+      } else if (item.diff) {
+        const diff = document.createElement('div');
+        diff.className = 'action-preview-diff';
+        const from = document.createElement('span');
+        from.className = 'action-preview-diff-from';
+        from.textContent = item.diff.from || 'Ungrouped';
+        const arrow = document.createElement('span');
+        arrow.className = 'action-preview-arrow';
+        arrow.textContent = '\u2192';
+        const to = document.createElement('span');
+        to.className = 'action-preview-diff-to';
+        to.textContent = item.diff.to || '';
+        diff.append(from, arrow, to);
+        before.append(diff);
+      } else if (item.unchanged) {
+        row.classList.add('is-unchanged');
+        const stays = document.createElement('div');
+        stays.className = 'action-preview-stays';
+        stays.textContent = `Already in ${item.source || 'this Tag'}`;
+        before.append(stays);
       }
 
       if (variant === 'groups') {
@@ -11382,6 +10433,7 @@ function renderActionDialogPreview(sections = [], variant = 'changes') {
 
 function renderSettings() {
   renderSettingsAISection();
+  renderTidyRulesSettings();
   els.undoArcImportButton.disabled = !(state.lastArcImport?.spaceIds || [])
     .some((spaceId) => state.spaces.some((space) => space.id === spaceId));
 
@@ -11395,7 +10447,55 @@ function renderSettings() {
     ai: state.ai,
     theme: state.theme,
     shortcuts: state.shortcuts,
+    tidyRules: state.tidyRules,
   });
+}
+
+let activeSettingsPanel = 'ai';
+
+function showSettingsPanel(panelId) {
+  if (!els.settingsView.querySelector(`[data-settings-panel-body="${panelId}"]`)) return;
+  activeSettingsPanel = panelId;
+  for (const button of els.settingsNav.querySelectorAll('[data-settings-panel]')) {
+    button.classList.toggle('active', button.dataset.settingsPanel === panelId);
+  }
+  for (const body of els.settingsView.querySelectorAll('[data-settings-panel-body]')) {
+    body.hidden = body.dataset.settingsPanelBody !== panelId;
+  }
+}
+
+function renderTidyRulesSettings() {
+  const rules = normalizeTidyRuleSettings(state.tidyRules);
+  els.tidyRulesList.replaceChildren(...TIDY_RULES.map((rule) => {
+    const row = document.createElement('label');
+    row.className = 'tidy-rule-row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.tidyRule = rule.id;
+    checkbox.checked = tidyRuleEnabled(rules, rule.id);
+    checkbox.disabled = rule.locked === true;
+    const text = document.createElement('span');
+    text.className = 'tidy-rule-label';
+    text.textContent = rule.locked ? `${rule.label} (always on)` : rule.label;
+    text.title = rule.description || rule.label;
+    row.append(checkbox, text);
+    return row;
+  }));
+  els.tidyGroupPromptInput.value = tidyRulePrompt(rules, 'group-by-topic');
+  els.tidyRenamePromptInput.value = tidyRulePrompt(rules, 'rename-tabs');
+}
+
+function collectTidyRuleSettingsFromControls() {
+  const enabled = {};
+  const texts = {};
+  for (const checkbox of els.tidyRulesList.querySelectorAll('input[data-tidy-rule]')) {
+    enabled[checkbox.dataset.tidyRule] = checkbox.checked;
+  }
+  const groupPrompt = els.tidyGroupPromptInput.value.trim();
+  const renamePrompt = els.tidyRenamePromptInput.value.trim();
+  if (groupPrompt) texts['group-by-topic'] = groupPrompt;
+  if (renamePrompt) texts['rename-tabs'] = renamePrompt;
+  return normalizeTidyRuleSettings({ enabled, texts });
 }
 
 function renderSettingsAISection() {
@@ -11433,8 +10533,7 @@ function settingsAIControls() {
     providerInput: els.providerInput,
     baseUrlInput: els.baseUrlInput,
     modelInput: els.modelInput,
-    customModelLabel: els.customModelLabel,
-    customModelInput: els.customModelInput,
+    modelOptions: els.modelOptions,
     apiKeyInput: els.apiKeyInput,
     thinkingLabel: els.thinkingLabel,
     thinkingInput: els.thinkingInput,
@@ -11443,54 +10542,6 @@ function settingsAIControls() {
     testButton: els.testAIButton,
     statusTarget: els.settingsStatus,
   };
-}
-
-function onboardingAIControls() {
-  return {
-    providerInput: els.onboardingProviderInput,
-    baseUrlInput: els.onboardingBaseUrlInput,
-    modelInput: els.onboardingModelInput,
-    customModelLabel: els.onboardingCustomModelLabel,
-    customModelInput: els.onboardingCustomModelInput,
-    apiKeyInput: els.onboardingApiKeyInput,
-    thinkingLabel: els.onboardingThinkingLabel,
-    thinkingInput: els.onboardingThinkingInput,
-    thinkingHint: els.onboardingThinkingHint,
-    languageInput: els.onboardingLanguageInput,
-    testButton: els.onboardingTestAIButton,
-    statusTarget: els.onboardingAIStatus,
-  };
-}
-
-function renderOnboardingAISettings(options = {}) {
-  const controls = onboardingAIControls();
-  const configured = Boolean(String(state.ai?.baseUrl || '').trim() && String(state.ai?.model || '').trim());
-  renderProviderOptions(controls, { placeholder: true });
-  controls.languageInput.value = state.ai?.language || 'zh-CN';
-  controls.apiKeyInput.value = state.ai?.apiKey || '';
-  controls.thinkingInput.value = state.ai?.thinking || 'disabled';
-  if (configured && !options.selectNoProvider) {
-    renderAIProviderFields(normalizeAIProviderSettings(state.ai), controls);
-    controls.apiKeyInput.value = state.ai?.apiKey || '';
-    setAIControlsStatus(controls, 'Review the provider, test it, then Save.');
-  } else {
-    controls.providerInput.value = '';
-    controls.baseUrlInput.value = '';
-    controls.apiKeyInput.value = '';
-    controls.baseUrlInput.disabled = true;
-    controls.modelInput.replaceChildren();
-    controls.modelInput.disabled = true;
-    controls.apiKeyInput.disabled = true;
-    controls.thinkingInput.disabled = true;
-    controls.thinkingInput.value = 'disabled';
-    controls.thinkingHint.textContent = 'Choose a provider to see whether Thinking is supported.';
-    controls.thinkingHint.hidden = false;
-    controls.thinkingLabel.classList.add('thinking-unsupported');
-    controls.customModelLabel.hidden = true;
-    controls.customModelInput.required = false;
-    setAIControlsStatus(controls, 'Choose a provider, or Save without AI.');
-  }
-  updateOnboardingAIActionState();
 }
 
 function renderProviderOptions(controls = settingsAIControls(), config = {}) {
@@ -11526,28 +10577,24 @@ function renderAIProviderFields(settings, controls = settingsAIControls()) {
 }
 
 function renderModelOptions(provider, selectedModel = '', controls = settingsAIControls()) {
-  const customOption = document.createElement('option');
-  customOption.value = CUSTOM_MODEL_VALUE;
-  customOption.textContent = 'Custom model...';
-  const options = provider.models.map((model) => {
-    const option = document.createElement('option');
-    option.value = model.id;
-    option.textContent = model.label;
-    return option;
-  });
-  options.push(customOption);
-  controls.modelInput.replaceChildren(...options);
-
-  const hasBuiltInModel = provider.models.some((model) => model.id === selectedModel);
-  controls.modelInput.value = hasBuiltInModel ? selectedModel : CUSTOM_MODEL_VALUE;
-  controls.customModelInput.value = hasBuiltInModel ? '' : selectedModel;
-  updateCustomModelVisibility(controls);
-}
-
-function updateCustomModelVisibility(controls = settingsAIControls()) {
-  const custom = controls.modelInput.value === CUSTOM_MODEL_VALUE;
-  controls.customModelLabel.hidden = !custom;
-  controls.customModelInput.required = custom;
+  const entries = [
+    ...provider.models.map((model) => ({ id: model.id, label: model.label })),
+    ...detectedModelIds.map((modelId) => ({ id: modelId, label: modelId })),
+  ];
+  const seen = new Set();
+  controls.modelOptions.replaceChildren(...entries
+    .filter((entry) => {
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    })
+    .map((entry) => {
+      const option = document.createElement('option');
+      option.value = entry.id;
+      option.textContent = entry.label;
+      return option;
+    }));
+  controls.modelInput.value = String(selectedModel || '');
 }
 
 function updateAIThinkingControl(controls = settingsAIControls(), settings = null) {
@@ -11637,6 +10684,7 @@ async function saveSettings() {
   const aiSettings = currentAISettingsDraftFromForm();
   const selectedTheme = state.tempTheme || settingsBaseline?.theme || state.theme;
   const baseline = structuredClone(settingsBaseline);
+  const tidyRules = collectTidyRuleSettingsFromControls();
   const draft = {
     ai: aiSettings,
     theme: selectedTheme,
@@ -11674,6 +10722,7 @@ async function saveSettings() {
       state.ai = mergedAI;
       state.shortcuts = merged.settings.shortcuts;
       state.theme = merged.settings.theme;
+      state.tidyRules = tidyRules;
       delete state.tempTheme;
       await persistCurrentAIConfiguration();
     });
@@ -11692,12 +10741,8 @@ async function saveSettings() {
     setSettingsStatus(mergeFailure);
     return;
   }
-  if (workbenchMode) {
-    renderSettings();
-    setSettingsStatus('Settings saved.');
-  } else {
-    els.settingsDialog.close();
-  }
+  renderSettings();
+  setSettingsStatus('Settings saved.');
   render();
 }
 
@@ -11831,23 +10876,7 @@ async function restoreStoredKey(snapshot, key, set, remove) {
 }
 
 function selectedModelFromControls(controls) {
-  if (controls.modelInput.value === CUSTOM_MODEL_VALUE) return controls.customModelInput.value.trim();
-  return controls.modelInput.value;
-}
-
-function updateOnboardingAIActionState() {
-  const controls = onboardingAIControls();
-  let valid = !controls.providerInput.value;
-  if (controls.providerInput.value) {
-    try {
-      const settings = currentAISettingsFromControls(controls);
-      valid = !providerRequiresApiKey(settings) || Boolean(settings.apiKey);
-    } catch {
-      valid = false;
-    }
-  }
-  els.onboardingOpenWorkbenchButton.disabled = !valid;
-  controls.testButton.disabled = !controls.providerInput.value || !valid || Boolean(activeAIRequestId);
+  return controls.modelInput.value.trim();
 }
 
 function setAIControlsStatus(controls, message) {
@@ -11937,20 +10966,14 @@ function endAIRequest(requestId) {
 async function abortActiveAIRequest() {
   if (!activeAIRequestId) return;
   const requestId = activeAIRequestId;
-  const stream = activeAskStreams.get(requestId);
-  if (stream) stream.aborted = true;
   activeAIRequestId = '';
   updateAIRequestUI();
   await send('ai:abort', { requestId }).catch(() => null);
-  if (activeView === 'ask') setStatus('Ask stopped.');
 }
 
 function updateAIRequestUI() {
   const busy = Boolean(activeAIRequestId);
-  els.askAIButton.textContent = busy ? 'Stop' : 'Ask Page';
   els.testAIButton.textContent = busy ? 'Stop request' : 'Test AI';
-  els.onboardingTestAIButton.textContent = busy ? 'Stop request' : 'Test AI';
-  updateOnboardingAIActionState();
 }
 
 async function storageGet() {
@@ -11995,33 +11018,58 @@ async function secretRemove() {
 }
 
 async function currentBrowserSessionId() {
-  let stored = {};
-  if (extensionRuntime && chrome.storage.session) {
-    stored = await chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY);
-  } else {
+  const readValue = async () => {
+    if (extensionRuntime && chrome.storage.session) {
+      const [storedSession, storedLocal] = await Promise.all([
+        chrome.storage.session.get(BROWSER_SESSION_STORAGE_KEY),
+        chrome.storage.local.get(BROWSER_SESSION_CARRYOVER_STORAGE_KEY),
+      ]);
+      return {
+        sessionValue: storedSession?.[BROWSER_SESSION_STORAGE_KEY],
+        carryoverValue: storedLocal?.[BROWSER_SESSION_CARRYOVER_STORAGE_KEY],
+      };
+    }
     try {
-      stored = JSON.parse(sessionStorage.getItem(BROWSER_SESSION_STORAGE_KEY) || '{}');
+      const storedSession = JSON.parse(sessionStorage.getItem(BROWSER_SESSION_STORAGE_KEY) || '{}');
+      const storedLocal = JSON.parse(localStorage.getItem(BROWSER_SESSION_CARRYOVER_STORAGE_KEY) || '{}');
+      return {
+        sessionValue: storedSession?.[BROWSER_SESSION_STORAGE_KEY],
+        carryoverValue: storedLocal?.[BROWSER_SESSION_CARRYOVER_STORAGE_KEY],
+      };
     } catch {
-      stored = {};
+      return { sessionValue: '', carryoverValue: '' };
+    }
+  };
+  const { sessionValue, carryoverValue } = await readValue();
+  const picked = pickBrowserSessionId({
+    sessionValue,
+    carryoverValue,
+    randomId: crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  });
+  if (picked.source === 'session') return picked.sessionId;
+
+  const writes = [];
+  if (extensionRuntime && chrome.storage.session) {
+    writes.push(chrome.storage.session.set({ [BROWSER_SESSION_STORAGE_KEY]: picked.sessionId }));
+    if (picked.source === 'new') {
+      writes.push(chrome.storage.local.set({
+        [BROWSER_SESSION_CARRYOVER_STORAGE_KEY]: picked.sessionId,
+      }));
+    }
+  } else {
+    sessionStorage.setItem(BROWSER_SESSION_STORAGE_KEY, JSON.stringify({
+      [BROWSER_SESSION_STORAGE_KEY]: picked.sessionId,
+    }));
+    if (picked.source === 'new') {
+      localStorage.setItem(BROWSER_SESSION_CARRYOVER_STORAGE_KEY, JSON.stringify({
+        [BROWSER_SESSION_CARRYOVER_STORAGE_KEY]: picked.sessionId,
+      }));
     }
   }
-  const existing = stored?.[BROWSER_SESSION_STORAGE_KEY];
-  if (isGeneratedBrowserSessionId(existing)) return existing;
-
-  const sessionId = crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const value = { [BROWSER_SESSION_STORAGE_KEY]: sessionId };
-  if (extensionRuntime && chrome.storage.session) {
-    await chrome.storage.session.set(value);
-  } else {
-    sessionStorage.setItem(BROWSER_SESSION_STORAGE_KEY, JSON.stringify(value));
-  }
-  return sessionId;
-}
-
-function isGeneratedBrowserSessionId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+  await Promise.all(writes);
+  return picked.sessionId;
 }
 
 async function windowStateGet() {
@@ -12057,7 +11105,6 @@ function stateForStorage() {
   return {
     ...state,
     activeSpaceId,
-    activeAskSessionKey,
     ai,
   };
 }
@@ -12090,7 +11137,6 @@ function restoreWorkspaceMemoryCheckpoint(checkpoint, { renderView = false } = {
     logicalChromeGroupTitles.set(groupId, title);
   }
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   lastRenderedSpacesSignature = '';
   if (renderView) {
     render();
@@ -12136,7 +11182,6 @@ function restoreFailedWorkspaceMutation(previousState, options = {}) {
   dormantSpaceView = [];
   dormantSpaceViewSpaceId = '';
   lastRenderedGroupsSignature = '';
-  lastRenderedAskSignature = '';
   lastRenderedSpacesSignature = '';
   if (!isCurrentPanelWindowBinding(options.windowBinding)) return;
   render();
@@ -12169,13 +11214,13 @@ function runTask(task) {
   // Capture the Workbench host window synchronously with the user gesture.
   // A queued task must never inherit whichever window the host happens to be
   // attached to when an earlier task finally releases the queue.
-  const windowBinding = capturePanelWindowBinding();
+    const windowBinding = capturePanelWindowBinding();
   activeTaskCount += 1;
   const execute = async () => {
     try {
       await task(windowBinding);
     } catch (error) {
-      const message = formatAIError(error);
+            const message = formatAIError(error);
       setStatus(message);
       if (activeView === 'settings') setSettingsStatus(message, 'error');
       else if (workbenchMode) showStatusToast(message, 'error');
@@ -12189,9 +11234,20 @@ function runTask(task) {
   return queuedTask;
 }
 
+// Re-entrancy depth for this panel context. Web Locks are not re-entrant, and
+// saveState now takes the shared lock itself, so nested callers (loadState,
+// withFreshSpaceStateMutation) must reuse the held lock instead of deadlocking.
+let sharedStateLockDepth = 0;
+
 async function withSharedStateLock(task) {
   if (!extensionRuntime || !navigator.locks?.request) return task();
-  return navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
+  if (sharedStateLockDepth > 0) return task();
+  sharedStateLockDepth += 1;
+  try {
+    return await navigator.locks.request(SHARED_STATE_LOCK_NAME, { mode: 'exclusive' }, task);
+  } finally {
+    sharedStateLockDepth -= 1;
+  }
 }
 
 async function withFreshSpaceStateMutation(task, options = {}) {
@@ -12243,6 +11299,30 @@ function currentGroupForMutation(reference) {
   return current;
 }
 
+// 折叠/展开是纯显示事务：只改 collapsed 状态，不动组内容。指纹校验（含每行
+// tab id/url）在这里会误伤——后台任何新 tab 入组都会让旧渲染指纹失配，把一次
+// 无害的折叠变成 "This group changed in another Space Tabs view" 报错。
+// 显示切换只需要"辨认出同一个组"：优先 snapshotGroupId（跨物化/快照重排稳定），
+// 其次渲染键（live 组折叠不销毁 chrome 组，键稳定）。空组节点不在 spaceView
+// （visibleHierarchyNodes 的合成节点），折叠空组直接用渲染期节点——display
+// toggle 只翻 collapsed，不触碰 Chrome 组，渲染上下文刚由 withFreshSpaceStateMutation
+// 重建过，即当前真身。
+function currentGroupForDisplayToggle(reference) {
+  const snapshotGroupId = String(reference?.snapshotGroupId || '');
+  const bySnapshot = snapshotGroupId
+    ? spaceView.filter((group) => String(group.snapshotGroupId || '') === snapshotGroupId)
+    : [];
+  const byKey = spaceView.filter((group) => group.key === reference?.key);
+  const candidates = bySnapshot.length === 1 ? bySnapshot : byKey;
+  const current = candidates.length === 1 ? candidates[0] : null;
+  if (!current) {
+    const rendered = renderedGroupContexts.get(reference?.key);
+    if (rendered?.emptyNode) return rendered;
+    throw new Error('This group changed in another Space Tabs view. Try the action again.');
+  }
+  return current;
+}
+
 function groupMutationFingerprint(group = {}) {
   const snapshotGroupId = String(group.snapshotGroupId || '');
   return JSON.stringify({
@@ -12272,69 +11352,6 @@ function groupMutationFingerprint(group = {}) {
 
 function currentSpace() {
   return state.spaces.find((space) => space.id === state.activeSpaceId) || state.spaces[0];
-}
-
-function ensureCurrentAskSession() {
-  const tab = currentAskPageTab() || {};
-  const key = sessionKeyForTab(tab);
-  if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
-  adoptPortableAskSession(state.askSessions, tab);
-  const session = ensureAskSessionByKey(key, tab);
-  setActiveAskSessionKey(key);
-  pruneCurrentAskSessions(key);
-  return session;
-}
-
-function pruneCurrentAskSessions(activeKey = activeAskSessionKey) {
-  state.askSessions = pruneAskSessions(
-    state.askSessions,
-    currentAskSessionPruneOptions(activeKey),
-  );
-  return state.askSessions;
-}
-
-function currentAskSessionPruneOptions(activeKey = activeAskSessionKey) {
-  const openTabs = [...tabs, ...foreignLiveTabs];
-  return {
-    activeKey,
-    inFlightKeys: [...activeAskStreams.values()]
-      .map((stream) => stream?.messageRef?.sessionKey)
-      .filter(Boolean),
-    openTabIds: openTabs.map((item) => item.id),
-    openSessionKeys: openTabs.map((item) => sessionKeyForTab(item)),
-    spaceIds: state.spaces.map((item) => item.id),
-  };
-}
-
-function currentAskSessionForRender() {
-  const tab = currentAskPageTab() || {};
-  // Chrome emits passive title/URL updates while the Ask view is open. A new
-  // route should render as a fresh conversation, but it must not become saved
-  // history until the user actually opens or sends to that conversation.
-  return projectAskSessionForTab(state.askSessions, tab);
-}
-
-function setActiveAskSessionKey(key) {
-  activeAskSessionKey = String(key || '');
-  state.activeAskSessionKey = activeAskSessionKey;
-}
-
-function ensureAskSessionByKey(key, tab = null) {
-  const currentTab = tab || currentAskPageTab() || {};
-  const currentKey = sessionKeyForTab(currentTab);
-  const requestedKey = String(key || '');
-  const safeKey = requestedKey.startsWith('tab:') ? requestedKey : currentKey;
-  const sessionTab = safeKey === currentKey ? currentTab : askSessionTabFromKey(safeKey, tabs);
-  if (!state.askSessions || typeof state.askSessions !== 'object') state.askSessions = {};
-  if (!state.askSessions[safeKey]) state.askSessions[safeKey] = createAskSession(sessionTab);
-  const session = state.askSessions[safeKey];
-  session.key = safeKey;
-  if (safeKey === currentKey) {
-    session.tabId = Number.isFinite(Number(currentTab.id)) ? Number(currentTab.id) : null;
-    session.title = currentTab.displayTitle || currentTab.title || session.title || 'Current page';
-    session.url = normalizeSessionUrl(currentTab.url);
-  }
-  return session;
 }
 
 function buildSpaceViewForSpace(spaceId, options = {}) {
@@ -12639,6 +11656,23 @@ function transferGroupLocalState(sourceKey, targetKey, spaceId = state.activeSpa
   if (groupOrder.includes(sourceKey)) {
     state.groupOrder[spaceId] = uniqueKeys(groupOrder.map((key) => key === sourceKey ? targetKey : key));
   }
+  const parents = state.groupParents?.[spaceId];
+  if (parents && typeof parents === 'object') {
+    const nextParents = {};
+    for (const [childKey, parentKey] of Object.entries(parents)) {
+      const nextChild = childKey === sourceKey ? targetKey : childKey;
+      const nextParent = parentKey === sourceKey ? targetKey : parentKey;
+      if (nextChild === nextParent) continue;
+      nextParents[nextChild] = nextParent;
+    }
+    state.groupParents[spaceId] = nextParents;
+  }
+  if (String(sourceKey).startsWith('node:')) {
+    const nodes = { ...(state.emptyNodes?.[spaceId] || {}) };
+    delete nodes[sourceKey];
+    if (Object.keys(nodes).length === 0) delete state.emptyNodes[spaceId];
+    else state.emptyNodes[spaceId] = nodes;
+  }
 }
 
 function clearLocalTabGrouping(tabIds) {
@@ -12710,6 +11744,78 @@ function chromeGroupForSnapshotIdentity(
     logicalTitle === '' ? '' : normalizeGroupTitle(logicalTitle),
   );
   return group;
+}
+
+// Opening a saved row under a same-titled live Tag used to join the chrome
+// group while keeping the saved row's second identity. A group carrying two
+// snapshot identities can never match a saved Tag again — the view split off
+// an extra empty pill per duplicate and collapse refused to save the Tag — so
+// a title match first folds duplicate saved Tags into one saved identity and
+// re-points the reused group's rows at it before the new row joins.
+async function resolveDormantChromeGroupTarget(dormantGroup, tab, options = {}) {
+  const identityMatch = chromeGroupForSnapshotIdentity(dormantGroup, state.activeSpaceId);
+  if (identityMatch) {
+    return {
+      group: identityMatch,
+      snapshotGroupId: String(dormantGroup.snapshotGroupId || tab?.snapshotGroupId || '').trim(),
+    };
+  }
+  const titledMatch = await chromeGroupForTitle(
+    dormantGroup.title,
+    state.activeSpaceId,
+    { windowBinding: options.windowBinding },
+  );
+  if (!titledMatch) return null;
+  const mergedPlan = convergeDuplicateSavedTags();
+  const rowSnapshotGroupId = String(
+    dormantGroup.snapshotGroupId || tab?.snapshotGroupId || '',
+  ).trim();
+  const snapshotGroupId = String(
+    mergedPlan.snapshotGroupIdReplacements[rowSnapshotGroupId] ||
+    canonicalSameTitleSavedGroupId(dormantGroup.title) ||
+    rowSnapshotGroupId,
+  ).trim();
+  const liveSavedGroupId = coherentSavedGroupIdForChromeGroup(titledMatch.id);
+  if (liveSavedGroupId && snapshotGroupId && liveSavedGroupId !== snapshotGroupId) {
+    // The reused group's rows were saved under an identity the duplicate merge
+    // could not collapse (no stored copy of its own). Point them at the
+    // surviving saved Tag so the chrome group keeps exactly one identity.
+    remapMergedSnapshotGroupReferences({ [liveSavedGroupId]: snapshotGroupId });
+  }
+  return { group: titledMatch, snapshotGroupId };
+}
+
+function convergeDuplicateSavedTags() {
+  const mergedPlan = mergeDuplicateSnapshotTags(
+    state.spaceSnapshots?.[state.activeSpaceId] || null,
+  );
+  if (mergedPlan.mergedCount > 0) {
+    replaceActiveSpaceSnapshotGroups(mergedPlan.snapshot.groups, mergedPlan.snapshot);
+    remapMergedSnapshotGroupReferences(mergedPlan.snapshotGroupIdReplacements);
+  }
+  return mergedPlan;
+}
+
+function canonicalSameTitleSavedGroupId(title) {
+  const titleKey = groupTitleKey(title);
+  if (!titleKey) return '';
+  const matches = (state.spaceSnapshots?.[state.activeSpaceId]?.groups || []).filter((group) => (
+    !isUngroupedSnapshotGroup(group) &&
+    groupTitleKey(group.title) === titleKey &&
+    String(group.snapshotGroupId || '').trim()
+  ));
+  return matches.length === 1 ? String(matches[0].snapshotGroupId) : '';
+}
+
+function coherentSavedGroupIdForChromeGroup(chromeGroupId) {
+  const savedIds = new Set();
+  for (const liveTab of tabs) {
+    if (Number(liveTab.groupId) !== Number(chromeGroupId)) continue;
+    const binding = currentLifecycleBinding(liveTab.id);
+    const savedId = String(binding?.snapshotGroupId || liveTab.snapshotGroupId || '').trim();
+    if (savedId) savedIds.add(savedId);
+  }
+  return savedIds.size === 1 ? [...savedIds][0] : '';
 }
 
 function logicalGroupTitlesForSpace(spaceId = state.activeSpaceId) {
@@ -12848,48 +11954,6 @@ function formatArcImportSummary(summary, prefix = 'Arc import') {
 function formatArcConflictSummary(plan) {
   const count = Array.isArray(plan?.conflicts) ? plan.conflicts.length : 0;
   return count ? ` ${count} naming ${count === 1 ? 'conflict was' : 'conflicts were'} resolved and shown below.` : '';
-}
-
-function renderAskMessages() {
-  const session = currentAskSessionForRender();
-  const signature = askMessagesRenderSignature(session);
-  if (signature === lastRenderedAskSignature) return;
-
-  const shouldStickToBottom = els.askMessages.scrollHeight - els.askMessages.scrollTop - els.askMessages.clientHeight < 24;
-  els.askMessages.replaceChildren(...(session.messages || []).map(createAskMessageElement));
-  if (shouldStickToBottom) els.askMessages.scrollTop = els.askMessages.scrollHeight;
-  lastRenderedAskSignature = signature;
-}
-
-function createAskMessageElement(message) {
-  const node = document.createElement('div');
-  node.className = `ask-message ${message.role === 'user' ? 'user' : 'assistant'}`;
-  if (message.role === 'assistant') node.innerHTML = renderMarkdown(message.text);
-  else node.textContent = message.text;
-  return node;
-}
-
-async function addAskMessage(role, text, sessionKey = activeAskSessionKey) {
-  if (!text) return;
-  let messageRef;
-  const sourceTab = currentAskPageTab() || askSessionTabFromKey(sessionKey, tabs);
-  await withSharedStateLock(async () => {
-    await syncStateFromStorage();
-    const session = ensureAskSessionByKey(sessionKey, sourceTab);
-    const message = appendAskSessionMessage(session, role, text);
-    messageRef = { sessionKey: session.key, messageId: message.id, sourceTab };
-    await saveState({ persistWindowState: false });
-  });
-  if (messageRef.sessionKey === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  return messageRef;
-}
-
-async function updateAskMessage(ref, text, options = {}) {
-  if (!ref) return;
-  const session = ensureAskSessionByKey(ref.sessionKey, ref.sourceTab);
-  updateAskSessionMessage(session, ref.messageId, text);
-  if (session.key === activeAskSessionKey && activeView === 'ask') renderAskMessages();
-  if (options.persist !== false) await persistAskMessage(ref, text);
 }
 
 function setStatus(text) {

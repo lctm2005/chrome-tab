@@ -6,6 +6,7 @@ import {
   assertSafeAIAuthTransport,
   createScopedAIAuth,
   persistScopedAIConfiguration,
+  reconcileScopedAIKey,
   scopedAIKey,
 } from '../src/shared/ai-auth.js';
 
@@ -259,6 +260,123 @@ test('atomically clears old auth before persisting a keyless configuration', asy
     'restore-settings:before',
     'restore-auth:before',
   ]);
+});
+
+test('clearing a keyless configuration keeps a secret saved for a different scope', async () => {
+  const keyless = { ...openAI, apiKey: '' };
+  const storedAuth = {
+    apiKey: 'other-endpoint-key',
+    provider: 'z-ai',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+  };
+  const calls = [];
+  const operations = {
+    readSettings: async () => calls.push('read-settings'),
+    readAuth: async () => {
+      calls.push('read-auth');
+      return { secret: { ai: storedAuth } };
+    },
+    authFromSnapshot: (snapshot) => snapshot?.secret?.ai || null,
+    persistSettings: async () => calls.push('settings'),
+    persistAuth: async () => calls.push('auth'),
+    clearAuth: async () => calls.push('clear'),
+    restoreSettings: async () => calls.push('restore-settings'),
+    restoreAuth: async () => calls.push('restore-auth'),
+  };
+
+  assert.equal(await persistScopedAIConfiguration(keyless, operations), null);
+  assert.deepEqual(calls, ['read-settings', 'read-auth', 'settings']);
+});
+
+test('clearing a keyless configuration still removes a secret saved for the same scope', async () => {
+  const keyless = { ...openAI, apiKey: '' };
+  const storedAuth = {
+    apiKey: 'openai-key',
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+  };
+  const calls = [];
+  const operations = {
+    readSettings: async () => calls.push('read-settings'),
+    readAuth: async () => {
+      calls.push('read-auth');
+      return { secret: { ai: storedAuth } };
+    },
+    authFromSnapshot: (snapshot) => snapshot?.secret?.ai || null,
+    persistSettings: async () => calls.push('settings'),
+    persistAuth: async () => calls.push('auth'),
+    clearAuth: async () => calls.push('clear'),
+    restoreSettings: async () => calls.push('restore-settings'),
+    restoreAuth: async () => calls.push('restore-auth'),
+  };
+
+  assert.equal(await persistScopedAIConfiguration(keyless, operations), null);
+  assert.deepEqual(calls, ['read-settings', 'read-auth', 'clear', 'settings']);
+});
+
+test('reconciling a stored key keeps scope-matched keys and repairs drifted endpoints', () => {
+  const storedAuth = {
+    apiKey: 'openai-key',
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+  };
+  assert.deepEqual(reconcileScopedAIKey(storedAuth, openAI), {
+    apiKey: 'openai-key',
+    drifted: false,
+  });
+
+  const driftedAuth = {
+    apiKey: 'z-ai-key',
+    provider: 'z-ai',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+  };
+  assert.deepEqual(reconcileScopedAIKey(driftedAuth, {
+    provider: 'z-ai',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+    model: 'glm-5.2',
+  }), { apiKey: 'z-ai-key', drifted: true });
+});
+
+test('reconciling keeps keys for a different provider unreadable instead of stealing them', () => {
+  const storedAuth = {
+    apiKey: 'openai-key',
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+  };
+  assert.equal(reconcileScopedAIKey(storedAuth, {
+    provider: 'deepseek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+  }), null);
+  assert.equal(reconcileScopedAIKey(null, openAI), null);
+  assert.equal(reconcileScopedAIKey({ provider: 'openai' }, openAI), null);
+});
+
+test('reconciling ignores malformed stored records', () => {
+  assert.equal(reconcileScopedAIKey('not-a-record', openAI), null);
+  assert.equal(reconcileScopedAIKey({ baseUrl: 'https://api.openai.com/v1' }, openAI), null);
+  assert.equal(reconcileScopedAIKey({ apiKey: 'orphan-key' }, openAI), null);
+});
+
+test('an unreadable stored snapshot still counts as owning no key and clears nothing', async () => {
+  const keyless = { ...openAI, apiKey: '' };
+  const calls = [];
+  const operations = {
+    readSettings: async () => calls.push('read-settings'),
+    readAuth: async () => {
+      calls.push('read-auth');
+      return { secret: 'unreadable' };
+    },
+    authFromSnapshot: (snapshot) => snapshot?.secret?.ai || null,
+    persistSettings: async () => calls.push('settings'),
+    persistAuth: async () => calls.push('auth'),
+    clearAuth: async () => calls.push('clear'),
+    restoreSettings: async () => calls.push('restore-settings'),
+    restoreAuth: async () => calls.push('restore-auth'),
+  };
+
+  assert.equal(await persistScopedAIConfiguration(keyless, operations), null);
+  assert.deepEqual(calls, ['read-settings', 'read-auth', 'clear', 'settings']);
 });
 
 test('AI configuration reads fail before writes and rollback failures preserve the cause', async () => {

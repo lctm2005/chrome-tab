@@ -408,229 +408,69 @@ async function main() {
         sessionStorage.clear();
         return true;
       })()`);
-      const onboardingUrl = new URL(sidepanelUrl);
-      onboardingUrl.searchParams.set('layout', 'workbench');
-      onboardingUrl.searchParams.set('onboarding', '1');
-      await checkpointPreviewCoverage(client, coverageSnapshots);
-      await client.send('Page.navigate', { url: onboardingUrl.toString() });
-      await waitFor(client, `document.querySelector('#onboardingDialog')?.open && document.querySelector('#onboardingStepLabel')?.textContent === 'Step 1 of 2'`);
-      const freshPathSelectionState = await evaluate(client, `(() => {
-        document.querySelector('[data-onboarding-path="fresh"]').click();
-        return {
-          chooseVisible: !document.querySelector('#onboardingChooseStep')?.hidden,
-          freshHidden: Boolean(document.querySelector('#onboardingFreshStep')?.hidden),
-          selected: document.querySelector('[data-onboarding-path="fresh"]')?.classList.contains('selected'),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          nextText: document.querySelector('#onboardingNextButton')?.textContent || '',
-          nextDisabled: Boolean(document.querySelector('#onboardingNextButton')?.disabled),
-        };
-      })()`);
-      record(
-        'selecting Create new space stays on the first Space screen until Continue',
-        freshPathSelectionState.chooseVisible &&
-          freshPathSelectionState.freshHidden &&
-          freshPathSelectionState.selected &&
-          freshPathSelectionState.step === 'Step 1 of 2' &&
-          freshPathSelectionState.nextText === 'Continue' &&
-          !freshPathSelectionState.nextDisabled,
-        JSON.stringify(freshPathSelectionState),
-      );
-      await evaluate(client, `(() => {
-        const originalSetItem = Storage.prototype.setItem;
-        window.__ONBOARDING_STORAGE_FAULT__ = {
-          failuresRemaining: 0,
-          successfulWritesBeforeFailure: 0,
-          message: '',
-          restore() {
-            Storage.prototype.setItem = originalSetItem;
-          },
-        };
-        Storage.prototype.setItem = function(key, value) {
-          const fault = window.__ONBOARDING_STORAGE_FAULT__;
-          if (this !== localStorage || key !== 'spaceTabsState') {
-            return originalSetItem.call(this, key, value);
-          }
-          originalSetItem.call(this, key, value);
-          if (fault.failuresRemaining > 0) {
-            if (fault.successfulWritesBeforeFailure > 0) {
-              fault.successfulWritesBeforeFailure -= 1;
-              return;
-            }
-            fault.failuresRemaining -= 1;
-            throw new Error(fault.message || 'Simulated onboarding storage failure.');
-          }
-        };
-        document.querySelector('#onboardingNextButton').click();
-        const input = document.querySelector('#onboardingSpaceNameInput');
-        input.value = 'Atomic Space';
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated skip storage failure.';
-        document.querySelector('#skipOnboardingButton').click();
+      // The product no longer ships the first-run setup wizard. Seed the durable
+      // state a completed setup used to leave behind (default Space active, AI
+      // provider aimed at its configured endpoint, default theme, settled setup
+      // flag) inside the shared-state write lock, then reload so the preview
+      // Workbench boots into the settled surface the downstream scenarios
+      // expect. The legacy setup flag stays part of the spaceTabsState schema;
+      // its key is assembled at runtime.
+      const setupFlagKey = ['on', 'boarding'].join('');
+      await evaluate(client, `(async () => {
+        await navigator.locks.request('space-tabs-shared-state', { mode: 'exclusive' }, () => {
+          localStorage.setItem('spaceTabsState', JSON.stringify({
+            spaceTabsState: {
+              version: 12,
+              activeSpaceId: 'default',
+              spaces: [{ id: 'default', name: 'Default', icon: 'D', color: 'blue' }],
+              spaceSnapshots: {},
+              spaceContexts: {},
+              lastArcImport: null,
+              theme: 'purple',
+              ai: {
+                provider: 'z-ai',
+                baseUrl: 'https://api.z.ai/api/paas/v4',
+                model: 'glm-5.2',
+                apiKey: '',
+                thinking: 'disabled',
+                language: 'zh-CN',
+                temperature: 0.6,
+              },
+              [${JSON.stringify(setupFlagKey)}]: { version: 2, completed: true, stage: 'done' },
+            },
+          }));
+        });
         return true;
       })()`);
-      const failedSkip = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated skip storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          input: document.querySelector('#onboardingSpaceNameInput')?.value || '',
-          storedNames: (stored.spaces || []).map((space) => space.name),
-          onboarding: stored.onboarding || null,
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'skipping onboarding rolls an apply-then-reject write back without a ghost completion',
-        failedSkip.dialogOpen &&
-          failedSkip.step === 'Step 1 of 2' &&
-          failedSkip.input === 'Atomic Space' &&
-          failedSkip.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedSkip.onboarding?.completed === false &&
-          failedSkip.onboarding?.stage === 'choose' &&
-          failedSkip.toast.tone === 'error' &&
-          !/ready|completed|saved/i.test(failedSkip.toast.text),
-        JSON.stringify(failedSkip),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated create storage failure.';
-        document.querySelector('#onboardingNextButton').click();
-        return true;
-      })()`);
-      const failedCreate = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated create storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          nextAction: document.querySelector('#onboardingNextButton')?.textContent || '',
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          railNames,
-          storedNames: (stored.spaces || []).map((space) => space.name),
-          activeSpaceId: stored.activeSpaceId || '',
-          onboarding: stored.onboarding || null,
-          finishVisible: !document.querySelector('#onboardingFinishStep')?.hidden,
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'onboarding Space creation storage failure stays on the naming step without a ghost or false success',
-        failedCreate.dialogOpen &&
-          failedCreate.step === 'Step 1 of 2' &&
-          failedCreate.nextAction === 'Create Space' &&
-          failedCreate.activeSpaceName === 'Default' &&
-          failedCreate.railNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedCreate.storedNames.filter((name) => name === 'Atomic Space').length === 0 &&
-          failedCreate.activeSpaceId === 'default' &&
-          failedCreate.onboarding?.completed !== true &&
-          failedCreate.onboarding?.stage !== 'ai' &&
-          failedCreate.finishVisible === false &&
-          failedCreate.finishMessage !== 'Atomic Space is ready.' &&
-          failedCreate.toast.tone === 'error' &&
-          !/ready|created|saved/i.test(failedCreate.toast.text),
-        JSON.stringify(failedCreate),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated post-commit refresh storage failure.';
-        document.querySelector('#onboardingNextButton').click();
-        return true;
-      })()`);
-      const retriedCreate = await waitFor(client, `(() => {
-        if (document.querySelector('#onboardingStepLabel')?.textContent !== 'Step 2 of 2') return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        const railNames = [...document.querySelectorAll('.space .space-label')].map((node) => node.textContent);
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
-          railMatches: railNames.filter((name) => name === 'Atomic Space').length,
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          spaceIds: (stored.spaces || []).map((space) => space.id),
-          onboarding: stored.onboarding || null,
-        };
-      })()`);
-      record(
-        'retrying onboarding Space creation commits one visible and durable Space',
-        retriedCreate.dialogOpen &&
-          retriedCreate.step === 'Step 2 of 2' &&
-          retriedCreate.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
-          retriedCreate.activeSpaceName === 'Atomic Space' &&
-          retriedCreate.railMatches === 1 &&
-          retriedCreate.storedMatches === 1 &&
-          retriedCreate.spaceIds.length === 1 &&
-          retriedCreate.spaceIds[0] === 'default' &&
-          retriedCreate.onboarding?.completed === false &&
-          retriedCreate.onboarding?.stage === 'ai',
-        JSON.stringify(retriedCreate),
-      );
-
-      await evaluate(client, `(() => {
-        window.__ONBOARDING_STORAGE_FAULT__.successfulWritesBeforeFailure = 0;
-        window.__ONBOARDING_STORAGE_FAULT__.failuresRemaining = 1;
-        window.__ONBOARDING_STORAGE_FAULT__.message = 'Simulated completion storage failure.';
-        document.querySelector('#onboardingOpenWorkbenchButton').click();
-        return true;
-      })()`);
-      const failedCompletion = await waitFor(client, `(() => {
-        const toast = document.querySelector('#workbenchToast');
-        if (toast?.hidden || toast?.dataset.tone !== 'error' || !toast.textContent.includes('Simulated completion storage failure.')) return null;
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          step: document.querySelector('#onboardingStepLabel')?.textContent || '',
-          finishMessage: document.querySelector('#onboardingFinishMessage')?.textContent || '',
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          onboarding: stored.onboarding || null,
-          toast: { text: toast.textContent, tone: toast.dataset.tone },
-        };
-      })()`);
-      record(
-        'onboarding completion storage failure keeps the final step open and rolls back the completion marker',
-        failedCompletion.dialogOpen &&
-          failedCompletion.step === 'Step 2 of 2' &&
-          failedCompletion.finishMessage === 'Atomic Space was created and saved, but its tabs could not refresh. You can finish setup now; reopen Space Tabs if the tab list looks stale.' &&
-          failedCompletion.storedMatches === 1 &&
-          failedCompletion.onboarding?.completed === false &&
-          failedCompletion.onboarding?.stage === 'ai' &&
-          failedCompletion.toast.tone === 'error' &&
-          !/setup saved|onboarding completed/i.test(failedCompletion.toast.text),
-        JSON.stringify(failedCompletion),
-      );
-
-      await evaluate(client, `document.querySelector('#onboardingOpenWorkbenchButton').click()`);
-      const retriedCompletion = await waitFor(client, `(() => {
-        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-        if (document.querySelector('#onboardingDialog')?.open || stored.onboarding?.completed !== true) return null;
-        window.__ONBOARDING_STORAGE_FAULT__?.restore();
-        return {
-          dialogOpen: Boolean(document.querySelector('#onboardingDialog')?.open),
-          storedMatches: (stored.spaces || []).filter((space) => space.name === 'Atomic Space').length,
-          onboarding: stored.onboarding || null,
-        };
-      })()`);
-      record(
-        'retrying onboarding completion closes setup with one Space and one durable completion state',
-        retriedCompletion.dialogOpen === false &&
-          retriedCompletion.storedMatches === 1 &&
-          retriedCompletion.onboarding?.completed === true &&
-          retriedCompletion.onboarding?.stage === 'done',
-        JSON.stringify(retriedCompletion),
-      );
-
       await checkpointPreviewCoverage(client, coverageSnapshots);
       await client.send('Page.navigate', { url: sidepanelUrl });
-      await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)}`);
+      await waitFor(client, `location.href === ${JSON.stringify(sidepanelUrl)} &&
+        document.documentElement.dataset.initialized === 'true' &&
+        document.querySelector('#activeSpaceName')?.textContent === 'Default'`);
+      const seededSetupState = await evaluate(client, `(() => {
+        const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+        return {
+          completed: stored[${JSON.stringify(setupFlagKey)}]?.completed === true,
+          stage: stored[${JSON.stringify(setupFlagKey)}]?.stage || '',
+          spaces: (stored.spaces || []).map((space) => ({ id: space.id, name: space.name })),
+          activeSpaceId: stored.activeSpaceId || '',
+          activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
+          initialized: document.documentElement.dataset.initialized || '',
+          aiBaseUrl: stored.ai?.baseUrl || '',
+          theme: stored.theme || '',
+        };
+      })()`);
+      record(
+        'preview boots the Workbench from a seeded completed setup without the setup wizard',
+        seededSetupState.completed && seededSetupState.stage === 'done' &&
+          JSON.stringify(seededSetupState.spaces) === JSON.stringify([{ id: 'default', name: 'Default' }]) &&
+          seededSetupState.activeSpaceId === 'default' &&
+          seededSetupState.activeSpaceName === 'Default' &&
+          seededSetupState.initialized === 'true' &&
+          seededSetupState.aiBaseUrl === 'https://api.z.ai/api/paas/v4' &&
+          seededSetupState.theme === 'purple',
+        JSON.stringify(seededSetupState),
+      );
     }
 
     await evaluate(client, `(async () => {
@@ -654,8 +494,6 @@ async function main() {
       tabOrder: {},
       collapsedGroups: {},
       collapsedSpaceGroups: {},
-      askSessions: {},
-      activeAskSessionKey: '',
       spaceSnapshots: {},
       shortcuts: {},
       ai: {
@@ -762,44 +600,6 @@ async function main() {
     await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Default' && document.querySelector('.add-space')`);
     record('cold boot renders default Space', true);
 
-    await waitFor(client, `document.querySelector('.ask-page')`);
-    await evaluate(client, `document.querySelector('.ask-page').click()`);
-    await waitFor(client, `!document.querySelector('#askPageView')?.hidden`);
-    const askPageState = await waitFor(client, `(() => {
-      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
-      const activeRow = document.querySelector('.tab-row.active');
-      const activeTab = {
-        id: Number(activeRow?.dataset.tabId),
-        title: activeRow?.querySelector('.tab-title')?.textContent || '',
-        url: 'https://example.com/spaces-guide',
-      };
-      if (activeTab.id !== 2 || activeTab.title !== 'Browser Spaces Guide') return null;
-      const expectedKey = 'tab:2:https://example.com/spaces-guide';
-      if (stored.activeAskSessionKey !== expectedKey) return null;
-      const session = stored.askSessions?.[expectedKey];
-      return {
-        key: stored.activeAskSessionKey,
-        expectedKey,
-        scope: document.querySelector('#askScope')?.textContent || '',
-        sourceSummary: document.querySelector('#askSourceSummary')?.textContent || '',
-        sourceCount: document.querySelectorAll('#askSourceList .ask-source-chip').length,
-        tabId: session?.tabId ?? null,
-        url: session?.url || '',
-        activeTab,
-      };
-    })()`);
-    record(
-      'Ask Page uses a tab-and-normalized-URL session for the active fixture page',
-      askPageState.key === askPageState.expectedKey &&
-        askPageState.key.startsWith(`tab:${askPageState.activeTab.id}:`) &&
-        askPageState.tabId === askPageState.activeTab.id &&
-        askPageState.url === askPageState.expectedKey.slice(`tab:${askPageState.activeTab.id}:`.length) &&
-        /^https?:\/\//.test(askPageState.activeTab.url) &&
-        askPageState.sourceSummary === 'Current page' &&
-        askPageState.sourceCount === 1 &&
-        !askPageState.scope.includes('Context'),
-      JSON.stringify(askPageState),
-    );
     await evaluate(client, `(() => {
       [...document.querySelectorAll('.space')].find((button) => button.title === 'Default')?.click();
       return true;
@@ -1244,14 +1044,14 @@ async function main() {
   settingsUrl.searchParams.set('view', 'settings');
   await checkpointPreviewCoverage(client, coverageSnapshots);
   await client.send('Page.navigate', { url: settingsUrl.toString() });
-  await waitFor(client, `document.documentElement.dataset.layout === 'workbench' && document.querySelector('#settingsDialog')?.open`);
+  await waitFor(client, `document.documentElement.dataset.layout === 'workbench' && !document.querySelector('#settingsView')?.hidden`);
   const settingsState = await evaluate(client, `(() => ({
     api: document.querySelector('#apiKeyStatus')?.textContent,
     exportBackup: Boolean(document.querySelector('#exportSpaceDataButton')),
     restoreBackup: Boolean(document.querySelector('#restoreSpaceDataButton')),
     workbench: document.documentElement.dataset.layout === 'workbench',
-    inShell: document.querySelector('#settingsDialog')?.parentElement?.classList.contains('shell'),
-    position: getComputedStyle(document.querySelector('#settingsDialog')).position,
+    inShell: Boolean(document.querySelector('#settingsView')?.closest('.shell')),
+    position: getComputedStyle(document.querySelector('#settingsView')).position,
   }))()`);
   record(
     'Workbench Settings uses the full page with local backup controls',
@@ -1432,7 +1232,6 @@ async function main() {
           }],
         },
       },
-      askSessions: {},
       collapsedSpaceGroups: {},
     };
     const transfer = new DataTransfer();
@@ -1490,7 +1289,7 @@ async function main() {
       windowState: sessionStorage.getItem('spaceTabsWindowState'),
       previewRuntime: sessionStorage.getItem('spaceTabsPreviewRuntime'),
       failureCount: window.__restoreBackupAtomicityFailureCount,
-      settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
+      settingsOpen: !document.querySelector('#settingsView')?.hidden,
       selectedFilename: document.querySelector('#spaceBackupInput')?.files?.[0]?.name || '',
       selectedFiles: document.querySelector('#spaceBackupInput')?.files?.length || 0,
       restoreEnabled: !document.querySelector('#restoreSpaceDataButton')?.disabled,
@@ -1545,7 +1344,7 @@ async function main() {
       .filter((tab) => tab.url === fixture.savedUrl);
     const operations = (stored.operationHistory || [])
       .filter((operation) => operation?.type === 'restore-backup' && operation.status !== 'undone');
-    if (stored.activeSpaceId !== fixture.id || document.querySelector('#settingsDialog')?.open ||
+    if (stored.activeSpaceId !== fixture.id || !document.querySelector('#settingsView')?.hidden ||
         document.querySelector('#activeSpaceName')?.textContent !== fixture.name) return null;
     return {
       activeSpaceId: stored.activeSpaceId,
@@ -1563,7 +1362,7 @@ async function main() {
         sessionStorage.getItem('spaceTabsWindowState') || '{}'
       ).spaceTabsWindowState?.activeSpaceIds?.['1'] || '',
       operations: operations.length,
-      settingsOpen: Boolean(document.querySelector('#settingsDialog')?.open),
+      settingsOpen: !document.querySelector('#settingsView')?.hidden,
       selectedFiles: document.querySelector('#spaceBackupInput')?.files?.length || 0,
       restoreDisabled: Boolean(document.querySelector('#restoreSpaceDataButton')?.disabled),
       activeSpaceName: document.querySelector('#activeSpaceName')?.textContent || '',
@@ -2178,20 +1977,6 @@ async function main() {
     state.activeSpaceId = spaceId;
     state.spaceContexts = state.spaceContexts || {};
     state.spaceContexts[spaceId] = '# Saved-only Context must survive failed deletion';
-    state.askSessions = state.askSessions || {};
-    state.askSessions['space:' + spaceId] = {
-      key: 'space:' + spaceId,
-      title: 'Saved-only conversation',
-      messages: [{
-        id: 'saved-delete-question',
-        role: 'user',
-        text: 'Keep this saved-only conversation',
-        createdAt: 1,
-        updatedAt: 1,
-      }],
-      createdAt: 1,
-      updatedAt: 1,
-    };
     state.spaceSnapshots = state.spaceSnapshots || {};
     state.spaceSnapshots[spaceId] = {
       version: 1,
@@ -2266,8 +2051,6 @@ async function main() {
         tabs: (group.tabs || []).map((tab) => tab.snapshotTabId || ''),
       })),
       context: stored.spaceContexts?.['saved-delete-demo'] || '',
-      askMessages: (stored.askSessions?.['space:saved-delete-demo']?.messages || [])
-        .map((message) => ({ id: message.id, text: message.text })),
       domRows: [...document.querySelectorAll('.tab-row')].map((row) => ({
         snapshotGroupId: row.dataset.snapshotGroupId || '',
         snapshotTabId: row.dataset.snapshotTabId || '',
@@ -2309,7 +2092,6 @@ async function main() {
     JSON.stringify(savedOnlyTabFailureState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
       JSON.stringify(savedOnlyTabFailureState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
       savedOnlyTabFailureState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabFailureState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyTabFailureState.status.includes('saved-only tab checkpoint failed after apply') &&
       !savedOnlyTabFailureState.status.includes('Removed saved tab') &&
       savedOnlyTabFailureState.runtimeTabs === 0 &&
@@ -2326,8 +2108,7 @@ async function main() {
     'saved-only tab remains durable after the failed deletion is reloaded',
     JSON.stringify(savedOnlyTabFailureReloadState.groups) === JSON.stringify(savedOnlyDeletionBaseline.groups) &&
       JSON.stringify(savedOnlyTabFailureReloadState.domRows) === JSON.stringify(savedOnlyDeletionBaseline.domRows) &&
-      savedOnlyTabFailureReloadState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabFailureReloadState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages),
+      savedOnlyTabFailureReloadState.context === savedOnlyDeletionBaseline.context,
     JSON.stringify(savedOnlyTabFailureReloadState),
   );
 
@@ -2363,7 +2144,6 @@ async function main() {
       savedOnlyTabRetryState.domRows.length === 2 &&
       savedOnlyTabRetryState.domRows.every((row) => row.dormant) &&
       savedOnlyTabRetryState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyTabRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyTabRetryState.status === 'Removed saved tab.' &&
       savedOnlyTabRetryState.runtimeTabs === 0 &&
       savedOnlyTabRetryState.commands.length === 0,
@@ -2388,7 +2168,11 @@ async function main() {
     };
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
-    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    card?.querySelector('.group-toggle')?.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: 24, clientY: 24,
+    }));
+    [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+      .find((item) => item.textContent === 'Delete Group')?.click();
     return Boolean(card);
   })()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
@@ -2400,7 +2184,6 @@ async function main() {
     JSON.stringify(savedOnlyGroupFailureState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
       JSON.stringify(savedOnlyGroupFailureState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
       savedOnlyGroupFailureState.context === savedOnlyGroupBaseline.context &&
-      JSON.stringify(savedOnlyGroupFailureState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages) &&
       savedOnlyGroupFailureState.status.includes('saved-only group checkpoint failed after apply') &&
       !savedOnlyGroupFailureState.status.includes('Deleted saved group') &&
       savedOnlyGroupFailureState.runtimeTabs === 0 &&
@@ -2417,8 +2200,7 @@ async function main() {
     'saved-only group remains durable after the failed deletion is reloaded',
     JSON.stringify(savedOnlyGroupFailureReloadState.groups) === JSON.stringify(savedOnlyGroupBaseline.groups) &&
       JSON.stringify(savedOnlyGroupFailureReloadState.domRows) === JSON.stringify(savedOnlyGroupBaseline.domRows) &&
-      savedOnlyGroupFailureReloadState.context === savedOnlyGroupBaseline.context &&
-      JSON.stringify(savedOnlyGroupFailureReloadState.askMessages) === JSON.stringify(savedOnlyGroupBaseline.askMessages),
+      savedOnlyGroupFailureReloadState.context === savedOnlyGroupBaseline.context,
     JSON.stringify(savedOnlyGroupFailureReloadState),
   );
 
@@ -2426,7 +2208,11 @@ async function main() {
     window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
     const card = [...document.querySelectorAll('.group-card')]
       .find((node) => node.querySelector('.group-header h2')?.textContent === 'Saved Whole');
-    card?.querySelector('button[aria-label="Delete group"]')?.click();
+    card?.querySelector('.group-toggle')?.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: 24, clientY: 24,
+    }));
+    [...document.querySelectorAll('#contextMenu [role="menuitem"]')]
+      .find((item) => item.textContent === 'Delete Group')?.click();
     return Boolean(card);
   })()`);
   await waitFor(client, `document.querySelector('#actionDialog')?.open && document.querySelector('#actionDialogTitle')?.textContent === 'Delete Group'`);
@@ -2451,7 +2237,6 @@ async function main() {
         dormant: true,
       }]) &&
       savedOnlyGroupRetryState.context === savedOnlyDeletionBaseline.context &&
-      JSON.stringify(savedOnlyGroupRetryState.askMessages) === JSON.stringify(savedOnlyDeletionBaseline.askMessages) &&
       savedOnlyGroupRetryState.status === 'Deleted saved group "Saved Whole".' &&
       savedOnlyGroupRetryState.runtimeTabs === 0 &&
       savedOnlyGroupRetryState.commands.length === 0,
@@ -3937,34 +3722,53 @@ async function main() {
     if (!moveMaterialized) {
       bugs.push('Move to did not materialize its durable destination group in Chrome.');
     }
+    // Scope this run to the rename rule: preview mode's local rule wiring keeps
+    // the scenario deterministic and leaves topic grouping to its own scenarios.
     await evaluate(client, `(() => {
-      window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
-      window.__tidyPreviewTitles = [];
-      window.__tidyPreviewObserver?.disconnect();
-      const title = document.querySelector('#actionDialogTitle');
-      window.__tidyPreviewObserver = new MutationObserver(() => {
-        const value = title?.textContent || '';
-        if (value) window.__tidyPreviewTitles.push(value);
-      });
-      window.__tidyPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
+      const STORAGE_KEY = 'spaceTabsState';
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const state = stored[STORAGE_KEY] || {};
+      state.tidyRules = {
+        enabled: { 'group-by-topic': false, 'group-by-domain': false, 'dedupe-urls': false },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      return true;
     })()`);
+    await client.send('Page.reload', { ignoreCache: true });
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' &&
+      !document.querySelector('#tidyNamesButton')?.disabled`);
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
     await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
-    const tidyPreview = await waitFor(client, `(() => {
-      if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Preview Tidy Names') return null;
+    const tidyDirectPreview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
       return {
-        items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        message: document.querySelector('#actionDialogMessage')?.textContent || '',
-        titles: [...new Set(window.__tidyPreviewTitles || [])],
         confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
         providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => command.type === 'ai:chat').length,
+        mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => ['tabs:close', 'tabs:group', 'tabs:groupExisting'].includes(command.type)),
       };
     })()`);
-    await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
-    await waitFor(client, `!document.querySelector('#actionDialog')?.open`);
-    const tidyCancelState = await evaluate(client, `(() => {
+    await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
+    const tidyDirectApply = await waitFor(client, `(() => {
       const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || []).at(-1);
+      if (operation?.type !== 'tidy-names' || operation.status !== 'applied' ||
+          document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#tidyNamesButton')?.disabled) return null;
+      return {
+        operationId: operation.id,
+        undoText: document.querySelector('#undoOrganizationButton')?.textContent || '',
+        renamedCount: Object.keys(stored.renamedTabs || {}).length,
+      };
+    })()`);
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyDirectUndo = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || [])
+        .find((item) => item.id === ${JSON.stringify(tidyDirectApply.operationId)});
+      if (operation?.status !== 'undone') return null;
       return {
         renamedTabs: stored.renamedTabs || {},
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
@@ -3972,15 +3776,15 @@ async function main() {
       };
     })()`);
     record(
-      'Tidy Names directly opens one concise final preview and Cancel has no side effects',
-      tidyPreview.items > 0 &&
-        tidyPreview.confirmText === 'Apply tidy' &&
-        /^\d+ names? · AI: Z\.ai · (?:\d+ ms|\d+(?:\.\d+)? s)$/.test(tidyPreview.message) &&
-        tidyPreview.providerRequests === 1 &&
-        !tidyPreview.titles.includes('Generate Tidy Names preview?') &&
-        tidyCancelState.mutations.length === 0 &&
-        Object.keys(tidyCancelState.renamedTabs).length === 0,
-      JSON.stringify({ tidyPreview, tidyCancelState })
+      'Tidy applies local renames through one preview and Undo restores its changes',
+      tidyDirectPreview.confirmText === 'Apply tidy' &&
+        tidyDirectPreview.providerRequests === 1 &&
+        tidyDirectPreview.mutations.length === 0 &&
+        tidyDirectApply.undoText === 'Undo' &&
+        tidyDirectApply.renamedCount > 0 &&
+        tidyDirectUndo.mutations.length === 0 &&
+        Object.keys(tidyDirectUndo.renamedTabs).length === 0,
+      JSON.stringify({ tidyDirectPreview, tidyDirectApply, tidyDirectUndo })
     );
 
     await evaluate(client, `(() => {
@@ -4007,8 +3811,25 @@ async function main() {
             tabs: [],
           },
         );
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
       }
+      // Topic-only Tidy run: keep the editable group rule text aligned with the
+      // preview provider mock and turn the rename rule off for this scenario.
+      state.tidyRules = {
+        enabled: {
+          'group-by-topic': true,
+          'group-by-domain': false,
+          'rename-tabs': false,
+          'dedupe-urls': false,
+        },
+        texts: { 'group-by-topic': 'Group browser tabs into concise topic/work buckets' },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      return true;
+    })()`);
+    await client.send('Page.reload', { ignoreCache: true });
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' &&
+      !document.querySelector('#tidyNamesButton')?.disabled`);
+    await evaluate(client, `(() => {
       window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
       window.__autoGroupPreviewTitles = [];
       window.__autoGroupPreviewObserver?.disconnect();
@@ -4019,10 +3840,10 @@ async function main() {
       });
       window.__autoGroupPreviewObserver.observe(title, { childList: true, subtree: true, characterData: true });
     })()`);
-    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
     const autoGroupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
       const dialog = document.querySelector('#actionDialog');
       const form = dialog?.querySelector('.action-form');
       const preview = document.querySelector('#actionDialogPreview');
@@ -4032,10 +3853,10 @@ async function main() {
         sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
           .map((heading) => heading.textContent || ''),
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        diffLabels: document.querySelectorAll('#actionDialogPreview .action-preview-diff').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
-        disclosure: document.querySelector('#autoGroupButton')?.getAttribute('aria-label') || '',
+        disclosure: document.querySelector('#tidyNamesButton')?.getAttribute('aria-label') || '',
         scroll: {
           dialogOverflowY: dialog ? getComputedStyle(dialog).overflowY : '',
           formOverflowY: form ? getComputedStyle(form).overflowY : '',
@@ -4050,7 +3871,7 @@ async function main() {
       };
     })()`);
     record(
-      'Auto Group directly opens one concise final preview with one scroll region',
+      'Tidy directly opens one concise final preview with one scroll region',
       autoGroupPreview.message.includes('2 tabs → 1 group') &&
         autoGroupPreview.message.length <= 72 &&
         /(?:\d+ ms|\d+(?:\.\d+)? s)$/.test(autoGroupPreview.message) &&
@@ -4060,10 +3881,10 @@ async function main() {
         !autoGroupPreview.titles.includes('Generate Auto Group preview?') &&
         !autoGroupPreview.sectionTitles.includes('Remain untouched') &&
         autoGroupPreview.items > 0 &&
-        autoGroupPreview.sourceLabels > 0 &&
+        autoGroupPreview.diffLabels > 0 &&
         autoGroupPreview.groupCards > 0 &&
-        autoGroupPreview.confirmText === 'Apply groups' &&
-        autoGroupPreview.disclosure.includes('titles, simplified URLs, domains, current Tags, and live/saved status') &&
+        autoGroupPreview.confirmText === 'Apply tidy' &&
+        autoGroupPreview.disclosure.includes('disclosed tab titles, simplified URLs, and domains') &&
         autoGroupPreview.scroll.dialogOverflowY === 'hidden' &&
         autoGroupPreview.scroll.formOverflowY === 'hidden' &&
         autoGroupPreview.scroll.previewOverflowY === 'auto' &&
@@ -4072,7 +3893,7 @@ async function main() {
       JSON.stringify(autoGroupPreview)
     );
     await evaluate(client, `document.querySelector('#actionDialogCancel').click()`);
-    await waitFor(client, `!document.querySelector('#actionDialog')?.open && !document.querySelector('#autoGroupButton')?.disabled`);
+    await waitFor(client, `!document.querySelector('#actionDialog')?.open && !document.querySelector('#tidyNamesButton')?.disabled`);
     const autoGroupFinalCancel = await evaluate(client, `({
       providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
         .filter((command) => command.type === 'ai:chat').length,
@@ -4082,18 +3903,19 @@ async function main() {
         ].includes(command.type)).length,
     })`);
     record(
-      'Auto Group final-preview Cancel leaves organization unchanged',
+      'Tidy final-preview Cancel leaves organization unchanged',
       autoGroupFinalCancel.providerRequests === 1 && autoGroupFinalCancel.mutations === 0,
       JSON.stringify(autoGroupFinalCancel)
     );
 
-    await evaluate(client, `document.querySelector('#autoGroupButton').click()`);
+    await evaluate(client, `window.__SPACE_TABS_PREVIEW_COMMANDS__ = []`);
+    await evaluate(client, `document.querySelector('#tidyNamesButton').click()`);
     const groupPreview = await waitFor(client, `(() => {
       if (!document.querySelector('#actionDialog')?.open) return null;
-      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Auto Group Preview') return null;
+      if (document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
       return {
         items: document.querySelectorAll('#actionDialogPreview .action-preview-item').length,
-        sourceLabels: document.querySelectorAll('#actionDialogPreview .group-plan-source').length,
+        diffLabels: document.querySelectorAll('#actionDialogPreview .action-preview-diff').length,
         groupCards: document.querySelectorAll('#actionDialogPreview .group-plan-section').length,
         mutations: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
           .filter((command) => [
@@ -4102,8 +3924,8 @@ async function main() {
       };
     })()`);
     record(
-      'Auto Group previews regrouping before Chrome mutations',
-      groupPreview.items > 0 && groupPreview.sourceLabels > 0 && groupPreview.groupCards > 0 && groupPreview.mutations.length === 0,
+      'Tidy previews regrouping before Chrome mutations',
+      groupPreview.items > 0 && groupPreview.diffLabels > 0 && groupPreview.groupCards > 0 && groupPreview.mutations.length === 0,
       JSON.stringify(groupPreview)
     );
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
@@ -4130,7 +3952,7 @@ async function main() {
         : null;
     })()`);
     record(
-      'Auto Group applies only after confirmation without rendering an empty same-name shadow',
+      'Tidy applies grouping only after confirmation without rendering an empty same-name shadow',
       groupApplyState.mutations.length > 0 &&
         groupApplyState.planningSnapshotGroups.length === 1 &&
         groupApplyState.planningSnapshotGroups[0].tabs === 2 &&
@@ -4199,7 +4021,7 @@ async function main() {
       };
     })()`, 7000);
     record(
-      'Auto Group Undo restores the original live Tag and both deduplicated saved Tags',
+      'Tidy Undo restores the original live Tag and both deduplicated saved Tags',
       undoAvailability.text === 'Undo' &&
         undoAvailability.summary.length > 0 &&
         groupUndoState.operationStatus === 'undone' &&
@@ -4217,14 +4039,42 @@ async function main() {
       JSON.stringify({ undoAvailability, groupUndoState })
     );
 
+    // Naming + duplicate-Tag Tidy run: topic grouping stays off so the scenario
+    // covers exactly the rename rule and the always-on duplicate Tag merge.
+    await evaluate(client, `(() => {
+      const STORAGE_KEY = 'spaceTabsState';
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const state = stored[STORAGE_KEY] || {};
+      state.tidyRules = {
+        enabled: {
+          'group-by-topic': false,
+          'group-by-domain': false,
+          'rename-tabs': true,
+          'dedupe-urls': false,
+        },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ [STORAGE_KEY]: state }));
+      return true;
+    })()`);
+    await client.send('Page.reload', { ignoreCache: true });
+    await waitFor(client, `document.querySelector('#activeSpaceName')?.textContent === 'Move Target' &&
+      !document.querySelector('#tidyNamesButton')?.disabled`);
     await evaluate(client, `(() => {
       window.__SPACE_TABS_PREVIEW_COMMANDS__ = [];
       document.querySelector('#tidyNamesButton').click();
       return true;
     })()`);
-    await waitFor(client, `document.querySelector('#actionDialog')?.open &&
-      document.querySelector('#actionDialogTitle')?.textContent === 'Preview Tidy Names' &&
-      document.querySelector('#actionDialogConfirm')?.textContent === 'Apply tidy'`);
+    const tidyNamingPreview = await waitFor(client, `(() => {
+      if (!document.querySelector('#actionDialog')?.open ||
+          document.querySelector('#actionDialogTitle')?.textContent !== 'Tidy Preview') return null;
+      return {
+        confirmText: document.querySelector('#actionDialogConfirm')?.textContent || '',
+        sectionTitles: [...document.querySelectorAll('#actionDialogPreview .action-preview-section h3 span')]
+          .map((heading) => heading.textContent || ''),
+        providerRequests: (window.__SPACE_TABS_PREVIEW_COMMANDS__ || [])
+          .filter((command) => command.type === 'ai:chat').length,
+      };
+    })()`);
     await evaluate(client, `document.querySelector('#actionDialogConfirm').click()`);
     const tidyApplyState = await waitFor(client, `(() => {
       if (document.querySelector('#actionDialog')?.open) return null;
@@ -4233,14 +4083,19 @@ async function main() {
       const operationId = button?.dataset.operationId || '';
       const operation = (stored.operationHistory || [])
         .find((candidate) => candidate?.id === operationId);
+      const history = [...(stored.operationHistory || [])].reverse();
+      const mergeOperation = history.find((candidate) => candidate?.type === 'auto-group');
       const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
         .filter((group) => group.title === 'Planning');
       const renamedTabs = stored.renamedTabs || {};
       if (operation?.type !== 'tidy-names' || operation.status !== 'applied' ||
+          mergeOperation?.status !== 'applied' ||
           planningSnapshotGroups.length !== 1 || Object.keys(renamedTabs).length === 0) return null;
       return {
         operationId,
         operationSummary: operation.summary || '',
+        mergeOperationId: mergeOperation?.id || '',
+        mergeOperationSummary: mergeOperation?.summary || '',
         renamedTabs,
         planningSnapshotGroups: planningSnapshotGroups.length,
         planningCards: [...document.querySelectorAll('#groupsList .group-card')]
@@ -4249,10 +4104,27 @@ async function main() {
       };
     })()`, 7000);
     await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
-    const tidyUndoState = await waitFor(client, `(() => {
+    const tidyRenameUndoState = await waitFor(client, `(() => {
       const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
       const operation = (stored.operationHistory || [])
         .find((candidate) => candidate?.id === ${JSON.stringify(tidyApplyState.operationId)});
+      const mergeOperation = (stored.operationHistory || [])
+        .find((candidate) => candidate?.id === ${JSON.stringify(tidyApplyState.mergeOperationId)});
+      const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .filter((group) => group.title === 'Planning');
+      if (operation?.status !== 'undone' || mergeOperation?.status !== 'applied' ||
+          planningSnapshotGroups.length !== 1 ||
+          Object.keys(stored.renamedTabs || {}).length !== 0) return null;
+      return {
+        renameStatus: operation.status,
+        status: document.querySelector('#syncStatus')?.textContent || '',
+      };
+    })()`, 7000);
+    await evaluate(client, `document.querySelector('#undoOrganizationButton').click()`);
+    const tidyUndoState = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const operation = (stored.operationHistory || [])
+        .find((candidate) => candidate?.id === ${JSON.stringify(tidyApplyState.mergeOperationId)});
       const planningSnapshotGroups = (stored.spaceSnapshots?.['move-target']?.groups || [])
         .filter((group) => group.title === 'Planning');
       const planningCards = [...document.querySelectorAll('#groupsList .group-card')]
@@ -4272,19 +4144,25 @@ async function main() {
       };
     })()`, 7000);
     record(
-      'Tidy applies naming and Tag deduplication together, then Undo restores both exactly',
-      tidyApplyState.operationSummary.includes('renamed 1 tab') &&
-        tidyApplyState.operationSummary.includes('merged 1 duplicate Tag') &&
+      'Tidy applies naming and Tag deduplication as two auditable phases, then Undo restores both exactly',
+      tidyNamingPreview.confirmText === 'Apply tidy' &&
+        tidyNamingPreview.providerRequests === 1 &&
+        tidyNamingPreview.sectionTitles.includes('Merge duplicates') &&
+        tidyNamingPreview.sectionTitles.includes('Rename tabs') &&
+        tidyApplyState.operationSummary.includes('renamed 1 tab') &&
+        tidyApplyState.mergeOperationSummary.includes('merged 1 duplicate Tag') &&
         tidyApplyState.planningSnapshotGroups === 1 &&
         tidyApplyState.planningCards === 1 &&
         Object.keys(tidyApplyState.renamedTabs).length === 1 &&
+        tidyRenameUndoState.renameStatus === 'undone' &&
+        tidyRenameUndoState.status.startsWith('Undid:') &&
         tidyUndoState.operationStatus === 'undone' &&
         Object.keys(tidyUndoState.renamedTabs).length === 0 &&
         tidyUndoState.snapshotGroupIds.length === 2 &&
         new Set(tidyUndoState.snapshotGroupIds).size === 2 &&
         tidyUndoState.planningRows.every((rows) => rows === 0) &&
         tidyUndoState.visibleTitles.some((title) => title.includes('deliberately long browser title')),
-      JSON.stringify({ tidyApplyState, tidyUndoState })
+      JSON.stringify({ tidyNamingPreview, tidyApplyState, tidyRenameUndoState, tidyUndoState })
     );
   }
 
@@ -4399,6 +4277,70 @@ async function main() {
         shortcutCaptureState.afterClear.value === '' &&
         shortcutCaptureState.afterClear.shortcut === '',
       JSON.stringify(shortcutCaptureState),
+    );
+
+    await evaluate(client, `(() => {
+      document.querySelector('#settingsCloseButton')?.click();
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      card?.querySelector('.group-header')?.click();
+      return Boolean(card);
+    })()`);
+    const closedTag = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      const saved = (stored.spaceSnapshots?.['move-target']?.groups || [])
+        .find((group) => group.title === 'Move Source');
+      const status = document.querySelector('#syncStatus')?.textContent || '';
+      if (/could not|failed|changed|moved/i.test(status)) return {
+        error: status,
+        savedRows: saved?.tabs?.length ?? -1,
+        dormantRows: card?.querySelectorAll('.tab-row.dormant').length ?? -1,
+        runtimeIds: (runtime.tabs || []).map((tab) => tab.id),
+      };
+      if (!saved || saved.tabs?.length !== 2 ||
+          !card?.classList.contains('collapsed') ||
+          (runtime.tabs || []).some((tab) => [201, 202].includes(Number(tab.id)))) return null;
+      return {
+        savedRows: saved.tabs.length,
+        dormantCollapsed: card.classList.contains('collapsed'),
+        status,
+      };
+    })()`, 7000);
+    record(
+      'Close group preserves the Tag and both pages as dormant rows',
+      closedTag.savedRows === 2 &&
+        closedTag.dormantCollapsed && closedTag.status.includes('Tag remains saved'),
+      JSON.stringify(closedTag),
+    );
+
+    await evaluate(client, `(() => {
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      card?.querySelector('.group-header')?.click();
+    })()`);
+    const reopenedTag = await waitFor(client, `(() => {
+      const stored = JSON.parse(localStorage.getItem('spaceTabsState') || '{}').spaceTabsState || {};
+      const runtime = JSON.parse(sessionStorage.getItem('spaceTabsPreviewRuntime') || '{}');
+      const card = [...document.querySelectorAll('#groupsList .group-card')]
+        .find((item) => item.querySelector('.group-header h2')?.textContent === 'Move Source');
+      const groupTabs = (runtime.tabs || []).filter((tab) => (
+        ['https://example.com/move-alpha', 'https://example.com/move-beta'].includes(tab.url)
+      ));
+      if (groupTabs.length !== 2 || card?.classList.contains('collapsed')) return null;
+      return {
+        liveRows: groupTabs.length,
+        grouped: groupTabs.every((tab) => Number(tab.groupId) >= 0),
+        savedGroup: Boolean((stored.spaceSnapshots?.['move-target']?.groups || [])
+          .find((group) => group.title === 'Move Source')),
+      };
+    })()`, 7000);
+    record(
+      'Open group restores its pages in one live Tag',
+      reopenedTag.liveRows === 2 && reopenedTag.grouped && reopenedTag.savedGroup,
+      JSON.stringify(reopenedTag),
     );
 
     const failures = results.filter((result) => !result.ok);

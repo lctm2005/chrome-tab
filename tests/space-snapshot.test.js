@@ -19,6 +19,7 @@ import {
   retitleSnapshotGroup,
   sanitizeSpaceSnapshot,
   shouldAutoCloseTab,
+  snapshotEmptyTagIsMergeCandidate,
   snapshotHasPersistentContent,
   snapshotGroupShouldPersist,
   snapshotTabIdentitiesConflict,
@@ -194,7 +195,7 @@ test('Tidy Tag merging keeps the canonical identity when duplicate legacy metada
   assert.deepEqual(result.snapshot.groups, [snapshot.groups[0], snapshot.groups[3]]);
 });
 
-test('Tidy previews the union of saved and live duplicate Tags without double-counting a shared title', () => {
+test('Tidy counts the union of saved and live duplicate Tags without double-counting a shared title', () => {
   assert.deepEqual(combineDuplicateTagMergePlans(
     [
       { title: ' Docs ', mergedCount: 1, appendedRowCount: 2 },
@@ -575,6 +576,165 @@ test('stable group identity keeps same-title same-color groups separate during r
   })), [
     { id: 'group-a', tabs: ['row-a-live', 'row-a-saved'] },
     { id: 'group-b', tabs: ['row-b-live', 'row-b-saved'] },
+  ]);
+});
+
+test('a saved Tag whose only row moved into a reserved live Tag is dropped', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      {
+        snapshotGroupId: 'old-tag', title: 'Old', color: 'blue', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-old', title: 'Moved', url: 'https://moved.test/page' }],
+      },
+      {
+        snapshotGroupId: 'live-a', title: 'Keeper', color: 'red', collapsed: false,
+        tabs: [{ snapshotTabId: 'row-keep', title: 'Kept', url: 'https://kept.test/page' }],
+      },
+    ],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-a', title: 'Keeper', color: 'red', collapsed: false,
+      tabs: [
+        { snapshotTabId: 'row-old', title: 'Moved', url: 'https://moved.test/page' },
+        { snapshotTabId: 'row-keep', title: 'Kept', url: 'https://kept.test/page' },
+      ],
+    }],
+  };
+
+  const merged = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(merged.groups.map((group) => group.snapshotGroupId), ['live-a']);
+  assert.deepEqual(new Set(merged.groups[0].tabs.map((tab) => tab.snapshotTabId)), new Set(['row-old', 'row-keep']));
+});
+
+test('empty saved Tags survive only as duplicate merge candidates without preserveGroups', () => {
+  const duplicatesSnapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+      { snapshotGroupId: 'dup-b', title: 'docs', color: 'pink', collapsed: true, tabs: [] },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(duplicatesSnapshot, duplicatesSnapshot.groups[0]), true);
+  assert.equal(snapshotGroupShouldPersist(duplicatesSnapshot, duplicatesSnapshot.groups[1]), true);
+  assert.equal(snapshotHasPersistentContent(duplicatesSnapshot), true);
+
+  const uniqueSnapshot = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'solo', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(uniqueSnapshot, uniqueSnapshot.groups[0]), false);
+  assert.equal(snapshotHasPersistentContent(uniqueSnapshot), false);
+  assert.equal(snapshotHasPersistentContent(null), false);
+  assert.equal(snapshotHasPersistentContent(undefined), false);
+
+  // Direct branch coverage: the merge-candidate rule must not depend on
+  // reducer timing elsewhere for every branch to stay exercised.
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'tabbed', title: 'Docs', color: 'blue', tabs: [{ title: 'T', url: 'https://t.test' }],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'empty-grouped', title: 'Ungrouped', color: 'grey', tabs: [],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(duplicatesSnapshot, {
+    snapshotGroupId: 'untitled', title: '   ', color: 'blue', tabs: [],
+  }), false);
+  assert.equal(snapshotEmptyTagIsMergeCandidate(null, {
+    snapshotGroupId: 'orphan', title: 'Docs', color: 'blue', tabs: [],
+  }), false);
+  assert.equal(snapshotHasPersistentContent({
+    version: 1,
+    groups: [{
+      snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false,
+      tabs: [{ title: 'T', url: 'https://t.test' }],
+    }],
+  }), true);
+
+  const duplicatesWithRows = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [
+      { snapshotGroupId: 'dup-a', title: 'Docs', color: 'blue', collapsed: false, tabs: [] },
+      {
+        snapshotGroupId: 'dup-b', title: 'Docs', color: 'pink', collapsed: true,
+        tabs: [{ title: 'Saved', url: 'https://example.test/saved' }],
+      },
+    ],
+  };
+  assert.equal(snapshotGroupShouldPersist(duplicatesWithRows, duplicatesWithRows.groups[0]), true);
+});
+
+test('same-title saved and live Tags with different stable identities remain visible to Tidy', () => {
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'saved-tag', title: 'Docs', color: 'blue',
+      tabs: [{ snapshotTabId: 'saved-row', title: 'Saved', url: 'https://example.test/saved' }],
+    }],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-tag', title: 'Docs', color: 'blue',
+      tabs: [{ snapshotTabId: 'live-row', title: 'Live', url: 'https://example.test/live' }],
+    }],
+  };
+
+  const refreshed = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(refreshed.groups.map((group) => group.snapshotGroupId), [
+    'saved-tag', 'live-tag',
+  ]);
+  const tidyPlan = mergeDuplicateSnapshotTags(refreshed);
+  assert.equal(tidyPlan.mergedCount, 1);
+  assert.deepEqual(tidyPlan.snapshot.groups.map((group) => ({
+    id: group.snapshotGroupId,
+    rows: group.tabs.map((tab) => tab.snapshotTabId),
+  })), [{ id: 'saved-tag', rows: ['saved-row', 'live-row'] }]);
+});
+
+test('same-title saved and live Tags sharing only a URL stay separate for Tidy', () => {
+  // Shared page content is not shared identity: these Tags keep distinct
+  // stable rows and group ids so Tidy keeps seeing a duplicate to merge.
+  const stored = {
+    version: 1,
+    identityVersion: 1,
+    preserveGroups: true,
+    updatedAt: 1,
+    groups: [{
+      snapshotGroupId: 'saved-tag', title: 'Remote Current', color: 'cyan',
+      tabs: [{ snapshotTabId: 'saved-row', title: 'Saved', url: 'https://example.net/remote-saved' }],
+    }],
+  };
+  const live = {
+    version: 1,
+    identityVersion: 1,
+    updatedAt: 2,
+    groups: [{
+      snapshotGroupId: 'live-tag', title: 'Remote Current', color: 'cyan',
+      tabs: [{ snapshotTabId: 'live-row', title: 'Live', url: 'https://example.net/remote-saved' }],
+    }],
+  };
+
+  const refreshed = mergeSpaceSnapshot(live, stored);
+  assert.deepEqual(refreshed.groups.map((group) => group.snapshotGroupId), [
+    'saved-tag', 'live-tag',
   ]);
 });
 
@@ -3069,4 +3229,20 @@ test('uses stable merge metadata defaults and honors preserveGroups from either 
   });
   assert.equal(defaultVersion.version, 1);
   assert.equal(defaultVersion.updatedAt, 5);
+});
+
+import { snapshotGroupHasLiveBoundRows } from '../src/shared/space-snapshot.js';
+
+test('snapshotGroupHasLiveBoundRows detects groups whose rows are still live-bound', () => {
+  const group = { title: 'Docs', tabs: [{ snapshotTabId: 'row-1' }, { snapshotTabId: 'row-2' }] };
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set(['row-1'])), true);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set(['row-other'])), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, new Set()), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(group, 'not-a-set'), false);
+  assert.equal(snapshotGroupHasLiveBoundRows(null, new Set(['row-1'])), false);
+  assert.equal(snapshotGroupHasLiveBoundRows({ tabs: [{ snapshotTabId: '  row-1  ' }] }, new Set(['row-1'])), true);
+});
+
+test('snapshotGroupHasLiveBoundRows treats rows without snapshot ids as unbound', () => {
+  assert.equal(snapshotGroupHasLiveBoundRows({ tabs: [{}, null] }, new Set(['row-1'])), false);
 });

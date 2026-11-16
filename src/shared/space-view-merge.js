@@ -32,7 +32,11 @@ export function mergeLiveAndDormantGroups({
     liveEntries,
     recentlyOpenedTabs,
   );
-  const liveGroupMatches = matchDormantGroupsToLiveGroups(liveEntries, dormantEntries);
+  const liveGroupMatches = matchDormantGroupsToLiveGroups(
+    liveEntries,
+    dormantEntries,
+    liveMatchByDormantTab,
+  );
   const ungroupedIndex = liveEntries.findIndex((entry) => entry.group.key === 'ungrouped');
   let ungrouped = ungroupedIndex >= 0 ? liveEntries[ungroupedIndex].group : null;
   const matchedLiveIndexes = new Set(liveGroupMatches.values());
@@ -71,6 +75,8 @@ export function mergeLiveAndDormantGroups({
       snapshotOrderedOutput.push(matchingLiveGroup);
       continue;
     }
+
+    if (dormantEntryAbsorbedByMixedLiveEntry(entry, liveMatchByDormantTab)) continue;
 
     dormantGroup.tabs = dormantGroup.tabs.filter((tab) => !liveMatchByDormantTab.has(tab));
     snapshotOrderedOutput.push(dormantGroup);
@@ -114,7 +120,11 @@ function stableGroupIdentity(group) {
   };
 }
 
-function matchDormantGroupsToLiveGroups(liveEntries, dormantEntries) {
+function matchDormantGroupsToLiveGroups(
+  liveEntries,
+  dormantEntries,
+  liveMatchByDormantTab = new Map(),
+) {
   const matches = new Map();
   const consumedLiveIndexes = new Set();
   const liveStableIndexes = indexesByStableIdentity(liveEntries);
@@ -154,11 +164,56 @@ function matchDormantGroupsToLiveGroups(liveEntries, dormantEntries) {
     const liveIndex = liveIndexes[0];
     const liveIdentity = liveEntries[liveIndex].identity.id;
     const dormantIdentity = dormantEntries[dormantIndex].identity.id;
-    if (liveIdentity && dormantIdentity) continue;
+    // Divergent group identities normally mean two distinct Tags, but stable
+    // ROW evidence outranks them: when the live group holds rows whose
+    // snapshotTabIds belong to the saved Tag, the group id was regenerated
+    // (for example after Tidy re-applied a plan onto a saved Tag) and the
+    // pair is one Tag. Without this, the saved copy collapses into an empty
+    // merge-candidate pill next to its own live copy.
+    if (
+      liveIdentity && dormantIdentity &&
+      !groupsShareStableRows(
+        dormantEntries[dormantIndex],
+        liveEntries[liveIndex],
+        liveMatchByDormantTab,
+      )
+    ) continue;
     matches.set(dormantIndex, liveIndex);
   }
 
   return matches;
+}
+
+function groupsShareStableRows(dormantEntry, liveEntry, liveMatchByDormantTab) {
+  // Only stable-mode matches can exist between two identity-carrying groups
+  // (URL fallback modes are gated off by the group identity conflict), so a
+  // match into this live entry IS exact row evidence.
+  for (const dormantTab of dormantEntry.group.tabs) {
+    const match = liveMatchByDormantTab.get(dormantTab);
+    if (match && match.entry === liveEntry) return true;
+  }
+  return false;
+}
+
+// One chrome Tag can physically hold rows saved under several snapshot
+// identities: opening a duplicate same-named saved Tag used to join its rows
+// into the same-titled live group while keeping the second saved identity, and
+// a group with two identities can never match any saved Tag again. Saved
+// copies whose every row is stably matched inside such a mixed live group are
+// absorbed into that live card instead of rendering as empty duplicate pills.
+function dormantEntryAbsorbedByMixedLiveEntry(dormantEntry, liveMatchByDormantTab) {
+  const dormantTabs = dormantEntry.group.tabs;
+  if (dormantTabs.length === 0) return false;
+  let absorber = null;
+  for (const dormantTab of dormantTabs) {
+    const match = liveMatchByDormantTab.get(dormantTab);
+    if (!match || match.entry.ungrouped || !match.entry.identity.ambiguous) return false;
+    const dormantSnapshotTabId = cleanIdentity(dormantTab.snapshotTabId);
+    if (!dormantSnapshotTabId || match.snapshotTabId !== dormantSnapshotTabId) return false;
+    if (!absorber) absorber = match.entry;
+    else if (absorber !== match.entry) return false;
+  }
+  return true;
 }
 
 function indexesByStableIdentity(entries) {

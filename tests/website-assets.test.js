@@ -8,7 +8,6 @@ const screenshotNames = [
   '02-nested-folders-dormant-tabs.png',
   '03-tab-context-menu.png',
   '04-settings-arc-import-shortcuts.png',
-  '05-ask-page-byok-ai.png',
 ];
 
 async function sha256(path) {

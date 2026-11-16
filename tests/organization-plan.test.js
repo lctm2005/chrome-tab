@@ -104,7 +104,7 @@ test('builds stable numeric candidates from live and one-to-one dormant snapshot
   const second = buildOrganizationCandidates(input);
 
   assert.deepEqual(first, second);
-  assert.match(first.fingerprint, /^organization-v3-[0-9a-f]{8}-5$/);
+  assert.match(first.fingerprint, /^organization-v4-[0-9a-f]{8}-5$/);
   assert.deepEqual(first.candidates.map((candidate) => candidate.id), [1, 2, 3, 4, 5]);
   assert.deepEqual(first.candidates.map((candidate) => candidate.dormant), [false, false, true, false, false]);
   assert.equal(first.candidates[0].source.live.tabId, 101);
@@ -757,7 +757,7 @@ test('prefers the same Tag when a live navigation only has a base-URL fallback',
   assert.equal(built.candidates[1].source.snapshot.groupTitle, 'Beta');
 });
 
-test('invalidates an organization preview when titles, panel names, or empty Tag metadata change', () => {
+test('keeps fingerprints stable across live title drift but reacts to saved metadata', () => {
   const snapshot = {
     preserveGroups: true,
     groups: [
@@ -783,14 +783,16 @@ test('invalidates an organization preview when titles, panel names, or empty Tag
   }];
   const initial = buildOrganizationCandidates({ snapshot, liveGroups }).fingerprint;
 
-  assert.notEqual(buildOrganizationCandidates({
+  // 标题在页面加载期间自然漂移；指纹只含稳定字段，不再把它当作组织变化。
+  assert.equal(buildOrganizationCandidates({
     snapshot,
     liveGroups: [{ ...liveGroups[0], tabs: [{ ...liveGroups[0].tabs[0], title: 'New live title' }] }],
   }).fingerprint, initial);
-  assert.notEqual(buildOrganizationCandidates({
+  assert.equal(buildOrganizationCandidates({
     snapshot,
     liveGroups: [{ ...liveGroups[0], tabs: [{ ...liveGroups[0].tabs[0], panelTitle: 'New name', displayTitle: 'New name' }] }],
   }).fingerprint, initial);
+  // 快照组元数据（折叠状态）仍是组织数据。
   assert.notEqual(buildOrganizationCandidates({
     snapshot: {
       ...snapshot,
@@ -1568,7 +1570,7 @@ test('candidate building gives malformed or untitled live and saved rows stable 
   assert.equal(built.candidates[2].url, '');
   assert.equal(built.candidates[2].source.live.tabId, null);
   assert.equal(built.candidates[2].source.live.groupId, null);
-  assert.match(built.fingerprint, /^organization-v3-/);
+  assert.match(built.fingerprint, /^organization-v4-/);
   assert.deepEqual(buildOrganizationCandidates(), buildOrganizationCandidates({ liveGroups: null }));
 });
 
@@ -1743,4 +1745,67 @@ test('rebasing rejects two preview identities resolving to one current row and s
   assert.throws(() => rebaseOrganizationPlan({
     previewCandidates: [{ id: 1 }, { id: 1 }],
   }), /Duplicate organization candidate id/);
+});
+
+test('organization fingerprint ignores natural tab title drift', () => {
+  const liveGroups = () => [{
+    key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+    tabs: [{ id: 10, title: 'Loading…', displayTitle: 'Loading…', panelTitle: '', url: 'https://a.test/x', pinned: false, windowId: 1, index: 0 }],
+  }];
+  const before = buildOrganizationCandidates({ liveGroups: liveGroups(), snapshot: { version: 1, groups: [] } });
+  const drifted = liveGroups();
+  drifted[0].tabs[0].title = 'Real Page Title — Loaded';
+  drifted[0].tabs[0].displayTitle = 'Real Page Title — Loaded';
+  drifted[0].tabs[0].panelTitle = 'Panel';
+  const after = buildOrganizationCandidates({ liveGroups: drifted, snapshot: { version: 1, groups: [] } });
+  assert.equal(after.fingerprint, before.fingerprint);
+});
+
+test('organization fingerprint still reacts to url, order and pin changes', () => {
+  const base = () => buildOrganizationCandidates({
+    liveGroups: [{
+      key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+      tabs: [{ id: 10, title: 'T', url: 'https://a.test/x', pinned: false, windowId: 1, index: 0 }],
+    }],
+    snapshot: { version: 1, groups: [] },
+  }).fingerprint;
+  const urlMoved = buildOrganizationCandidates({
+    liveGroups: [{
+      key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+      tabs: [{ id: 10, title: 'T', url: 'https://a.test/y', pinned: false, windowId: 1, index: 0 }],
+    }],
+    snapshot: { version: 1, groups: [] },
+  }).fingerprint;
+  const reordered = buildOrganizationCandidates({
+    liveGroups: [{
+      key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+      tabs: [
+        { id: 11, title: 'T', url: 'https://a.test/x', pinned: false, windowId: 1, index: 0 },
+        { id: 10, title: 'T', url: 'https://a.test/z', pinned: false, windowId: 1, index: 1 },
+      ],
+    }],
+    snapshot: { version: 1, groups: [] },
+  }).fingerprint;
+  const swapped = buildOrganizationCandidates({
+    liveGroups: [{
+      key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+      tabs: [
+        { id: 10, title: 'T', url: 'https://a.test/z', pinned: false, windowId: 1, index: 0 },
+        { id: 11, title: 'T', url: 'https://a.test/x', pinned: false, windowId: 1, index: 1 },
+      ],
+    }],
+    snapshot: { version: 1, groups: [] },
+  }).fingerprint;
+  assert.notEqual(swapped, reordered);
+  const pinned = buildOrganizationCandidates({
+    liveGroups: [{
+      key: 'group:1', title: 'Alpha', color: 'blue', collapsed: false,
+      tabs: [{ id: 10, title: 'T', url: 'https://a.test/x', pinned: true, windowId: 1, index: 0 }],
+    }],
+    snapshot: { version: 1, groups: [] },
+  }).fingerprint;
+  const baseline = base();
+  assert.notEqual(urlMoved, baseline);
+  assert.notEqual(reordered, baseline);
+  assert.notEqual(pinned, baseline);
 });

@@ -29,7 +29,6 @@ test('blocking dialogs never queue panel actions and leave Escape to native dial
     assert.equal(event.stopped, 0);
   }
   assert.deepEqual(harness.calls.palette, []);
-  assert.deepEqual(harness.calls.submit, []);
   assert.deepEqual(harness.calls.dispatch, []);
 
   const escape = keyEvent({ key: 'Escape', code: 'Escape' });
@@ -40,20 +39,23 @@ test('blocking dialogs never queue panel actions and leave Escape to native dial
   assert.equal(harness.calls.hidePreview.length, 1);
 
   harness.state.activeAIRequestId = 'request-1';
-  harness.state.shortcuts = mergeShortcuts({ askAbort: 'Control+.' });
-  const abort = keyEvent({ key: '.', code: 'Period', ctrlKey: true });
-  assert.equal(harness.controller.handleKeydown(abort), 'ask-aborted');
-  assert.equal(abort.prevented, 1);
-  assert.equal(abort.stopped, 1);
-  assert.equal(harness.calls.abort.length, 1);
+  const abortEscape = keyEvent({ key: 'Escape', code: 'Escape' });
+  assert.equal(harness.controller.handleKeydown(abortEscape), 'blocked');
+  assert.equal(abortEscape.prevented, 0);
+  assert.equal(abortEscape.stopped, 0);
+  assert.equal(harness.calls.abort.length, 0);
   assert.deepEqual(harness.calls.dispatch, []);
 
-  harness.state.shortcuts = mergeShortcuts({ askAbort: 'Primary+C' });
+  const abort = keyEvent({ key: '.', code: 'Period', ctrlKey: true });
+  assert.equal(harness.controller.handleKeydown(abort), 'blocked');
+  assert.equal(abort.prevented, 0);
+  assert.equal(harness.calls.abort.length, 0);
+
   harness.state.selection = documentSelection('selected answer');
   const copy = keyEvent({ key: 'c', code: 'KeyC', ctrlKey: true });
   assert.equal(harness.controller.handleKeydown(copy), 'blocked');
   assert.equal(copy.prevented, 0);
-  assert.equal(harness.calls.abort.length, 1);
+  assert.equal(harness.calls.abort.length, 0);
 });
 
 test('Escape closes an open context menu first and otherwise dismisses transient previews', () => {
@@ -76,7 +78,7 @@ test('Escape closes an open context menu first and otherwise dismisses transient
 
   harness.state.activeAIRequestId = 'request-2';
   const abortEscape = keyEvent({ key: 'Escape', code: 'Escape' });
-  assert.equal(harness.controller.handleKeydown(abortEscape), 'ask-aborted');
+  assert.equal(harness.controller.handleKeydown(abortEscape), 'ai-aborted');
   assert.equal(abortEscape.prevented, 1);
   assert.equal(abortEscape.stopped, 1);
   assert.equal(harness.calls.abort.length, 1);
@@ -103,35 +105,36 @@ test('command palette shortcuts consume one event and support an injected reserv
 
 test('already-consumed, composing, and repeated events cannot dispatch duplicate actions', () => {
   const harness = createKeyboardHarness();
-  const actionEvent = keyEvent({ key: 'a', code: 'KeyA', altKey: true });
+  const actionEvent = keyEvent({ key: 't', code: 'KeyT', ctrlKey: true, altKey: true });
   assert.equal(harness.controller.handleKeydown(actionEvent), 'shortcut-dispatched');
   assert.equal(harness.controller.handleKeydown(actionEvent), 'already-handled');
-  assert.deepEqual(harness.calls.dispatch, ['openAsk']);
+  assert.deepEqual(harness.calls.dispatch, ['tidyNames']);
 
   const composing = keyEvent({
-    key: 'a',
-    code: 'KeyA',
+    key: 't',
+    code: 'KeyT',
+    ctrlKey: true,
     altKey: true,
     isComposing: true,
   });
   assert.equal(harness.controller.handleKeydown(composing), 'composing');
 
   const repeated = keyEvent({
-    key: 'a',
-    code: 'KeyA',
+    key: 't',
+    code: 'KeyT',
+    ctrlKey: true,
     altKey: true,
     repeat: true,
   });
   assert.equal(harness.controller.handleKeydown(repeated), 'ignored');
-  assert.deepEqual(harness.calls.dispatch, ['openAsk']);
+  assert.deepEqual(harness.calls.dispatch, ['tidyNames']);
   assert.equal(repeated.prevented, 0);
 });
 
-test('native copy with a real selection wins over Ask Abort and ordinary configured actions', () => {
+test('native copy with a real selection wins over AI abort and ordinary configured actions', () => {
   const textInput = { selectionStart: 0, selectionEnd: 4 };
   const askHarness = createKeyboardHarness({
     activeAIRequestId: 'request-copy',
-    shortcuts: { askAbort: 'Primary+C' },
   });
   const inputCopy = keyEvent({
     key: 'c',
@@ -160,7 +163,7 @@ test('native copy with a real selection wins over Ask Abort and ordinary configu
 test('editable targets keep text input while explicit modified shortcuts still work', () => {
   const harness = createKeyboardHarness({ shortcuts: {
     addSpace: 'Space',
-    openAsk: 'Alt+A',
+    nextSpace: 'Alt+A',
   } });
   const inputNode = {};
   const plainSpace = keyEvent({
@@ -179,7 +182,7 @@ test('editable targets keep text input while explicit modified shortcuts still w
     target: plainTarget({ editableNode: inputNode }),
   });
   assert.equal(harness.controller.handleKeydown(modified), 'shortcut-dispatched');
-  assert.deepEqual(harness.calls.dispatch, ['openAsk']);
+  assert.deepEqual(harness.calls.dispatch, ['nextSpace']);
 
   const nonEditable = keyEvent({
     key: ' ',
@@ -187,32 +190,7 @@ test('editable targets keep text input while explicit modified shortcuts still w
     target: plainTarget({ editableNode: contentEditableNode('false') }),
   });
   assert.equal(harness.controller.handleKeydown(nonEditable), 'shortcut-dispatched');
-  assert.deepEqual(harness.calls.dispatch, ['openAsk', 'addSpace']);
-});
-
-test('Ask submit toggles between starting and stopping only in the Ask view', () => {
-  const harness = createKeyboardHarness({ activeView: 'ask' });
-  const submit = keyEvent({ key: 'Enter', code: 'Enter', ctrlKey: true });
-  assert.equal(harness.controller.handleKeydown(submit), 'ask-submitted');
-  assert.equal(harness.calls.submit.length, 1);
-  assert.deepEqual(harness.calls.abort, []);
-  assert.equal(submit.prevented, 1);
-
-  harness.state.activeAIRequestId = 'request-submit';
-  const stop = keyEvent({ key: 'Enter', code: 'Enter', metaKey: true });
-  assert.equal(harness.controller.handleKeydown(stop), 'ask-submitted');
-  assert.equal(harness.calls.submit.length, 1);
-  assert.equal(harness.calls.abort.length, 1);
-
-  harness.state.activeView = 'space';
-  harness.state.activeAIRequestId = '';
-  const outsideAsk = keyEvent({ key: 'Enter', code: 'Enter', ctrlKey: true });
-  assert.equal(harness.controller.handleKeydown(outsideAsk), 'ignored');
-  assert.equal(harness.calls.submit.length, 1);
-
-  harness.state.activeView = 'ask';
-  const unrelated = keyEvent({ key: 'x', code: 'KeyX' });
-  assert.equal(harness.controller.handleKeydown(unrelated), 'ignored');
+  assert.deepEqual(harness.calls.dispatch, ['nextSpace', 'addSpace']);
 });
 
 test('Space and Shift+Space remain distinct configurable actions', () => {
@@ -313,7 +291,6 @@ function createKeyboardHarness(overrides = {}) {
     hidePreview: [],
     palette: [],
     abort: [],
-    submit: [],
     dispatch: [],
   };
   const controller = createPanelKeyboardController({
@@ -327,7 +304,6 @@ function createKeyboardHarness(overrides = {}) {
     getSelection: () => state.selection,
     openCommandPalette: () => calls.palette.push(true),
     abortActiveAIRequest: () => calls.abort.push(true),
-    submitAsk: () => calls.submit.push(true),
     dispatchShortcutAction: (action) => calls.dispatch.push(action),
     ...(overrides.commandPaletteShortcut
       ? { commandPaletteShortcut: overrides.commandPaletteShortcut }

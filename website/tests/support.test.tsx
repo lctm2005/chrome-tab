@@ -6,7 +6,7 @@ import SupportPage, { metadata } from "../app/support/page";
 import { expectNoAccessibilityViolations, expectWorkingSkipLink } from "./accessibility";
 
 describe("support page", () => {
-  it("presents a two-step setup and seven independently expandable answers", async () => {
+  it("presents a two-step setup and five independently expandable answers", async () => {
     const user = userEvent.setup();
     const view = render(<SupportPage />);
 
@@ -18,10 +18,10 @@ describe("support page", () => {
     expect(view.container.querySelectorAll(".quick-grid article")).toHaveLength(2);
 
     const details = [...view.container.querySelectorAll("details")];
-    expect(details).toHaveLength(7);
-    expect(details.map((item) => item.open)).toEqual([true, false, false, false, false, false, false]);
+    expect(details).toHaveLength(5);
+    expect(details.map((item) => item.open)).toEqual([true, false, false, false, false]);
     const disclosureIcons = [...view.container.querySelectorAll(".faq-list summary span")];
-    expect(disclosureIcons).toHaveLength(7);
+    expect(disclosureIcons).toHaveLength(5);
     for (const icon of disclosureIcons) expect(icon).toHaveAttribute("aria-hidden", "true");
 
     const firstSummary = screen.getByText("Why are there two setup steps?").closest("summary");
