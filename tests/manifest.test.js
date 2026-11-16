@@ -707,14 +707,14 @@ test('sidepanel refresh adopts orphan groups without overwriting newer Workbench
   assert.match(source, /async function importArcFile\(options = \{\}\)[\s\S]*withSharedStateLock[\s\S]*createArcImportPlan\(pendingArcImportText, \{ existingSpaces: state\.spaces \}\)/);
 });
 
-test('hierarchy drops re-parent groups through the state-backed planner', async () => {
+test('Tag rendering and dragging use only independent flat groups', async () => {
   const source = await readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
-
-  assert.match(source, /planHierarchyDrop\(\{[\s\S]*parents: renderedHierarchyKeyParents,[\s\S]*order: state\.groupOrder\[state\.activeSpaceId\] \|\| \[\],[\s\S]*sourceRootKeys: dragState\.sourceRootKeys,[\s\S]*sourceAllKeys: dragState\.groupKeys,[\s\S]*intent: targetKey \? groupDropIntent\(event\) : 'root',/);
-  assert.match(source, /async function applyHierarchyDrop\(plan, options = \{\}\)[\s\S]*assertFreshOrganizationDrag\(options\)[\s\S]*state\.groupParents\[spaceId\] = anchorizeHierarchyParents\(plan\.parents, spaceId\);[\s\S]*state\.groupOrder\[spaceId\] = plan\.order;[\s\S]*restoreChromeGroupMutationAfterFailure\(rollback, \{ windowBinding \}\)/);
-  assert.match(source, /function replaceActiveSpaceSnapshotGroups[\s\S]*remapSnapshotGroupIndexedState\(\{[\s\S]*groupOrder:[\s\S]*collapsedGroups:[\s\S]*tabOrder:/);
-  assert.match(source, /function subtreeGroupsForMove\(group\)[\s\S]*descendantKeysOf\(group\.key, renderedHierarchyKeyParents\)/);
-  assert.doesNotMatch(source, /movedGroupTitleForFolderDrop|retitleGroupForNestedMove|targetPathForSiblingMove|moveGroupBlockBesideContext/);
+  assert.doesNotMatch(source, /groupParents|buildGroupTree|descendantKeysOf|New Subgroup|migrateSpaceHierarchy/);
+  assert.match(source, /const cards = nodes\.map/);
+  assert.match(source, /groupKeys: \[node\.key\]/);
+  assert.match(source, /async function applyGroupReorder[\s\S]*assertFreshOrganizationDrag\(options\)/);
+  assert.match(source, /state\.groupOrder\[spaceId\] = plan\.order/);
+  assert.match(source, /checkpointMovedGroupsToSpace\(\[group\], spaceId/);
 });
 
 test('single tab context menu can create a tab group', async () => {
@@ -1047,14 +1047,12 @@ test('long logical group titles keep distinct Chrome identities across create an
   assert.match(source, /function chromeGroupForSnapshotIdentity[\s\S]*binding\?\.snapshotGroupId \|\| tab\.snapshotGroupId[\s\S]*bindChromeGroup\(groupId, spaceId\)[\s\S]*logicalChromeGroupTitles\.set/);
   assert.match(source, /resolveChromeGroupTitleMatch\(candidates, title, logicalGroupTitlesForSpace\(spaceId\)\)/);
   assert.match(source, /logicalChromeGroupTitles\.set\(groupId, logicalTitle\)/);
-  assert.match(source, /menuAction\('New Subgroup', \(windowBinding\) => createEmptyGroupNode\(group\.key, \{ windowBinding \}\)\)/);
-  // 空组节点：稳定键占位，支持独立建组/建子组；迁移把旧 folderPaths 转成节点。
-  assert.match(source, /async function createEmptyGroupNode\(parentKey = '', options = \{\}\)[\s\S]*createHierarchyNodeId\(\)[\s\S]*state\.emptyNodes\[spaceId\]/);
-  assert.match(source, /async function migrateSpaceHierarchy\(spaceId = state\.activeSpaceId, options = \{\}\)[\s\S]*planLegacyTitlePathMigration\(\{[\s\S]*folderPathsBySpace: \{ \[spaceId\]: storedPaths \},[\s\S]*groupsBySpace: \{ \[spaceId\]: groupsToMigrate \},[\s\S]*idFactory: createHierarchyNodeId/);
+  // Empty Tags remain available as independent drop destinations.
+  assert.match(source, /async function createEmptyGroupNode\(options = \{\}\)[\s\S]*createEmptyGroupId\(\)[\s\S]*state\.emptyNodes\[spaceId\]/);
   // The header already covers open/close and delete, so the group menu keeps
-  // only Rename, New Subgroup, and Move to.
+  // only Rename, Close & Save, and Move to.
   assert.doesNotMatch(source, /menuAction\('Open Group'[^)]*\)\),\s*\n[\s\S]{0,200}menuAction\('Delete Group'[^)]*\)\),\s*\n[\s\S]{0,200}showGroupContextMenu/);
-  assert.match(source, /intent: targetKey \? groupDropIntent\(event\) : 'root',/);
+  assert.match(source, /intent: targetKey \? groupDropIntent\(event\) : 'end',/);
   assert.match(source, /if \(canDragGroup \|\| group\.emptyNode\) \{[\s\S]*acceptGroupOrTabDrop\(event, group\)\);[\s\S]*dropGroupOrTab\(event, group\)\);/);
   assert.match(source, /groups\.push\(\{[\s\S]*title: physicalTitle/);
   assert.match(source, /\.\.\.logicalChromeGroupTitleOverride\(group\)/);
@@ -1168,7 +1166,6 @@ test('organization commits validate freshness and record Undo only after the app
   assert.match(source, /function currentGroupForMutation[\s\S]*groupMutationFingerprint\(current\) !== groupMutationFingerprint\(reference\)/);
   assert.match(source, /function groupMutationFingerprint[\s\S]*url: snapshotUrlIdentity\(tab\?\.url\)/);
   assert.match(source, /async function deleteGroup\(group, options = \{\}\)[\s\S]*const current = renderedGroupContexts\.get\(group\.key\);[\s\S]*if \(!current\?\.emptyNode\) \{/);
-  assert.match(source, /clearHierarchyEntriesForKeys\(\[group\.key\], state\.activeSpaceId, \[hierarchyAnchorForNode\(group\)\]\)/);
 });
 
 test('destructive Settings and Undo actions bind the reviewed record and merge concurrent edits', async () => {
@@ -1291,8 +1288,8 @@ test('group deletion requires an explicit destructive confirmation with the affe
   assert.match(deletionSource, /danger: true/);
   assert.equal((deletionSource.match(/showStatusToast\(message, 'success'\)/g) || []).length, 2);
   assert.equal((deletionSource.match(/deletion\.skippedTabCount > 0 \? 'info' : 'success'/g) || []).length, 1);
-  // 空组节点删除是非破坏性的：真实子组升根，不连带删 tab。
-  assert.match(deletionSource, /async function deleteHierarchyNode\(node, options = \{\}\)[\s\S]*startsWith\('node:'\)[\s\S]*saveState\(\{ persistWindowState: false, windowBinding: options\.windowBinding \}\)/);
+  // Deleting an empty Tag does not close tabs.
+  assert.match(deletionSource, /async function deleteEmptyGroup[\s\S]*delete nodes\[node\.key\][\s\S]*saveState\(\{ persistWindowState: false, windowBinding: options\.windowBinding \}\)/);
   assert.doesNotMatch(deletionSource, /\btags\b/);
 
   const closeSource = source.slice(
@@ -1454,13 +1451,12 @@ test('shared render signatures cover panel dependencies without invalidating eve
   );
 
   assert.match(source, /import \{[\s\S]{0,180}groupsRenderSignature,[\s\S]{0,180}spacesRenderSignature,[\s\S]{0,180}\} from '\.\/src\/shared\/panel-render-signatures\.js'/);
-  assert.match(source, /buildGroupTree\(nodes, parents\)[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}collapsedGroups: state\.collapsedGroups,[\s\S]{0,900}selectedTabIds,[\s\S]{0,900}hierarchy: parents/);
+  assert.match(source, /const nodes = visibleGroups\(\);[\s\S]{0,900}groupsRenderSignature\(\{[\s\S]{0,900}selectedTabIds/);
   assert.match(source, /spacesRenderSignature\(\{[\s\S]{0,500}workbenchMode,[\s\S]{0,500}onboardingCompleted:[\s\S]{0,500}spaces: state\.spaces/);
   assert.doesNotMatch(source, /function (?:groupsRenderSignature|spacesRenderSignature)\(/);
   const syncState = source.match(/async function syncStateFromStorage\(options = \{\}\)[\s\S]*?\n}\n\nasync function saveState/)[0];
   assert.doesNotMatch(syncState, /lastRendered(?:Groups|Spaces)Signature\s*=\s*''/);
   assert.match(signatures, /import \{ tabRowPresentation \} from '\.\/tab-utils\.js'/);
-  assert.match(signatures, /hierarchy: Object\.keys\(hierarchy\)\.sort\(\)/);
   assert.match(signatures, /const presentation = tabRowPresentation\(tab\)[\s\S]*selected: !tab\.dormant && !presentation\.foreign/);
   assert.match(source, /row\.dataset\.snapshotTabId = String\(tab\.snapshotTabId \|\| ''\)/);
   assert.match(source, /row\.dataset\.snapshotGroupId = String\(tab\.snapshotGroupId \|\| ''\)/);
@@ -1483,7 +1479,7 @@ test('moving tabs to another Space activates the target Space', async () => {
   assert.match(finishMoveSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function reportMoveSuccess\(message\)[\s\S]*setStatus\(message\)[\s\S]*showStatusToast\(message, 'success'\)/);
   assert.match(source, /async function moveSelectedTabsToSpace\(tabIds, spaceId, options = \{\}\)[\s\S]*moveTabsToSpace\(tabIds, spaceId, options\)[\s\S]*reportMoveSuccess\(`Moved \$\{moved\} selected tabs to \$\{spaceName\(spaceId\)\}\.`\)/);
-  assert.match(source, /async function moveGroupToSpace\(group, spaceId, options = \{\}\)[\s\S]*subtreeGroupsForMove\(group\)[\s\S]*checkpointMovedGroupsToSpace\(subtreeGroups, spaceId, \{ windowBinding \}\)[\s\S]*reportMoveSuccess\(`Moved group/);
+  assert.match(source, /async function moveGroupToSpace[\s\S]*checkpointMovedGroupsToSpace\(\[group\], spaceId, \{ windowBinding \}\)/);
   assert.match(moveGroupsSource, /state\.spaces\.some\(\(space\) => space\.id === spaceId\)[\s\S]*destination Space no longer exists[\s\S]*captureChromeGroupMutationRollback\(\)[\s\S]*runChromeGroupMutationTransaction\([\s\S]*apply: \(\) => moveGroupsWithoutSaving[\s\S]*checkpoint: \(\) => saveState\(\{ persistWindowState: false \}\)[\s\S]*rollback: \(\) => restoreChromeGroupMutationAfterFailure\(rollback, \{[\s\S]*windowBinding: options\.windowBinding,[\s\S]*\}\)[\s\S]*await activateSpace[\s\S]*committedMoveActivationError/);
   assert.match(moveGroupsSource, /const activated = await activateSpace\([\s\S]*activated !== true[\s\S]*destination Space was not opened/);
   assert.match(source, /function moveGroupsWithoutSaving[\s\S]*transferSnapshotGroupsBetweenSpaces\([\s\S]*snapshotGroupIds:[\s\S]*snapshotTabIds:/);
@@ -1706,7 +1702,7 @@ test('every Tag group exposes a real keyboard-operable disclosure button', async
   assert.ok(toggleGroupSource);
 
   assert.match(source, /function createGroupToggle\(group, title\)[\s\S]*document\.createElement\('button'\)[\s\S]*type = 'button'[\s\S]*aria-expanded/);
-  assert.match(source, /function createGroupCard\(node, depth = 0\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
+  assert.match(source, /function createGroupCard\(group\)[\s\S]*createGroupToggle\(group, group\.displayTitle \|\| group\.title\)/);
   assert.match(toggleGroupSource, /captureChromeGroupMutationRollback\(\)[\s\S]*groups:update[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*restoreChromeGroupMutationMemory\(rollback\)[\s\S]*restoring the Chrome group collapse state/);
   assert.match(source, /async function toggleGroup\([\s\S]*Group was \$\{action\}, but the panel could not refresh yet/);
   assert.match(toggleGroupSource, /await refreshTabsView\(\{ windowBinding \}\)[\s\S]*Group was \$\{action\}, but the panel could not refresh yet[\s\S]*await saveState\(\{ persistWindowState: false \}\)[\s\S]*panel refreshed, but the latest Space snapshot could not be saved/);

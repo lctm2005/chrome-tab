@@ -24,13 +24,13 @@ describe("home page", () => {
     expect(view.container.querySelector("#product")).not.toBeNull();
     expect(screen.getByRole("link", { name: "Migration" })).toHaveAttribute("href", "/#migration");
     expect(view.container.querySelector("#migration")).not.toBeNull();
-    expect(screen.getByText(/Tidy Names uses your configured provider when available/)).toHaveTextContent("falls back to local naming rules without sending tab metadata");
-    expect(screen.getByText(/Tidy Names uses your configured provider when available/)).toHaveTextContent("Auto Group requires configured AI");
+    expect(screen.getByText(/Tidy combines duplicate merging/)).toHaveTextContent("local script rules keep working without AI");
+    expect(screen.getByText(/Tidy combines duplicate merging/)).toHaveTextContent("Prompt rules use your configured provider");
 
     const screenshots = screen.getAllByRole("img");
     expect(screenshots).toHaveLength(4);
     expect(view.container.querySelectorAll("figure.product-screenshot figcaption")).toHaveLength(4);
-    expect(screen.getByAltText(/Launch Space, nested groups/)).toHaveAttribute("data-priority", "true");
+    expect(screen.getByAltText(/Launch Space, Tags/)).toHaveAttribute("data-priority", "true");
     expect(screen.getByAltText(/two-step Arc import preview/)).toHaveAttribute("data-priority", "false");
 
     expectWorkingSkipLink(view);

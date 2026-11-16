@@ -420,7 +420,7 @@ h1 {
   background: var(--muted);
 }
 
-/* 拖组到面板空白处 = 回到顶层（无文字提示，背景微亮提示投放区） */
+/* Dropping a Tag into the blank area moves it to the end of the list. */
 #groupsList.root-drop-hover {
   background: color-mix(in srgb, var(--accent, #6c5ce7) 8%, transparent);
   outline: 1px dashed color-mix(in srgb, var(--accent, #6c5ce7) 45%, transparent);
@@ -440,16 +440,6 @@ h1 {
 
 .space-view.groups-collapsed {
   gap: 0;
-}
-
-/* --- HIERARCHY TREE (state-backed parent-child groups) --- */
-.group-card .group-children {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 6px 0 4px 18px;
-  padding-left: 10px;
-  border-left: 2px solid color-mix(in srgb, var(--group-color, #666) 45%, transparent);
 }
 
 /* --- GLASS CARDS (GROUPS / FOLDERS) --- */

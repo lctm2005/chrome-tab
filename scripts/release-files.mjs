@@ -25,7 +25,7 @@ export const RUNTIME_FILES = Object.freeze([
   'src/shared/chrome-group-transaction.js',
   'src/shared/dormant-snapshot.js',
   'src/shared/group-title.js',
-  'src/shared/group-tree.js',
+  'src/shared/group-order.js',
   'src/shared/operation-safety.js',
   'src/shared/organization-plan.js',
   'src/shared/panel-focus.js',

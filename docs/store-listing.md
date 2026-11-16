@@ -35,7 +35,7 @@ Features:
 
 - Arc-like Spaces for separate browser work contexts.
 - Selectable Arc import with conflict preview and Undo.
-- Nested folders and Chrome tab group integration.
+- Independent, flat Tags with drag sorting and Chrome tab group integration.
 - Dormant saved tabs that stay unloaded until opened.
 - Optional BYOK AI with built-in and OpenAI-compatible providers.
 - One Tidy action merges duplicate Tags, regroups tabs, renames tabs, and can close duplicate tabs. Every step is shown in one reviewable preview before applying, and Undo is available afterward.

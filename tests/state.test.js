@@ -20,106 +20,51 @@ import {
   WINDOW_STATE_KEY,
 } from '../src/shared/state.js';
 
-test('merges groupParents and emptyNodes per space and sanitizes chrome-id links on session reset', () => {
-  const defaults = createDefaultState({ browserSessionId: 'session-one' });
-  const stored = mergeStoredState({
-    version: 9,
-    groupParents: {
-      work: { 'group:9': 'group:7', 'tag:1': 'node:2', 'node:3': 'group:9' },
-      broken: 'not-a-map',
-    },
-    emptyNodes: { work: { 'node:2': { title: 'New Group', color: 'blue' } } },
-  }, defaults);
-  assert.deepEqual(stored.groupParents.work, {
-    'group:9': 'group:7',
-    'tag:1': 'node:2',
-    'node:3': 'group:9',
-  });
-  assert.equal(stored.groupParents.broken, undefined);
-  assert.deepEqual(stored.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
-
-  const empty = mergeStoredState({ version: 9 }, createDefaultState({ browserSessionId: 'session-one' }));
-  assert.deepEqual(empty.groupParents, {});
-  assert.deepEqual(empty.emptyNodes, {});
-  assert.deepEqual(empty.folderPaths, {});
-
-  const arrayStored = mergeStoredState({
-    version: 9,
-    groupParents: ['not', 'a', 'map'],
-    emptyNodes: ['not', 'a', 'map'],
-  }, defaults);
-  assert.deepEqual(arrayStored.groupParents, {});
-  assert.deepEqual(arrayStored.emptyNodes, {});
-
-  const reset = resetChromeSessionBindings(stored, 'session-two');
-  // chrome 组 id 重启后可能被复用：没有 tabLifecycle 桥（groupId→snapshotGroupId）
-  // 时派生边无法转成持久身份，只能清除；稳定键（snapshot/node）保留。
-  assert.deepEqual(reset.groupParents.work, { 'tag:1': 'node:2' });
-  assert.equal(reset.groupParents.broken, undefined);
-  assert.deepEqual(reset.emptyNodes.work, { 'node:2': { title: 'New Group', color: 'blue' } });
-
-  // 有 tabLifecycle 桥时，live↔live 嵌套跨会话轮换转成 sgid anchor 存活。
-  // snapshotsBySpace 里的快照身份让 snapshot 裸键解析出 sgid；空端点被丢弃。
-  const bridged = resetChromeSessionBindings(mergeStoredState({
-    version: 9,
+test('upgrades nested Tags to flat Tags without losing titles, saved pages, empty Tags, or order', () => {
+  const snapshot = { groups: [{ title: 'Docs / API', snapshotGroupId: 'saved-child', tabs: [
+    { title: 'Reference', url: 'https://example.com/api', snapshotTabId: 'saved-tab' },
+  ] }] };
+  const input = {
+    version: 12,
     browserSessionId: 'session-one',
-    tabLifecycle: {
-      11: { tabId: 11, groupId: 9, snapshotGroupId: 'group:child-uuid' },
-      12: { tabId: 12, groupId: 9, snapshotGroupId: 'group:child-uuid' },
-      13: { tabId: 13, groupId: 7, snapshotGroupId: 'group:parent-uuid' },
-      14: { tabId: 14, groupId: 0, snapshotGroupId: '' },
-    },
-    spaceSnapshots: {
-      work: { groups: [{ snapshotGroupId: 'group:saved-uuid', title: 'Saved', tabs: [] }] },
-    },
-    groupParents: {
-      work: {
-        'group:9': 'group:7',
-        'snapshot:2:work:group:saved-uuid': 'group:7',
-        'node:3': 'group:9',
-        'vgroup:vg1': 'group:7',
-        'sgid:group:already-anchored': 'group:7',
-        'snapshot:4:work:group:ghost': 'group:7',
-        'group:8': 'group:8',
-        '': 'group:7',
-      },
-    },
-  }, defaults), 'session-two');
-  assert.deepEqual(bridged.groupParents.work, {
-    'sgid:group:child-uuid': 'sgid:group:parent-uuid',
-    'sgid:group:saved-uuid': 'sgid:group:parent-uuid',
-    'node:3': 'sgid:group:child-uuid',
-    'vgroup:vg1': 'sgid:group:parent-uuid',
-    'sgid:group:already-anchored': 'sgid:group:parent-uuid',
-    'snapshot:4:work:group:ghost': 'sgid:group:parent-uuid',
-  });
+    spaces: [{ id: 'work', name: 'Work' }],
+    activeSpaceId: 'work',
+    groupParents: { work: { 'sgid:saved-child': 'node:parent', 'node:child': 'node:parent' } },
+    emptyNodes: { work: {
+      'node:parent': { title: 'Parent', color: 'blue' },
+      'node:child': { title: 'Child', color: 'green' },
+    } },
+    groupOrder: { work: ['node:parent', 'node:child'] },
+    collapsedGroups: { 'node:parent': true },
+    spaceSnapshots: { work: snapshot },
+  };
+  const before = structuredClone(input);
+  const merged = mergeStoredState(input);
+  assert.equal(merged.version, 13);
+  assert.equal(Object.hasOwn(merged, 'groupParents'), false);
+  assert.equal(Object.hasOwn(merged, 'folderPaths'), false);
+  assert.deepEqual(merged.emptyNodes, input.emptyNodes);
+  assert.deepEqual(merged.spaceSnapshots.work, snapshot);
+  assert.deepEqual(merged.groupOrder.work, input.groupOrder.work);
+  assert.equal(merged.collapsedGroups['node:parent'], true);
+  assert.deepEqual(mergeStoredState(merged), merged);
+  assert.deepEqual(input, before);
+  const reset = resetChromeSessionBindings(merged, 'session-two');
+  assert.equal(Object.hasOwn(reset, 'groupParents'), false);
+  assert.deepEqual(reset.emptyNodes, merged.emptyNodes);
+  assert.deepEqual(reset.spaceSnapshots, merged.spaceSnapshots);
+  const rawReset = resetChromeSessionBindings(input, 'session-two');
+  assert.equal(Object.hasOwn(rawReset, 'groupParents'), false);
+  assert.equal(Object.hasOwn(rawReset, 'folderPaths'), false);
+});
 
-  const invalidReset = resetChromeSessionBindings(
-    mergeStoredState({ version: 9, groupParents: 'garbage' }, defaults),
-    'session-three',
-  );
-  assert.deepEqual(invalidReset.groupParents, {});
-
-  // 显式 null 的 tabLifecycle / spaceSnapshots → 桥与身份集为空；快照缺 groups
-  // / null 快照 / null 生命周期行都被跳过。
-  const nullInputs = resetChromeSessionBindings(mergeStoredState({
-    version: 9,
-    browserSessionId: 'session-one',
-    tabLifecycle: { 15: null },
-    spaceSnapshots: { work: { title: 'no groups key' }, gone: null },
-    groupParents: { work: { 'group:9': 'group:7' } },
-  }, defaults), 'session-two');
-  // 全部端点无法转成持久身份 → 该 Space 的层级整表清除
-  assert.equal(nullInputs.groupParents.work, undefined);
-
-  // 显式 null（不经 merge 默认值）：桥与身份集直接走空分支，边清除。
-  const explicitNull = resetChromeSessionBindings({
-    browserSessionId: 'session-one',
-    tabLifecycle: null,
-    spaceSnapshots: null,
-    groupParents: { work: { 'group:9': 'group:7' } },
-  }, 'session-two');
-  assert.equal(explicitNull.groupParents.work, undefined);
+test('ignores malformed retired hierarchy maps and empty Tag maps', () => {
+  for (const value of [null, ['invalid'], 'invalid']) {
+    const merged = mergeStoredState({ version: 12, groupParents: value, emptyNodes: value });
+    assert.equal(Object.hasOwn(merged, 'groupParents'), false);
+    assert.deepEqual(merged.emptyNodes, {});
+  }
+  assert.deepEqual(mergeStoredState({ version: 12, emptyNodes: { work: null, bad: [] } }).emptyNodes, {});
 });
 
 test('keeps the durable browser fallback independent from per-window active Spaces', () => {
@@ -403,7 +348,7 @@ test('serializes a pending navigation as the restorable tab URL', () => {
 test('creates a single fallback Space with blank BYOK AI settings', () => {
   const state = createDefaultState();
 
-  assert.equal(state.version, 12);
+  assert.equal(state.version, 13);
   assert.equal(state.browserSessionId, '');
   assert.equal(state.spaces.length, 1);
   assert.equal(state.activeSpaceId, 'default');
@@ -745,7 +690,7 @@ test('preserves an explicitly saved Cmd+S toggle shortcut in current state', () 
   assert.equal(merged.shortcuts.togglePanel, 'Meta+S');
 });
 
-test('migrates v4 Space ownership into v12 without resetting shortcuts', () => {
+test('migrates v4 Space ownership into v13 without resetting shortcuts', () => {
   const merged = mergeStoredState({
     version: 4,
     activeSpaceId: 'work',
@@ -756,7 +701,7 @@ test('migrates v4 Space ownership into v12 without resetting shortcuts', () => {
     shortcuts: { togglePanel: 'Meta+S' },
   }, createDefaultState());
 
-  assert.equal(merged.version, 12);
+  assert.equal(merged.version, 13);
   assert.equal(merged.activeSpaceId, 'work');
   assert.deepEqual(merged.groupSpaces, { 7: 'work' });
   assert.deepEqual(merged.tabSpaces, { 4: 'work' });
@@ -899,12 +844,14 @@ test('preserves empty current shortcuts as disabled actions', () => {
   assert.equal(merged.shortcuts.previousSpace, 'Control+Alt+ArrowLeft');
 });
 
-test('stored empty folder paths survive a state merge', () => {
+test('legacy empty folder paths become independent empty Tags', () => {
   const merged = mergeStoredState({
     folderPaths: { custom: ['Research', 'Research / Memory'] },
   }, createDefaultState());
 
-  assert.deepEqual(merged.folderPaths.custom, ['Research', 'Research / Memory']);
+  assert.equal(Object.hasOwn(merged, 'folderPaths'), false);
+  assert.deepEqual(Object.values(merged.emptyNodes.custom).map((node) => node.title), ['Research', 'Research / Memory']);
+  assert.deepEqual(mergeStoredState(merged).emptyNodes, merged.emptyNodes);
 });
 
 test('merges stored state without dropping new defaults', () => {
@@ -923,7 +870,7 @@ test('merges stored state without dropping new defaults', () => {
   assert.equal(merged.shortcuts.togglePanel, 'Alt+S');
   assert.deepEqual(merged.groupSpaces, {});
   assert.equal(merged.collapsedSpaceGroups.custom, true);
-  assert.deepEqual(merged.folderPaths, {});
+  assert.deepEqual(merged.emptyNodes, {});
 });
 
 test('preserves populated legacy Spaces during migration and drops obsolete fields', () => {
@@ -988,7 +935,7 @@ test('refuses to overwrite data written by a newer workspace schema', () => {
 });
 
 test('preserves workspaces and Tag snapshots across every supported schema upgrade', () => {
-  for (let version = 4; version <= 12; version += 1) {
+  for (let version = 4; version <= 13; version += 1) {
     const stored = {
       version,
       spaces: [{ id: 'default', name: 'My workspace', icon: 'M', color: 'green' }, { id: 'work', name: 'Work', icon: 'W', color: 'blue' }],

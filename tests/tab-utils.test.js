@@ -270,7 +270,7 @@ test('keeps complete logical Auto Group titles instead of persisting Chrome disp
   assert.equal(groups[0].title, longTitle);
 });
 
-test('compacts Auto Group hierarchy paths that would render as single-child folders', () => {
+test('keeps slash-containing Tag names independent and intact', () => {
   const groups = sanitizeTidyGroups([
     { title: 'Work / Client / Docs', color: 'blue', tabIds: [1] },
     { title: 'Work / Client / Issues', color: 'green', tabIds: [2] },
@@ -288,15 +288,16 @@ test('compacts Auto Group hierarchy paths that would render as single-child fold
   ]);
 
   assert.deepEqual(groups.map((group) => group.title), [
-    'Work · Client / Docs',
-    'Work · Client / Issues',
+    'Work / Client / Docs',
+    'Work / Client / Issues',
+    'Research / Browser / Notes',
     'Research · Browser · Notes',
     'Archive',
     'Archive / History',
   ]);
   assert.deepEqual(groups.find((group) => (
     group.title === 'Research · Browser · Notes'
-  )).tabIds, [3, 6]);
+  )).tabIds, [6]);
 
 
 });

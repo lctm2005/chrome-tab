@@ -659,6 +659,8 @@ export function removeSpaceReferences(state, spaceId) {
   delete state.tabOrder?.[spaceId];
   delete state.spaceSnapshots?.[spaceId];
   delete state.spaceContexts?.[spaceId];
+  for (const key of Object.keys(state.emptyNodes?.[spaceId] || {})) removedCollapsedGroupKeys.add(key);
+  delete state.emptyNodes?.[spaceId];
   delete state.folderPaths?.[spaceId];
   delete state.collapsedSpaceGroups?.[spaceId];
   for (const [groupKey, group] of Object.entries(state.virtualGroups || {})) {

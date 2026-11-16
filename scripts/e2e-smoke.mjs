@@ -1,3 +1,4 @@
+import { runFlatTagScenarios } from './e2e-flat-tags.mjs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -402,6 +403,11 @@ async function main() {
   })`);
 
     await waitFor(client, `document.documentElement.dataset.initialized === 'true'`, 15000);
+    if (process.env.E2E_FLAT_TAGS_ONLY === '1') {
+      console.log(JSON.stringify(await runFlatTagScenarios({ client, evaluate, waitFor }), null, 2));
+      return;
+    }
+
     if (preview) {
       await evaluate(client, `(() => {
         localStorage.clear();

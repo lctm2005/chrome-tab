@@ -157,7 +157,7 @@ export function createPrompt(kind, context = {}) {
           ...(ruleText ? [ruleText] : []),
           'Include every supplied tab id exactly once; do not omit tabs, invent ids, or repeat ids.',
           'Use specific topical titles; never create Ungrouped, 未分组, Uncategorized, 未分类, Tabs, or an equivalent placeholder group.',
-          'Use slash-separated hierarchy only when every folder has at least two direct children; otherwise return one flat descriptive title.',
+          'All Tags are independent and flat. Use one descriptive title per group; do not create parent groups, subgroups, or slash-separated paths.',
           'Return only JSON: [{"title":"Topic","tabIds":[1,2],"color":"blue"}].',
         ].join(' '),
       },

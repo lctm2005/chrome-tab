@@ -63,7 +63,6 @@ function groupsOptions(overrides = {}) {
       { key: 'node:alpha', tabs: [] },
       { key: 'node:beta', tabs: [] },
     ],
-    hierarchy: { 'group:9': 'group:7' },
     ...overrides,
   };
 }
@@ -81,7 +80,6 @@ test('groups render signature defaults to a stable empty render model', () => {
     fileSchemeAccessAllowed: false,
     spaceGroupsCollapsed: false,
     collapsedGroups: [],
-    hierarchy: [],
     groups: [],
   });
 });
@@ -96,7 +94,7 @@ test('groups signature includes only collapsed keys that can affect the current 
     ['node:alpha', false],
     ['node:beta', true],
   ]);
-  assert.deepEqual(model.hierarchy, [['group:9', 'group:7']]);
+  assert.equal(Object.hasOwn(model, 'hierarchy'), false);
 
   options.collapsedGroups['stale:space-b:key'] = false;
   options.collapsedGroups['stale:space-a:key'] = true;
@@ -107,7 +105,7 @@ test('groups signature includes only collapsed keys that can affect the current 
 
   options.collapsedGroups['node:alpha'] = false;
   options.hierarchy = { 'group:9': 'group:8' };
-  assert.notEqual(groupsRenderSignature(options), baseline);
+  assert.equal(groupsRenderSignature(options), baseline);
 });
 
 test('groups signature normalizes collapse truthiness and ignores map insertion order', () => {

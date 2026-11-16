@@ -11,8 +11,8 @@ involved and what will change before anything is applied.
 - Spaces: switch between separate work contexts without keeping every saved tab loaded.
 - Arc migration: choose `StorableSidebar.json` for each import, preview selected Spaces, review conflicts and counts, and undo the latest import. Space Tabs reads the chosen file locally and never modifies it.
 - Workbench: use a full-page view for the current Space's tabs and Settings.
-- Folders: show locally stored nested folders derived from slash-separated Tag names.
-- Tab Groups: leaf folders map to Chrome tab groups when tabs are opened.
+- Tags: independent, flat groups of live or saved tabs. Drag Tags to reorder them; move tabs into a Tag to change membership.
+- Existing nested Tags become independent Tags, preserving names, saved pages, and empty Tags. Slash characters in names are plain text.
 - Ungrouped tabs: Arc-style temporary area with quick new tab and clear actions.
 - Pinned tabs: stay open across Space switches and are never silently renamed, grouped, dragged, cleared, or closed by Space actions. Deleting their Space moves their ownership to the fallback Space.
 - Panel-only names: tidy tab names in the side panel without renaming Chrome tabs globally.
@@ -65,7 +65,7 @@ profile; it is not an OS keychain.
 
 ## Install From Package
 
-1. Run `npm run package`, or download a release zip from `dist/`.
+1. Download the extension zip from [GitHub Releases](https://github.com/lctm2005/chrome-tab/releases/latest), or run `npm run package` to build it locally in `dist/`.
 2. Unzip it to a local folder.
 3. Open `chrome://extensions`.
 4. Enable `Developer mode`.

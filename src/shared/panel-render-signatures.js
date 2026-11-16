@@ -7,7 +7,6 @@ export function groupsRenderSignature({
   collapsedGroups = {},
   selectedTabIds = [],
   groups = [],
-  hierarchy = {},
 } = {}) {
   const renderedGroups = groups.filter(Boolean);
   const visibleCollapsedKeys = new Set(
@@ -22,9 +21,6 @@ export function groupsRenderSignature({
     collapsedGroups: [...visibleCollapsedKeys]
       .sort((left, right) => left.localeCompare(right))
       .map((key) => [key, Boolean(collapsedGroups[key])]),
-    // 父子关系改变结构但不改变组内容，必须单独进入签名。
-    hierarchy: Object.keys(hierarchy).sort()
-      .map((key) => [key, hierarchy[key]]),
     groups: renderedGroups.map((group) => groupRenderModel(group, selected)),
   });
 }

@@ -272,21 +272,7 @@ export function sanitizeTidyGroups(plannedGroups, tabs) {
     sanitized.push(sanitizedGroup);
   }
 
-  const compactHierarchy = compactUnaryAutoGroupPaths(sanitized);
-  const compactByTitle = new Map();
-  const compactGroups = [];
-  for (const group of compactHierarchy) {
-    const titleKey = groupTitleKey(group.title);
-    const existing = compactByTitle.get(titleKey);
-    if (existing) {
-      existing.tabIds.push(...group.tabIds);
-      continue;
-    }
-    compactByTitle.set(titleKey, group);
-    compactGroups.push(group);
-  }
-
-  return compactGroups.map((group, index) => ({
+  return sanitized.map((group, index) => ({
     ...group,
     color: group.color || GROUP_COLORS[index % GROUP_COLORS.length],
   }));
@@ -313,47 +299,6 @@ export function assertCompleteAutoGroupPlan(plannedGroups = [], tabs = []) {
     );
   }
   return plannedGroups;
-}
-
-function compactUnaryAutoGroupPaths(groups = []) {
-  const root = autoGroupPathNode();
-  const groupPaths = [];
-  for (const group of groups) {
-    const parts = autoGroupTitleParts(group.title);
-    groupPaths.push(parts);
-    let node = root;
-    for (const part of parts) {
-      if (!node.children.has(part)) node.children.set(part, autoGroupPathNode());
-      node = node.children.get(part);
-    }
-    node.terminal = true;
-  }
-
-  return groups.map((group, groupIndex) => {
-    const parts = groupPaths[groupIndex];
-    const labels = [];
-    let node = root;
-    let partIndex = 0;
-    while (partIndex < parts.length) {
-      let label = parts[partIndex];
-      node = node.children.get(parts[partIndex]);
-      partIndex += 1;
-      while (partIndex < parts.length && !node.terminal && node.children.size === 1) {
-        label += ` · ${parts[partIndex]}`;
-        node = node.children.get(parts[partIndex]);
-        partIndex += 1;
-      }
-      labels.push(label);
-    }
-    return {
-      ...group,
-      title: labels.join(' / '),
-    };
-  });
-}
-
-function autoGroupPathNode() {
-  return { terminal: false, children: new Map() };
 }
 
 function autoGroupTitleParts(title) {

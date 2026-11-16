@@ -25,7 +25,7 @@ export function createDefaultState(localConfig = {}) {
   if (ai.provider) aiProviderInput.provider = ai.provider;
   const normalizedAI = normalizeAIProviderSettings(aiProviderInput);
   return {
-    version: 12,
+    version: 13,
     browserSessionId: normalizeBrowserSessionId(localConfig.browserSessionId),
     theme: 'purple',
     activeSpaceId: 'default',
@@ -43,8 +43,6 @@ export function createDefaultState(localConfig = {}) {
     tabOrder: {},
     collapsedGroups: {},
     collapsedSpaceGroups: {},
-    folderPaths: {},
-    groupParents: {},
     emptyNodes: {},
     spaceContexts: {},
     spaceSnapshots: {},
@@ -79,8 +77,9 @@ export function resetChromeSessionBindings(state, sessionId) {
   const nextSessionId = normalizeBrowserSessionId(sessionId);
   if (!nextSessionId || normalizeBrowserSessionId(state.browserSessionId) === nextSessionId) return state;
 
+  const { groupParents: _parents, folderPaths: _paths, ...flatState } = state;
   return {
-    ...state,
+    ...flatState,
     spaceSnapshots: preserveVirtualTags(state),
     browserSessionId: nextSessionId,
     groupSpaces: {},
@@ -93,98 +92,10 @@ export function resetChromeSessionBindings(state, sessionId) {
     groupOrder: {},
     tabOrder: {},
     collapsedGroups: {},
-    // Chrome group ids can be reused after a restart, so parent links derived
-    // from them cannot survive as raw ids. Anchor-domain endpoints (sgid:,
-    // node:, vgroup:) survive untouched; raw chrome-keyed endpoints are
-    // CONVERTED to their snapshot identity via the not-yet-wiped tabLifecycle
-    // bridge, so live↔live nesting survives the restart. Only endpoints that
-    // carry no durable identity are dropped.
-    groupParents: sanitizeGroupParentsForNewSession(state.groupParents, {
-      tabLifecycle: state.tabLifecycle,
-      snapshotsBySpace: state.spaceSnapshots,
-    }),
     emptyNodes: state.emptyNodes || {},
     operationHistory: (Array.isArray(state.operationHistory) ? state.operationHistory : [])
       .filter((operation) => !LIVE_ID_OPERATION_TYPES.has(operation?.type)),
   };
-}
-
-const CHROME_GROUP_KEY_PATTERN = /^group:(\d+)$/;
-const SNAPSHOT_GROUP_KEY_PATTERN = /^snapshot:(\d+):([^:]*):([\s\S]+)$/;
-
-function normalizeGroupParentsMap(groupParents) {
-  const next = {};
-  for (const [spaceId, parents] of Object.entries(groupParents)) {
-    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
-    next[spaceId] = { ...parents };
-  }
-  return next;
-}
-
-// groupId → snapshotGroupId bridge from the lifecycle rows that are about to
-// be wiped. Rows without a durable identity are skipped.
-function chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle) {
-  const bridge = new Map();
-  const bindings = tabLifecycle ? Object.values(tabLifecycle) : [];
-  for (const binding of bindings) {
-    const groupId = Number(binding?.groupId);
-    const snapshotGroupId = String(binding?.snapshotGroupId || '').trim();
-    if (Number.isSafeInteger(groupId) && groupId > 0 && snapshotGroupId && !bridge.has(groupId)) {
-      bridge.set(groupId, snapshotGroupId);
-    }
-  }
-  return bridge;
-}
-
-function knownSnapshotGroupIds(snapshotsBySpace) {
-  const ids = new Set();
-  const snapshots = snapshotsBySpace ? Object.values(snapshotsBySpace) : [];
-  for (const snapshot of snapshots) {
-    const groups = (snapshot && Array.isArray(snapshot.groups)) ? snapshot.groups : [];
-    for (const group of groups) {
-      const snapshotGroupId = String(group?.snapshotGroupId || '').trim();
-      if (snapshotGroupId) ids.add(snapshotGroupId);
-    }
-  }
-  return ids;
-}
-
-// Converts one raw view-key endpoint to its durable anchor for the new
-// session. Returns '' when the endpoint references nothing durable.
-function anchorForNewSession(endpoint, bridge, knownSnapshotGroupIds) {
-  const raw = String(endpoint || '').trim();
-  if (!raw) return '';
-  if (raw.startsWith('sgid:') || raw.startsWith('node:') || raw.startsWith('vgroup:')) return raw;
-  const chromeMatch = CHROME_GROUP_KEY_PATTERN.exec(raw);
-  if (chromeMatch) {
-    const snapshotGroupId = bridge.get(Number(chromeMatch[1]));
-    return snapshotGroupId ? `sgid:${snapshotGroupId}` : '';
-  }
-  const snapshotMatch = SNAPSHOT_GROUP_KEY_PATTERN.exec(raw);
-  if (snapshotMatch) {
-    const identity = snapshotMatch[3];
-    return knownSnapshotGroupIds.has(identity) ? `sgid:${identity}` : raw;
-  }
-  return raw;
-}
-
-function sanitizeGroupParentsForNewSession(groupParents, { tabLifecycle, snapshotsBySpace } = {}) {
-  if (!groupParents || typeof groupParents !== 'object' || Array.isArray(groupParents)) return {};
-  const bridge = chromeGroupIdToSnapshotGroupIdBridge(tabLifecycle);
-  const knownIds = knownSnapshotGroupIds(snapshotsBySpace);
-  const next = {};
-  for (const [spaceId, parents] of Object.entries(groupParents)) {
-    if (!parents || typeof parents !== 'object' || Array.isArray(parents)) continue;
-    const kept = {};
-    for (const [childKey, parentKey] of Object.entries(parents)) {
-      const childAnchor = anchorForNewSession(childKey, bridge, knownIds);
-      const parentAnchor = anchorForNewSession(parentKey, bridge, knownIds);
-      if (!childAnchor || !parentAnchor || childAnchor === parentAnchor) continue;
-      kept[childAnchor] = parentAnchor;
-    }
-    if (Object.keys(kept).length > 0) next[spaceId] = kept;
-  }
-  return next;
 }
 
 /**
@@ -346,13 +257,7 @@ export function mergeStoredState(stored, defaults = createDefaultState()) {
     tabOrder: compatibleSpaceModel ? { ...defaults.tabOrder, ...(stored.tabOrder || {}) } : defaults.tabOrder,
     collapsedGroups: compatibleSpaceModel ? { ...defaults.collapsedGroups, ...(stored.collapsedGroups || {}) } : defaults.collapsedGroups,
     collapsedSpaceGroups: { ...defaults.collapsedSpaceGroups, ...(stored.collapsedSpaceGroups || {}) },
-    folderPaths: { ...defaults.folderPaths, ...(stored.folderPaths || {}) },
-    groupParents: compatibleSpaceModel && stored.groupParents && typeof stored.groupParents === 'object' && !Array.isArray(stored.groupParents)
-      ? normalizeGroupParentsMap(stored.groupParents)
-      : defaults.groupParents,
-    emptyNodes: compatibleSpaceModel && stored.emptyNodes && typeof stored.emptyNodes === 'object' && !Array.isArray(stored.emptyNodes)
-      ? { ...defaults.emptyNodes, ...stored.emptyNodes }
-      : defaults.emptyNodes,
+    emptyNodes: normalizeEmptyGroups(stored, compatibleSpaceModel),
     spaceContexts: { ...defaults.spaceContexts, ...(stored.spaceContexts || {}) },
     spaceSnapshots: { ...defaults.spaceSnapshots, ...(stored.spaceSnapshots || {}) },
     tidyRules: normalizeTidyRuleSettings(stored.tidyRules),
@@ -371,6 +276,36 @@ function normalizeDefaultSpace(spaces, storedVersion = 0) {
   return spaces.map((space) => space.id === 'default' && space.name === 'Space' && space.icon === 'S'
     ? { ...space, name: 'Default', icon: 'D' }
     : space);
+}
+
+function normalizeEmptyGroups(stored, compatibleSpaceModel) {
+  const result = {};
+  const source = compatibleSpaceModel && stored.emptyNodes;
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    for (const [spaceId, nodes] of Object.entries(source)) {
+      if (!nodes || typeof nodes !== 'object' || Array.isArray(nodes)) continue;
+      result[spaceId] = { ...nodes };
+    }
+  }
+  for (const [spaceId, paths] of Object.entries(stored.folderPaths || {})) {
+    if (!Array.isArray(paths)) continue;
+    const nodes = result[spaceId] || {};
+    const titles = new Set([
+      ...Object.values(nodes).map((node) => node?.title),
+      ...(stored.spaceSnapshots?.[spaceId]?.groups || []).map((group) => group.title),
+      ...Object.values(stored.virtualGroups || {}).filter((group) => group?.spaceId === spaceId)
+        .map((group) => group.title),
+    ]);
+    for (const path of paths) {
+      const title = String(path || '').trim();
+      if (!title || titles.has(title)) continue;
+      const key = `node:legacy:${encodeURIComponent(spaceId)}:${encodeURIComponent(title)}`;
+      nodes[key] = { title, color: 'blue' };
+      titles.add(title);
+    }
+    if (Object.keys(nodes).length) result[spaceId] = nodes;
+  }
+  return result;
 }
 
 function hasExistingWorkspace(stored) {

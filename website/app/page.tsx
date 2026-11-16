@@ -64,8 +64,8 @@ export default function Home() {
           <ProductScreenshot
             className="hero-product-shot"
             src="/screenshots/01-spaces-overview.png"
-            alt="Current Space Tabs extension showing the Launch Space, nested groups, and saved tabs in Chrome"
-            caption="Current extension UI · Space switching, folders, Chrome-native groups, and dormant saved tabs"
+            alt="Current Space Tabs extension showing the Launch Space, Tags, and saved tabs in Chrome"
+            caption="Current extension UI · Space switching, Tags, Chrome-native groups, and dormant saved tabs"
             priority
           />
         </section>
@@ -110,7 +110,7 @@ export default function Home() {
             <p className="eyebrow"><span /> AI you control</p>
             <h2>A proposal first.<br />A change only after you approve.</h2>
             <p>Tidy combines duplicate merging, topic grouping, and renaming into one reviewable preview. Prompt rules use your configured provider and are editable in Settings; local script rules keep working without AI. Proposals send only the disclosed metadata—review exactly what will change or remain untouched; tabs and Tags do not change until you choose Apply. A 10-second Undo prompt follows each applied change.</p>
-            <div className="privacy-note"><b>BYOK disclosure</b><span>When Tidy sends tab metadata to your provider, Space Tabs shows that metadata first: tab titles, simplified URLs without query strings or fragments, and domains; topic grouping additionally sends each tab&apos;s current Tag and live/saved status. Requests go directly to the endpoint you configured, and your API key stays in Chrome local extension storage on this device.</span></div>
+            <div className="privacy-note"><b>BYOK disclosure</b><span>When Tidy sends tab metadata to your provider, Space Tabs shows that metadata first: tab titles, simplified URLs without query strings or fragments, and domains; topic grouping additionally sends each tab&apos;s current Tag and live/saved status. Requests go directly to the endpoint you configured, and your API key is encrypted and saved on this device.</span></div>
           </div>
         </section>
 
