@@ -6910,7 +6910,7 @@ async function main() {
             foreignWindowTabId: row.dataset.foreignWindowTabId || '',
             foreignWindowId: row.dataset.foreignWindowId || '',
             title: row.querySelector('.tab-title')?.textContent || '',
-            secondary: row.querySelector('.tab-domain')?.textContent || '',
+            secondary: row.querySelector('.tab-main-button')?.title || '',
           }));
         const activeSpaceIds = storedWindowState.spaceTabsWindowState?.activeSpaceIds || {};
         if (hostTab?.windowId !== ${JSON.stringify(secondaryPanel.windowId)} ||
@@ -8956,7 +8956,7 @@ async function main() {
             tabId: row.dataset.tabId || '',
             className: row.className,
             title: row.querySelector('.tab-title')?.textContent || '',
-            domain: row.querySelector('.tab-domain')?.textContent || '',
+            domain: row.querySelector('.tab-main-button')?.title || '',
             group: row.closest('.group-card')?.querySelector('.group-header h2')?.textContent || '',
           })),
         primaryLifecyclePresent: Boolean(saved.tabLifecycle?.[String(${JSON.stringify(arcWindowTabs.primary.id)})]),
@@ -9244,7 +9244,7 @@ async function main() {
               className: row.className,
               tabId: row.dataset.tabId || '',
               title: row.querySelector('.tab-title')?.textContent || '',
-              domain: row.querySelector('.tab-domain')?.textContent || '',
+              domain: row.querySelector('.tab-main-button')?.title || '',
             })),
           } : null,
           allAlphaRows: [...document.querySelectorAll('.tab-row')]
@@ -9252,7 +9252,7 @@ async function main() {
             .map((row) => ({
               className: row.className,
               tabId: row.dataset.tabId || '',
-              domain: row.querySelector('.tab-domain')?.textContent || '',
+              domain: row.querySelector('.tab-main-button')?.title || '',
               group: row.closest('.group-card')?.querySelector('.group-header h2')?.textContent || '',
             })),
         };
@@ -14640,7 +14640,7 @@ ${error.message}`);
     })()`, 60000);
     await waitFor(client, `(() => {
       const row = document.querySelector('.tab-row[data-tab-id="${openedSavedTarget.tabId}"]');
-      return row?.querySelector('.tab-domain')?.textContent === 'chrome';
+      return row?.querySelector('.tab-main-button')?.title.includes('chrome://settings/');
     })()`, 60000);
     await evaluate(client, `(() => {
       const toast = document.querySelector('#workbenchToast');
@@ -22058,11 +22058,11 @@ ${error.message}`);
         return saved.groupSpaces?.[String(fixture.groupId)] === fixture.spaceId &&
           saved.tabLifecycle?.[String(fixture.tabId)]?.spaceId === fixture.spaceId &&
           header && showButton && header.draggable === false &&
-          row.querySelector('.tab-domain')?.textContent.includes('Open in another window')
+          row.querySelector('.tab-main-button')?.title.includes('Open in another window')
           ? {
             headerDraggable: header.draggable,
             groupKey: row.dataset.groupKey || '',
-            rowDomain: row.querySelector('.tab-domain')?.textContent || '',
+            rowDomain: row.querySelector('.tab-main-button')?.title || '',
             rowTitle: row.querySelector('.tab-title')?.textContent || '',
           }
           : null;
@@ -22132,7 +22132,7 @@ ${error.message}`);
           })),
           rows: [...document.querySelectorAll('.tab-row')].map((row) => ({
             title: row.querySelector('.tab-title')?.textContent || '',
-            domain: row.querySelector('.tab-domain')?.textContent || '',
+            domain: row.querySelector('.tab-main-button')?.title || '',
             className: row.className,
             groupKey: row.dataset.groupKey || '',
             snapshotTabId: row.dataset.snapshotTabId || '',
@@ -22144,7 +22144,7 @@ ${error.message}`);
             .filter((row) => row.querySelector('[title="Show in other window"]'))
             .map((row) => ({
               title: row.querySelector('.tab-title')?.textContent || '',
-              domain: row.querySelector('.tab-domain')?.textContent || '',
+              domain: row.querySelector('.tab-main-button')?.title || '',
               groupKey: row.dataset.groupKey || '',
             })),
         };

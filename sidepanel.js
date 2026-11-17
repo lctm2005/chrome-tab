@@ -2910,12 +2910,16 @@ function createTabRow(tab, groupKey) {
   label.className = 'tab-label';
   label.innerHTML = `
     <div class="tab-title">${escapeHtml(tab.displayTitle || tab.title || tab.url || 'Untitled')}</div>
-    <div class="tab-domain">${escapeHtml(presentation.secondaryLabel)}</div>
   `;
 
   const primary = document.createElement('button');
   primary.type = 'button';
   primary.className = 'tab-main-button';
+  primary.title = [
+    accessibleTitle,
+    tab.url,
+    presentation.foreign ? 'Open in another window' : presentation.ariaStateLabel,
+  ].filter(Boolean).join('\n');
   primary.setAttribute(
     'aria-label',
     `${accessibleTitle}${presentation.ariaStateLabel ? `, ${presentation.ariaStateLabel}` : ''}`,

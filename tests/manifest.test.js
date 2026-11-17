@@ -1722,7 +1722,7 @@ test('tab rows expose valid multi-select semantics and keyboard behavior', async
   assert.match(source, /function configureTabListAccessibility[\s\S]*role', 'list'/);
   assert.match(source, /function createTabRow[\s\S]*role', 'listitem'[\s\S]*className = 'tab-main-button'[\s\S]*aria-pressed/);
   assert.match(source, /import \{[\s\S]{0,1800}isForeignWindowTab,[\s\S]{0,1800}tabRowPresentation,[\s\S]{0,1800}\} from '\.\/src\/shared\/tab-utils\.js'/);
-  assert.match(source, /function createTabRow[\s\S]*const presentation = tabRowPresentation\(tab\)[\s\S]*escapeHtml\(presentation\.secondaryLabel\)[\s\S]*presentation\.ariaStateLabel[\s\S]*if \(!tab\.dormant && !presentation\.foreign\)/);
+  assert.match(source, /function createTabRow[\s\S]*const presentation = tabRowPresentation\(tab\)[\s\S]*primary\.title[\s\S]*presentation\.ariaStateLabel[\s\S]*if \(!tab\.dormant && !presentation\.foreign\)/);
   assert.match(source, /const selected = !tab\.dormant && !presentation\.foreign && selectedTabIds\.has\(tab\.id\)/);
   assert.match(source, /row\.draggable = !tab\.dormant && !tab\.pinned && !presentation\.foreign/);
   assert.match(source, /if \(!tab\.dormant && !presentation\.foreign\) \{[\s\S]*showTabContextMenu/);
